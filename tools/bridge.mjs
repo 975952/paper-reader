@@ -32,8 +32,14 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
-const MAILBOX = path.join(ROOT, 'test', 'artifacts', 'bridge', 'mailbox.jsonl');
-const RESULTS = path.join(ROOT, 'test', 'artifacts', 'bridge', 'results.jsonl');
+/* 信箱 / 回执的路径可被环境变量覆盖：测试用临时信箱跑回归，绝不动正在用的那一份。
+   （路径写死会让「验证 fetch 的行为」变成「拿真实信箱做实验」，风险不值得。） */
+const MAILBOX = process.env.BRIDGE_MAILBOX
+  ? path.resolve(process.env.BRIDGE_MAILBOX)
+  : path.join(ROOT, 'test', 'artifacts', 'bridge', 'mailbox.jsonl');
+const RESULTS = process.env.BRIDGE_RESULTS
+  ? path.resolve(process.env.BRIDGE_RESULTS)
+  : path.join(ROOT, 'test', 'artifacts', 'bridge', 'results.jsonl');
 const PORT = Number(process.env.BRIDGE_PORT || 8899);
 const CODEX = process.env.CODEX_BIN
   || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe');
@@ -42,7 +48,31 @@ const argv = process.argv.slice(2);
 const cmd = argv[0] || 'help';
 
 const ensureDir = () => fs.mkdirSync(path.dirname(MAILBOX), { recursive: true });
-const readLines = (f) => { try { return fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+/**
+ * 读 JSONL。**一行坏掉不能让整箱任务消失。**
+ *
+ * 踩过的坑（2026-10-04 实测）：用 PowerShell 的 `Set-Content -Encoding utf8`（或任何带 BOM 的
+ * 编辑器）碰过信箱后，文件头多出 U+FEFF，`JSON.parse` 第一行就抛错。旧写法是
+ * `try { …map(JSON.parse) } catch { return [] }` —— 一个 catch 把**整个文件**判成空，
+ * 于是 `fetch` 打印 `[]`、`status` 报 `pending:0`，而任务其实正躺在信箱里没人取：
+ * 这正是「Codex 投了任务但我收不到」最隐蔽的一种坏法。
+ *
+ * 现在：剥掉 BOM、逐行解析、坏行跳过并**在 stderr 上报**（不静默）。半截行（多进程同时
+ * append 时可能出现）也被安全跳过，不再连累后面的好行。
+ */
+const stripBom = (s) => (s.charCodeAt(0) === 0xfeff ? s.slice(1) : s);
+const readLines = (f) => {
+  let text = '';
+  try { text = stripBom(fs.readFileSync(f, 'utf8')); } catch { return []; }
+  const out = [];
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    try { out.push(JSON.parse(line)); }
+    catch { console.error(`[bridge] 跳过一行无法解析的内容（${line.slice(0, 60)}…）`); }
+  }
+  return out;
+};
 const append = (f, obj) => { ensureDir(); fs.appendFileSync(f, JSON.stringify(obj) + '\n', 'utf8'); };
 
 /* ───────────────── 我 → Codex：非交互调用，拿最终回答 ───────────────── */

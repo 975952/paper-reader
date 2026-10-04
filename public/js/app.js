@@ -1528,13 +1528,28 @@ function floatPanel(id, { rect = null } = {}) {
   syncFloatFocus(id);
   // 右侧 AI 面板浮出后，右侧栏只留下活动入口，不再同时占着正文宽度。
   // 回栏时 dockPanelTo('right') 会明确展开它；浮窗停在普通位置时不会自动恢复右栏。
+  /**
+   * ⚠️ 两个约束（用户实测缺陷 2026-10-04：「译文被挡死了，啥也看不见」）：
+   *
+   *   ① **同一侧还有别的停靠可见块时，不能收起整条右栏。**
+   *      两栏模式下（译文第 1 栏、问答第 2 栏）把问答拖出成卡片，旧代码无条件
+   *      `sideIntent.noRight = true` → `body.no-right #rightCols{display:none}` 把**还停在栏里的
+   *      译文一起藏掉**：`state.panels.translate.visible === true`，但块宽 0、一个字都看不到。
+   *      探针实测：浮出后译文块宽 0（`test/artifacts/phase1/probe-baseline2.json` 的 S2）。
+   *   ② **不写存档**（原来这里还有一句 `if (isRightPanel(id)) saveUi();`）。
+   *      这是「这一次浮出」的临时布局决定，不是用户的持久意图。落盘成 `reader.ui.noRight` 之后，
+   *      下次启动 initLayout() 读到 true，而此刻面板是 float（`dockedRightVisible` 为假、
+   *      反制规则不生效）→ 右栏整条 display:none，刷新多少次都收着 = 自锁。
+   *      重启后该收谁由 initLayout() 按「有没有停靠可见的块」重算（见那里的 floatingRightVisible 分支）。
+   */
   if (isRightPanel(id)) {
-    sideIntent.noRight = true;
+    const stillDocked = PANEL_IDS_RIGHT.some((x) => x !== id
+      && state.panels[x]?.visible && state.panels[x].dock === 'right');
+    sideIntent.noRight = !stillDocked;    // 同侧还有停靠可见的块 → 栏留着，别把它一起藏掉
     sideIntent.pinned.right = false;
   }
   // 浮出可能把某一侧栏空出来：重算一次布局（正文宽度 / 自动收起）
   if (applyResponsiveLayout()) refitViewer(0); else refitViewer(REFIT_AFTER_MS);
-  if (isRightPanel(id)) saveUi();
   if (!wasVisible) toast(`「${panelTitle(id)}」已浮出`, '', 1600);
   return true;
 }
@@ -3326,8 +3341,19 @@ function applyResponsiveLayout() {
   const viewerMin = cssPx('--viewer-min', VIEWER_MIN);
   // 侧栏先「让宽」再「整条消失」（见下方 sideWanted 的注释）
   const SIDE_MIN = 220;
-  /** 侧栏被压到的最小保底宽度：窄窗下宁可压到这么窄 + 正文横向滚动，也不整条隐藏。 */
-  const SIDE_SQUEEZE_W = 60;
+  /**
+   * 侧栏被压到的最小保底宽度：窄窗下宁可压窄，也不整条隐藏（用户口径：「翻译的内容应该是要
+   * 记录在右侧那个里面的，不管打不打开」）。
+   *
+   * ⚠️ 原来是 60。60px 的栏里 `.msg` 只剩 60 − 2×`--ai-pad`(14) = **32px**，中文一行两三个字，
+   * 而且 `.side` 是 `overflow:hidden`，多出来的内容直接**被裁掉**（滚也滚不到）——
+   * 用户看到的就是「右边被挡住了」。探针实测（`test/artifacts/phase1/probe-baseline2.json`）：
+   * 900px / 780px 窗口下 `--right-w=60px`、块宽 59px、`.ai-body` 只有 59px。
+   * 160px 是「块头能放下标题 + 正文每行能读十来个字」的下限；再窄就没有意义了。
+   * 注意这里只影响「这一侧还有可见块、但窗口放不下」的情形：真正放不下时依旧按
+   * `fits()` 的规则整条收起（`cards.mjs` 的 780px 自动收起断言仍然成立）。
+   */
+  const SIDE_SQUEEZE_W = 160;
   /** 用户口径：「窄窗下不要出现横向滚动条、正文不能只剩一条缝」→ 正文硬下限就取
    *  --viewer-min（420）。⚠️ 这里**不能**降成一个很小的值：试过 200，结果 780px 窗口下
    *  右栏死活不收、正文被压到 200px —— 那是另一种坏（正文读不了）。
@@ -5260,12 +5286,26 @@ function setBlockVisible(id, on) {
 }
 
 /**
+ * 结果块的**最小可用高度**（px）。
+ *
+ * 60px 是已经作废的「上下分屏拖动」时代留下的保底值：那个逻辑（`ensureSplit` / `.ai-split`）
+ * 负责写 `state.panels[id].size`，但**现在没有任何调用点**（一栏只开一个之后不存在上下两块），
+ * 所以今天存档里的 `size` 全是历史遗留。可 `fitBlockSizes()` 照旧把它当"用户拖好的高度"套成
+ * 内联 `height`：块头 40px + 正文只剩 19px —— 用户看到的就是「译文的怎么只露最上面一点点」。
+ *
+ * 最小值按「块头(40) + 三行正文(14×1.72×3≈72) + 底部渐隐(22) + 内边距」取 180。
+ * 注意这**不是**把用户的高度记忆作废：> 180 的高度照旧原样使用（`cards.mjs` 的 300/320 迁移断言
+ * 仍然成立），只是不允许小到没法读。
+ */
+const MIN_USABLE_BLOCK_H = 180;
+
+/**
  * 把保存的块高度套上去，**并且保证总高不超过容器**。
  *
  * 用户拖出来的高度只是「偏好」：窗口变小、或者输入区变高（比如多了「全文/联网」那一行）之后，
  * 原来的高度加起来就装不下了。`.ai` 是 overflow:hidden，装不下的部分会被**直接裁掉**，
  * 表现出来就是「右侧输出最下面的内容被下面的输入框挡住」——其实是被裁了，滚也滚不到。
- * 所以这里按比例压缩，每个块至少留 60px。
+ * 所以这里按比例压缩，每个块至少留 `MIN_USABLE_BLOCK_H`（受这一栏可用高度夹取）。
  */
 function fitBlockSizes() {
   // 现在右栏可能有并列的两栏，每一栏的「可用高度」是它自己的结果区；
@@ -5281,7 +5321,10 @@ function fitBlockSizes() {
     const px = state.panels[id].size;
     if (px > 0) {
       node.classList.add('sized');
-      node.style.height = `${Math.max(60, Math.min(Math.round(px), avail))}px`;
+      /* 见 MIN_USABLE_BLOCK_H 的注释：下限不再是 60，但上界仍然是这一栏的可用高度，
+         所以任何窗口尺寸下都不会溢出（`.ai` 是 overflow:hidden，溢出就等于被裁掉）。 */
+      const minH = Math.min(MIN_USABLE_BLOCK_H, avail);
+      node.style.height = `${Math.max(minH, Math.min(Math.round(px), avail))}px`;
     } else {
       node.classList.remove('sized');
       node.style.height = '';
