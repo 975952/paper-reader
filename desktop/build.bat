@@ -52,6 +52,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$src = (Resolve-Path 'target\release\paper-reader.exe').Path;" ^
   "$root = (Resolve-Path '..').Path;" ^
   "$dst = @((Join-Path $root ($n + '.exe')), (Join-Path ([Environment]::GetFolderPath('Desktop')) ($n + '.exe')));" ^
+  "$latest = (Get-ChildItem '..\public' -Recurse -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime;" ^
   "$sha = [Security.Cryptography.SHA256]::Create();" ^
   "$want = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($src))).Replace('-', '');" ^
   "$bad = 0;" ^
@@ -59,6 +60,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "  try { Copy-Item -Force $src $d -ErrorAction Stop } catch { Write-Host ('      [x] ' + $d + ' : ' + $_.Exception.Message); $bad = 1; continue }" ^
   "  $got = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($d))).Replace('-', '');" ^
   "  if ($got -ne $want) { Write-Host ('      [x] MISMATCH ' + $d); $bad = 1; continue }" ^
+  "  (Get-Item $d).LastWriteTime = $latest;" ^
   "  Write-Host ('      -> ' + $d + '  (' + (Get-Item $d).Length + ' B, sha256 ok)')" ^
   "}" ^
   "exit $bad"

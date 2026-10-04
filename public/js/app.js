@@ -1347,11 +1347,29 @@ function unionRect(nodes) {
 }
 const visibleRect = (nodes) => unionRect(nodes);
 
-/** 可以让浮窗待的区域：顶栏以下、视口以内 */
+/**
+ * 可以让浮窗待的区域：**正文阅读区**（`.viewer-wrap`）之内、顶栏之下。
+ *
+ * ⚠️ 这里**不能**用整屏（用户实测缺陷 2026-10-04：「左边的也还是会被挡住」）。
+ * `#floatLayer` 是 `position:fixed; inset:0; z-index:60`，卡片浮在**所有侧栏与正文之上**；
+ * 原来的可用区是「顶栏以下 + 整个视口」，于是卡片可以停在左栏 / 右栏正上方，
+ * 且没有任何避让 —— 实测：译文卡片停在左栏上时，左栏整体被压 **64.2%**、
+ * 目录块 `#outlineList` 被压 **88.5%**、文件块 `#fileList` 被压 **77.4%**（不浮窗时 0%）。
+ *
+ * 改成「只在正文区内活动」后，卡片再怎么拖也压不到左右栏。
+ * 阅读区本身很窄时（窄窗）退回视口，避免卡片被挤到 0 宽。
+ */
 function floatSafeBox() {
-  const main = $('#main');
-  const top = Math.round(main?.getBoundingClientRect().top || 46);
-  return { left: 0, top, right: window.innerWidth, bottom: window.innerHeight };
+  const wrap = document.querySelector('.viewer-wrap');
+  const r = wrap?.getBoundingClientRect?.();
+  const mainTop = Math.round($('#main')?.getBoundingClientRect().top || 46);
+  if (r && r.width > FLOAT_MIN_W + FLOAT_GAP * 2 && r.height > FLOAT_MIN_H + FLOAT_GAP * 2) {
+    return {
+      left: Math.round(r.left), top: Math.max(Math.round(r.top), mainTop),
+      right: Math.round(r.right), bottom: Math.round(r.bottom),
+    };
+  }
+  return { left: 0, top: mainTop, right: window.innerWidth, bottom: window.innerHeight };
 }
 /** #composer 的矩形；收起右栏 / 没有输入框时返回 null（这时不需要避让） */
 function composerRect() {
@@ -3308,6 +3326,8 @@ function applyResponsiveLayout() {
   const viewerMin = cssPx('--viewer-min', VIEWER_MIN);
   // 侧栏先「让宽」再「整条消失」（见下方 sideWanted 的注释）
   const SIDE_MIN = 220;
+  /** 侧栏被压到的最小保底宽度：窄窗下宁可压到这么窄 + 正文横向滚动，也不整条隐藏。 */
+  const SIDE_SQUEEZE_W = 60;
   /** 用户口径：「窄窗下不要出现横向滚动条、正文不能只剩一条缝」→ 正文硬下限就取
    *  --viewer-min（420）。⚠️ 这里**不能**降成一个很小的值：试过 200，结果 780px 窗口下
    *  右栏死活不收、正文被压到 200px —— 那是另一种坏（正文读不了）。
@@ -3396,6 +3416,65 @@ function applyResponsiveLayout() {
   if (Math.round(leftFinal) !== Math.round(cssPx('--left-w', baseLeftW))) setVar('--left-w', leftFinal);
   if (Math.round(rightFinal) !== Math.round(cssPx('--right-w', baseRightW))) setVar('--right-w', rightFinal);
 
+  /**
+   * 第三档：**别再整条藏掉侧栏**（用户口径 2026-10-04：
+   *   「翻译的内容应该是要记录在右侧那个里面的，不管打不打开」）。
+   *
+   * 现状：窗口宽 960~1000px 时，正文被压到 `--viewer-min`(420) 之后右栏整条 `display:none`，
+   * 译文块 `0×0`、命中可见比例 0% —— 用户看到的就是「译文被挡死了，啥也看不见」。
+   * 而 `body.right-empty`（两块都关掉收成活动栏，是我按用户要求加的）也依赖
+   * `--right-w > 0` 才能把栏从 `display:none` 拉回来，所以窄窗下它一起失效。
+   *
+   * 这里加一条硬保底：**只要这一侧有可见面板要显示、且用户没主动收起，就保证它的宽度 ≥60px**。
+   * 于是窄窗下不再"整条消失"，而是"压缩到最小 + 正文横向滚动"（后者由 `body.side-squeezed` 加）。
+   * 修复顺序：这一条必须在 `applyPanels()`/`renderCols()` 之前，所以放在这里写 CSS 变量。
+   */
+  let squeezed = false;
+  if (!noLeft && document.body.classList.contains('no-left') && leftFinal < 60) { setVar('--left-w', 60); squeezed = true; }
+  /**
+   * 右栏：`noRight` 在窄窗下会是 true（`fits()` 放不下就自动收起）。但只要
+   * **这一侧还有可见面板要显示**，就不许它整条消失 —— 压到 60px 并让正文横向滚动。
+   *
+   * 注意这里必须按 `noRight`（实际是否收起）判断，不能按 `rightFinal`：
+   * `rightFinal` 在收起时等于**用户意图宽度**（360），拿它比 `< 60` 永远不成立
+   * （实测 980px 时 `--right-w=360px`、`#rightCols display=none`、译文块 0×0）。
+   */
+  {
+    const hasRightContent = PANEL_IDS_RIGHT.some((id) => state.panels[id]?.visible);
+    /**
+     * ⚠️ 保底只在**自动收起**时生效（`!sideIntent.noRight`）—— 这一条是子智能体逐帧验证抓出来的
+     * 「单向陷阱」：原来的条件只看 `noRight || rightFinal < 60`，而 `noRight` 恰好就是
+     * 「用户主动收起」以及「拖分隔条拖过 collapseBelow」，于是保底会把用户的意思覆盖掉：
+     * 拖过阈值 → 被压成 60px；再往回拖 → `--right-w` 中途到过 353px，松手又被写回 60px；
+     * 顶栏「收起右栏」也被吞（点完仍 60px）→ **进 60px 后既收不起也展不开也拉不宽，只能刷新**。
+     *
+     * 现在的口径：
+     *   · 用户**明确**要收起（`sideIntent.noRight`）→ 尊重他，整条收起，不做保底；
+     *   · 只是**自动**收起（窗口窄、或拖到 collapseBelow）→ 不隐藏，压到最小宽度并让正文横向滚动。
+     */
+    const autoCollapsed = noRight && !sideIntent.noRight;
+    if (hasRightContent && !sideIntent.noRight && (autoCollapsed || rightFinal < SIDE_SQUEEZE_W)) {
+      setVar('--right-w', SIDE_SQUEEZE_W);
+      squeezed = true;
+      noRight = false;                       // 只压窄，不隐藏
+      state.autoCollapse = { ...(state.autoCollapse || {}), right: true };
+    }
+  }
+  const hasLeftContent = visiblePanelsOfDock('left').length > 0;
+  const autoCollapsedLeft = noLeft && !sideIntent.noLeft;
+  if (hasLeftContent && !sideIntent.noLeft && (autoCollapsedLeft || leftFinal < SIDE_SQUEEZE_W)) {
+    setVar('--left-w', SIDE_SQUEEZE_W);
+    squeezed = true;
+    noLeft = false;
+  }
+  // 正文允许横向滚动，而不是把侧栏藏起来
+  document.body.classList.toggle('side-squeezed', squeezed);
+  // right-empty 只看「有没有内容」，不看栏宽 —— 否则窄窗下活动栏会一直显示、栏永远回不来
+  document.body.classList.toggle(
+    'right-empty',
+    !panelWindow.enabled && visiblePanelsOfDock('right').length === 0,
+  );
+
   state.autoCollapse = { left: noLeft && !sideIntent.noLeft, right: noRight && !sideIntent.noRight };
   const wasNoLeft = document.body.classList.contains('no-left');
   const wasNoRight = document.body.classList.contains('no-right');
@@ -3462,8 +3541,32 @@ function initLayout() {
   // 只恢复「用户意图」；自动收起由 applyResponsiveLayout() 按当前窗口宽度当场算
   sideIntent.noLeft = !!saved.noLeft;
   sideIntent.noRight = !!saved.noRight;
-  // 右栏浮窗是右侧输出区的独占形态：即使是旧存档，也先收起右栏，避免两套入口同时占位。
-  if (!panelWindow.enabled && floatPanels('right').some((id) => state.panels[id].visible)) {
+  /**
+   * ⚠️ 这里**不能**因为「右栏有浮窗」就收起右栏（用户实测缺陷 2026-10-04：
+   *   「译文被挡死了，啥也看不见，就最上面一点点露出来」）。
+   *
+   * 旧写法是无条件 `if (floatPanels('right').some(visible)) sideIntent.noRight = true`，
+   * 而 `floatPanels()` 返回的是所有 `dock === 'float'` 的面板 —— 只要用户**曾经**把译文/问答
+   * 拖出成卡片，这个标记就一直在，重启后右栏 100% 被 `display:none`，
+   * 而且 `sideIntent` 会被写回 `reader.ui.noRight` → **自锁：刷新多少次都是收起的**。
+   * 实测：`#rightCols w=0 display:none`、译文块 `0×0`、`.ai-body clientH=0`、命中测试可见比例 0%。
+   *
+   * 正确口径：只有「右栏里确实还有停靠在右栏的可见面板」时才需要为浮窗让位；
+   * 面板是 `dock === 'right'` 就说明它要显示在栏里，那就必须展开右栏。
+   */
+  const floatingRightVisible = floatPanels('right').filter((id) => state.panels[id]?.visible);
+  const dockedRightVisible = PANEL_IDS_RIGHT.some((id) => state.panels[id]?.visible && state.panels[id].dock === 'right');
+  /**
+   * 反向也有一条：**有面板明确停靠在右栏且可见时，存档里的 noRight 不许把它藏起来**。
+   * 这是同一类自锁的另一半 —— 用户实测「译文被挡死了啥也看不见」的路径之一就是
+   * 存档 `reader.ui.noRight=true`（可能来自更早的窄窗自动收起或旧版本）。
+   * 内容在、栏不在，是最让人困惑的一种坏法，所以这里让「有内容要显示」优先。
+   */
+  if (!panelWindow.enabled && dockedRightVisible) {
+    sideIntent.noRight = false;
+    sideIntent.pinned.right = true;
+  }
+  if (!panelWindow.enabled && floatingRightVisible.length && !dockedRightVisible) {
     sideIntent.noRight = true;
     sideIntent.pinned.right = false;
   }
@@ -3524,8 +3627,42 @@ function initRails() {
       }
     };
   });
+  /**
+   * 右侧活动栏那个按钮（`#railRightBtn`）。
+   *
+   * ⚠️ 不能只写 `setSideCollapsed('right', false, true)`：当右栏**两块都关掉**时，
+   * `body.right-empty` 把整条右栏 `display:none` 了，而此刻 `sideIntent.noRight` 本来就是 false，
+   * 于是这个 onclick 是**彻底 no-op** —— 实测真鼠标点击按钮确实收到 pointerdown+click 也获得焦点，
+   * 但 `right-empty` 恒 true、`#rightCols` 恒 `display:none`、连点两次都无效。
+   * 这时页面上没有任何可见的译文/问答入口（`#aiBar` 随栏一起隐藏，`#panelDock` 只有左栏四块），
+   * 用户看到的就是「一个点不动的按钮」，只能靠划词才救回来。
+   *
+   * 正确语义：右栏是空的时候，这个按钮应该**打开一块面板**（而不是去展开一条空栏）。
+   * 记住上次用过哪一块，没有就默认问答（问答能打字，是最常用的入口）。
+   */
   const rightBtn = $('#railRightBtn');
-  if (rightBtn) rightBtn.onclick = () => setSideCollapsed('right', false, true);
+  function openRightPanelFromRail() {
+    const last = readRightChoice() || 'chat';
+    const id = PANEL_IDS_RIGHT.includes(last) ? last : 'chat';
+    const p = state.panels?.[id];
+    if (!p) return;
+    if (p.dock !== 'right') dockPanelTo(id, 'right');
+    sideIntent.noRight = false;          // 用户明确要这一边
+    sideIntent.pinned.right = true;
+    setPanelColumn(id, 1);
+    setPanelVisible(id, true);
+    applyPanels();                        // 清掉 right-empty（它只在「没有可见面板」时为真）
+    applyResponsiveLayout();
+  }
+  if (rightBtn) rightBtn.onclick = () => {
+    if (document.body.classList.contains('right-empty')) {
+      openRightPanelFromRail();
+    } else {
+      const id = rightPanelInCol(1) || rightPanelInCol(2) || '';
+      if (id) rememberRightChoice(id);
+      setSideCollapsed('right', false, true);
+    }
+  };
   syncRailActive();
 }
 
@@ -3880,6 +4017,20 @@ function rememberLeftChoice(id) {
   try {
     const old = readUi();
     old.leftActive = id;
+    localStorage.setItem('reader.ui', JSON.stringify(old));
+  } catch { /* 忽略 */ }
+}
+
+/** 右栏的对应项：右侧活动栏按钮「打开一块」时用哪一块（与左栏 leftActive 对称）。 */
+function readRightChoice() {
+  const v = readUi().rightActive;
+  return ['translate', 'chat'].includes(v) ? v : '';
+}
+function rememberRightChoice(id) {
+  if (!['translate', 'chat'].includes(id)) return;
+  try {
+    const old = readUi();
+    old.rightActive = id;
     localStorage.setItem('reader.ui', JSON.stringify(old));
   } catch { /* 忽略 */ }
 }

@@ -103,21 +103,21 @@
      :root，能压过后面那块；而 :root[data-theme="light"] 是显式选浅色、优先级同为
      (0,2,0) 且位置更靠后，仍然照常生效，所以「显式浅色」不受影响。 */
   :root:root {
-    --bg: #211F1A;
-    --bg-elev: #2A2721;
-    --bg-sunken: #1A1815;
+    /* 与 :root[data-theme="dark"] 保持一致：深色底提亮一档，避免整条右栏看起来是"黑块" */
+    --bg: #2E2B24;
+    --bg-elev: #38342B;
+    --bg-sunken: #24211C;
     --fg: #FFFFFF;
     --fg-dim: #CDC7B8;
-    /* R7 D1 的暖色版：深色下弱化文字对 #2A2721 6.0:1、对 #211F1A 6.6:1，
-       仍弱于 --fg-dim。深色底一律是暖灰（#211F1A 不是纯黑）。
-       （随用户口径把主文字提亮到纯白后，次要两档同步提亮，层级关系保持不变。） */
+    /* R7 D1 的暖色版：深色下弱化文字仍弱于 --fg-dim，层级不变。
+       深色底一律是暖灰（不是纯黑）。 */
     --fg-faint: #A9A294;
-    --border: #3C382F;
-    --border-strong: #4E4839;
+    --border: #4A453A;
+    --border-strong: #5C5648;
     --accent: #A8BFA7;
     --ok-text: #9CC08C;
     --err-text: #D89A8A;
-    --accent-soft: #333629;
+    --accent-soft: #3C4030;
     --accent-fg: #1E2418;
     --btn: #5C7358;
     --btn-fg: #EDF2E6;
@@ -141,10 +141,15 @@
   /* 用户口径（2026-10-04）：「深色模式下文字不应该是白色的吗」——
      原来正文主色是暖米 #EDE6D2，在深底上显得发黄、不够亮，和「深色模式 = 白字」的直觉不符。
      改成接近纯白 #FFFFFF（对 #211F1A 对比度 19.8:1），次要/弱化文字同步提亮，
-     保证「主文字白、次要浅灰、更弱更灰」的层级还在。 */
-  --bg: #211F1A; --bg-elev: #2A2721; --bg-sunken: #1A1815; --fg: #FFFFFF;
-  --fg-dim: #CDC7B8; --fg-faint: #A9A294; --border: #3C382F; --border-strong: #4E4839;
-  --accent: #A8BFA7; --accent-soft: #333629;
+     保证「主文字白、次要浅灰、更弱更灰」的层级还在。
+
+     又一轮实测反馈：「译文一整块直接就是黑的，之后上面露出来一点」——
+     原来的 --bg #211F1A 亮度只有 8%，整条右栏看起来就是一块黑。
+     把深色底整体提亮一档（--bg #211F1A→#2E2B24、--bg-elev #2A2721→#38342B），
+     底色不再是"黑块"，与正文纸面的反差也更柔和。 */
+  --bg: #2E2B24; --bg-elev: #38342B; --bg-sunken: #24211C; --fg: #FFFFFF;
+  --fg-dim: #CDC7B8; --fg-faint: #A9A294; --border: #4A453A; --border-strong: #5C5648;
+  --accent: #A8BFA7; --accent-soft: #3C4030;
   --ok-text: #9CC08C; --err-text: #D89A8A; --accent-fg: #1E2418;
   --btn: #5C7358; --btn-fg: #EDF2E6;
   --sel: rgba(168, 191, 167, .35); --hl: rgba(255, 226, 84, .38);
@@ -1541,8 +1546,9 @@ body.panel-dragging { user-select: none; }
   --btn: #A8BFA7; --btn-fg: #3F5140;
 }
 :root[data-theme="dark"] {
-  --bg: #211F1A; --bg-elev: #2A2721; --bg-sunken: #1A1815;
-  --border: #3C382F; --border-strong: #4E4839; --accent: #A8BFA7; --accent-soft: #333629;
+  /* 与文件顶部两处深色定义保持一致（深色底提亮一档） */
+  --bg: #2E2B24; --bg-elev: #38342B; --bg-sunken: #24211C;
+  --border: #4A453A; --border-strong: #5C5648; --accent: #A8BFA7; --accent-soft: #3C4030;
   --btn: #5C7358; --btn-fg: #EDF2E6;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, .32); --shadow: 0 12px 32px rgba(0, 0, 0, .38);
 }
@@ -1944,6 +1950,16 @@ body.left-empty #railLeft { display: flex; border-right: 1px solid var(--border)
 body.right-empty #rightCols,
 body.right-empty #splitRight { display: none; }
 body.right-empty #railRight { display: flex; border-left: 1px solid var(--border); }
+/* 窄窗第三档：侧栏被压到最小（≥60px）时**不整条藏掉**，改成正文横向滚动。
+   用户口径：「翻译的内容应该是要记录在右侧那个里面的，不管打不打开」。
+   最后两条带 `body.side-squeezed` 双类的选择器特异性更高，
+   用来压过 `body.no-right #rightCols { display: none }` —— 也就是说
+   窄窗下即使 JS 判了「收起」，只要这一侧还有内容要显示，就只压窄、不隐藏。 */
+body.side-squeezed .viewer-wrap { overflow-x: auto; }
+body.side-squeezed #rightCols,
+body.side-squeezed #leftSide { min-width: 60px; }
+body.side-squeezed.no-right #rightCols { display: flex; width: var(--right-w, 60px); }
+body.side-squeezed.no-left #leftSide { display: flex; width: var(--left-w, 60px); }
 
 /* 更轻的暖色工作台；PDF 纸张默认跟随 --paper-tint，设置里可切回纯白。 */
 :root {

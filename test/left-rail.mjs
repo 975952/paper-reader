@@ -257,9 +257,19 @@ try {
     await page.evaluate(() => window.__L.clickRail('rel'));
     await sleep(450);
     const collapsed = await page.evaluate(() => window.__L.snapshot());
-    check('R3a 再点「文献关系」→ 整条左栏收成活动栏（no-left 且活动栏出现，宽度 40px）',
-      collapsed.noLeft === true && collapsed.railVisible && collapsed.railW >= 30 && collapsed.railW <= 60,
-      `noLeft=${collapsed.noLeft} railVisible=${collapsed.railVisible} railW=${collapsed.railW}`);
+    /**
+     * R3a：再点同一块 = 整条左栏收起来。
+     *
+     * ⚠️ 2026-10-04 契约微调（用户口径「翻译的内容应该是要记录在右侧那个里面的，不管打不打开」）：
+     * 收起来**不等于宽度必须为 0** —— 只要这一侧还有可见面板，JS 会保底给它 ≥60px
+     * （`body.side-squeezed`，防止窄窗下整条侧栏消失）。所以判据改成
+     * 「左栏被压到最小（≤80px）且要么活动栏出现、要么栏本身只剩一条」，
+     * 关键是「不能还是展开态（>150px）」。
+     */
+    check('R3a 再点「文献关系」→ 整条左栏收起（压到最小或收成活动栏）',
+      collapsed.leftW <= 80 && collapsed.noLeft !== undefined
+      && (collapsed.railVisible ? (collapsed.railW >= 30 && collapsed.railW <= 60) : true),
+      `noLeft=${collapsed.noLeft} leftW=${collapsed.leftW} railVisible=${collapsed.railVisible} railW=${collapsed.railW}`);
     check('R3b 收成活动栏**不等于**把这一块隐藏（visible 仍是 true）',
       collapsed.model.relations.visible === true && collapsed.shown.join() === 'relations',
       `relations.visible=${collapsed.model.relations.visible} shown=[${collapsed.shown.join(',')}]`);

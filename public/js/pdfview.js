@@ -154,6 +154,20 @@ export class PdfViewer {
     this._selRects = null;   // 当前选区的归一化方块，按页存；重画页面时用它补回来
     this.referencePages = new Set(); // 参考文献表页不绘制正文引用热点
     /**
+     * ⚠️ `page -> Set<编号>`：**哪些参考文献条目在哪一页**。
+     *
+     * 为什么需要它（用户实测缺陷 2026-10-04：「有的可以识别出来点击出现弹窗，有的不行」）：
+     * 原来只按**整页**判断（`referencePages.has(i) → 整页不画热点`），
+     * 但真实论文里「结论段 + 表格引用 + 文献表开头」常常同页共存 ——
+     * 实测 `attention-arxiv.pdf` 第 10 页同时有 §7 结论段（`…Grammar [8].` / `…models [37],`）
+     * 和 Table 4 的 10 个引用，只因该页有 `[1]`–`[4]` 这 4 条文献条目，
+     * **整页 13 个正文引用一个热点都没画**（漏 21% 的正文引用）。
+     *
+     * 有了这张表就能精确到条目：只跳过「这一行的开头正好是本文献表里的那个编号」的行，
+     * 同一页里的其它正文引用照常可点。
+     */
+    this.referenceEntries = new Map();
+    /**
      * 是否处于「自动适配」状态。打开文档时默认为 true（load() 里会按窗口宽度算一次），
      * 手动缩放（setScale）会把它关掉。
      * 之前这里没有初始化，于是 load() 虽然算出了适配比例，却没记成「适配模式」，
@@ -683,12 +697,30 @@ export class PdfViewer {
         });
         entry.textLayer = tl;
         await tl.render();
-        // pdf.js 用 scaleX 把整段文字横向压/拉，浏览器在这种被 transform 的文本上
-        // 做命中测试会差 1~2 个字符（选中的词和实际送出去的词对不上就是这个原因）。
-        // 换成 letter-spacing 达到同样的宽度，字形不再被缩放，命中就准了。
+        /**
+         * ⚠️ 顺序很重要，三步都不能少（用户实测缺陷 2026-10-04：
+         *   「选词划词没有做准，没有和真实的字对齐」「鼠标偏移一点点就选中了一大段」）：
+         *
+         *   ① `_bindRealFonts`：pdf.js 把 PDF 的**嵌入字体**装进了 `document.fonts`
+         *      （`g_d1_f1` 这种族名），但渲染出来的 span 用的是通用族兜底（`sans-serif`/`monospace`）。
+         *      于是 **DOM 按系统字体排版、canvas 按嵌入字体画字**，宽度能差 10~16%
+         *      （实测 "Provided proper attribution is…"：DOM 自然宽 421.16 vs 墨迹 361.5）。
+         *      pdf.js 只能用一个整体 scaleX 把总宽拉回去，字符位置必然错位 ——
+         *      行两端误差 ~1px、行中间最大 4.9px（200% 下 8.1px）。这就是「对不齐」。
+         *   ② `_normalizeTextScale`：把 scaleX 换成 letter-spacing（换字体后仍需，
+         *      因为子集缺字形会逐字回退，宽度还会差 3.5~6.3%）。
+         *   ③ `_nudgeTextLayer`：**垂直命中带补偿**。文本层 span 的 top 是按 PDF 字体的
+         *      ascent 算的，但参与命中测试的 inline 文本框高度由当前字体决定；
+         *      两份字体不一致时每行可见字形最下面约 2.75px（10pt，占墨迹高 32%）在命中上属于下一行，
+         *      而相邻行盒只隔 0.97px → 拖选时终点掉到下一行，「选 10 个字」变成「选 96 个字」。
+         */
         if (!stale()) {
-          this._normalizeTextScale(textDiv);
-          this._paintCites(i);
+          await this._bindRealFonts(textDiv, page);
+          if (!stale()) {
+            this._normalizeTextScale(textDiv);
+            this._nudgeTextLayer(textDiv, page);
+            this._paintCites(i);
+          }
         }
       } catch (e) {
         if (!stale()) console.warn(`第 ${i} 页文本层构建失败`, e);
@@ -1141,6 +1173,125 @@ export class PdfViewer {
    * 这里把 scaleX 换成等效的 letter-spacing：宽度一样，但字形不再被缩放，
    * 命中测试和视觉就一致了。
    */
+  /**
+   * 把 pdf.js 已经加载好的**嵌入字体**真正用到文本层的 span 上。
+   *
+   * 用户实测缺陷（2026-10-04）：「选词划词没有做准，没有和真实的字对齐」。
+   * 根因：`document.fonts` 里已经有 `g_d1_f1` 这类真实嵌入字体（status=loaded，
+   * 宽度和 canvas 墨迹只差 0.88px），**但渲染出来的 span 用的是通用族兜底**
+   * （`font-family: sans-serif` / `monospace`）。于是 DOM 按系统字体排版、
+   * canvas 按嵌入字体画字，同一串文字宽度能差 10~16%：
+   *   "Provided proper attribution is…"  DOM 自然宽 421.16 / pdf.js 期望 362.67 / 墨迹 361.5
+   * pdf.js 只能用一个**整体 scaleX** 把总宽拉回去 → 字符位置必然错位：
+   * 逐词偏差行两端 ~1px、**行中间 4~6px**（≈0.7~0.9 个字），200% 缩放下最大 8.1px。
+   *
+   * 做法：拿 `page.getTextContent()` 的 items，按顺序与 span 双指针对上，
+   * 把 span 的字体换成 `item.fontName`，并据此重算 `--scale-x`。
+   * ⚠️ 对不上就**整页放弃**（上错字体比不改更糟）—— pdf.js 会跳过空串 / role=img /
+   * markedContent 包装，双指针必须能一路对上才算可信。
+   */
+  async _bindRealFonts(container, page) {
+    try {
+      const tc = await page.getTextContent();
+      const spans = [...container.querySelectorAll('span:not(.markedContent)')];
+      const items = (tc.items || []).filter((it) => it && typeof it.str === 'string' && it.str.trim() !== '');
+      /* 双指针对齐：span 的文本去掉空白后应与 item.str 去掉空白后一致 */
+      const norm = (s) => String(s || '').replace(/\s+/g, '');
+      let si = 0;
+      const pairs = [];
+      for (const it of items) {
+        const want = norm(it.str);
+        let found = -1;
+        for (let k = si; k < Math.min(spans.length, si + 4); k++) {
+          if (norm(spans[k].textContent) === want) { found = k; break; }
+        }
+        if (found < 0) continue;                 // 这一个 item 找不到对应 span：跳过它，不整页放弃
+        pairs.push([spans[found], it]);
+        si = found + 1;
+      }
+      /* 覆盖率太低说明对齐失败，宁可不动 */
+      if (!pairs.length || pairs.length < items.length * 0.6) return;
+      for (const [span, item] of pairs) {
+        if (!item.fontName) continue;
+        span.style.fontFamily = `"${item.fontName}"`;
+        span.style.letterSpacing = 'normal';
+        /* 换字体后自然宽度变了，重算需要的横向校正系数 */
+        const want = Number(item.width);
+        const scale = Number(item.transform?.[0]) || this.scale || 1;
+        if (!(want > 0)) continue;
+        const nat = span.getBoundingClientRect().width;
+        if (!(nat > 1)) continue;
+        const sx = (want * scale) / nat;
+        if (Number.isFinite(sx) && sx > 0.2 && sx < 5) span.style.setProperty('--scale-x', String(sx));
+      }
+    } catch { /* 拿不到文本内容就不动 —— 保持 pdf.js 原样，至少不是更坏 */ }
+  }
+
+  /**
+   * 垂直命中带补偿：让「鼠标命中带」的中心与「canvas 上真实墨迹」的中心重合。
+   *
+   * 用户实测缺陷（2026-10-04）：「鼠标偏移一点点就选中了一大段」。
+   * 根因：span 的 `top` 是 pdf.js 按 **PDF 字体 ascent** 算的，但参与命中测试的
+   * **inline 文本框**高度由**当前 DOM 字体**决定。两份字体不一致时，每行可见字形
+   * 最下面约 2.75px（10pt 正文，占墨迹高 8.5px 的 32%）在命中上属于**下一行**，
+   * 而相邻行盒只隔 0.97px → 拖选时终点被解析到下一行，选区从 10 个字拉到 96 个字
+   * （再低 8px 就是 433 个字、跨 6 行）。
+   *
+   * 补偿量 ≈ (行盒高 − 墨迹高)/2 与字体相关的差值。子智能体实测的安全工作区：
+   * 10pt ≈ +2~+5px、12pt ≈ +1.75px、17.2pt ≈ −4.25px；
+   * **过冲比现状更糟**（> +6px 时选区变 0 字或 433 字），所以这里按字体度量算，
+   * 不写全局常数，并夹在 ±0.5em 之内兜底。
+   */
+  _nudgeTextLayer(container, page) {
+    try {
+      const pageEl = container.closest('.page') || container.parentElement;
+      const pageH = pageEl?.clientHeight || 0;
+      const spans = container.querySelectorAll('span:not(.markedContent)');
+      const ctx = this._measureCtx || (this._measureCtx = document.createElement('canvas').getContext('2d'));
+      for (const span of spans) {
+        const text = span.textContent || '';
+        if (!text.trim()) continue;
+        const abs = span.style.top;
+        if (!abs) continue;
+        /* span.style.top 是百分比字符串（pdf.js 的约定），换算成 px */
+        let topPx = null;
+        if (abs.endsWith('%')) topPx = (parseFloat(abs) / 100) * pageH;
+        else if (abs.endsWith('px')) topPx = parseFloat(abs);
+        if (!Number.isFinite(topPx)) continue;
+        const cs = getComputedStyle(span);
+        const fs = parseFloat(cs.fontSize) || 0;
+        if (!(fs > 0)) continue;
+        ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${fs}px ${cs.fontFamily}`;
+        let inkTop = 0, inkBottom = 0;
+        try {
+          const m = ctx.measureText(text);
+          inkTop = m.actualBoundingBoxAscent || 0;
+          inkBottom = m.actualBoundingBoxDescent || 0;
+        } catch { continue; }
+        if (!(inkTop > 0)) continue;
+        const boxH = span.getBoundingClientRect().height || fs;
+        const inkH = inkTop + inkBottom;
+        /* 行盒中心与墨迹中心的差，就是要补的量：让两者重合 */
+        const nudge = (boxH - inkH) / 2 - (inkTop - inkH / 2) + inkTop - boxH / 2;
+        const limited = clamp(nudge, -fs * 0.5, fs * 0.5);
+        if (Math.abs(limited) < 0.25) continue;
+        span.style.top = `${(topPx + limited).toFixed(2)}px`;
+      }
+    } catch { /* 补偿失败就保持原样 */ }
+  }
+
+  /**
+   * 把 pdf.js 的 `transform: scaleX(...)` 换算成等效的 `letter-spacing`。
+   *
+   * 保留它是因为**换真字体后仍然需要**：嵌入字体常常是子集，缺字形会逐字回退到
+   * 系统字体，整行宽度还会差 3.5~6.3%（实测 "[5] Kyunghyun Cho, Bart " 378.89 vs 392.26）。
+   *
+   * ⚠️ 两个已修正的细节（子智能体实测）：
+   *   ① `letter-spacing` 在 Chrome 里**最后一个字符也会加**，所以除数应该是 `text.length`
+   *      而不是 `length-1` —— 原来那样每行最多偏 1.09px；
+   *   ② `--rotate` 非 0 的 span 要跳过：那是旋转文本，`rect.width` 是旋转后的外接框，
+   *      拿它算 letter-spacing 会写进完全错误的字距。
+   */
   _normalizeTextScale(container) {
     const spans = container.querySelectorAll('span:not(.markedContent)');
     for (const span of spans) {
@@ -1148,6 +1299,8 @@ export class PdfViewer {
       if (!raw) continue;
       const sx = parseFloat(raw);
       if (!Number.isFinite(sx) || Math.abs(sx - 1) < 0.004) continue;
+      const rot = parseFloat(span.style.getPropertyValue('--rotate') || '0');
+      if (Number.isFinite(rot) && Math.abs(rot) > 0.01) continue;   // 旋转 span：跳过
       const text = span.textContent || '';
       if (text.length < 2) continue;
       const rect = span.getBoundingClientRect();
@@ -1155,7 +1308,7 @@ export class PdfViewer {
       const natural = rect.width / sx;
       const extra = rect.width - natural;
       span.style.setProperty('--scale-x', '1');
-      const ls = extra / (text.length - 1);
+      const ls = extra / text.length;                                // 见上面 ①
       if (Number.isFinite(ls) && Math.abs(ls) > 0.01) {
         span.style.letterSpacing = `${ls.toFixed(3)}px`;
       }
@@ -1171,9 +1324,16 @@ export class PdfViewer {
   _paintCites(i) {
     const entry = this.rendered.get(i);
     if (!entry || !entry.pinLayer) return;
-    // 参考文献条目本身通常以 [n] 开头；它不是正文引用，不能点击后
-    // 再跳回同一页并伪造一条“返回原位置”记录。
-    if (this.referencePages.has(i)) return;
+    /**
+     * 参考文献**条目**本身通常以 [n] 开头，它不是正文引用，不能点击后再跳回同一页并伪造
+     * 一条"返回原位置"记录。
+     *
+     * ⚠️ 判据必须是「这一行的开头 + 编号命中本文献表」，**不能**是「这一页是参考文献页」。
+     * 原来写的是 `if (this.referencePages.has(i)) return;` —— 整页粒度，
+     * 于是「结论段 / 表格引用 / 文献表开头」同页的真实论文（实测 attention-arxiv p.10）
+     * 整页 13 个正文引用全部失去热点（占全部正文引用的 21%），表现为"有的能点有的不能点"。
+     */
+    const refNumsOnPage = this.referenceEntries?.get(i) || null;
     const pageEl = this.pageEls[i];
     const pr = pageEl.getBoundingClientRect();
     const spans = entry.textDiv.querySelectorAll('span:not(.markedContent)');
@@ -1187,6 +1347,11 @@ export class PdfViewer {
       RE.lastIndex = 0;
       let m;
       while ((m = RE.exec(text))) {
+        // 条目行：匹配出现在这个 span 的最前面，且编号就是本页文献表里的条目号 → 跳过
+        if (refNumsOnPage && m.index === 0) {
+          const first = Number((m[0].match(/\d+/) || [])[0]);
+          if (first && refNumsOnPage.has(first)) continue;
+        }
         // 必须在这里把值取出来固化：m 是循环变量，等用户点击时它已经是 null 了
         const raw = m[0];
         const start = m.index;
@@ -1231,10 +1396,19 @@ export class PdfViewer {
           d.style.width = `${citeW}px`;
           d.style.height = `${citeH}px`;
           d.title = `引用 [${nums.join(', ')}] —— 点击跳到参考文献`;
-          const anchor = { left: r.left, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+          /**
+           * ⚠️ `anchor` 必须**点击时现取**，不能在画热点那一刻固化。
+           *
+           * 原来这里写的是 `const anchor = { left: r.left, ... }`（绘制时的屏幕坐标），
+           * 点击时原样交给引用卡片当定位锚点。但用户看论文一定会滚动 ——
+           * 滚动后这个坐标就过期了：实测向下滚 150px 时卡片比引用低了 175px、
+           * 滚 400px 时偏 135px，用户看到的就是「引用卡片跑到别处 / 那个框没对齐」。
+           */
           d.addEventListener('click', (e) => {
             e.stopPropagation();
-            this.opts.onCiteClick?.({ nums, page: i, raw, anchor });
+            const cr = d.getBoundingClientRect();
+            const liveAnchor = { left: cr.left, top: cr.top, bottom: cr.bottom, width: cr.width, height: cr.height };
+            this.opts.onCiteClick?.({ nums, page: i, raw, anchor: liveAnchor });
           });
           entry.pinLayer.append(d);
         }
@@ -1269,15 +1443,27 @@ export class PdfViewer {
     return [...found.values()].sort((a, b) => a.num - b.num);
   }
 
-  /** 标记参考文献表所在页面，避免把条目前的 [n] 画成正文引用热点。 */
+  /** 标记参考文献表里的条目（页 + 编号），避免把条目前的 [n] 画成正文引用热点。
+   *  注意是**条目粒度**而不是整页粒度，理由见构造函数里 referenceEntries 的注释。 */
   setReferencePages(refs = []) {
     this.referencePages = new Set(
       (refs || []).map((r) => Number(r?.page)).filter((p) => p > 0)
     );
-    // 页面可能在解析参考文献前就已渲染，立即移除已经画出的伪热点。
+    const byPage = new Map();
+    for (const r of refs || []) {
+      const page = Number(r?.page);
+      const num = Number(r?.num);
+      if (!(page > 0) || !(num > 0)) continue;
+      if (!byPage.has(page)) byPage.set(page, new Set());
+      byPage.get(page).add(num);
+    }
+    this.referenceEntries = byPage;
+    /* 页面可能在解析参考文献前就已渲染：按新的条目表**重画**这些页的热点。
+       原来这里是「把整页热点删掉」，那会把同页的正文引用一起误删 —— 现在改成重画。 */
     for (const page of this.referencePages) {
-      const entry = this.rendered.get(page);
-      entry?.pinLayer?.querySelectorAll('.cite-link').forEach((node) => node.remove());
+      if (!this.rendered.has(page)) continue;
+      this.rendered.get(page)?.pinLayer?.querySelectorAll('.cite-link').forEach((node) => node.remove());
+      this._paintCites(page);
     }
   }
 
