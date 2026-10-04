@@ -153,6 +153,7 @@ export class PdfViewer {
     this._activeHit = null;
     this._selRects = null;   // 当前选区的归一化方块，按页存；重画页面时用它补回来
     this.referencePages = new Set(); // 参考文献表页不绘制正文引用热点
+    this.referenceByNum = new Map();  // 已解析的编号索引，点击引用时优先走缓存
     /**
      * ⚠️ `page -> Set<编号>`：**哪些参考文献条目在哪一页**。
      *
@@ -226,6 +227,8 @@ export class PdfViewer {
     this.current = 1;
     this._selRects = null;   // 换文档了，上一个选区跟着作废
     this.referencePages.clear();
+    this.referenceByNum.clear();
+    this.referenceEntries.clear();
     if (this.pagesEl) this.pagesEl.remove();
     this.pagesEl = null;
   }
@@ -558,14 +561,19 @@ export class PdfViewer {
       if (!entry.slice || !entry.cssW) continue;
       const need = this._sliceFor(i, entry.cssW, entry.cssH, entry.ratio);
       if (need && this._sliceCovers(entry.slice, need)) continue;
+      // 滚动很快时同一页可能连续触发多次切片刷新；保留当前任务，避免每 60ms
+      // 取消并重开一次文本层，导致引用热点出现可点击空窗。
+      if (this.renderTasks.has(i)) continue;
       this._renderPage(i, { force: true });
     }
   }
 
   async _renderPage(i, { priority = false, gen = this._gen, force = false, soft = false } = {}) {
     if (!this.pdf || gen !== this._gen) return;
-    if (!force && !soft && (this.renderTasks.has(i) || this.rendered.has(i))) return;
-    if (!force && soft && this.renderTasks.has(i)) return;
+    // 无论调用方是否带 force，都不要取消一份正在生成的文本层；等它自然结束后
+    // 再由切片检查决定是否需要下一轮。这样旧热点可以继续覆盖当前页面。
+    if (this.renderTasks.has(i)) return;
+    if (!force && !soft && this.rendered.has(i)) return;
     const pageEl = this.pageEls[i];
     if (!pageEl) return;
     /**
@@ -578,12 +586,16 @@ export class PdfViewer {
      */
     const prevEntry = this.rendered.get(i);
     const prevCanvas = prevEntry?.canvas || null;
+    const reusePinLayer = !!(prevEntry?.pinLayer
+      && Math.abs(Number(prevEntry.renderScale || this.scale) - this.scale) < 0.001);
     if (prevEntry) {
       try { prevEntry.task?.cancel(); } catch { /* ignore */ }
       prevEntry.textDiv.remove();
       prevEntry.hlLayer.remove();
       prevEntry.hitLayer.remove();
-      prevEntry.pinLayer?.remove();
+      // 同一缩放比例下切片重画只改变 canvas/text layer，旧热点仍落在同一页坐标上。
+      // 暂时复用它，等新文本层和新热点准备好后再原地替换，避免点击落空。
+      if (!reusePinLayer) prevEntry.pinLayer?.remove();
       this.rendered.delete(i);
     }
 
@@ -634,8 +646,9 @@ export class PdfViewer {
       const hitLayer = document.createElement('div');
       hitLayer.className = 'search-hit-layer';
       // 笔记书签单独一层，z-index 必须高于文本层，否则点不到
-      const pinLayer = document.createElement('div');
+      const pinLayer = reusePinLayer ? prevEntry.pinLayer : document.createElement('div');
       pinLayer.className = 'hl-pin-layer';
+      if (!reusePinLayer) pinLayer.style.transform = '';
 
       const entry = {
         canvas, textDiv, hlLayer, hitLayer, pinLayer, task: null, textLayer: null,
@@ -1195,33 +1208,36 @@ export class PdfViewer {
       const tc = await page.getTextContent();
       const spans = [...container.querySelectorAll('span:not(.markedContent)')];
       const items = (tc.items || []).filter((it) => it && typeof it.str === 'string' && it.str.trim() !== '');
-      /* 双指针对齐：span 的文本去掉空白后应与 item.str 去掉空白后一致 */
-      const norm = (s) => String(s || '').replace(/\s+/g, '');
-      let si = 0;
+      /* 按文本层实际顺序配对。旧实现从 item 反向找 span，遇到一个换行/空 item
+         就可能把后续 span 配到前一个字体；这里宁可跳过不匹配的 item，也不写错字体。 */
+      const norm = (s) => String(s || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+      let ii = 0;
       const pairs = [];
-      for (const it of items) {
-        const want = norm(it.str);
-        let found = -1;
-        for (let k = si; k < Math.min(spans.length, si + 4); k++) {
-          if (norm(spans[k].textContent) === want) { found = k; break; }
-        }
-        if (found < 0) continue;                 // 这一个 item 找不到对应 span：跳过它，不整页放弃
-        pairs.push([spans[found], it]);
-        si = found + 1;
+      for (const span of spans) {
+        const text = norm(span.textContent);
+        if (!text) continue;
+        while (ii < items.length && norm(items[ii].str) !== text) ii++;
+        if (ii >= items.length) break;
+        pairs.push([span, items[ii++]]);
       }
-      /* 覆盖率太低说明对齐失败，宁可不动 */
-      if (!pairs.length || pairs.length < items.length * 0.6) return;
+      /* 覆盖率太低说明流式文本和页面文本不是同一份，宁可整页保持 pdf.js 原样。 */
+      if (!pairs.length || pairs.length < Math.max(1, spans.length * 0.6)) return;
       for (const [span, item] of pairs) {
-        if (!item.fontName) continue;
-        span.style.fontFamily = `"${item.fontName}"`;
+        const fam = String(item.fontName || '').trim();
+        if (!fam) continue;
+        const cs = getComputedStyle(span);
+        const px = parseFloat(cs.fontSize) || 0;
+        if (document.fonts?.check && px > 0 && !document.fonts.check(`${px}px "${fam}"`)) continue;
+        span.style.fontFamily = `"${fam}"`;
         span.style.letterSpacing = 'normal';
-        /* 换字体后自然宽度变了，重算需要的横向校正系数 */
-        const want = Number(item.width);
-        const scale = Number(item.transform?.[0]) || this.scale || 1;
+        span.dataset.pdfFontName = fam;
+        /* item.width 是 scale=1 的 PDF/CSS 宽度；不要误用 transform[0]（那是字号/基线变换）。 */
+        const want = Number(item.width) * this.scale;
         if (!(want > 0)) continue;
+        span.style.setProperty('--scale-x', '1');
         const nat = span.getBoundingClientRect().width;
         if (!(nat > 1)) continue;
-        const sx = (want * scale) / nat;
+        const sx = want / nat;
         if (Number.isFinite(sx) && sx > 0.2 && sx < 5) span.style.setProperty('--scale-x', String(sx));
       }
     } catch { /* 拿不到文本内容就不动 —— 保持 pdf.js 原样，至少不是更坏 */ }
@@ -1269,11 +1285,26 @@ export class PdfViewer {
           inkBottom = m.actualBoundingBoxDescent || 0;
         } catch { continue; }
         if (!(inkTop > 0)) continue;
-        const boxH = span.getBoundingClientRect().height || fs;
-        const inkH = inkTop + inkBottom;
-        /* 行盒中心与墨迹中心的差，就是要补的量：让两者重合 */
-        const nudge = (boxH - inkH) / 2 - (inkTop - inkH / 2) + inkTop - boxH / 2;
-        const limited = clamp(nudge, -fs * 0.5, fs * 0.5);
+        /* PDF.js 的 top 是 baseline - fontBoundingBoxAscent；浏览器的 Range 命中框
+           往往还会向上伸出一小段。用同一字体的实际墨迹上缘和 Range 上缘做差，
+           把命中带移到可见字形上，而不是用一个会代数抵消成 0 的中心公式。 */
+        const fm = ctx.measureText('');
+        const fba = fm.fontBoundingBoxAscent || fs * 0.75;
+        const fbd = Math.abs(fm.fontBoundingBoxDescent || fs * 0.25);
+        const ratio = fba / Math.max(0.01, fba + fbd);
+        const baseline = topPx + fs * ratio;
+        const inkTopPx = baseline - inkTop;
+        const range = document.createRange();
+        try { range.selectNodeContents(span.firstChild || span); } catch { continue; }
+        const rr = range.getClientRects()[0];
+        const pr = pageEl.getBoundingClientRect();
+        if (!rr || !pr || !(pr.height > 0)) continue;
+        const hitTopPx = rr.top - pr.top;
+        const nudge = inkTopPx - hitTopPx;
+        // 正文的小字号行距很紧：+2px 已足够把 10–12pt 的命中分界线压到字形下缘，
+        // 再往下会让双击/拖选少吃一个字。标题和大字号保留更宽的上限。
+        const downLimit = fs <= 14 ? Math.min(fs * 0.25, 2) : Math.min(fs * 0.35, 4);
+        const limited = clamp(nudge, -fs * 0.35, downLimit);
         if (Math.abs(limited) < 0.25) continue;
         span.style.top = `${(topPx + limited).toFixed(2)}px`;
       }
@@ -1324,6 +1355,8 @@ export class PdfViewer {
   _paintCites(i) {
     const entry = this.rendered.get(i);
     if (!entry || !entry.pinLayer) return;
+    // 复用热点层时只清引用节点，保留同层的笔记书签。
+    entry.pinLayer.querySelectorAll('.cite-link').forEach((node) => node.remove());
     /**
      * 参考文献**条目**本身通常以 [n] 开头，它不是正文引用，不能点击后再跳回同一页并伪造
      * 一条"返回原位置"记录。
@@ -1458,6 +1491,11 @@ export class PdfViewer {
       byPage.get(page).add(num);
     }
     this.referenceEntries = byPage;
+    this.referenceByNum = new Map();
+    for (const r of refs || []) {
+      const num = Number(r?.num);
+      if (num > 0 && !this.referenceByNum.has(num)) this.referenceByNum.set(num, r);
+    }
     /* 页面可能在解析参考文献前就已渲染：按新的条目表**重画**这些页的热点。
        原来这里是「把整页热点删掉」，那会把同页的正文引用一起误删 —— 现在改成重画。 */
     for (const page of this.referencePages) {
@@ -1470,6 +1508,8 @@ export class PdfViewer {
   /** 在正文里找 [n] 对应的参考文献条目（通常在最后几页） */
   async findReference(n) {
     const gen = this._gen;
+    const cached = this.referenceByNum?.get(Number(n));
+    if (cached) return { page: cached.page, num: Number(n), text: cached.text };
     // 注意不能加 m 标志：那样 $ 会在每个换行处成立，惰性匹配只吃到第一行，
     // 文献条目就会被截成半句
     const re = new RegExp(`(?:^|\\n)[ \\t]*\\[${n}\\][ \\t]*([\\s\\S]{0,700}?)(?=\\n[ \\t]*\\[\\d+\\]|$)`);

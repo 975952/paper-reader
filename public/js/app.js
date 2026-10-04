@@ -4676,11 +4676,14 @@ function jumpToCiteInBody() {
 
 async function handleCite({ nums, page, anchor }) {
   const n = nums[0];
+  const citeSeq = (state.citeSeq = (state.citeSeq || 0) + 1);
   const ref = await viewer.findReference(n);
+  // 连点不同引用时，旧请求不能把新卡片覆盖掉。
+  if (citeSeq !== state.citeSeq) return;
   if (!ref) { toast(`正文里没找到 [${n}] 对应的文献条目`, 'err', 3000); return; }
-  const onReferencePage = ref.page === page
-    || (state.refsDoc === state.doc?.docId
-      && state.refs.some((item) => item.page === page));
+  // 只比较「这一个编号的条目」是否就在当前页。不能因为同页存在其它参考文献条目，
+  // 就把结论段/表格里的正文引用误判成已经在文献表页。
+  const onReferencePage = ref.page === page;
   showCiteBox(n, ref, anchor, { canReturn: !onReferencePage });
   if (!onReferencePage) jumpToPageWithHistory(ref.page, { smooth: true });
 }
