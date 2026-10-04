@@ -1368,3 +1368,5 @@ const citeTop   = clamp(localTop,  0, Math.max(0, pageH - citeH));
 | 文件 | 大小 | SHA256 |
 |---|---:|---|
 | `论文阅读器.exe`（根目录与桌面副本） | 10,095,616 B | `318D3F45FE6262D938FB0739067A16E9B4BE24D43F5F6C9CA0B813B975E3E23D` |
+
+手机版资源同步检查通过（274 个资源与 `public/` 一致）；`android\\build-apk.bat` 的 Gradle 阶段因当前 Java 无法建立 loopback connection 失败，未生成新的 APK。
