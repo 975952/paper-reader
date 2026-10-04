@@ -1,0 +1,2474 @@
+%PDF-1.4
+%TEST
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Outlines 36 0 R /PageMode /UseOutlines >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 16 /Kids [5 0 R 7 0 R 9 0 R 11 0 R 13 0 R 15 0 R 17 0 R 19 0 R 21 0 R 23 0 R 25 0 R 27 0 R 29 0 R 31 0 R 33 0 R 35 0 R] >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Length 6487 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Attention Is All You Need: A Synthetic Test Paper) Tj
+T*
+(Section 1) Tj
+T*
+(Section 1 Topic 1) Tj
+T*
+(UniqueSignal marks the first isolated search hit.) Tj
+T*
+(The second UniqueSignal hit stays on the same page.) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>
+endobj
+6 0 obj
+<< /Length 6326 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 2) Tj
+T*
+(Section 1 Topic 2) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>
+endobj
+8 0 obj
+<< /Length 6326 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 3) Tj
+T*
+(Section 1 Topic 3) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 8 0 R >>
+endobj
+10 0 obj
+<< /Length 6326 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 4) Tj
+T*
+(Section 1 Topic 4) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 10 0 R >>
+endobj
+12 0 obj
+<< /Length 6344 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 5) Tj
+T*
+(Section 2) Tj
+T*
+(Section 2 Topic 1) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+13 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 12 0 R >>
+endobj
+14 0 obj
+<< /Length 6326 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 6) Tj
+T*
+(Section 2 Topic 2) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+15 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 14 0 R >>
+endobj
+16 0 obj
+<< /Length 6326 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 7) Tj
+T*
+(Section 2 Topic 3) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+17 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 16 0 R >>
+endobj
+18 0 obj
+<< /Length 6326 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 8) Tj
+T*
+(Section 2 Topic 4) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+19 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 18 0 R >>
+endobj
+20 0 obj
+<< /Length 6344 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 9) Tj
+T*
+(Section 3) Tj
+T*
+(Section 3 Topic 1) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+21 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 20 0 R >>
+endobj
+22 0 obj
+<< /Length 6327 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 10) Tj
+T*
+(Section 3 Topic 2) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+23 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 22 0 R >>
+endobj
+24 0 obj
+<< /Length 6327 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 11) Tj
+T*
+(Section 3 Topic 3) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+25 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 24 0 R >>
+endobj
+26 0 obj
+<< /Length 6327 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 12) Tj
+T*
+(Section 3 Topic 4) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+27 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 26 0 R >>
+endobj
+28 0 obj
+<< /Length 6345 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 13) Tj
+T*
+(Section 4) Tj
+T*
+(Section 4 Topic 1) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+29 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 28 0 R >>
+endobj
+30 0 obj
+<< /Length 6327 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 14) Tj
+T*
+(Section 4 Topic 2) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+31 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 30 0 R >>
+endobj
+32 0 obj
+<< /Length 6327 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 15) Tj
+T*
+(Section 4 Topic 3) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+ET
+endstream
+endobj
+33 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 32 0 R >>
+endobj
+34 0 obj
+<< /Length 6414 >>
+stream
+BT
+/F1 9 Tf
+10 TL
+72 740 Td
+(Synthetic Paper - Page 16) Tj
+T*
+(Section 4 Topic 4) Tj
+T*
+(Abstract: This test fixture discusses attention and the Transformer architecture.) Tj
+T*
+(It contains no user data and is used only for automated reader regression tests.) Tj
+T*
+(The model maps queries, keys, and values through scaled dot product attention.) Tj
+T*
+(Multi-head attention allows the model to jointly attend to information.) Tj
+T*
+(The encoder and decoder use residual connections and feed-forward layers.) Tj
+T*
+(This paragraph provides selectable text for the PDF text layer assertions.) Tj
+T*
+(A citation to the original architecture appears here [1].) Tj
+T*
+(The following lines ensure enough text spans are present on each page.) Tj
+T*
+(Experiments evaluate translation quality and computational complexity.) Tj
+T*
+(Results are illustrative fixture content, not research findings or user papers.) Tj
+T*
+(The attention mechanism computes weights from query and key representations.) Tj
+T*
+(The value vectors are combined according to those normalized weights.) Tj
+T*
+(Positional encodings represent token order in the input sequence.) Tj
+T*
+(The model uses multiple layers to build contextual representations.) Tj
+T*
+(This text also provides stable words for find and selection UI tests.) Tj
+T*
+(Related work includes sequence models and neural machine translation.) Tj
+T*
+(The reader should preserve page numbers and restore document progress.) Tj
+T*
+(A reference marker [3-5] tests clickable citation detection.) Tj
+T*
+(Automated tests must not depend on a users personal bookshelf contents.) Tj
+T*
+(Supplementary fixture line 1: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 2: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 3: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 4: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 5: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 6: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 7: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 8: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 9: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 10: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 11: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 12: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 13: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 14: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 15: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 16: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 17: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 18: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 19: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 20: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 21: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 22: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 23: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 24: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 25: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 26: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 27: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 28: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 29: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 30: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 31: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 32: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 33: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 34: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 35: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 36: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 37: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 38: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 39: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 40: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 41: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 42: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 43: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 44: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(Supplementary fixture line 45: attention supports contextual sequence processing and evaluation.) Tj
+T*
+(References) Tj
+T*
+([1] Vaswani et al. Attention Is All You Need. NeurIPS 2017.) Tj
+T*
+ET
+endstream
+endobj
+35 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 34 0 R >>
+endobj
+36 0 obj
+<< /Type /Outlines /First 37 0 R /Last 40 0 R /Count 20 >>
+endobj
+37 0 obj
+<< /Title (Section 1) /Parent 36 0 R /Next 38 0 R /First 41 0 R /Last 44 0 R /Count 4 /Dest [5 0 R /XYZ null 730 null] >>
+endobj
+38 0 obj
+<< /Title (Section 2) /Parent 36 0 R /Prev 37 0 R /Next 39 0 R /First 45 0 R /Last 48 0 R /Count 4 /Dest [13 0 R /XYZ null 730 null] >>
+endobj
+39 0 obj
+<< /Title (Section 3) /Parent 36 0 R /Prev 38 0 R /Next 40 0 R /First 49 0 R /Last 52 0 R /Count 4 /Dest [21 0 R /XYZ null 730 null] >>
+endobj
+40 0 obj
+<< /Title (Section 4) /Parent 36 0 R /Prev 39 0 R /First 53 0 R /Last 56 0 R /Count 4 /Dest [29 0 R /XYZ null 730 null] >>
+endobj
+41 0 obj
+<< /Title (Section 1 Topic 1) /Parent 37 0 R /Next 42 0 R /Dest [5 0 R /XYZ null 720 null] >>
+endobj
+42 0 obj
+<< /Title (Section 1 Topic 2) /Parent 37 0 R /Prev 41 0 R /Next 43 0 R /Dest [7 0 R /XYZ null 730 null] >>
+endobj
+43 0 obj
+<< /Title (Section 1 Topic 3) /Parent 37 0 R /Prev 42 0 R /Next 44 0 R /Dest [9 0 R /XYZ null 730 null] >>
+endobj
+44 0 obj
+<< /Title (Section 1 Topic 4) /Parent 37 0 R /Prev 43 0 R /Dest [11 0 R /XYZ null 730 null] >>
+endobj
+45 0 obj
+<< /Title (Section 2 Topic 1) /Parent 38 0 R /Next 46 0 R /Dest [13 0 R /XYZ null 720 null] >>
+endobj
+46 0 obj
+<< /Title (Section 2 Topic 2) /Parent 38 0 R /Prev 45 0 R /Next 47 0 R /Dest [15 0 R /XYZ null 730 null] >>
+endobj
+47 0 obj
+<< /Title (Section 2 Topic 3) /Parent 38 0 R /Prev 46 0 R /Next 48 0 R /Dest [17 0 R /XYZ null 730 null] >>
+endobj
+48 0 obj
+<< /Title (Section 2 Topic 4) /Parent 38 0 R /Prev 47 0 R /Dest [19 0 R /XYZ null 730 null] >>
+endobj
+49 0 obj
+<< /Title (Section 3 Topic 1) /Parent 39 0 R /Next 50 0 R /Dest [21 0 R /XYZ null 720 null] >>
+endobj
+50 0 obj
+<< /Title (Section 3 Topic 2) /Parent 39 0 R /Prev 49 0 R /Next 51 0 R /Dest [23 0 R /XYZ null 730 null] >>
+endobj
+51 0 obj
+<< /Title (Section 3 Topic 3) /Parent 39 0 R /Prev 50 0 R /Next 52 0 R /Dest [25 0 R /XYZ null 730 null] >>
+endobj
+52 0 obj
+<< /Title (Section 3 Topic 4) /Parent 39 0 R /Prev 51 0 R /Dest [27 0 R /XYZ null 730 null] >>
+endobj
+53 0 obj
+<< /Title (Section 4 Topic 1) /Parent 40 0 R /Next 54 0 R /Dest [29 0 R /XYZ null 720 null] >>
+endobj
+54 0 obj
+<< /Title (Section 4 Topic 2) /Parent 40 0 R /Prev 53 0 R /Next 55 0 R /Dest [31 0 R /XYZ null 730 null] >>
+endobj
+55 0 obj
+<< /Title (Section 4 Topic 3) /Parent 40 0 R /Prev 54 0 R /Next 56 0 R /Dest [33 0 R /XYZ null 730 null] >>
+endobj
+56 0 obj
+<< /Title (Section 4 Topic 4) /Parent 40 0 R /Prev 55 0 R /Dest [35 0 R /XYZ null 730 null] >>
+endobj
+xref
+0 57
+0000000000 65535 f 
+0000000015 00000 n 
+0000000104 00000 n 
+0000000265 00000 n 
+0000000335 00000 n 
+0000006873 00000 n 
+0000006999 00000 n 
+0000013376 00000 n 
+0000013502 00000 n 
+0000019879 00000 n 
+0000020005 00000 n 
+0000026383 00000 n 
+0000026511 00000 n 
+0000032907 00000 n 
+0000033035 00000 n 
+0000039413 00000 n 
+0000039541 00000 n 
+0000045919 00000 n 
+0000046047 00000 n 
+0000052425 00000 n 
+0000052553 00000 n 
+0000058949 00000 n 
+0000059077 00000 n 
+0000065456 00000 n 
+0000065584 00000 n 
+0000071963 00000 n 
+0000072091 00000 n 
+0000078470 00000 n 
+0000078598 00000 n 
+0000084995 00000 n 
+0000085123 00000 n 
+0000091502 00000 n 
+0000091630 00000 n 
+0000098009 00000 n 
+0000098137 00000 n 
+0000104603 00000 n 
+0000104731 00000 n 
+0000104806 00000 n 
+0000104944 00000 n 
+0000105096 00000 n 
+0000105248 00000 n 
+0000105387 00000 n 
+0000105497 00000 n 
+0000105620 00000 n 
+0000105743 00000 n 
+0000105854 00000 n 
+0000105965 00000 n 
+0000106089 00000 n 
+0000106213 00000 n 
+0000106324 00000 n 
+0000106435 00000 n 
+0000106559 00000 n 
+0000106683 00000 n 
+0000106794 00000 n 
+0000106905 00000 n 
+0000107029 00000 n 
+0000107153 00000 n 
+trailer
+<< /Size 57 /Root 1 0 R >>
+startxref
+107264
+%%EOF

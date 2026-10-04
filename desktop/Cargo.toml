@@ -1,0 +1,46 @@
+[package]
+name = "paper-reader"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "论文阅读器 —— 本地桌面壳（wry + tao + 内置 HTTP 服务，前端资源内嵌）"
+publish = false
+
+[[bin]]
+name = "paper-reader"
+path = "src/main.rs"
+
+[dependencies]
+# 窗口 + WebView2
+wry = "0.55"
+tao = "0.35"
+
+# 本地 HTTP 服务
+tiny_http = "0.12"
+
+# 上游 AI 接口的 HTTP 客户端。
+# 关掉默认的 rustls（会连带 ring / NASM 那一串麻烦），
+# 改用 native-tls → Windows 上就是系统自带的 SChannel。
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+
+# 把 public/ 打进 exe
+rust-embed = "8"
+
+# float_roundtrip：默认的浮点解析不是"正确舍入"的，笔记里那些归一化坐标
+#   （0.018276762402088774）读进来再写回去会差最后一位；
+#   加上它以后 JSON -> f64 -> JSON 完全无损。
+# preserve_order：保持键的插入顺序，写回的 notes/state 和 Node 版逐字节一致，
+#   不会因为键被重排而让文件反复 churn。
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+
+[profile.release]
+opt-level = 2
+lto = false
+strip = true
+codegen-units = 16
+# 必须保留 unwind：每个请求都用 catch_unwind 兜底，abort 就没得兜了
+panic = "unwind"
+
+[build-dependencies]
+# 把生成的 .ico 编译进 exe 的 PE 资源（exe/快捷方式/任务栏才有图标）
+winres = "0.1"

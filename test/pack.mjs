@@ -1,0 +1,163 @@
+/**
+ * 打包成一个可以直接推到 GitHub 的 zip。
+ *
+ *   node test/pack.mjs
+ *
+ * 用**白名单**：只挑明确要发布的文件，其余一律不进包。
+ * 这条规则是硬性的 —— data/ 里有用户的 API Key，papers/ 里有他的论文，
+ * 一旦用「全量打包再排除」的写法，将来加了个新目录就会漏出去。
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+const ROOT = path.join(import.meta.dirname, '..');
+const STAGE = path.join(import.meta.dirname, 'artifacts', 'pkg');
+const ZIP = path.join(import.meta.dirname, 'artifacts', 'paper-reader-src.zip');
+
+/** 要发布的顶层文件 / 目录（相对 ROOT） */
+const INCLUDE = [
+  'server.js',
+  'start.bat',
+  '启动.bat',
+  'README.md',
+  '.gitignore',
+  'public',
+  'desktop/src',
+  'desktop/Cargo.toml',
+  'desktop/Cargo.lock',
+  'desktop/build.bat',
+  'desktop/build.rs',
+  'desktop/tools',
+  'docs',
+  'test/cards.mjs',
+  'test/cjk.mjs',
+  'test/context.mjs',
+  'test/desktop.mjs',
+  'test/diag.mjs',
+  'test/diag2.mjs',
+  'test/diag3.mjs',
+  'test/e2e.mjs',
+  'test/export.mjs',
+  'test/isolate.mjs',
+  'test/links.mjs',
+  'test/math.mjs',
+  'test/node-search.mjs',
+  'test/ops.mjs',
+  'test/outline.mjs',
+  'test/pack.mjs',
+  'test/proto-search.mjs',
+  'test/real.mjs',
+  'test/save-reliability.mjs',
+  'test/relations.mjs',
+  'test/selection.mjs',
+  'test/smoke.mjs',
+  'test/stream.mjs',
+  'test/ux.mjs',
+  'test/zoom.mjs',
+  'test/_env.mjs',
+  'test/fixtures',
+  'test/package.json',
+  'test/package-lock.json',
+];
+
+/** 兜底：就算误入白名单，这些也绝不进包 */
+const DENY = [
+  /(^|[\\/])data([\\/]|$)/,
+  /(^|[\\/])papers([\\/]|$)/,
+  /node_modules/,
+  /[\\/]target[\\/]/,
+  /[\\/]artifacts[\\/]/,
+  /\.exe$/i,
+  /\.pdf$/i,        // 例外只有下面 isFixturePdf() 放行的合成夹具
+  /\.log$/i,
+  /webview2/,
+  /\.desktop-port$/,
+];
+
+/**
+ * 唯一允许进包的 `.pdf`：`test/fixtures/` 下的**合成**夹具。
+ * e2e / ux / cjk / context / outline 都要拿它铺隔离书架，不带它，打出来的源码包
+ * 连 `node test/e2e.mjs` 都跑不起来（缺夹具）。
+ * 前缀写死在正则里：`papers/`、`data/` 或任何别处的 pdf 都匹配不到这条豁免。
+ */
+const isFixturePdf = (rel) => /^test[\\/]fixtures[\\/][^\\/]+\.pdf$/i.test(rel);
+
+const walk = (abs, rel, out) => {
+  const st = fs.statSync(abs);
+  if (st.isDirectory()) {
+    for (const e of fs.readdirSync(abs)) walk(path.join(abs, e), path.join(rel, e), out);
+    return;
+  }
+  if (DENY.some((re) => re.test(rel)) && !isFixturePdf(rel)) return;
+  out.push({ abs, rel });
+};
+
+/* ── 1. 收集 ── */
+const files = [];
+for (const item of INCLUDE) {
+  const abs = path.join(ROOT, item);
+  if (!fs.existsSync(abs)) { console.log(`  [skip] 不存在：${item}`); continue; }
+  walk(abs, item, files);
+}
+
+/* ── 2. 安全检查：包里绝不能出现密钥 / 论文 ── */
+const dangerous = files.filter((f) => /(^|[\\/])data([\\/]|$)|(^|[\\/])papers([\\/]|$)|\.exe$/i.test(f.rel)
+  || (/\.pdf$/i.test(f.rel) && !isFixturePdf(f.rel)));
+if (dangerous.length) {
+  console.error('拒绝打包：白名单里混进了敏感文件');
+  for (const d of dangerous) console.error('  ' + d.rel);
+  process.exit(1);
+}
+// 反向自检：敏感目录一个都不许出现在清单里（正常情况 DENY 已经拦掉了，这里是第二道）
+const forbidden = files.filter((f) => /(^|[\\/])(data|papers|node_modules|artifacts)([\\/]|$)/i.test(f.rel)
+  || /[\\/]target[\\/]/i.test(f.rel));
+if (forbidden.length) {
+  console.error('拒绝打包：清单里出现了 data/ papers/ artifacts/ node_modules/ target/');
+  for (const f of forbidden) console.error('  ' + f.rel);
+  process.exit(1);
+}
+const leaked = [];
+for (const f of files) {
+  if (!/\.(js|mjs|json|html|css|md|rs|toml|bat|txt)$/i.test(f.rel)) continue;
+  const txt = fs.readFileSync(f.abs, 'utf8');
+  // 真实 API Key 长这样：sk- 后面 30+ 位
+  if (/sk-[A-Za-z0-9]{20,}/.test(txt)) leaked.push(f.rel);
+}
+if (leaked.length) {
+  console.error('拒绝打包：这些文件里出现了疑似真实 API Key');
+  for (const l of leaked) console.error('  ' + l);
+  process.exit(1);
+}
+
+/* ── 3. 落到临时目录 ── */
+fs.rmSync(STAGE, { recursive: true, force: true });
+fs.mkdirSync(STAGE, { recursive: true });
+let bytes = 0;
+for (const f of files) {
+  const dst = path.join(STAGE, f.rel);
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.copyFileSync(f.abs, dst);
+  bytes += fs.statSync(dst).size;
+}
+
+/* ── 4. 打 zip ── */
+fs.rmSync(ZIP, { force: true });
+execFileSync('powershell', [
+  '-NoProfile', '-Command',
+  `Compress-Archive -Path '${STAGE}\\*' -DestinationPath '${ZIP}' -CompressionLevel Optimal -Force`,
+], { stdio: 'inherit' });
+fs.rmSync(STAGE, { recursive: true, force: true });
+
+const zipSize = fs.statSync(ZIP).size;
+console.log(`\n文件数：${files.length}`);
+console.log(`原始大小：${(bytes / 1048576).toFixed(1)} MB`);
+console.log(`压缩后：${(zipSize / 1048576).toFixed(1)} MB`);
+console.log(`输出：${ZIP}`);
+console.log('\n前 20 个文件：');
+for (const f of files.slice(0, 20)) console.log('  ' + f.rel);
+// 夹具 PDF 单独列出来：它们进了包，e2e / ux / cjk 这些套件才跑得起来，值得一眼核对
+const fixturePdfs = files.filter((f) => isFixturePdf(f.rel)).map((f) => f.rel).sort();
+console.log(`\n合成 PDF 夹具（${fixturePdfs.length} 个）：`);
+for (const f of fixturePdfs) console.log('  ' + f);
+console.log(`敏感路径自检：${forbidden.length === 0 ? '通过（清单里没有 data/ / papers/ / artifacts/ / node_modules/ / target/）' : '失败'}`);

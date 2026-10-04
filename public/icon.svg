@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="论文阅读器">
+  <title>论文阅读器</title>
+  <!--
+    一个正常的「P」：竖笔 → 起笔横 → 右半圆碗 → 收笔横，一条描边的路径。
+    用 stroke + round linecap 出来的是圆头笔画，和字体里的 P 是一个样子；
+    之前那版是「矩形当竖 + 半圆环当碗」，方头方脑所以难看。
+    透明背景，只有笔画本身着色。
+
+    颜色 = 主题主色（橄榄绿 #556B2F）。这里**必须写死颜色、不能用 currentColor**：
+    同一个文件既当 favicon 又当欢迎页的 <img src="/icon.svg">，而 <img> 引入的 SVG
+    是独立文档，拿不到外层页面的 currentColor。暖色改造时这一处是 UI 骨架里最后的蓝色。
+  -->
+  <path d="M34 84 V18 H54 A21 21 0 0 1 54 60 H34"
+        fill="none" stroke="#556B2F" stroke-width="15"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

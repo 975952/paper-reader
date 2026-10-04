@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<!-- 手机版：viewport-fit=cover 让刘海屏能用满；user-scalable=no 是为了让「长按选词」不被
+     系统的双指缩放抢走（字号由设置面板控制，不靠手势缩放，见 mobile.js 的说明）。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#F3E8C3" />
+<meta name="color-scheme" content="light dark" />
+<title>论文阅读器</title>
+<link rel="icon" type="image/svg+xml" href="../icon.svg" />
+<link rel="stylesheet" href="../style.css" />
+<link rel="stylesheet" href="../vendor/katex/katex.min.css" />
+<link rel="stylesheet" href="./reader.css" />
+</head>
+<body class="m-body">
+
+  <!-- 顶栏：**点击才出现**（手机没有 hover）。只在阅读时用得到的那几个动作。 -->
+  <header class="m-topbar" id="mTopbar">
+    <button class="m-icon" id="mOpen" title="打开 PDF" aria-label="打开 PDF">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.4 7.4a2 2 0 0 1 2-2h3.3l2 2.4h7.9a2 2 0 0 1 2 2v8.4a2 2 0 0 1-2 2H5.4a2 2 0 0 1-2-2z"/></svg>
+    </button>
+    <span class="m-name" id="mName">未打开文档</span>
+    <button class="m-icon" id="mFit" title="适应宽度" aria-label="适应宽度">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5.2v13.6"/><path d="M21 5.2v13.6"/><path d="M6.6 12h10.8"/><path d="m9.6 8.8-3.2 3.2 3.2 3.2"/><path d="m14.4 8.8 3.2 3.2-3.2 3.2"/></svg>
+    </button>
+    <button class="m-icon" id="mSettings" title="设置" aria-label="设置">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="6.4"/><path d="M12 2.2v3.4"/><path d="M12 18.4v3.4"/><path d="M2.2 12h3.4"/><path d="M18.4 12h3.4"/><path d="m5.1 5.1 2.4 2.4"/><path d="m16.5 16.5 2.4 2.4"/><path d="m18.9 5.1-2.4 2.4"/><path d="m7.5 16.5-2.4 2.4"/></svg>
+    </button>
+    <input type="file" id="mFile" accept="application/pdf,.pdf" hidden />
+  </header>
+
+  <!-- 阅读区：**只有 PDF 本身**（用户口径：「阅读的时候要只显示 pdf 本身」） -->
+  <main class="m-viewer" id="mViewer" tabindex="0">
+    <div class="m-welcome" id="mWelcome">
+      <p class="m-welcome-t">还没有打开论文</p>
+      <button class="m-primary" id="mOpen2">打开一个 PDF</button>
+      <p class="m-welcome-h">打开后：单指拖动看内容 · 长按选词 · 点顶栏中间切页</p>
+    </div>
+  </main>
+
+  <!-- 底部：页码 + 进度。常显但极窄，不抢阅读面积。
+       点击页码那一行 = 切页；手势上翻/下翻同样能切。 -->
+  <footer class="m-footer" id="mFooter">
+    <button class="m-page-btn" id="mPrev" aria-label="上一页">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4.8 7.8 12 15 19.2"/></svg>
+    </button>
+    <button class="m-page" id="mPage" aria-label="跳到指定页">
+      <b id="mPageCur">–</b><span>/</span><span id="mPageAll">–</span>
+    </button>
+    <button class="m-page-btn" id="mNext" aria-label="下一页">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4.8 16.2 12 9 19.2"/></svg>
+    </button>
+  </footer>
+
+  <!-- 长按选词后的操作条 -->
+  <div class="m-sheet hidden" id="mSelectSheet" role="dialog" aria-label="选中文字的操作">
+    <div class="m-sheet-quote" id="mSelQuote"></div>
+    <div class="m-sheet-row">
+      <button class="m-sheet-btn" data-act="copy">复制</button>
+      <button class="m-sheet-btn" data-act="word">选一个词</button>
+      <button class="m-sheet-btn" data-act="all">整段</button>
+      <button class="m-sheet-btn m-ghost" data-act="close">取消</button>
+    </div>
+  </div>
+
+  <!-- 设置：手机只放「阅读」相关的项；界面不做伸缩，字号在这里调 -->
+  <div class="m-modal hidden" id="mModal" role="dialog" aria-label="阅读设置">
+    <div class="m-modal-card">
+      <div class="m-modal-head"><b>阅读设置</b><button class="m-icon" id="mClose" aria-label="关闭设置">✕</button></div>
+
+      <label class="m-field">
+        <span>正文字号 <i id="mFsVal">100%</i></span>
+        <input type="range" id="mFontScale" min="60" max="200" step="5" value="100" />
+        <em>只改 PDF 里的**文字**大小，图片、表格、公式的尺寸不变。</em>
+      </label>
+
+      <label class="m-field">
+        <span>页面底色</span>
+        <select id="mPageTone">
+          <option value="warm">米白（跟随软件主题）</option>
+          <option value="paper">纸白（原始观感）</option>
+          <option value="sepia">茶色（护眼）</option>
+        </select>
+      </label>
+
+      <label class="m-field">
+        <span>阅读区底色</span>
+        <select id="mBackTone">
+          <option value="app">跟随软件背景</option>
+          <option value="deep">深一点的灰</option>
+        </select>
+      </label>
+
+      <label class="m-field m-inline">
+        <span>翻页方向</span>
+        <select id="mDir">
+          <option value="v">上下滚动</option>
+          <option value="h">左右翻页</option>
+        </select>
+      </label>
+
+      <div class="m-modal-foot">
+        <button class="m-primary" id="mDone">完成</button>
+      </div>
+      <p class="m-note" id="mNote"></p>
+    </div>
+  </div>
+
+  <div class="m-toast hidden" id="mToast"></div>
+
+  <script type="module" src="./mobile.js"></script>
+</body>
+</html>

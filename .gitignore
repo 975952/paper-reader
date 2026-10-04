@@ -1,0 +1,36 @@
+# ⚠️ 绝对不要提交：data/ 里有你填的 API Key，papers/ 里是你的论文
+data/
+papers/
+
+# 构建产物
+desktop/target/
+*.exe
+!desktop/tools/*.exe
+
+# 依赖
+node_modules/
+
+# 测试产物
+test/artifacts/
+test/.desktop-port
+test/dump/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.log
+Thumbs.db
+.DS_Store
+
+# 与本项目无关的本地脚本（DSH 相关，不属于论文阅读器）
+.dsh-probe/
+dsh-phone-bridge.mjs
+check_python_env.py
+
+# 本地快照与临时目录（体积大、且不是源码）——2026-10-04 推 GitHub 前补上
+backup/
+.tmp-vps/
+test/node_modules/
+
+# 交付物（可由 build.bat / build-apk.bat 重新生成，不进仓库）
+*.apk

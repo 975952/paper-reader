@@ -1,0 +1,532 @@
+/**
+ * AI 层：设置、OpenAI 兼容接口客户端（流式）、各类提示词
+ *
+ * 所有请求都发到本机 /api/chat，由 server.js 转发。
+ * 好处：绕开浏览器 CORS；API Key 存在本机 data/config.json，不进 localStorage。
+ */
+
+export const PRESETS = {
+  deepseek: { baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-flash', visionModel: '' },
+  openai: { baseURL: 'https://api.openai.com/v1', model: 'gpt-4o-mini', visionModel: 'gpt-4o-mini' },
+  openrouter: { baseURL: 'https://openrouter.ai/api/v1', model: 'google/gemini-2.0-flash-001', visionModel: 'google/gemini-2.0-flash-001' },
+  siliconflow: { baseURL: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct', visionModel: 'Qwen/Qwen2.5-VL-7B-Instruct' },
+  ollama: { baseURL: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b', visionModel: 'llava:7b' },
+};
+
+export const MODEL_SUGGESTIONS = [
+  'deepseek-flash', 'deepseek-chat', 'deepseek-reasoner', 'gpt-4o-mini', 'gpt-4o',
+  'google/gemini-2.0-flash-001', 'anthropic/claude-3.5-sonnet',
+  'Qwen/Qwen2.5-7B-Instruct', 'Qwen/Qwen2.5-VL-7B-Instruct',
+  'qwen2.5:7b', 'llava:7b', 'glm-4-flash',
+];
+
+/* ---------------------------------------------------------------- 设置 */
+
+export const Settings = {
+  data: {
+    baseURL: 'https://api.deepseek.com/v1',
+    apiKey: '',
+    hasApiKey: false,
+    model: 'deepseek-flash',
+    visionModel: '',
+    targetLang: '中文',
+    temperature: 0.2,
+    stream: true,
+    autoTranslate: true,
+    theme: 'light',
+    fontSize: 15,
+    glossary: '',
+    idleMs: 60000,   // 多久收不到数据就判定卡住并中止（没有 UI，可在 data/config.json 里调）
+  },
+
+  async load() {
+    try {
+      const r = await fetch('/api/config');
+      if (r.ok) {
+        const cfg = await r.json();
+        this.data = { ...this.data, ...cfg };
+      }
+    } catch { /* 离线也能用 */ }
+    // 界面偏好存本地就够了
+    try {
+      const local = JSON.parse(localStorage.getItem('reader.ui') || '{}');
+      Object.assign(this.data, local);
+    } catch { /* ignore */ }
+    return this.data;
+  },
+
+  async save(patch) {
+    Object.assign(this.data, patch);
+    const { theme, fontSize, ...serverPatch } = patch;
+    if (theme !== undefined || fontSize !== undefined) {
+      let local = {};
+      try { local = JSON.parse(localStorage.getItem('reader.ui') || '{}'); } catch { /* ignore */ }
+      localStorage.setItem('reader.ui', JSON.stringify({ ...local, ...(theme !== undefined ? { theme } : {}), ...(fontSize !== undefined ? { fontSize } : {}) }));
+    }
+    try {
+      const r = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(serverPatch),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j?.error?.message || `HTTP ${r.status}`);
+      }
+      if (r.ok) {
+        const j = await r.json();
+        this.data.hasApiKey = j.hasApiKey;
+      }
+    } catch (e) {
+      throw new Error(`保存失败：${e.message}`);
+    }
+  },
+
+  get ready() {
+    return !!this.data.baseURL && (this.data.hasApiKey || /127\.0\.0\.1|localhost/.test(this.data.baseURL));
+  },
+};
+
+/* ---------------------------------------------------------------- 客户端 */
+
+/** 选中文段的目标语言：中文为主的就译成英文，其余一律译成中文 */
+export function targetLangFor(text) {
+  const s = String(text || '');
+  const cjk = (s.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) || []).length;
+  return cjk / Math.max(1, s.length) > 0.15 ? 'English' : '中文';
+}
+
+/**
+ * 流式对话。返回完整文本。
+ * 带「空闲看门狗」：一段时间收不到任何数据就主动中止，避免界面像卡死一样一直转。
+ * @param {{messages:Array, model?:string, onDelta?:Function, onReasoning?:Function,
+ *          signal?:AbortSignal, temperature?:number, idleMs?:number, onTick?:Function}} opts
+ */
+export async function streamChat(opts) {
+  const {
+    messages,
+    model = Settings.data.model,
+    onDelta,
+    onReasoning,
+    signal,
+    temperature = Settings.data.temperature,
+    stream = Settings.data.stream,
+    idleMs = 60000,
+    onTick,
+  } = opts;
+
+  // 自己的 controller：既能被调用方 abort，也能被看门狗 abort
+  const ctl = new AbortController();
+  const forward = () => ctl.abort();
+  if (signal) {
+    if (signal.aborted) ctl.abort();
+    else signal.addEventListener('abort', forward, { once: true });
+  }
+
+  let idleTimer = null;
+  let stalled = false;
+  const startedAt = Date.now();
+  const bump = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { stalled = true; ctl.abort(); }, idleMs);
+  };
+  const tick = setInterval(() => onTick?.(Date.now() - startedAt), 1000);
+  const cleanup = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    clearInterval(tick);
+    signal?.removeEventListener?.('abort', forward);
+  };
+
+  const stale = () => {
+    if (!stalled) return null;
+    const err = new Error(
+      `超过 ${Math.round(idleMs / 1000)} 秒没有收到任何数据，已判定为卡住并中断。\n`
+      + '可能是模型名不对、额度用尽，或网络/代理卡住了。可以换个模型再试。',
+    );
+    err.name = 'TimeoutError';   // 要与「用户主动停止」区分开，不能显示成「已停止」
+    return err;
+  };
+
+  try {
+    bump();
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages,
+        model,
+        temperature,
+        stream,
+        baseURL: Settings.data.baseURL,
+        apiKey: Settings.data.apiKey || undefined,
+      }),
+      signal: ctl.signal,
+    });
+
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try {
+        const j = await res.json();
+        msg = j?.error?.message || msg;
+      } catch {
+        try { msg = (await res.text()).slice(0, 500) || msg; } catch { /* ignore */ }
+      }
+      const regionUnavailable = /not available in (?:your|this|the) region|unavailable in (?:your|this|the) region|not available in (?:your|this|the) country|not supported in (?:your|this|the) (?:region|country)|region (?:is )?not supported|(?:地区|区域).{0,12}(?:不支持|不可用|限制)|(?:不支持|不可用).{0,12}(?:地区|区域)/i.test(msg);
+      if (regionUnavailable) {
+        msg += ' —— 该模型在你所在地区不可用，密钥不一定有问题。请到右上角 ⚙ 更换为当地可用的模型或服务商。';
+      } else if (res.status === 401 || /invalid.*(?:api[\s_-]*key|key)|(?:api[\s_-]*key|key).*invalid|authentication|unauthor/i.test(msg)) {
+        msg += ' —— API Key 无效或已失效，点右上角 ⚙ 重新填一个（也可能是账户欠费/密钥被停用）';
+      } else if (res.status === 403) {
+        msg += ' —— 服务商拒绝了这次模型调用，可能是模型权限、账户状态或地区限制；请检查服务商账户和模型设置。';
+      } else if (res.status === 402 || /insufficient|balance|quota/i.test(msg)) {
+        msg += ' —— 账户额度不够了，去服务商后台充值或换个 Key';
+      } else if (res.status === 404) {
+        msg += ' —— 模型名或接口地址不对，点右上角 ⚙ 检查一下';
+      } else if (res.status === 429) {
+        msg += ' —— 触发限流了，等一会儿再试';
+      }
+      throw new Error(msg);
+    }
+
+    const ctype = (res.headers.get('content-type') || '').toLowerCase();
+
+    // 兼容网关 / 某些 Ollama 版本会忽略 stream:true，直接回普通 JSON
+    if (!ctype.includes('event-stream')) {
+      const raw = await res.text();
+      let text = '';
+      try {
+        const j = JSON.parse(raw);
+        text = j?.choices?.[0]?.message?.content ?? j?.choices?.[0]?.text ?? j?.content ?? '';
+      } catch {
+        text = raw;
+      }
+      if (!text) {
+        throw new Error(
+          `服务端返回的不是流式数据（Content-Type: ${ctype || '未知'}），且解析不出内容。\n`
+          + '检查一下 API 地址是不是 OpenAI 兼容的 /v1 端点。',
+        );
+      }
+      onDelta?.(text, text);
+      return text;
+    }
+
+    if (!stream) {
+      const raw = await res.text();
+      let text = '';
+      for (const line of raw.split('\n')) {
+        const t = line.trim();
+        if (!t.startsWith('data:')) continue;
+        const payload = t.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+          const j = JSON.parse(payload);
+          text += j?.choices?.[0]?.delta?.content || j?.choices?.[0]?.message?.content || '';
+        } catch { /* ignore */ }
+      }
+      if (!text) throw new Error('服务端返回了流式数据但解析不出内容。');
+      onDelta?.(text, text);
+      return text;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let full = '';
+    let reasoning = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bump();
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line || line.startsWith(':')) continue;
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        let json;
+        try { json = JSON.parse(payload); } catch { continue; }
+        if (json.error) throw new Error(json.error.message || '上游返回错误');
+        const delta = json.choices?.[0]?.delta;
+        if (!delta) continue;
+        if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+          reasoning += delta.reasoning_content;
+          onReasoning?.(delta.reasoning_content, reasoning);
+        }
+        const piece = typeof delta.content === 'string' ? delta.content : '';
+        if (piece) {
+          full += piece;
+          onDelta?.(piece, full);
+        }
+      }
+    }
+
+    if (!full && !reasoning) {
+      throw new Error('模型没有返回任何内容。可能是模型名不对、额度用尽，或被网关拦截了。');
+    }
+    return full;
+  } catch (e) {
+    const s = stale();
+    if (s) throw s;
+    throw e;
+  } finally {
+    cleanup();
+  }
+}
+
+/** 测试连接：发一条最短的请求 */
+export async function testConnection() {
+  const t0 = Date.now();
+  const text = await streamChat({
+    messages: [{ role: 'user', content: '只回复两个字：可用' }],
+    stream: false,
+    temperature: 0,
+  });
+  return { ms: Date.now() - t0, text: (text || '').trim().slice(0, 40), model: Settings.data.model };
+}
+
+/* ---------------------------------------------------------------- 提示词 */
+
+const OUTPUT_ONLY = '只输出译文本身，不要任何前言、说明、礼貌用语或 Markdown 代码块包裹。';
+
+export function translateMessages({ text, targetLang, context, page, docTitle, glossary }) {
+  const sys = [
+    `你是一位严谨的学术论文翻译专家，把论文片段翻译成${targetLang}。`,
+    '',
+    '要求：',
+    `1. 术语准确、全篇一致。专业术语首次出现时写成「${targetLang === '中文' ? '中文（English）' : '译文（原文）'}」的形式。`,
+    '2. 公式、变量名、数字、单位、引用编号（如 [12]）、图表编号（如 Fig. 2 / Table 3）一律原样保留，不翻译、不改写。',
+    '3. 保持原文段落结构（空行分段）。不要添加解释、不要总结、不要补标题。',
+    '4. 若片段明显被截断，按语义补全成通顺的句子，但不得编造原文没有的内容。',
+    `5. ${OUTPUT_ONLY}`,
+  ];
+  const hits = matchGlossary(text, glossary);
+  if (hits.length) {
+    sys.push('', '以下术语必须严格按给定译名翻译（用户指定，优先级最高）：');
+    for (const [k, v] of hits) sys.push(`· ${k} → ${v}`);
+  }
+
+  const user = [];
+  user.push(`【论文】${docTitle || '未命名'}${page ? `（第 ${page} 页）` : ''}`);
+  if (context) user.push(`【所在段落 · 仅供理解语境，不要翻译】\n${context}`);
+  user.push(`【需要翻译的片段】\n${text}`);
+  return [
+    { role: 'system', content: sys.join('\n') },
+    { role: 'user', content: user.join('\n\n') },
+  ];
+}
+
+/** 从「英文=译名」文本里找出这次片段真正命中的术语 */
+export function matchGlossary(text, glossaryText) {
+  if (!glossaryText || !text) return [];
+  const entries = String(glossaryText)
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#') && l.includes('='))
+    .map((l) => {
+      const i = l.indexOf('=');
+      return [l.slice(0, i).trim(), l.slice(i + 1).trim()];
+    })
+    .filter(([k, v]) => k && v);
+  if (!entries.length) return [];
+  const hay = text.toLowerCase();
+  return entries.filter(([k]) => hay.includes(k.toLowerCase()));
+}
+
+export function askMessages({ question, selection, context, page, docTitle, fullText, webResults, history = [] }) {
+  const sys = [
+    '你是嵌在论文阅读器里的阅读助手，帮助读者读懂正在看的论文。',
+    '',
+    '回答规则：',
+    '1. 优先依据【选中文本】【所在页上下文】【论文全文】回答；这些材料里没有的，再参考【联网搜索结果】。',
+    '2. 论文里没有的信息不要编造。数据、结论、引用必须能在给出的材料里找到；找不到就说「给出的内容里没有提到」。',
+    '3. 用到联网结果时，在相应句子末尾标出来源，写成 [来源1]、[来源2] 这种形式。',
+    '   注意：论文自己的参考文献编号长这样 —— [27]、[32]，两者的含义完全不同，千万不要混用。',
+    '   用到领域常识（联网结果和论文都没有的）时标「（背景知识）」，与原文区分开。',
+    '4. 用中文回答，简洁、结构化，能用短列表就用短列表。不要空话套话。',
+    '5. 数学公式用行内 LaTeX：$...$；独立公式用 $$...$$。',
+    '6. 术语保留英文原词（括号里给中文），方便读者回原文核对。',
+  ].join('\n');
+
+  const contextBlock = [];
+  if (docTitle) contextBlock.push(`【论文】${docTitle}${page ? `（第 ${page} 页）` : ''}`);
+  if (selection) contextBlock.push(`【选中文本】\n"""\n${selection}\n"""`);
+  if (context) contextBlock.push(`【所在页上下文】\n"""\n${context}\n"""`);
+  if (fullText) contextBlock.push(`【论文全文${fullText.length > 60000 ? '（很长，已按页给出）' : ''}】\n"""\n${fullText}\n"""`);
+  if (webResults?.length) {
+    contextBlock.push('【联网搜索结果】\n' + webResults.map((r, i) => {
+      const snip = String(r.snippet || '').replace(/\s+/g, ' ').slice(0, 400);
+      return `[来源${i + 1}] ${r.title}\n${r.url}${snip ? `\n${snip}` : ''}`;
+    }).join('\n\n'));
+    contextBlock.push(`（引用联网结果时只能写 [来源1]～[来源${webResults.length}]；论文原文里的 [27] 那类编号是论文自己的参考文献，不要拿来当联网来源）`);
+  }
+
+  const messages = [{ role: 'system', content: sys }];
+  for (const h of history.slice(-6)) messages.push(h);
+  messages.push({
+    role: 'user',
+    content: contextBlock.length ? `${contextBlock.join('\n\n')}\n\n【问题】\n${question}` : question,
+  });
+  return messages;
+}
+
+/** 太长时先生成一份「阅读索引」，之后每次提问都带它 */
+export function digestMessages({ text, docTitle }) {
+  return [
+    {
+      role: 'system',
+      content: '你负责把论文正文压缩成「阅读索引」。输出中文，分节列出：研究问题 / 方法 / 关键公式与符号 / 实验设置 / 主要结论 / 局限。只依据给定文本，不编造。控制在 800 字以内。',
+    },
+    { role: 'user', content: `【论文】${docTitle || '未命名'}\n\n【正文】\n${text}` },
+  ];
+}
+
+/**
+ * 「论文操作」的请求体：一次带独立 system prompt 的调用。
+ *
+ * 文档上下文沿用和提问完全一样的格式（【论文全文】带页码标记 / 【阅读索引】），
+ * 这样操作和问答看到的是同一份材料，也共用同一套抽取、降级与缓存逻辑。
+ */
+export function opMessages(op, { docTitle, fullText, digest, extra, history = [] } = {}) {
+  const parts = [];
+  if (docTitle) parts.push(`【论文】${docTitle}`);
+  if (fullText) {
+    parts.push(`【论文全文${fullText.length > 60000 ? '（很长，已按页给出）' : ''}】\n"""\n${fullText}\n"""`);
+  } else if (digest) {
+    parts.push(`【阅读索引】\n${digest}`);
+  }
+  if (extra) parts.push(extra);
+  parts.push(`【本次任务】\n${op.ask}`);
+  return [
+    { role: 'system', content: op.sys },
+    ...history.slice(-4),
+    { role: 'user', content: parts.join('\n\n') },
+  ];
+}
+
+/**
+ * 联网搜索该用什么样的查询串。
+ *
+ * 这里踩过一个坑：直接把「这篇论文的核心贡献是什么？另外帮我查一下 Transformer
+ * 架构最近有什么重要进展。」整句丢给 cn.bing.com，Bing 会把它当成单字查询，
+ * 返回一堆「这」字的字典释义 —— 点开全是百科/汉典，跟问题毫无关系。
+ * 所以先把口水话剔掉，只留真正能搜的词。
+ */
+
+// 中文口水词 / 提问套话。必须按长度从长到短替换，否则「查一下」会先被「查」吃掉
+const ZH_FILLER = [
+  '是什么意思', '什么意思', '是什么', '什么是', '有什么', '什么',
+  '介绍一下', '解释一下', '说明一下',
+  '查一下', '搜一下', '找一下', '看一下', '讲一下', '说一下', '了解一下',
+  '为什么', '怎么样', '怎样', '怎么', '如何', '哪些', '哪个', '哪一种', '多少',
+  '是否', '能不能', '可不可以', '能否',
+  '帮我', '帮忙', '请问', '请', '另外', '还有', '以及', '顺便', '然后', '那么',
+  '这篇论文', '这篇', '本文', '该论文', '该文', '论文里', '论文中', '论文的', '论文', '文章', '文献',
+  '这句话', '这段', '这句', '上面', '下面', '选中', '讲的', '说的是', '提到了', '提到',
+  '主要', '核心', '贡献', '内容', '意思', '解释', '翻译', '总结', '概括', '介绍', '说明',
+  '告诉', '相关', '关于', '方面', '问题', '情况', '东西', '最近', '最新', '现在', '目前', '今天',
+  '重要', '进展', '一下', '什么样', '有没有', '没有',
+  '的', '了', '是', '在', '和', '与', '及', '我', '你', '他', '她', '它', '这', '那', '们',
+  '就', '也', '都', '很', '把', '被', '给', '对', '从', '到', '而', '或', '但', '让', '使',
+  '之', '其', '该', '此', '些', '个', '有', '吗', '呢', '吧', '啊', '呀', '哦', '嘛',
+];
+
+// 英文里没有检索价值的词
+const EN_FILLER = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'these', 'those', 'from', 'into', 'about',
+  'what', 'which', 'who', 'whom', 'whose', 'when', 'where', 'why', 'how', 'is', 'are', 'was',
+  'were', 'be', 'been', 'being', 'do', 'does', 'did', 'can', 'could', 'should', 'would', 'will',
+  'shall', 'may', 'might', 'must', 'have', 'has', 'had', 'not', 'but', 'or', 'if', 'then',
+  'than', 'as', 'at', 'by', 'in', 'on', 'of', 'to', 'it', 'its', 'we', 'you', 'your', 'our',
+  'they', 'their', 'he', 'she', 'his', 'her', 'me', 'my', 'i', 'please', 'tell', 'explain',
+  'paper', 'this paper', 'doi', 'pdf', 'any', 'some', 'more', 'most', 'much', 'also', 'there',
+  'here', 'so', 'such', 'only', 'just', 'very', 'get', 'got', 'make', 'made', 'use', 'used',
+  'using', 'like', 'want', 'need', 'know', 'recent', 'latest', 'new', 'main', 'key',
+]);
+
+/** 从一句话里挑出有检索价值的词：英文原词 + 中文去掉口水词后的连续片段 */
+export function searchTerms(text) {
+  const s = String(text || '');
+  const out = [];
+
+  for (const w of s.match(/[A-Za-z][A-Za-z0-9+#._-]*/g) || []) {
+    const key = w.toLowerCase().replace(/[._-]+$/, '');
+    if (key.length < 2 || EN_FILLER.has(key)) continue;
+    if (!out.some((x) => x.toLowerCase() === key)) out.push(w.replace(/[._-]+$/, ''));
+  }
+
+  let zh = s;
+  for (const w of ZH_FILLER) zh = zh.split(w).join(' ');
+  for (const run of zh.split(/\s+/)) {
+    // 只留中文，标点和英文都丢掉（英文上面已经单独收过了）
+    for (const piece of run.replace(/[^\u4e00-\u9fa5]+/g, ' ').split(/\s+/)) {
+      if (piece.length >= 2 && !out.includes(piece)) out.push(piece);
+    }
+  }
+  return out;
+}
+
+/** 真正发给搜索引擎的查询串 */
+export function webQueryFor(question, selection) {
+  const q = String(question || '').replace(/\s+/g, ' ').trim();
+  const sel = String(selection || '').replace(/\s+/g, ' ').trim();
+  const terms = searchTerms(q);
+
+  // 一句全是口水话（「这段什么意思」）时没词可搜，就退回选中原文当线索
+  if (!terms.length) {
+    return `${q} ${sel.slice(0, 80)}`.replace(/\s+/g, ' ').trim().slice(0, 140);
+  }
+  let out = terms.join(' ');
+  // 只搜到一个词、又刚好有选中的原文，就补上原文里的术语
+  if (terms.length < 2 && sel) {
+    const extra = searchTerms(sel).filter((t) => !out.includes(t)).slice(0, 3).join(' ');
+    if (extra) out += ` ${extra}`;
+  }
+  return out.slice(0, 140);
+}
+
+/** 「释」：不提问，直接把这段讲明白 */
+export function explainMessages({ selection, context, page, docTitle }) {
+  const sys = [
+    '读者读论文时选中了一段看不懂的内容，请你直接把它讲明白。',
+    '',
+    '要求：',
+    '1. 先用一两句话说明「这段在讲什么」，再拆解关键概念、符号和逻辑关系。',
+    '2. 有公式就解释每个符号的含义和整体在算什么；有实验结论就说明它意味着什么。',
+    '3. 只依据给出的文本，不要编造论文里没有的数据或结论；需要领域常识时标「（背景知识）」。',
+    '4. 用中文，短段落或列表，不要复述原文，不要客套。',
+    '5. 数学公式用行内 LaTeX：$...$。',
+  ].join('\n');
+  const user = [
+    docTitle ? `【论文】${docTitle}${page ? `（第 ${page} 页）` : ''}` : '',
+    `【需要解释的段落】\n"""\n${selection}\n"""`,
+    context ? `【所在页上下文】\n"""\n${context}\n"""` : '',
+  ].filter(Boolean).join('\n\n');
+  return [{ role: 'system', content: sys }, { role: 'user', content: user }];
+}
+
+export function regionMessages({ question, targetLang, page, docTitle }) {
+  const sys = [
+    '你是论文阅读助手，读者给你截取了论文中的一块区域（可能是插图、表格、公式或扫描文字）。',
+    '',
+    '请按内容类型处理：',
+    '· 公式：用 LaTeX 完整写出（$$...$$），并逐个符号解释含义。',
+    `· 插图/表格：说明它展示的内容、坐标轴与图例含义、以及它支持的结论；表头和数据要读准。`,
+    `· 文字（含扫描件）：先给出识别出的原文，再用${targetLang}翻译。`,
+    '',
+    '最后用一句话说明这块内容在整篇论文里的作用。',
+    '看不清或不确定的地方要明确说「不确定」，不要猜。用中文回答。',
+  ].join('\n');
+  const user = [
+    `【论文】${docTitle || '未命名'}${page ? `（第 ${page} 页）` : ''}`,
+    question ? `【读者的问题】${question}` : '',
+    '【区域截图】见下。',
+  ].filter(Boolean).join('\n');
+  return [
+    { role: 'system', content: sys },
+    { role: 'user', content: user },
+  ];
+}

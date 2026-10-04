@@ -1,0 +1,265 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   手机版阅读器样式（public/mobile/reader.css）
+   ══════════════════════════════════════════════════════════════════════════
+
+   设计口径（用户 2026-10-03）：
+     「阅读的时候要只显示 pdf 本身。pdf 字体如果能放大就很好，图片的大小不变。
+       图片长按可以单独放大查看。然后也是长按选词。然后界面就不要做伸缩了，
+       字体在设置调节。」
+
+   三条落地规则：
+     ① **阅读态只有 PDF**：顶栏和底栏都是覆盖层（fixed），不占布局高度，
+        正文区域永远是整屏 —— 所以不存在「面板伸缩」这件事。
+     ② **只有字号可调**（设置里的「正文字号」）：改的是 PDF 文本层的字号
+        （--m-text-boost），canvas 位图不变，所以图片/表格/公式的尺寸一个像素都不动。
+     ③ 所有尺寸用视口单位与固定值，不做断点伸缩；窄屏上按钮变小靠 flex 收缩，
+        不靠媒体查询改布局。
+
+   颜色全部走 style.css 里的主题 token（米白/暖灰/橄榄绿），这里不重复定义色板。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* PDF 文本层的字号倍率：由设置面板写。canvas 不受它影响（图片尺寸不变）。 */
+  --m-text-boost: 1;
+  --m-topbar-h: 52px;
+  --m-footer-h: 44px;
+  /* 阅读区底色（默认跟随软件背景） */
+  --m-reader-bg: var(--bg-sunken);
+  /* PDF 页面底色（默认纸白，与桌面一致；可在设置里改成跟随主题的米白） */
+  --m-page-bg: var(--paper);
+}
+
+/* 页面底色三档：paper 是桌面原样；warm 跟软件主题的米白；sepia 是护眼的浅茶 */
+:root[data-page-tone="warm"] { --m-page-bg: var(--bg-elev); }
+:root[data-page-tone="sepia"] { --m-page-bg: #F6ECD2; }
+:root[data-back-tone="deep"] { --m-reader-bg: color-mix(in srgb, var(--bg-sunken) 72%, #6B6350); }
+
+html, body.m-body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;             /* 滚动交给 #mViewer 自己管 */
+  background: var(--m-reader-bg);
+  color: var(--fg);
+  font-family: var(--font);
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;    /* 禁掉「下拉刷新」把阅读打断 */
+}
+
+/* ── 阅读区：整屏。顶栏 / 底栏是覆盖层，退出阅读才看得到它们 ── */
+.m-viewer {
+  position: fixed; inset: 0;
+  background: var(--m-reader-bg);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  outline: none;
+}
+/* 桌面 style.css 里 .viewer-wrap / .viewer 是给「正文 + 状态栏」两段式用的，
+   手机版不用那一套，这里把它的内边距与最小高度清掉，避免继承出奇怪的空白。 */
+.m-viewer .pages { padding: 8px 0 24px; gap: 10px; }
+.m-viewer .page { background: var(--m-page-bg); }
+/* 手机屏窄，页面阴影收一点，省得页面左右各留一条阴影显得很脏 */
+.m-viewer .page { box-shadow: 0 1px 2px rgba(74, 64, 38, .16); border-radius: 2px; }
+
+/* ── 顶栏：点击才出现（手机没有 hover），滑入不挤压正文 ── */
+.m-topbar {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: calc(var(--m-topbar-h) + env(safe-area-inset-top, 0px));
+  padding: env(safe-area-inset-top, 0px) 6px 0;
+  display: flex; align-items: center; gap: 4px;
+  background: color-mix(in srgb, var(--bg-elev) 94%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+  transform: translateY(-100%);
+  transition: transform .16s ease-out;
+  z-index: 30;
+}
+.m-topbar.on { transform: translateY(0); }
+.m-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 13px; color: var(--fg-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-align: center; padding: 0 4px;
+}
+.m-icon {
+  flex: 0 0 auto;
+  width: 40px; height: 40px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 9px; background: transparent; color: var(--fg-dim);
+  cursor: pointer;
+}
+.m-icon:active { background: var(--bg-sunken); color: var(--fg); }
+
+/* ── 底栏：页码。常显但很窄；点页码区可以切页 ── */
+.m-footer {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  height: calc(var(--m-footer-h) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-top: 1px solid var(--border);
+  z-index: 25;
+}
+.m-page-btn {
+  width: 44px; height: 34px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 8px; background: transparent; color: var(--fg-dim);
+}
+.m-page-btn:active { background: var(--bg-sunken); }
+.m-page {
+  min-width: 92px; height: 34px; padding: 0 10px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: transparent; color: var(--fg); font: inherit; font-size: 13px;
+}
+.m-page b { color: var(--accent); }
+
+/* ── 欢迎页（没打开论文时） ── */
+.m-welcome {
+  min-height: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; padding: 40px 28px; text-align: center;
+}
+.m-welcome-t { margin: 0; font-size: 16px; color: var(--fg); }
+.m-welcome-h { margin: 0; font-size: 12.5px; line-height: 1.9; color: var(--fg-faint); }
+.m-primary {
+  border: 0; border-radius: 10px; padding: 11px 22px;
+  background: var(--btn, var(--accent)); color: var(--btn-fg, var(--accent-fg));
+  font: inherit; font-size: 14px; font-weight: 600;
+}
+.m-primary:active { filter: brightness(.94); }
+
+/* ── 长按选词的操作条 ── */
+.m-sheet {
+  position: fixed; left: 8px; right: 8px; bottom: calc(var(--m-footer-h) + env(safe-area-inset-bottom, 0px) + 8px);
+  z-index: 40;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 10px;
+}
+.m-sheet-quote {
+  max-height: 22vh; overflow: auto;
+  font-size: 13px; line-height: 1.6; color: var(--fg-dim);
+  padding: 2px 4px 8px; margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+.m-sheet-row { display: flex; gap: 6px; }
+.m-sheet-btn {
+  flex: 1 1 0; min-width: 0;
+  height: 38px; border-radius: 9px;
+  border: 1px solid var(--border); background: transparent; color: var(--fg);
+  font: inherit; font-size: 13.5px;
+}
+.m-sheet-btn:active { background: var(--accent-soft); color: var(--accent); }
+.m-sheet-btn.m-ghost { flex: 0 0 auto; padding: 0 14px; color: var(--fg-faint); }
+
+/* ── 设置弹层 ── */
+.m-modal {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(40, 36, 26, .38);
+  display: flex; align-items: flex-end;
+}
+.m-modal-card {
+  width: 100%;
+  max-height: 86vh; overflow: auto;
+  background: var(--bg-elev);
+  border-top-left-radius: 16px; border-top-right-radius: 16px;
+  border-top: 1px solid var(--border);
+  padding: 14px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+}
+.m-modal-head { display: flex; align-items: center; margin-bottom: 6px; }
+.m-modal-head b { flex: 1 1 auto; font-size: 15px; }
+.m-field { display: block; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.m-field > span { display: flex; align-items: center; justify-content: space-between; font-size: 13.5px; color: var(--fg); }
+.m-field > span i { font-style: normal; font-size: 12.5px; color: var(--accent); }
+.m-field em { display: block; margin-top: 6px; font-style: normal; font-size: 11.5px; line-height: 1.7; color: var(--fg-faint); }
+.m-field input[type="range"] { width: 100%; margin-top: 10px; accent-color: var(--accent); }
+.m-field select {
+  width: 100%; margin-top: 8px; height: 38px; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--bg); color: var(--fg); font: inherit; font-size: 13.5px;
+}
+.m-modal-foot { padding-top: 14px; display: flex; justify-content: flex-end; }
+.m-note { margin: 10px 0 0; font-size: 11.5px; line-height: 1.7; color: var(--fg-faint); }
+
+.m-toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--m-footer-h) + env(safe-area-inset-bottom, 0px) + 16px);
+  z-index: 60; max-width: 88vw;
+  padding: 9px 15px; border-radius: 20px;
+  background: rgba(52, 50, 42, .95); color: #FBFDF4;
+  font-size: 12.5px; line-height: 1.5; text-align: center;
+}
+.hidden { display: none !important; }
+
+/* ── PDF 文本层：只放大文字的字形，不动 canvas 位图 ──
+   用户口径：「pdf 字体如果能放大就很好，图片的大小不变。」
+   实现：style.css 里每个 span 的字号是
+       font-size: calc(var(--text-scale-factor) * var(--font-height))
+   其中 --font-height 是 pdf.js 内联写在每个 span 上的。手机版只把 **font-size 再乘一个倍率**：
+     · 字形变大 → 更好读；行内 letter-spacing 由 pdfview.js 的 _normalizeTextScale 保留，
+       所以文字之间的相对位置不变；
+     · canvas 位图一个像素都不动 → 图片 / 表格 / 公式**尺寸完全不变**（这正是要的效果）。
+   为什么不改 --scale-factor / --total-scale-factor：那两个会同时改变文本层里每个 span 的
+   定位，文字会整体跑位、和底图错开。只改字形大小不会动定位。
+
+   代价（诚实写在设置面板里）：字号调大后，同一行文字会比原来宽一些，密集排版的 PDF 上
+   相邻文字可能轻微重叠。默认 100% 时与桌面版完全一致。 */
+.m-viewer .textLayer > :not(.markedContent),
+.m-viewer .textLayer .markedContent span:not(.markedContent) {
+  font-size: calc(var(--text-scale-factor) * var(--font-height) * var(--m-text-boost));
+}
+
+/* ── 长按选词：让原生选区在移动端可选 ── */
+.m-viewer .textLayer, .m-viewer .textLayer * {
+  /* 移动端默认会禁掉文本选择（避免拖动时误选），这里显式打开：长按选词完全依赖它 */
+  -webkit-user-select: text;
+  user-select: text;
+}
+.m-viewer ::selection { background: var(--sel); }
+
+/* 页面里的高亮层与选区层不要挡住触摸滚动 */
+.m-viewer .hl-layer { pointer-events: none; }
+
+/* ── 图片查看器：长按图片（或点放大镜）后全屏看这一块 ──
+   说明：PDF 里的图是画在 canvas 位图里的，**不是 DOM 图片**，所以没有 <img> 可以点。
+   做法：把长按位置那一块从 canvas 上裁出来（viewer.captureRegion），放进这个查看器里，
+   可以双指缩放/拖动。这样用户拿到的是「这一块图放大了看」。 */
+.m-imgview {
+  position: fixed; inset: 0; z-index: 70;
+  background: rgba(28, 25, 18, .94);
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+}
+.m-imgview img {
+  max-width: 100%; max-height: 100%;
+  transition: transform .12s ease-out;
+  will-change: transform;
+}
+.m-imgview-bar {
+  position: absolute; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);
+  display: flex; justify-content: center; gap: 8px;
+}
+.m-imgview-bar button {
+  height: 38px; padding: 0 16px; border-radius: 19px;
+  border: 1px solid rgba(255, 255, 255, .28);
+  background: rgba(255, 255, 255, .10); color: #FBFDF4;
+  font: inherit; font-size: 13.5px;
+}
+.m-imgview-close {
+  position: absolute; top: calc(env(safe-area-inset-top, 0px) + 8px); right: 10px;
+  width: 42px; height: 42px; border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, .28);
+  background: rgba(255, 255, 255, .10); color: #FBFDF4;
+  font-size: 18px; line-height: 1;
+}
+
+/* 横屏 / 大屏：把页面容器居中，不做「伸缩式布局改造」 */
+@media (min-width: 720px) {
+  .m-viewer .pages { padding: 14px 0 30px; }
+}

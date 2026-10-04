@@ -1,0 +1,20 @@
+KaTeX 0.18.7（本地内置，不联网）
+================================
+
+来源：npm 包 katex@0.18.7 的 dist/
+      katex.min.js、katex.min.css、fonts/ （60 个 woff2，约 1MB）
+
+为什么内置而不是走 CDN：这是个本地桌面应用，可能断网使用；
+而且公式渲染是回答里的常用能力，不该依赖外网。
+
+更新方式：
+  cd test && npm i katex@<版本>
+  copy node_modules\katex\dist\katex.min.js  ..\public\vendor\katex\
+  copy node_modules\katex\dist\katex.min.css ..\public\vendor\katex\
+  xcopy /E /Y node_modules\katex\dist\fonts    ..\public\vendor\katex\fonts\
+
+用法（public/js/util.js）：
+  renderMarkdown() 里把 $...$ / $$...$$ / \(...\) / \[...\] 摘出来，
+  交给 window.katex.renderToString()，结果作为「占位块」在 escapeHtml 之后再填回去
+  （公式 HTML 不能被转义；同时保证模型输出无法注入 HTML）。
+  渲染失败就原样保留 LaTeX 源码 —— 绝不吞内容，也不显示 KaTeX 的红色报错。
