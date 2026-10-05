@@ -1,10 +1,11 @@
 /**
- * 论文操作（可按需调用的那一排）+ coach 入口 验收。
+ * 论文操作目录验收：4 个文档级操作（tldr / method / evidence / limits）+ 顶栏 ✦ 菜单。
  *
  *   BASE=http://127.0.0.1:8787 node test/ops.mjs
  *
- * /api/chat 用桩：这里验的是「操作目录 / 按需调用 / 缓存 / prompt 约束」，
- * 模型请求由本地桩返回，不读取或消耗真实 API Key。
+ * 第一节直接 import public/js/ops.js 验「目录契约」（有哪几个操作、有没有残留的
+ * 分组 / coach 机制），不需要服务与浏览器；其余各节在页面里验菜单、按需调用、缓存。
+ * /api/chat 用桩：模型请求由本地桩返回，不读取或消耗真实 API Key。
  */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
@@ -23,6 +24,35 @@ const check = (name, ok, detail = '') => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* ── 一、目录本身（纯数据：直接 import 模块，不依赖服务与浏览器） ── */
+console.log('\n-- 操作目录');
+const opsMod = await import(new URL('../public/js/ops.js', import.meta.url).href).catch(() => null);
+check('能 import public/js/ops.js', !!opsMod, opsMod ? 'ok' : 'import 失败');
+const CATALOG = opsMod?.OPS ?? [];
+const opById = opsMod?.opById ?? (() => null);
+const COMMON = opsMod?.COMMON_RULES ?? '';
+const catIds = CATALOG.map((o) => o.id);
+check('目录只剩 4 个文档级操作', CATALOG.length === 4, `${CATALOG.length} 个：${catIds.join(',') || '(空)'}`);
+check('四个操作按 tldr / method / evidence / limits 排列',
+  catIds.join(',') === 'tldr,method,evidence,limits', catIds.join(','));
+check('每个操作都有独立的 system prompt 和任务描述', CATALOG.every((o) => !!o.sys && !!o.ask),
+  CATALOG.filter((o) => !o.sys || !o.ask).map((o) => o.id).join(',') || '全都有');
+check('每个操作都基于同一套 COMMON_RULES', !!COMMON && /硬性规矩/.test(COMMON)
+  && CATALOG.every((o) => typeof o.sys === 'string' && o.sys.startsWith(COMMON)));
+check('每个操作都有 title / hint / icon（菜单要渲染）',
+  CATALOG.every((o) => !!o.title && !!o.hint && !!o.icon));
+check('操作不再带 group 字段（分组机制已删除）', CATALOG.every((o) => !('group' in o)),
+  CATALOG.filter((o) => 'group' in o).map((o) => o.id).join(',') || '都没有');
+check('不再导出 COACH / OP_GROUPS / opGroups',
+  !!opsMod && !('COACH' in opsMod) && !('OP_GROUPS' in opsMod) && !('opGroups' in opsMod),
+  opsMod ? `导出：${Object.keys(opsMod).join(',')}` : '(import 失败)');
+check('删掉的操作确实取不到了', !!opsMod
+  && ['route', 'contrib', 'position', 'formula', 'terms', 'analogy', 'review', 'reproduce', 'takeaway', 'quiz', 'related', 'coach']
+    .every((id) => opById(id) === null));
+check('opById 行为不变：按 id 取到同一个对象、未知 id 返回 null',
+  opById('method')?.id === 'method' && opById('nope') === null && CATALOG.length === 4
+  && CATALOG.every((o) => opById(o.id) === o));
+
 const papers = await fetch(`${BASE}/api/papers`).then((r) => r.json()).catch(() => ({ papers: [] }));
 const first = [...(papers.papers || [])].sort((a, b) => (b.size || 0) - (a.size || 0))[0] || {};
 check('服务端有可用的 PDF', !!first.name, first.name || '(无)');
@@ -32,7 +62,6 @@ await fetch(`${BASE}/api/state`, {
   body: JSON.stringify({ lastDoc: null, lastName: null, lastUrl: null, docs: {} }),
 });
 
-/* ── 一、目录本身（纯数据，先在页面里查） ── */
 const browser = await puppeteer.launch({
   executablePath: CHROME, headless: 'shell',
   args: ['--no-sandbox', '--disable-gpu', '--window-size=1500,950'],
@@ -65,20 +94,6 @@ await page.evaluate((id) => {
 await page.waitForFunction(() => window.__viewer?.pdf, { timeout: 40000 });
 await sleep(1500);
 
-console.log('\n-- 操作目录');
-const catalog = await page.evaluate(() => ({
-  ops: window.__ctx.OPS.map((o) => ({ id: o.id, title: o.title, group: o.group, hasSys: !!o.sys, hasAsk: !!o.ask })),
-  groups: window.__ctx.opGroups().map((g) => ({ title: g.title, n: g.ops.length })),
-  coach: !!window.__ctx.COACH,
-}));
-check('操作目录里有足够多的操作（≥12）', catalog.ops.length >= 12, `${catalog.ops.length} 个`);
-check('每个操作都有独立的 system prompt 和任务描述', catalog.ops.every((o) => o.hasSys && o.hasAsk),
-  catalog.ops.filter((o) => !o.hasSys || !o.hasAsk).map((o) => o.id).join(',') || '全都有');
-check('按用途分了组', catalog.groups.length >= 3, catalog.groups.map((g) => `${g.title}(${g.n})`).join(' '));
-check('coach 是独立入口（不在操作列表里）',
-  catalog.coach && !catalog.ops.some((o) => o.id === 'coach'),
-  catalog.ops.map((o) => o.id).join(','));
-
 /* ── 二、菜单交互 ── */
 console.log('\n-- 菜单');
 check('菜单默认是收起的', await page.evaluate(() => document.getElementById('opsMenu').classList.contains('hidden')));
@@ -87,38 +102,29 @@ await sleep(300);
 const menu = await page.evaluate(() => {
   const m = document.getElementById('opsMenu');
   const r = m.getBoundingClientRect();
+  const clean = (x) => (x.textContent || '').replace(/ · 已生成$/, '').trim();
+  const items = [...m.querySelectorAll('.ops-item')];
   return {
     open: !m.classList.contains('hidden'),
-    items: m.querySelectorAll('.ops-item').length,
-    featuredItems: m.querySelectorAll('.ops-featured .ops-item').length,
-    featuredVisible: [...m.querySelectorAll('.ops-featured .ops-item')].every((x) => x.getBoundingClientRect().height > 0),
-    featuredTitles: [...m.querySelectorAll('.ops-featured .ops-title')].map((x) => x.textContent),
-    more: !!m.querySelector('#moreOps'),
-    moreOpen: !!m.querySelector('#moreOps[open]'),
-    moreSummary: m.querySelector('#moreOps > summary')?.textContent.trim() || '',
-    moreItems: m.querySelectorAll('#moreOps .ops-item').length,
-    groups: m.querySelectorAll('.ops-group').length,
+    items: items.length,
+    titles: items.map((x) => clean(x.querySelector('.ops-title') || x)),
+    hidden: items.filter((x) => x.getBoundingClientRect().height === 0).length,
+    heads: [...m.querySelectorAll('.ops-group')].map((x) => x.textContent.trim()),
     coachItem: !!m.querySelector('.ops-item.coach'),
     inViewport: r.left >= 0 && r.top >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1,
     hintShown: [...m.querySelectorAll('.ops-hint')].every((h) => h.textContent.trim().length > 4),
   };
 });
-check('点 ✦ 弹出操作菜单', menu.open && menu.items >= 12, `${menu.items} 项 / ${menu.groups} 组`);
-check('首屏直接显示四个常用入口', menu.featuredItems === 4 && menu.featuredVisible
-  && ['一句话速览', '阅读路线', '方法拆解', '术语表'].every((t) => menu.featuredTitles.includes(t)), menu.featuredTitles.join(' / '));
-check('其余操作仍在默认收起的「更多操作」里', menu.more && !menu.moreOpen && menu.moreItems === catalog.ops.length - menu.featuredItems
-  && /更多操作/.test(menu.moreSummary), `${menu.moreItems} 项 · ${menu.moreSummary}`);
+const EXPECTED_TITLES = ['一句话速览', '方法拆解', '实验够不够支撑结论', '局限与可疑之处'];
+check('点 ✦ 弹出操作菜单，里面正好 4 个操作', menu.open && menu.items === 4, `${menu.items} 项`);
+check('4 个操作直接可见（不再有「更多操作」折叠低频操作）', menu.hidden === 0, `${menu.hidden} 项被折叠`);
+check('菜单标题就是 4 个文档级操作', EXPECTED_TITLES.every((t) => menu.titles.includes(t)), menu.titles.join(' / '));
 check('菜单在可视区内（不会飞出去）', menu.inViewport);
 check('每一项都有一句话说明', menu.hintShown);
-check('菜单里有 coach 模式入口', menu.coachItem);
-
-await page.click('#moreOps > summary');
-await sleep(180);
-const expanded = await page.evaluate(() => ({
-  open: !!document.querySelector('#moreOps[open]'),
-  visible: [...document.querySelectorAll('#moreOps .ops-item')].filter((x) => x.getBoundingClientRect().height > 0).length,
-}));
-check('展开「更多操作」后全部低频入口可见', expanded.open && expanded.visible === menu.moreItems, `${expanded.visible}/${menu.moreItems}`);
+check('菜单里没有 coach 入口（该产品特性已取消）', !menu.coachItem);
+const OLD_GROUP_TITLES = ['快速了解', '精读理解', '评估判断', '应用延伸'];
+check('菜单不再按用途分组', !menu.heads.some((t) => OLD_GROUP_TITLES.includes(t)),
+  menu.heads.join(' / ') || '(没有分组标题)');
 
 await page.keyboard.press('Escape');
 await sleep(250);
@@ -190,8 +196,8 @@ check('点「重新生成」会真的重新请求', chatBodies.length === before
 
 /* ── 六、别的操作也能跑 ── */
 console.log('\n-- 多操作并存');
-const ids = ['tldr', 'terms', 'limits'];
-const titles = await page.evaluate((list) => list.map((id) => window.__ctx.opById(id).title), ids);
+const ids = ['tldr', 'evidence', 'limits'];
+const titles = await page.evaluate((list) => list.map((id) => window.__ctx.opById?.(id)?.title || id), ids);
 const reqBefore = chatBodies.length;
 for (const id of ids) {
   // eslint-disable-next-line no-await-in-loop
@@ -206,21 +212,6 @@ check('每个操作发出去的是各自的 system prompt',
   sentSys.length === ids.length && new Set(sentSys).size === ids.length,
   `${sentSys.length} 次请求 / ${new Set(sentSys).size} 种 system prompt`);
 check('「速览」的 prompt 要求只输出三句', /三句|三行/.test(sentSys[0] || ''), (sentSys[0] || '').slice(-40));
-
-/* ── 七、coach 入口 ── */
-console.log('\n-- coach 模式');
-await page.click('#opsBtn');
-await sleep(250);
-await page.evaluate(() => document.querySelector('#opsMenu .ops-item.coach').click());
-await sleep(700);
-const coachText = await page.evaluate(() => {
-  const m = [...document.querySelectorAll('#aiArea .msg.assistant')].pop();
-  return { tag: m?.querySelector('.tag')?.textContent || '', text: m?.querySelector('.text')?.textContent || '' };
-});
-check('点 coach 会说明它是什么模式', coachText.tag === 'Coach' && /等你回答|按需开启/.test(coachText.text),
-  coachText.text.slice(0, 50));
-check('coach 不会立刻发请求（不是默认入口）', !chatBodies.some((b) => /Coach/.test(b.messages?.[0]?.content || '')),
-  `${chatBodies.length} 次请求都不是 coach 发的`);
 
 check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 check('没有控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '));

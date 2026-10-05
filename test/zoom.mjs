@@ -121,7 +121,12 @@ check('停下后视口内没有 placeholder（离屏的属于正常）',
 /* ── 二、工具条按钮 / 键盘缩放 ── */
 console.log('\n-- 按钮与快捷键缩放');
 await startWatch();
-for (const sel of ['#zoomIn', '#zoomIn', '#zoomOut', '#fitWidth', '#zoomIn']) {
+/**
+ * 2026-10：翻页与缩放整组从顶栏搬到了**底栏**，id 也随之改名
+ * （`#zoomIn` → `#footZoomIn`，以此类推；用户口径：「底栏有的功能上面的一栏就不要了」）。
+ * 这里改点底栏那几个按钮 —— 验的还是同一件事：点这些按钮不闪灰条、不出空白。
+ */
+for (const sel of ['#footZoomIn', '#footZoomIn', '#footZoomOut', '#footFitWidth', '#footZoomIn']) {
   // eslint-disable-next-line no-await-in-loop
   await page.click(sel);
   // eslint-disable-next-line no-await-in-loop

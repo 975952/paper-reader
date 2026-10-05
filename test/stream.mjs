@@ -5,6 +5,7 @@
  */
 import http from 'node:http';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
+import { setScope } from './_scope.mjs';
 import puppeteer from 'puppeteer-core';
 
 const BASE = process.env.BASE || 'http://127.0.0.1:8787';
@@ -70,7 +71,16 @@ page.on('pageerror', (e) => errors.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 
 const papers = await fetch(`${BASE}/api/papers`).then((r) => r.json());
-const pdfName = papers.papers[0].name;
+/**
+ * ⚠️ 不要用 `papers.papers[0]`：这个列表按 mtime 倒序，夹具里 `image-sample.pdf`
+ * （纯图、**没有文字层**）恰好最新，取 [0] 会拿它去划词，直接「选不到文字」。
+ * 优先挑名字里带文字夹具的（multipage / cn 都带文字层），否则退回体积最大的一篇。
+ */
+const pdfPick = (papers.papers || []).find((p) => /multipage|cn-sample/i.test(p.name))
+  || [...(papers.papers || [])].sort((a, b) => (b.size || 0) - (a.size || 0))[0]
+  || {};
+const pdfName = pdfPick.name;
+if (!pdfName) throw new Error('隔离书架里没有可用的 PDF 夹具');
 assertIsolatedDataDir(resolveDataDir(papers.dir));
 
 async function loadPage() {
@@ -78,6 +88,20 @@ async function loadPage() {
   await page.waitForSelector('.page[data-page="1"] canvas', { timeout: 30000 });
   await sleep(1800);
 }
+
+/**
+ * 结果区里最新一条助手消息的正文。
+ *
+ * 2026-10 删减把「就地结果浮层」（`#popover` / `#popBody` / `#popClose`）整块去掉了 ——
+ * 同一个 AI 结果不允许同时出现在两个地方，译文/解释一律只进右栏的块。
+ * 所以这里改成从 `#aiArea` 里按 `dataset.seq` 取最后一条助手消息。
+ * ⚠️ 判据仍然是「增量」：先记条数/文本，再只认新出现的那一条（会话恢复会把旧消息重放出来）。
+ */
+const resultText = () => page.evaluate(() => {
+  const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')]
+    .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
+  return msgs.at(-1)?.querySelector('.text')?.innerText || '';
+});
 
 /** 选一段文字并点气泡按钮。offset 用来选不同文本，避开翻译缓存 */
 async function selectAndClick(act = 'translate', offset = 1) {
@@ -117,22 +141,20 @@ await selectAndClick('translate', 1);
 let firstAt = null;
 let firstCount = 0;
 for (let i = 0; i < 100; i++) {
-  const txt = await page.evaluate(() => document.getElementById('popBody')?.innerText || '');
+  const txt = await resultText();
   const n = (txt.match(/\[块\d+\]/g) || []).length;
   if (!firstAt && n > 0) { firstAt = Date.now() - t0; firstCount = n; }
   if (n >= CHUNKS) break;
   await sleep(80);
 }
 const totalMs = Date.now() - t0;
-const finalText = await page.evaluate(() => document.getElementById('popBody')?.innerText || '');
+const finalText = await resultText();
 const finalCount = (finalText.match(/\[块\d+\]/g) || []).length;
 check('译文完整收到', finalCount === CHUNKS, `${finalCount}/${CHUNKS} 块，总耗时 ${totalMs}ms`);
 check('是真实流式（第一块远早于总耗时）',
   firstAt !== null && firstAt < totalMs * 0.6,
   `第 1 块 ${firstAt}ms / 全部 ${totalMs}ms（${Math.round((firstAt / totalMs) * 100)}%）`);
 check('逐块增长（不是一次性出现）', firstCount > 0 && firstCount < CHUNKS / 2, `第一块出现时已有 ${firstCount} 块`);
-await page.evaluate(() => document.getElementById('popClose').click());
-await sleep(300);
 
 /* ═══ 2. 停止 ═══ */
 console.log('\n▶ 停止生成…');
@@ -144,16 +166,14 @@ const busy = await page.evaluate(() => ({
 }));
 check('生成中显示停止按钮 + 计时', busy.stopVisible && /\d+s/.test(busy.hint), `按钮=${busy.stopVisible} 提示="${busy.hint}"`);
 await page.evaluate(() => document.getElementById('stopBtn').click());
-const atStop = await page.evaluate(() => document.getElementById('popBody')?.innerText || '');
+const atStop = await resultText();
 await sleep(1200);
-const afterStop = await page.evaluate(() => ({
-  text: document.getElementById('popBody')?.innerText || '',
-  stopHidden: document.getElementById('stopBtn').classList.contains('hidden'),
-}));
+const afterStop = {
+  text: await resultText(),
+  stopHidden: await page.evaluate(() => document.getElementById('stopBtn').classList.contains('hidden')),
+};
 check('停止后不再继续增长', !afterStop.text.includes(`[块${CHUNKS}]`), `停止时 ${(atStop.match(/\[块\d+\]/g) || []).length} 块，之后 ${(afterStop.text.match(/\[块\d+\]/g) || []).length} 块`);
 check('停止后按钮恢复', afterStop.stopHidden);
-await page.evaluate(() => document.getElementById('popClose').click());
-await sleep(300);
 
 /* ═══ 3. 非流式上游 ═══ */
 console.log('\n▶ 非流式上游…');
@@ -161,13 +181,13 @@ await setBase(JSON_PORT_ACTUAL);
 await loadPage();
 await selectAndClick('translate', 1);
 await sleep(1600);
-const jsonText = await page.evaluate(() => document.getElementById('popBody')?.innerText || '');
+const jsonText = await resultText();
 check('非流式上游也能出结果', jsonText.includes('非流式'), JSON.stringify(jsonText.slice(0, 40)));
 const rendered = await page.evaluate(() => {
   // 取**最后一条**助手消息，不要用「第一个匹配」（恢复会话会把更早套件留下的回答一起重放出来）；
-  // 而且分栏之后 DOM 顺序 ≠ 时间顺序，「最新一条」按 dataset.seq 取最大。
-  // 注意选择器：`.assistant` 要在两个容器上各写一次（`#aiArea .msg, #aiArea2 .msg.assistant` 是错的）。
-  const msgs = [...document.querySelectorAll('#aiArea .msg.assistant, #aiArea2 .msg.assistant')]
+  // 消息按 dataset.seq 取最大 = 最新一条（DOM 里可能有历史重放出来的更早条目）。
+  // 2026-10 删减后右栏恒为单列，只剩 #aiArea 一个结果区。
+  const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')]
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
   const root = msgs.at(-1);
   if (!root) return { code: '', table: 0, math: false };
@@ -180,17 +200,21 @@ const rendered = await page.evaluate(() => {
 check('生成内容最终正确渲染代码、表格和公式', rendered.code.includes('const ok') && rendered.table >= 1 && rendered.math,
   `代码=${!!rendered.code} 表格行=${rendered.table} 公式=${rendered.math}`);
 // 直接用「问答块里的消息条数」做判据：这块本身就代表问答分块，
-// 不必再拼 `#aiArea/#aiArea2` 那种跨栏选择器（分栏后那块可能在任意一栏）。
+// 不必再去拼结果区选择器（右栏恒为单列，块在哪一栏已经是过去式）。
 const chatMsgCount = () => page.evaluate(() => window.__state.blockEls?.chat?.querySelectorAll('.msg').length ?? 0);
 const priorCount = await chatMsgCount();
+/**
+ * 2026-10：发送范围搬进设置页（`#cfgUseFullText` / `#cfgUseWeb`），默认都开着。
+ * 这一节要的是一条**干净**的问答流（不带整篇全文），所以先去设置里关掉整篇。
+ */
+await setScope(page, { full: false, web: false });
 await page.evaluate(() => {
-  if (document.querySelector('#optFull').classList.contains('on')) document.querySelector('#optFull').click();
   document.querySelector('#chatInput').value = 'mock session question';
   document.querySelector('#composer').requestSubmit();
 });
 await page.waitForFunction((count) => {
-  // 判据用「问答块里的消息条数」：这块本身就是问答分块，分栏之后它在 #aiArea 还是 #aiArea2
-  // 都不影响；同时要求最后一条助手消息的动作条已经显形（=这一轮回答真的收尾了）。
+  // 判据用「问答块里的消息条数」：这块本身就是问答分块，右栏恒为单列后它是唯一的结果区；
+  // 同时要求最后一条助手消息的动作条已经显形（=这一轮回答真的收尾了）。
   const chat = window.__state.blockEls?.chat;
   const msgs = [...(chat?.querySelectorAll('.msg') || [])]
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
@@ -203,7 +227,6 @@ await page.waitForFunction((count) => {
     chatPane: window.__state.blockEls?.chat?.closest('.ai')?.id || '-',
     chatKids: [...(window.__state.blockEls?.chat?.querySelectorAll('.ai-body > *') || [])].map((m) => `${m.tagName}.${m.className}`),
     vis: { t: window.__state.panels.translate.visible, c: window.__state.panels.chat.visible },
-    col: { t: window.__state.panels.translate.col, c: window.__state.panels.chat.col },
     entries: window.__state.sessionEntries.length,
     busy: window.__state.busy,
     hint: document.getElementById('composerHint')?.textContent || '',
@@ -229,7 +252,7 @@ if (switchTarget) {
 }
 await loadPage();
 const restored = await page.evaluate(() => ({
-  result: [...document.querySelectorAll('#aiArea .msg.assistant .text, #aiArea2 .msg.assistant .text')].some((n) => n.textContent.includes('非流式')),
+  result: [...document.querySelectorAll('#aiArea .msg.assistant .text')].some((n) => n.textContent.includes('非流式')),
   history: window.__state.history.some((x) => x.content === 'mock session question'),
 }));
 check('重启页面后恢复已完成 AI 结果和对话历史', restored.result && restored.history);
@@ -242,12 +265,21 @@ const boundedBytes = await page.evaluate(async (id) => {
   return new TextEncoder().encode(JSON.stringify(payload)).byteLength;
 }, await page.evaluate(() => window.__state.doc.docId));
 check('论文会话存储上限为 350 KB', boundedBytes <= 350000, `${boundedBytes} bytes`);
-page.once('dialog', (dialog) => dialog.accept());
-await page.click('#clearSession');
+/**
+ * 2026-10 用户口径：「范围 / 选中文本 + 当前页 / 清空会话这些……都删掉」。
+ * `#clearSession` 已经不在了（存盘 / 清空现在挂在会话菜单里），所以这一条改成直接验**接口**
+ * ——它才是所有入口最终都走的那条路：DELETE /api/session?doc=&sid= 之后再读必须两手空。
+ */
+const clearedDocId = await page.evaluate(() => window.__state.doc.docId);
+const del = await page.evaluate(async (id) => {
+  const r = await fetch(`/api/session?doc=${encodeURIComponent(id)}`, { method: 'DELETE' });
+  return r.status;
+}, clearedDocId);
+check('清空当前论文会话的接口可用', del === 200 || del === 204, `HTTP ${del}`);
 await page.waitForFunction(async (id) => {
   const r = await fetch(`/api/session?doc=${encodeURIComponent(id)}`); const j = await r.json(); return !j.entries?.length && !j.history?.length;
-}, {}, (await page.evaluate(() => window.__state.doc.docId)));
-check('清空当前论文会话入口可用', true);
+}, {}, clearedDocId);
+check('清空后服务端不再留着这篇论文的会话', true);
 
 console.log('\n── 异常 ──');
 console.log(errors.length ? errors.map((e) => '  ! ' + e).join('\n') : '  无');

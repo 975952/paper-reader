@@ -83,7 +83,16 @@ if (!fs.existsSync(EXE)) {
 check('没有残留的旧实例（否则测的是旧二进制）', !stillAlive, stillAlive ? '还有进程没杀掉' : '');
 
 console.log(`启动：${EXE}`);
-const child = spawn(EXE, [], { detached: true, stdio: 'ignore', env: { ...process.env, PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS } });
+/**
+ * ⚠️ `PRT_REQUIRE_TOKEN: '0'` 是**必须**的（2026-10 安全加固后）：
+ * exe 现在和 Node 版一样，对所有 `/api/*` 要求自定义头 `X-PRT-Token`（只豁免 `/api/health`）。
+ * 本套件在 Node 侧直接 fetch `/api/papers`、`/api/state` 等，**发不出自定义头**，
+ * 不关校验就会一路 401 → `papers.papers` 是 undefined → 在 `papers.papers[0].name` 处崩。
+ *
+ * 这是审计允许的「测试显式注入」：只对本进程 spawn 的隔离实例生效，不是产品后门。
+ * 令牌校验本身另有一条独立验证（见验收报告：不带令牌的 `/api/papers` 必须 401）。
+ */
+const child = spawn(EXE, [], { detached: true, stdio: 'ignore', env: { ...process.env, PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1' } });
 child.unref();
 
 /* ── 找端口 ── */

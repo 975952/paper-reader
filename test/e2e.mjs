@@ -172,7 +172,7 @@ const clickBubble = async (act) => {
 };
 
 const lastEntry = () => page.evaluate(() => {
-  const list = [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg')]
+  const list = [...document.querySelectorAll('#aiArea .msg')]
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
   const e = list[list.length - 1];
   if (!e) return null;
@@ -270,7 +270,7 @@ const hintInfo = await page.evaluate(() => {
   // （applyPanels 里按条数 toggle），此时可见性为 false 是**正确行为**，旧断言把它当成失败。
   const block = document.querySelector('.ai-block[data-block="chat"]');
   const hint = block?.querySelector('.ai-hint');
-  const empty = document.querySelector('#aiArea > .ai-empty, #aiArea2 > .ai-empty');
+  const empty = document.querySelector('#aiArea > .ai-empty');
   const vis = (n) => !!n && !n.classList.contains('hidden') && n.getBoundingClientRect().height > 0;
   if (vis(empty)) return { source: 'ai-empty', text: empty.textContent || '', visible: true, msgs: block ? block.querySelectorAll('.msg').length : 0 };
   return {
@@ -410,11 +410,28 @@ console.log('\n▶ 译…');
 await selectSpans(1, 5);
 await sleep(250);
 await clickBubble('translate');
+/**
+ * 2026-10 删减：就地结果浮层（`#popover` / `#popBody` / `#popClose`）整块删除 ——
+ * 同一个 AI 结果不允许同时出现在两个地方，译文/解释一律只进右栏的块。
+ * 所以这里改成等「译文」块里出现这次结果（原来是等浮层可见）。
+ */
 await page.waitForFunction(() => {
-  const p = document.getElementById('popover');
-  return !p.classList.contains('hidden') && (document.getElementById('popBody')?.innerText || '').includes('注意力机制');
+  const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')]
+    .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
+  return (msgs.at(-1)?.querySelector('.text')?.innerText || '').includes('注意力机制');
 }, { timeout: 15000 });
-check('译文就地出现在浮层', true);
+const transShown = await page.evaluate(() => {
+  const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')]
+    .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
+  return {
+    blocks: [...document.querySelectorAll('#aiArea .ai-block')].map((b) => b.dataset.block),
+    text: msgs.at(-1)?.querySelector('.text')?.innerText || '',
+    legacyPopover: !!document.getElementById('popover'),
+  };
+});
+check('译文出现在右栏「译文」块里（就地浮层已删除）',
+  transShown.blocks.includes('translate') && transShown.text.includes('注意力机制') && !transShown.legacyPopover,
+  `blocks=${transShown.blocks.join(',')} · 旧浮层=${transShown.legacyPopover} · ${JSON.stringify(transShown.text.slice(0, 30))}`);
 const tEntry = await lastEntry();
 /**
  * 类型标签是**内部标记**：public/style.css 里 `.msg .tag { display: none; }`，
@@ -427,20 +444,20 @@ const tEntry = await lastEntry();
 check('译文同时进「译文」块（带页码）', tEntry.tag === 'translation' && /^第\d+页$/.test(tEntry.page), `${tEntry.tag} ${tEntry.page}`);
 check('动作条里没有多余的 null', !tEntry.acts.some((a) => a === 'null'), tEntry.acts.join('/'));
 check('译文块自动出现', (await page.evaluate(() => [...document.querySelectorAll('.ai-block')].map((b) => b.dataset.block))).includes('translate'));
-await page.evaluate(() => document.getElementById('popClose').click());
-await sleep(300);
 
-/* ══════════════ 7. 释（只在侧栏） ══════════════ */
+/* ══════════════ 7. 释（只在右栏） ══════════════ */
 console.log('\n▶ 释…');
 await selectSpans(2, 6);
 await sleep(250);
 const beforeExplain = chatRequests.length;
 await clickBubble('explain');
-await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg .text')].some((x) => x.innerText.includes('注意力机制')), { timeout: 15000 });
+await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg .text')].some((x) => x.innerText.includes('注意力机制')), { timeout: 15000 });
 await sleep(500);
 const explainEntry = await lastEntry();
 check('「释」不需要输入就直接出结果', explainEntry.tag === 'explanation' && explainEntry.body.includes('注意力机制'), `tag=${explainEntry.tag}`);
-check('「释」只在侧栏显示，不弹浮层', await page.evaluate(() => document.getElementById('popover').classList.contains('hidden')));
+check('「释」只在右栏出结果（就地浮层已删除）',
+  await page.evaluate(() => !document.getElementById('popover')
+    && document.querySelectorAll('#aiArea .msg.assistant').length > 0));
 check('「释」确实发了一次请求', chatRequests.length === beforeExplain + 1, `${chatRequests.length - beforeExplain} 次`);
 check('「释」用的是解释提示词', /讲明白/.test(chatRequests[chatRequests.length - 1].sys || ''));
 
@@ -468,7 +485,7 @@ check('加完光标落在输入框', atts.focused === 'chatInput', atts.focused)
 
 await page.type('#chatInput', '这两段有什么关系？');
 await page.keyboard.press('Enter');
-await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg .text')].some((x) => x.innerText.includes('注意力机制')), { timeout: 15000 });
+await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg .text')].some((x) => x.innerText.includes('注意力机制')), { timeout: 15000 });
 await sleep(600);
 const qa = await lastEntry();
 const qaReq = chatRequests[chatRequests.length - 1];
@@ -564,17 +581,17 @@ await page.type('#chatInput', '这块图讲的是什么？');
 await page.keyboard.press('Enter');
 // 注意：$$E = mc^2$$ 现在会被 KaTeX 渲染成真公式，文本内容变成「E=mc²」（空格被吃掉、
 // 上标变成 <sup>），所以不能再按 'E = mc' 这种字面文本去找。
-await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg .text')]
+await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg .text')]
   .some((x) => x.querySelector('.katex') || /mc/.test(x.innerText)), { timeout: 20000 });
 await sleep(500);
 const imgReq = chatRequests[chatRequests.length - 1];
 check('图片作为多模态内容发给模型', imgReq.hasImage && imgReq.imageCount >= 1, `${imgReq.imageCount} 张图`);
 check('带图提问的回复已渲染（公式渲染成了 KaTeX）', await page.evaluate(() => {
-  const nodes = [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg .text')];
+  const nodes = [...document.querySelectorAll('#aiArea .msg .text')];
   const last = nodes[nodes.length - 1];
   return !!last && (last.querySelectorAll('.katex').length > 0 || /mc/.test(last.innerText));
 }));
-check('助手消息里显示了截图缩略图', (await page.evaluate(() => document.querySelectorAll('#aiArea .msg, #aiArea2 .msg .shot-img').length)) > 0);
+check('助手消息里显示了截图缩略图', (await page.evaluate(() => document.querySelectorAll('#aiArea .msg .shot-img').length)) > 0);
 
 /* ══════════════ 10. 修饰键 ══════════════ */
 console.log('\n▶ 修饰键…');
@@ -598,10 +615,9 @@ mockMode = 'json';
 await selectSpans(11, 13);
 await sleep(250);
 await clickBubble('translate');
-await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg .text')].some((x) => x.innerText.includes('非流式回退成功')), { timeout: 15000 }).catch(() => {});
+await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg .text')].some((x) => x.innerText.includes('非流式回退成功')), { timeout: 15000 }).catch(() => {});
 check('上游回普通 JSON 也能出结果', /非流式回退成功/.test((await lastEntry()).body));
 mockMode = 'sse';
-await page.evaluate(() => document.getElementById('popClose').click());
 await sleep(200);
 
 /* ══════════════ 12. 正文引用 → 参考文献 ══════════════ */
@@ -742,8 +758,18 @@ check('笔记不再画黄色高亮块', noted.marks === 0, `${noted.marks} 块�
 check('正文右边缘出现了可点的小书签', noted.pins === 1 && noted.pinsWithNote === 1, `标记 ${noted.pins} 个`);
 
 const pinPt = await page.evaluate(() => {
-  const r = document.querySelector('.hl-pin').getBoundingClientRect();
-  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+  const n = document.querySelector('.hl-pin');
+  const r = n.getBoundingClientRect();
+  const cx = Math.round(r.x + r.width / 2), cy = Math.round(r.y + r.height / 2);
+  const hit = document.elementFromPoint(cx, cy);
+  const viewer = document.getElementById('viewer').getBoundingClientRect();
+  return {
+    x: cx, y: cy,
+    // 现场取证：书签的几何位置 vs 阅读区真正可见的右边界，以及这个坐标上实际是谁
+    pinX: Math.round(r.x), viewerRight: Math.round(viewer.right),
+    hit: hit ? `${hit.tagName}.${hit.className}` : '(无)',
+    hitIsPin: !!(hit && hit.closest && hit.closest('.hl-pin')),
+  };
 });
 await page.mouse.click(pinPt.x, pinPt.y);
 await sleep(500);
@@ -751,12 +777,32 @@ const reopened = await page.evaluate(() => ({
   open: !document.getElementById('noteBox').classList.contains('hidden'),
   text: document.getElementById('noteText').value,
 }));
-check('点文中书签能重新打开这条笔记', reopened.open && reopened.text.includes('出发点'));
+/**
+ * ⚠️ 2026-10 实测**真缺陷**（不是断言过期，别删这条）：
+ *   右栏开着时 `.hl-pin` 的坐标落在阅读区可见范围之外 ——
+ *   实测 viewer=[215,1135]、`.page` 右边界 1282、书签 rect.x=1272（中心 x=1275），
+ *   于是 `elementFromPoint(1275,216)` 命中的是右栏里的 `.ai-body`，真实鼠标点不到书签。
+ *   节点本身是活的（`document.querySelector('.hl-pin').click()` 能正常打开笔记框），
+ *   所以问题在**书签定位 / 裁剪**，不在事件绑定。
+ *   书签贴近纸面右边缘、而纸面比阅读区宽（开了右栏或放大后横向溢出）时必然复现。
+ */
+check('点文中书签能重新打开这条笔记', reopened.open && reopened.text.includes('出发点'),
+  `书签中心 x=${pinPt.x} · 阅读区右边界=${pinPt.viewerRight} · 命中=${pinPt.hit}（是书签=${pinPt.hitIsPin}）· 笔记框=${reopened.open}`);
 
-await page.evaluate(() => { document.getElementById('noteText').value = '改过的笔记内容'; });
-await page.click('#noteSave');
-await sleep(800);
-check('笔记可以修改', (await page.evaluate(() => document.querySelector('#notesList li .nnote')?.textContent || '')) === '改过的笔记内容');
+/**
+ * 书签点不开时 `#noteBox` 是关着的，此时直接 `page.click('#noteSave')` 会抛
+ * 「Node is either not clickable or not an Element」，把后面整段（修改 / 刷新持久化 /
+ * 目录 / 外观 …）全部带走。这里兜一层：真失败上一条已经报过了，
+ * 这一层只保证套件能继续跑完，并把级联失败也如实记下来。
+ */
+if (await page.evaluate(() => !document.getElementById('noteBox').classList.contains('hidden'))) {
+  await page.evaluate(() => { document.getElementById('noteText').value = '改过的笔记内容'; });
+  await page.click('#noteSave');
+  await sleep(800);
+  check('笔记可以修改', (await page.evaluate(() => document.querySelector('#notesList li .nnote')?.textContent || '')) === '改过的笔记内容');
+} else {
+  check('笔记可以修改', false, '前置失败：书签没把笔记框点开，改不了（见上一条的现场取证）');
+}
 
 await page.reload({ waitUntil: 'domcontentloaded' });
 await page.waitForSelector('.page[data-page="1"] canvas', { timeout: 30000 });
@@ -781,34 +827,42 @@ const oLook = await page.evaluate(() => {
     sizes: [...new Set(items.slice(0, 12).map((li) => getComputedStyle(li).fontSize))],
     maxH: getComputedStyle(sec).maxHeight,
     overflow: getComputedStyle(list).overflowY,
+    // 判据要的是「这一块没有把目录关进一个小滚动框里」：
+    // 只看 overflowY 会把 `overflow:auto` 但**根本不需要滚动**（scrollH == clientH）的情况误判成失败，
+    // 所以同时量一下它到底有没有被裁掉内容。
+    listClientH: list.clientHeight,
+    listScrollH: list.scrollHeight,
     panel: getComputedStyle(document.getElementById('leftSide')).overflowY,
     indented: lv1 && lv2 ? parseFloat(getComputedStyle(lv2).paddingLeft) > parseFloat(getComputedStyle(lv1).paddingLeft) : null,
   };
 });
 check('目录字号统一（不做大小标题）', oLook.sizes.length === 1, oLook.sizes.join('/'));
-check('目录不再被限制在小区域里', oLook.maxH === 'none' && oLook.overflow === 'visible', `max-height=${oLook.maxH}`);
+check('目录不再被限制在小区域里',
+  oLook.maxH === 'none' && oLook.overflow !== 'hidden' && oLook.overflow !== 'scroll'
+    && oLook.listScrollH - oLook.listClientH <= 4,
+  `max-height=${oLook.maxH} overflowY=${oLook.overflow} client=${oLook.listClientH} scroll=${oLook.listScrollH}`);
 check('左栏整体滚动', oLook.panel === 'auto');
 check('层级靠缩进体现', oLook.indented === true);
 
 /* ══════════════ 17. 设置 ══════════════ */
 console.log('\n▶ 设置…');
 await page.click('#settingsBtn');
-await sleep(300);
+await page.waitForSelector('#settingsModal:not(.hidden)', { timeout: 6000 });
+await sleep(200);
 const ui = await page.evaluate(() => {
   const modal = document.getElementById('settingsModal');
   const fields = [...modal.querySelectorAll('.field')];
   return {
     open: !modal.classList.contains('hidden'),
-    // select 也要取到 id：主题/密度是 <select>，只读 input 会得到 undefined
+    // select 也要取到 id：主题是 <select>，只读 input 会得到 undefined
     visible: fields.filter((f) => !f.classList.contains('hidden')).map((f) => f.querySelector('input, select')?.id),
     coreVisible: [...modal.querySelectorAll('.settings-core-grid .field')]
       .filter((f) => getComputedStyle(f).display !== 'none' && f.getBoundingClientRect().height > 0)
       .map((f) => f.querySelector('input, select')?.id),
-    advancedOpen: !!modal.querySelector('#advancedStyles[open]'),
-    advancedSummary: modal.querySelector('#advancedStyles > summary')?.textContent.trim() || '',
-    advancedVisible: [...modal.querySelectorAll('#advancedStyles .field')]
-      .filter((f) => getComputedStyle(f).display !== 'none' && f.getBoundingClientRect().height > 0)
-      .map((f) => f.querySelector('input, select')?.id),
+    removedPresent: ['advancedStyles', 'uiDensity', 'uiTopbar', 'uiUiFontSize', 'uiControlSize', 'uiLineHeight',
+      'uiCodeSize', 'uiMaxWidth', 'uiOpacity', 'uiPaper', 'uiShowPage', 'uiShowQuote', 'uiShowSources']
+      .filter((id) => document.getElementById(id)),
+    resets: ['resetLayout', 'resetStyle', 'resetSettings'].filter((id) => document.getElementById(id)),
     topbar: [...document.querySelectorAll('.topbar button, .topbar input')].map((n) => n.id),
     tabs: document.querySelectorAll('.tabs').length,
     quickRow: document.querySelectorAll('#quickRow').length,
@@ -816,44 +870,99 @@ const ui = await page.evaluate(() => {
   };
 });
 /**
- * 设置弹窗现在把高频核心（主题 / 结果密度）直接露出，低频样式收进默认收起的「更多样式」。
- * 先断言默认收起，再展开一次验证所有旧控件仍可访问，避免用折叠来删功能。
+ * 2026-10 删减：设置弹窗从「核心三项 + 更多样式折叠」收成固定的六项 ——
+ * API Key / 模型名 / 接口地址 / 主题 / 阅读字号 / 恢复默认设置。
+ * 「结果密度」「顶栏行为」和「更多样式」里那批调试刻度（界面字号 / 控件大小 / 行高 /
+ * 代码大小 / 最大宽度 / 结果透明度 / PDF 纸张 / 三个显示开关）全部下架，
+ * 两个 reset 按钮并成一个 `#resetSettings`。
+ * 所以判据改成：留下的两项可见且**真的还能用**、下架的确实不在、恢复默认只剩一个入口。
+ * 存档里的老字段仍然生效（DEFAULT_UI_STYLE 没删），只是没有界面入口了。
  */
-const styleIds = ['uiTheme', 'uiDensity', 'uiUiFontSize', 'uiControlSize', 'uiFontSize', 'uiLineHeight', 'uiCodeSize', 'uiMaxWidth', 'uiOpacity'];
-check('设置是弹窗：AI 字段与主题 / 结果密度 / 顶栏核心项可见',
+check('设置是弹窗：AI 字段与主题 / 阅读字号核心项可见',
   ui.open && ui.visible.includes('cfgApiKey') && ui.visible.includes('cfgModel')
-    // 核心区 2026-10-03 多了「顶栏：悬停才出现 / 常驻」——自动隐藏会让静息态顶栏移出屏幕，
-    // 按坐标点击的路径（自动化 / 辅助技术）会失败，所以必须有一个用户能关掉它的可见入口。
-    && ui.coreVisible.join() === 'uiTheme,uiDensity,uiTopbar'
-    && ui.advancedOpen === false && ui.advancedSummary === '更多样式',
-  `核心=${ui.coreVisible.join(', ')} · advancedOpen=${ui.advancedOpen} · ${ui.advancedSummary}`);
-await page.click('#advancedStyles > summary');
-await sleep(180);
-const advanced = await page.evaluate(() => ({
-  open: !!document.querySelector('#advancedStyles[open]'),
-  ids: [...document.querySelectorAll('#advancedStyles .field')].map((f) => f.querySelector('input, select')?.id),
-}));
-check('展开「更多样式」后保留全部低频控件',
-  advanced.open && styleIds.slice(2).every((id) => advanced.ids.includes(id)), advanced.ids.join(', '));
+    && ui.coreVisible.join() === 'uiTheme,uiFontSize',
+  `核心=${ui.coreVisible.join(', ')} · 可见=${ui.visible.join(', ')}`);
+check('下架的低频样式控件确实都不在', ui.removedPresent.length === 0, ui.removedPresent.join(', '));
+check('恢复默认只剩一个入口（#resetSettings）', ui.resets.join() === 'resetSettings', ui.resets.join(', '));
 check('旧版非核心控件已移除', ui.tabs === 0 && ui.quickRow === 0 && ui.glossary === 0);
+
+// 主题：改一下必须立刻落到 documentElement[data-theme]（'跟随系统' = 删掉该属性）
+const themeApplied = await page.evaluate(() => {
+  const sel = document.getElementById('uiTheme');
+  const before = document.documentElement.dataset.theme || '(跟随系统)';
+  sel.value = 'dark'; sel.dispatchEvent(new Event('input', { bubbles: true }));
+  const after = document.documentElement.dataset.theme || '(跟随系统)';
+  sel.value = 'light'; sel.dispatchEvent(new Event('input', { bubbles: true }));
+  const back = document.documentElement.dataset.theme || '(跟随系统)';
+  return { before, after, back };
+});
+check('设置里改主题立刻生效（跟随系统 → dark → light）',
+  themeApplied.before !== 'dark' && themeApplied.after === 'dark' && themeApplied.back === 'light',
+  JSON.stringify(themeApplied));
+// 阅读字号：改一下必须立刻写进 --ai-fs（结果正文用的就是它）
+const fontSizeApplied = await page.evaluate(() => {
+  const el = document.getElementById('uiFontSize');
+  const before = getComputedStyle(document.documentElement).getPropertyValue('--ai-fs').trim();
+  const next = Number(el.value) >= Number(el.max) ? Number(el.max) - 1 : Number(el.value) + 1;
+  el.value = String(next); el.dispatchEvent(new Event('input', { bubbles: true }));
+  return {
+    before,
+    after: getComputedStyle(document.documentElement).getPropertyValue('--ai-fs').trim(),
+    label: document.getElementById('uiFontSizeValue')?.textContent || '',
+    value: el.value,
+  };
+});
+check('设置里改阅读字号立刻生效（--ai-fs 跟着变，右侧数值同步）',
+  fontSizeApplied.before !== fontSizeApplied.after && fontSizeApplied.label === `${fontSizeApplied.value}px`,
+  JSON.stringify(fontSizeApplied));
+// 恢复默认设置：真实点一下，确认它把主题与字号拨回默认（只动壳，不碰论文/会话/Key）
+const resetApplied = await page.evaluate(() => {
+  document.getElementById('resetSettings').click();
+  return {
+    select: document.getElementById('uiTheme').value,
+    range: document.getElementById('uiFontSize').value,
+    theme: document.documentElement.dataset.theme || '(跟随系统)',
+    fs: getComputedStyle(document.documentElement).getPropertyValue('--ai-fs').trim(),
+  };
+});
+check('「恢复默认设置」一个按钮把主题与阅读字号拨回默认',
+  resetApplied.select === 'system' && resetApplied.theme === '(跟随系统)' && !!resetApplied.range,
+  JSON.stringify(resetApplied));
 /**
  * 顶栏白名单：这份清单是**故意收窄**的 —— 顶栏只放用户高频、且一次点击能说清用途的控件。
- * R8 曾加入 `scanBtn`（扫描版 OCR），后按用户要求整体删除该功能；`panelBtn` 也因
- * 「不要把所有控件塞进一个小按钮」被移除（面板的长尾操作改到右键标题栏）。
+ * R8 曾加入 `scanBtn`（扫描版 OCR），后按用户要求整体删除该功能。
+ * 2026-10 删减又把 `panelBtn`（面板管理器入口）连同整个面板管理器一起删掉了：
+ * 「打开译文 / 问答」现在只剩右栏底部那排分段切换器（`#aiBar`）一个入口。
+ * 2026-10-04 顶栏又按用户口径（「完全模仿 VS Code」）变成**应用内标题栏**，
+ * 于是**故意**多了左右活动栏开关（topbarLeftToggle / topbarRightToggle）与
+ * 窗口按钮（windowMinimize / windowMaximize / windowClose）—— 这五个是新增的正当成员。
+ * 2026-10 首页改造再加 `homeBtn`（回首页 / 书架）：启动默认停在首页之后，阅读态必须
+ * 有**一个**明确的回头入口，否则用户只能靠刷新回书架。它是正当成员，
+ * 不是「删掉的入口又回来了」——白名单里也仍然禁止 panelBtn / scanBtn 那些。
  */
-const topbarCore = new Set(['prevPage', 'pageInput', 'nextPage', 'returnPosition', 'zoomOut', 'zoomRange', 'zoomIn', 'fitWidth', 'opsBtn', 'regionBtn', 'searchBtn', 'settingsBtn']);
-check('顶栏只剩核心控件（含返回原位置）', ui.topbar.length <= topbarCore.size && ui.topbar.includes('returnPosition') && ui.topbar.every((id) => topbarCore.has(id)), ui.topbar.join(' '));
+const topbarCore = new Set(['prevPage', 'pageInput', 'nextPage', 'returnPosition', 'zoomOut', 'zoomRange', 'zoomIn', 'fitWidth', 'homeBtn', 'opsBtn', 'regionBtn', 'searchBtn', 'settingsBtn',
+  'topbarLeftToggle', 'topbarRightToggle', 'windowMinimize', 'windowMaximize', 'windowClose']);
+check('顶栏只剩核心控件 + 标题栏按钮，且删掉的入口没有回来',
+  ui.topbar.includes('returnPosition')
+    && ui.topbar.every((id) => topbarCore.has(id))
+    && !ui.topbar.some((id) => ['scanBtn', 'panelBtn', 'exportBtn', 'dockBtn'].includes(id)),
+  ui.topbar.join(' '));
 await page.evaluate(() => { document.getElementById('cfgModel').value = 'deepseek-chat'; });
 await page.click('#saveSettings');
 await page.waitForFunction(() => /✅|❌/.test(document.getElementById('testResult').textContent || ''), { timeout: 20000 });
 check('保存并测试连接可用', /✅|❌/.test(await page.evaluate(() => document.getElementById('testResult').textContent)));
 await page.evaluate(() => document.getElementById('closeSettings').click());
-await sleep(300);
+// 必须等弹窗**真的**关掉再往下点：设置是覆盖层，弹窗还开着时点 #settingsBtn 的坐标会先命中
+// 遮罩（它的 mousedown 会顺手把弹窗关掉），于是后面点 #saveSettings 时它已经不可见了 ——
+// 实测报的就是「Node is either not clickable or not an Element」。
+await page.waitForFunction(() => document.getElementById('settingsModal').classList.contains('hidden'), { timeout: 5000 }).catch(() => {});
+await sleep(150);
 
 /* ══════════════ 17b. API Key 填一次就存下来 ══════════════ */
 console.log('\n▶ API Key 持久化…');
 await page.click('#settingsBtn');
-await sleep(300);
+await page.waitForSelector('#settingsModal:not(.hidden)', { timeout: 6000 });
+await sleep(200);
 await page.evaluate(() => { document.getElementById('cfgApiKey').value = 'sk-persist-check-abcdef'; });
 await page.click('#saveSettings');
 await page.waitForFunction(() => /✅|❌/.test(document.getElementById('testResult').textContent || ''), { timeout: 20000 });
@@ -891,6 +1000,15 @@ await page.mouse.move(sp1.x, sp1.y); await page.mouse.down(); await page.mouse.m
 await sleep(700);
 const w1 = await page.evaluate(() => document.getElementById('leftSide').getBoundingClientRect().width);
 check('左栏可以拖动调宽', Math.abs(w1 - w0) > 50, `${Math.round(w0)}px → ${Math.round(w1)}px`);
+/**
+ * 2026-10：右栏在「译文 / 问答一块都没开」时会收成右侧活动栏（`body.right-empty`），
+ * `#rightSide` 宽度变 0、`#splitRight` 也点不到 —— 直接量/拖只会得到「0px → 0px」的假红。
+ * 先把右栏拉回来，再量再拖。
+ */
+if (await page.evaluate(() => document.getElementById('rightSide').getBoundingClientRect().width === 0)) {
+  await page.click('#railRightBtn');
+  await sleep(500);
+}
 const r0 = await page.evaluate(() => document.getElementById('rightSide').getBoundingClientRect().width);
 const sp2 = await page.evaluate(() => { const r = document.getElementById('splitRight').getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + 200) }; });
 await page.mouse.move(sp2.x, sp2.y); await page.mouse.down(); await page.mouse.move(sp2.x - 70, sp2.y, { steps: 8 }); await page.mouse.up();
@@ -898,59 +1016,78 @@ await sleep(700);
 const r1 = await page.evaluate(() => document.getElementById('rightSide').getBoundingClientRect().width);
 check('右栏可以拖动调宽', Math.abs(r1 - r0) > 40, `${Math.round(r0)}px → ${Math.round(r1)}px`);
 
-/* ══════════════ 19. AI 分块：一栏只开一个 / 第二栏 ══════════════ */
+/* ══════════════ 19. AI 分块：右栏恒为单列 / 一栏只开一个 ══════════════ */
 console.log('\n▶ AI 分块调整…');
-// 前面几轮重载过页面，先造一条消息，才能验证「增删换位不丢消息」
+// 前面几轮重载过页面，先造一条消息，才能验证「换块不丢消息」
 await selectSpans(1, 4);
 await sleep(300);
 await clickBubble('translate');
-await page.waitForFunction(() => document.querySelectorAll('#aiArea .msg, #aiArea2 .msg').length >= 1, { timeout: 15000 });
+await page.waitForFunction(() => document.querySelectorAll('#aiArea .msg').length >= 1, { timeout: 15000 });
 await sleep(700);
-// 2026-10-04 起右栏是**多列**的：两块同时开着 = 各占一栏（第 2 栏按需现建），
-// 上下分屏的分隔条已经不存在了。这里按新语义验：两块都在、各占一栏、没有 .ai-split。
-await page.evaluate(() => { window.__ctx.setPanelColumn('chat', 2); window.__ctx.setPanelColumn('translate', 1); });
-await sleep(700);
+/**
+ * 2026-10 删减后右栏**恒为 1 列**：第二栏（`#rightCol2` / `#aiArea2` / `#rightColSplit` /
+ * `setPanelColumn` / `rightCols.{count,w2}`）连同上下分屏（`.ai-split`）一起删掉了。
+ * 「一栏只开一个面板」这条契约仍然成立，只是现在只有一个栏位：
+ *   · 文档里只有一栏（`#rightCols > .side.right` 长度 1）；
+ *   · `#aiArea` 里同时最多 1 个 `.ai-block`，且它就是要显示的那一块。
+ * 旧断言验的是「两块各占一栏 + 第 2 栏按需现建」，那整套契约已经不存在了。
+ */
 const adj0 = await page.evaluate(() => {
-  const perCol = ['aiArea', 'aiArea2'].map((id) => [...document.querySelectorAll(`#${id} .ai-block`)].map((b) => b.dataset.block));
+  const blocks = [...document.querySelectorAll('#aiArea .ai-block')];
   return {
-    perCol,
-    blocks: [...document.querySelectorAll('.ai-block')].map((b) => `${b.dataset.block}:${Math.round(b.getBoundingClientRect().height)}`),
+    blocks: blocks.map((b) => b.dataset.block),
+    heights: blocks.map((b) => `${b.dataset.block}:${Math.round(b.getBoundingClientRect().height)}`),
     splits: document.querySelectorAll('.ai-split').length,
+    cols: document.querySelectorAll('#rightCols > .side.right').length,
     col2: !!document.getElementById('rightCol2'),
-    wanted: window.__ctx.rightColsWanted(),
+    aiArea2: !!document.getElementById('aiArea2'),
   };
 });
-check('两块能同时打开并各占一栏（一栏只开一个，不再有上下分隔条）',
-  adj0.col2 && adj0.wanted === 2 && adj0.perCol.every((x) => x.length <= 1)
-    && adj0.perCol[0].length === 1 && adj0.perCol[1].length === 1 && adj0.splits === 0,
-  `${JSON.stringify(adj0.perCol)} | 高 ${adj0.blocks.join(' / ')}`);
-// 两块各占一栏时高度互不影响：把窗口变矮，两块都要重新夹进各自那一栏，不许被裁
+check('右栏恒为单列：译文块在 #aiArea 里，没有第二栏、也没有上下分隔条',
+  adj0.blocks.length === 1 && adj0.blocks[0] === 'translate'
+    && adj0.cols === 1 && !adj0.col2 && !adj0.aiArea2 && adj0.splits === 0,
+  `blocks=${JSON.stringify(adj0.blocks)} · 列数=${adj0.cols} · #rightCol2=${adj0.col2} · #aiArea2=${adj0.aiArea2} · .ai-split=${adj0.splits} | 高 ${adj0.heights.join(' / ')}`);
+// 单列里「一栏只开一个」：再开问答 → 同一栏原来那块自动收起，仍然只有 1 块
+await page.evaluate(() => document.querySelector('#aiBar .aibar-btn[data-block="chat"]').click());
+await sleep(700);
+const adjSwitch = await page.evaluate(() => ({
+  blocks: [...document.querySelectorAll('#aiArea .ai-block')].map((b) => b.dataset.block),
+  on: [...document.querySelectorAll('#aiBar .aibar-btn.on')].map((b) => b.dataset.block),
+}));
+check('单列里同时只开一块：开问答后 #aiArea 里只剩问答块',
+  adjSwitch.blocks.length === 1 && adjSwitch.blocks[0] === 'chat' && adjSwitch.on.join() === 'chat',
+  `blocks=${JSON.stringify(adjSwitch.blocks)} · 开关栏选中=${JSON.stringify(adjSwitch.on)}`);
+// 变矮的窗口里，唯一那块必须重新夹进栏内，不许被裁到栏外
 await page.setViewport({ width: 1500, height: 700 });
 await sleep(900);
 const adjShort = await page.evaluate(() => {
-  const out = {};
-  for (const id of ['aiArea', 'aiArea2']) {
-    const pane = document.getElementById(id);
-    if (!pane) continue;
-    const block = pane.querySelector('.ai-block');
-    out[id] = { paneBottom: Math.round(pane.getBoundingClientRect().bottom), blockBottom: block ? Math.round(block.getBoundingClientRect().bottom) : 0 };
-  }
-  return out;
+  const pane = document.getElementById('aiArea');
+  const block = pane?.querySelector('.ai-block');
+  return {
+    paneBottom: pane ? Math.round(pane.getBoundingClientRect().bottom) : 0,
+    blockBottom: block ? Math.round(block.getBoundingClientRect().bottom) : 0,
+  };
 });
-check('窗口变矮后两块仍在自己那一栏里（没被裁到栏外）',
-  Object.values(adjShort).every((v) => v.blockBottom <= v.paneBottom + 1), JSON.stringify(adjShort));
+check('窗口变矮后结果块仍夹在栏内（没被裁到栏外）',
+  adjShort.blockBottom > 0 && adjShort.blockBottom <= adjShort.paneBottom + 1, JSON.stringify(adjShort));
 await page.setViewport({ width: 1500, height: 950 });
 await sleep(700);
-const adj2 = await page.evaluate(() => ['aiArea', 'aiArea2'].map((id) => document.querySelector(`#${id} .ai-block`)?.dataset.block || ''));
-const adjMsg = await page.evaluate(() => document.querySelectorAll('#aiArea .msg, #aiArea2 .msg').length);
-check('开第二栏 / 换栏都不会丢消息', adjMsg > 0 && adj2[0] === 'translate' && adj2[1] === 'chat', `${adj2.join(' > ')} · msg=${adjMsg}`);
+// 切回译文：块节点被停进脱离文档的 #panelPark 后仍带着原来那条消息 —— 换块不丢消息
+await page.evaluate(() => document.querySelector('#aiBar .aibar-btn[data-block="translate"]').click());
+await sleep(700);
+const adjBack = await page.evaluate(() => ({
+  block: document.querySelector('#aiArea .ai-block')?.dataset.block || '',
+  msgs: document.querySelectorAll('#aiArea .msg').length,
+}));
+check('换块不丢消息：切回译文后原来那条还在',
+  adjBack.block === 'translate' && adjBack.msgs > 0, `${adjBack.block} · msg=${adjBack.msgs}`);
 
 /* ══════════════ 20. 外观 ══════════════ */
 console.log('\n▶ 对话流外观…');
 await selectSpans(1, 4);
 await sleep(300);
 await clickBubble('translate');
-await page.waitForFunction(() => document.querySelectorAll('#aiArea .msg, #aiArea2 .msg').length >= 1, { timeout: 15000 });
+await page.waitForFunction(() => document.querySelectorAll('#aiArea .msg').length >= 1, { timeout: 15000 });
 await sleep(700);
 // 再造一条「我说的话」，才能检查用户气泡的样式
 await waitIdle();
@@ -960,13 +1097,13 @@ await clickBubble('add');
 await sleep(400);
 await page.type('#chatInput', '这两段怎么联系起来？');
 await page.keyboard.press('Enter');
-await page.waitForFunction(() => !!document.querySelector('#aiArea .msg.user, #aiArea2 .msg.user'), { timeout: 15000 });
+await page.waitForFunction(() => !!document.querySelector('#aiArea .msg.user'), { timeout: 15000 });
 await sleep(900);
 const look = await page.evaluate(() => {
-  const msgs = [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg')];
+  const msgs = [...document.querySelectorAll('#aiArea .msg')];
   const last = msgs[msgs.length - 1];
   const cs = last ? getComputedStyle(last) : null;
-  const um = document.querySelector('#aiArea .msg.user, #aiArea2 .msg.user');
+  const um = document.querySelector('#aiArea .msg.user');
   const umText = um ? um.querySelector('.text') : null;
   const userBg = umText ? getComputedStyle(umText).backgroundColor : '';
   // 最新一条助手消息：分块之后 DOM 顺序 ≠ 时间顺序，按 seq 取
@@ -974,13 +1111,12 @@ const look = await page.evaluate(() => {
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0)).pop() || null;
   return {
     // 「折叠元素（<details>）只应该出现在设置面板里」这条契约的**正确判据**：
-    // 先数设置弹窗里的 details（本身就有多个：更多样式、自定义端点…），
-    // 再要求「文档里 details 的总数 == 设置里的数量」—— 这样新增设置分组不会误报，
-    // 而别处冒出折叠元素（比如面板管理器里的布局设置）仍然会红。
-    // 旧写法把期望写死成 1，设置一加分组就假红。
+    // 数「文档里 details 的总数」与「设置弹窗里的数量」，要求两者相等 ——
+    // 这样别处冒出折叠元素（比如曾经的面板管理器布局设置）仍然会红。
+    // 2026-10 删减把设置里唯一那个 <details>（「更多样式」）也去掉了，
+    // 于是两边都是 0；判据保留「不许出现在设置以外」这条不变量，不再要求「至少有一个」。
     details: document.querySelectorAll('details').length,
     detailsInSettings: document.querySelectorAll('#settingsModal details').length,
-    settingsAdvanced: !!document.querySelector('#settingsModal #advancedStyles'),
     border: cs ? `${cs.borderTopWidth}/${cs.borderLeftWidth}` : '',
     radius: cs ? cs.borderRadius : '',
     msgBg: cs ? cs.backgroundColor : '',
@@ -989,16 +1125,16 @@ const look = await page.evaluate(() => {
     legacy: document.querySelectorAll('.entry, .e-head, .e-body, .quote-block').length,
     // 最终设计：用户消息 = 圆标 + 底色气泡；助手消息 = 没有圆标，
     // 靠阅读字体 / 正文宽度 / 底部动作条跟用户消息区分开
-    userHasAva: !!document.querySelector('#aiArea .msg.user .ava, #aiArea2 .msg.user .ava'),
+    userHasAva: !!document.querySelector('#aiArea .msg.user .ava'),
     userHasBubble: !!userBg && !/^(transparent|rgba\(0,\s*0,\s*0,\s*0\))$/.test(userBg),
     assistantNoAva: !!asst && !asst.querySelector('.ava'),
     assistantHasActs: !!asst && !!asst.querySelector('.acts'),
   };
 });
-// 折叠元素只应出现在设置弹窗里：总数必须等于设置里的数量（且至少有一个「更多样式」）
-check('折叠元素只用于设置里的更多样式',
-  look.settingsAdvanced && look.detailsInSettings >= 1 && look.details === look.detailsInSettings,
-  `details=${look.details} 设置内=${look.detailsInSettings} hasAdvanced=${look.settingsAdvanced}`);
+// 折叠元素只允许出现在设置弹窗里：总数必须等于设置里的数量（2026-10 之后两边都是 0）
+check('折叠元素不许出现在设置以外的地方',
+  look.details === look.detailsInSettings,
+  `details=${look.details} 设置内=${look.detailsInSettings}`);
 const notCard = look.radius === '0px' && look.border.endsWith('/0px') && parseFloat(look.border) <= 1;
 check('消息是扁平行（无圆角卡片、无左边框）', notCard && look.legacy === 0, `border=${look.border} radius=${look.radius}`);
 check('助手消息与面板同底色', look.msgBg === look.panelBg || look.msgBg === 'rgba(0, 0, 0, 0)', look.msgBg);
@@ -1038,11 +1174,11 @@ const hangPre = await page.evaluate(() => ({
 // 先记下**发请求前**已有的最大 seq，之后只看比它大的那条 —— 断言必须盯住本次这一条。
 // 旧写法用「界面上存在任意一条含『没有收到任何数据|失败』的元素」当条件，而会话恢复会把
 // 历史失败条目一起带回来，于是条件第一轮就成立、hangMs 恒为 0.0s 读到历史条目 —— 假红。
-const hangTarget = Math.max(0, ...(await page.evaluate(() => [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg')].map((e) => Number(e.dataset.seq || 0)))));
+const hangTarget = Math.max(0, ...(await page.evaluate(() => [...document.querySelectorAll('#aiArea .msg')].map((e) => Number(e.dataset.seq || 0)))));
 await clickBubble('translate');
 const t0 = Date.now();
 await page.waitForFunction((target) => {
-  const list = [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg')]
+  const list = [...document.querySelectorAll('#aiArea .msg')]
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
   const mine = list.filter((e) => Number(e.dataset.seq || 0) > target).pop();
   if (!mine) return false;
@@ -1050,14 +1186,14 @@ await page.waitForFunction((target) => {
 }, { timeout: 25000 }, hangTarget).catch(() => {});
 const hangMs = Date.now() - t0;
 const hangEntry = await page.evaluate((target) => {
-  const list = [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg')]
+  const list = [...document.querySelectorAll('#aiArea .msg')]
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
   const mine = list.filter((e) => Number(e.dataset.seq || 0) > target).pop();
   return mine ? { seq: mine.dataset.seq, body: mine.querySelector('.text')?.innerText || '' } : null;
 }, hangTarget);
 // 现场记录：这条断言历史上报过「0.0s 后报错」，有这份流水就能看出是「没发请求」还是「读错条目」
 const hangDiag = await page.evaluate(() => {
-  const list = [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg')]
+  const list = [...document.querySelectorAll('#aiArea .msg')]
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
   return {
     busy: !!window.__state?.busy,
@@ -1107,7 +1243,7 @@ mockMode = '401';
 await selectSpans(1, 4);
 await sleep(300);
 await clickBubble('translate');
-await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg .text')].some((x) => /失败/.test(x.innerText)), { timeout: 20000 }).catch(() => {});
+await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg .text')].some((x) => /失败/.test(x.innerText)), { timeout: 20000 }).catch(() => {});
 const authMsg = (await lastEntry())?.body || '';
 check('401 会提示「API Key 无效/已失效，去换一个」',
   /API Key 无效或已失效/.test(authMsg) && /⚙/.test(authMsg), authMsg.slice(0, 90));
@@ -1155,11 +1291,11 @@ const regionAfterClick = await page.evaluate(() => ({
   stopHidden: document.getElementById('stopBtn')?.classList.contains('hidden'),
   hint: document.querySelector('.ai-empty, .hint, #aiArea .tip')?.textContent?.slice(0, 40) || '',
 }));
-await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg .text')].some((x) => /该模型在你所在地区不可用/.test(x.innerText)), { timeout: 20000 }).catch(() => {});
+await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg .text')].some((x) => /该模型在你所在地区不可用/.test(x.innerText)), { timeout: 20000 }).catch(() => {});
 const regionMsg = (await lastEntry())?.body || '';
 // 诊断（保留：这条断言历史上假红过两次，留一份现场便于下次直接看出是「没发请求」还是「读错条目」）
 const regionDiag = await page.evaluate(() => {
-  const list = [...document.querySelectorAll('#aiArea .msg, #aiArea2 .msg')]
+  const list = [...document.querySelectorAll('#aiArea .msg')]
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
   return {
     total: list.length,
@@ -1174,18 +1310,28 @@ check('地区限制明确提示模型不可用且不误报密钥失效',
   `${regionMsg.slice(0, 70)} ‖ 选中=${JSON.stringify(regionSel)} ‖ 点前=${JSON.stringify(regionClicks)} ‖ 气泡=${JSON.stringify(regionBubble)} ‖ 命中=${JSON.stringify(regionHit)} ‖ 点后=${JSON.stringify(regionAfterClick)} ‖ 请求数=${chatRequests.length} ‖ 现场=${JSON.stringify(regionDiag)} ‖ 拦截流水=${JSON.stringify(mockLog.slice(-4))}`);
 mockMode = 'sse';
 
-/* ══════════════ 22. 首次使用 ══════════════ */
+/* ══════════════ 22. 首次使用（2026-10：欢迎页 → 首页 / 书架页） ══════════════ */
 console.log('\n▶ 首次使用…');
 await page.goto('about:blank');
 await sleep(300);
 await postJson(`${BASE}/api/state`, { lastDoc: null, lastName: null, lastUrl: null, docs: {} });
 await page.goto(`${BASE}/?topbar=static`, { waitUntil: 'domcontentloaded' });
-await sleep(1500);
+await sleep(1800);
+/**
+ * 契约已随首页改造更新：原来的 `#welcome`（阅读区里的空状态）升级成了独立的
+ * `#home` 首页，而且**默认就停在这里**（不再自动打开上次论文，见 test/home.mjs 的 A4）。
+ * 所以这里的断言是「停在首页 + 书架可见」，语义与改造前一致，只是选择器和页面结构换了。
+ */
 const firstRun = await page.evaluate(() => ({
-  welcome: !document.getElementById('welcome').classList.contains('hidden'),
+  home: !document.getElementById('home').classList.contains('hidden'),
+  reading: document.body.classList.contains('reading'),
+  hasOpen: !!document.getElementById('homeOpen'),
+  hasDrop: !!document.getElementById('homeDrop'),
   files: document.querySelectorAll('#fileList li:not(.empty)').length,
 }));
-check('首次打开显示欢迎页', firstRun.welcome);
+check('首次打开停在首页（书架页）', firstRun.home && !firstRun.reading && firstRun.hasOpen && firstRun.hasDrop,
+  JSON.stringify(firstRun));
+check('首次打开**没有**自动进入任何论文', firstRun.reading === false);
 check('papers/ 里的论文被列出', firstRun.files >= 1, `${firstRun.files} 篇`);
 const errBefore = pageErrors.length;
 await page.evaluate(() => { document.getElementById('fitWidth').click(); document.getElementById('zoomIn').click(); document.getElementById('zoomOut').click(); });
@@ -1230,12 +1376,22 @@ await page.evaluate(() => document.querySelectorAll('#fileList li')[0]?.click())
 await sleep(30);
 await (await page.$('#fileInput')).uploadFile(localPdf);
 await sleep(2500);
+/**
+ * 状态栏已删除（2026-10）：PDF 下面那条只有「就绪」的 22px 横条整块去掉了，
+ * 解析进度改由页码那一格的 `.busy` + title 表达。
+ * 所以这里不再读 statusText，改成读**等价的真实信号**：
+ *   · 页面与画布都渲染出来了（原来的 pages/canvases 判据不变）
+ *   · 页码那一格不是占位符「–」（说明视图真的就绪了，而不是停在「正在打开…」）
+ * 没有削弱断言，只是把已删除的 UI 换成它现在对应的观测点。
+ */
 const race2 = await page.evaluate(() => ({
   pages: document.querySelectorAll('.page').length,
   canvases: document.querySelectorAll('.page canvas').length,
-  status: document.getElementById('statusText').textContent,
+  pageLabel: document.getElementById('pageInput')?.value || '',
+  busy: !!document.querySelector('#pageInput.busy'),
 }));
-check('快速切换文档状态一致', race2.pages > 0 && race2.canvases >= 1 && !/失败/.test(race2.status), `${race2.canvases}/${race2.pages} 已渲染`);
+check('快速切换文档状态一致', race2.pages > 0 && race2.canvases >= 1 && race2.pageLabel !== '–' && race2.pageLabel !== '',
+  `${race2.canvases}/${race2.pages} 已渲染 · 页码=${race2.pageLabel} busy=${race2.busy}`);
 
 /* ══════════════ 汇总 ══════════════ */
 console.log('\n──────── 错误汇总 ────────');

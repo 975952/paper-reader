@@ -12,13 +12,27 @@ use serde_json::Value;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::api;
+use crate::auth;
 use crate::chat;
+use crate::limits;
 use crate::util::*;
 
 /// 请求体上限，和 server.js 一致
 pub const MAX_BODY: usize = 64 * 1024 * 1024;
 /// 导入 PDF 用的上限（比普通请求大得多）
 pub const MAX_UPLOAD: usize = 256 * 1024 * 1024;
+
+/// 按接口的请求体上限（审计 §P1，与 server.js 的 BODY_LIMITS 一致）
+fn body_limit(path: &str) -> usize {
+    match path {
+        "/api/upload" => MAX_UPLOAD,
+        "/api/config" => limits::BODY_CONFIG,
+        "/api/state" => limits::BODY_STATE,
+        "/api/notes" => limits::BODY_NOTES,
+        "/api/session" => limits::BODY_SESSION,
+        _ => MAX_BODY,
+    }
+}
 
 pub struct Ctx {
     pub port: u16,
@@ -107,18 +121,37 @@ fn handle(mut rq: Request, ctx: &Ctx) {
         return send_text(rq, 400, "Bad path");
     }
 
+    // 审计 §P0：所有 /api/* 必须带自定义请求头。
+    //
+    // 这一步在**读请求体之前**，也在任何读盘 / 写盘 / 出网之前 —— 401 不会写任何用户数据。
+    // 唯一例外是 `/api/pdf` 的 GET/HEAD（浏览器子资源加载加不了自定义头），
+    // 见 auth::authorized()。
+    let is_get_or_head = matches!(method, Method::Get | Method::Head);
+    if path.starts_with("/api/") && auth::enforced() {
+        if !auth::authorized(&rq, &path, is_get_or_head) {
+            return auth::unauthorized(rq);
+        }
+        // Origin / Referer 白名单只是附加防线，token 才是主防线
+        if !auth::origin_allowed(&rq) {
+            return auth::forbidden(rq);
+        }
+    }
+
     // 非 GET/HEAD 一律先把 body 收干净（避免 keep-alive 连接错位）
-    // 导入 PDF 的请求体可能是几十 MB，单独放宽
-    let limit = if path == "/api/upload" { MAX_UPLOAD } else { MAX_BODY };
+    // 导入 PDF 的请求体可能是几十 MB，按接口单独放宽
+    let limit = body_limit(&path);
     let mut body: Vec<u8> = Vec::new();
-    if !matches!(method, Method::Get | Method::Head) {
+    if !is_get_or_head {
         match read_body(&mut rq, limit) {
             Ok(b) => body = b,
             Err(()) => {
                 return send_json(
                     rq,
                     413,
-                    &err_json(&format!("请求体过大（上限 {}MB）", limit / 1048576)),
+                    &err_json(&format!(
+                        "请求体过大（上限 {}KB），已拒绝，未写入任何数据",
+                        limit / 1024
+                    )),
                 )
             }
         }
@@ -138,6 +171,10 @@ fn handle(mut rq: Request, ctx: &Ctx) {
         "/api/state" => return api::state(rq, &method, &body),
         "/api/notes" => return api::notes(rq, &method, &raw_query, &body),
         "/api/session" => return api::session(rq, &method, &raw_query, &body),
+        // 会话列表（2026-10 多会话）。Node 版与 Rust 版必须同时有 —— 少一边就会出现
+        // 「开发时能用、exe 里新建会话后列表是空的」（实测踩过：请求落到 SPA 回落，
+        // 返回的是 index.html，前端 JSON.parse 失败后当成"没有会话"）。
+        "/api/sessions" => return api::sessions(rq, &method, &raw_query),
         "/api/health" => return api::health(rq, ctx),
         "/api/ref-search" => return api::ref_search(rq, &raw_query),
         "/api/web-search" => return api::web_search(rq, &raw_query),
@@ -150,10 +187,14 @@ fn handle(mut rq: Request, ctx: &Ctx) {
     if !matches!(method, Method::Get | Method::Head) {
         return send_text(rq, 405, "Method Not Allowed");
     }
-    api::static_file(rq, &path);
+    api::static_file(rq, &path, method == Method::Head);
 }
 
-/// 读请求体，超过上限返回 Err
+/// 读请求体，超过上限返回 Err。
+///
+/// 读失败（客户端中途断开）按**空 body** 处理（Node 的 readBody 是 rejects，
+/// 上层会当成 400 "请求体解析失败"）—— 这里折中成两者都不更坏的结果：
+/// 空 body 会让后续校验失败并返回错误，不会误写用户数据。
 pub fn read_body(rq: &mut Request, limit: usize) -> Result<Vec<u8>, ()> {
     let mut buf: Vec<u8> = Vec::new();
     {
@@ -175,6 +216,33 @@ pub fn push_header(headers: &mut Vec<Header>, k: &str, v: &str) {
     if let Ok(h) = Header::from_bytes(k.as_bytes().to_vec(), v.as_bytes().to_vec()) {
         headers.push(h);
     }
+}
+
+/// 静态资源。HTML 只从 `static_file()` 出去，那里会注入 token —— 这里只负责
+/// 把字节发出去（注入后的长度由调用方给）。
+pub fn send_html(rq: Request, body: Vec<u8>, is_head: bool) {
+    let mut headers: Vec<Header> = Vec::new();
+    push_header(&mut headers, "Content-Type", MIME_HTML);
+    push_header(&mut headers, "Cache-Control", "no-cache");
+    // 子资源通道（/api/pdf 的 GET/HEAD 允许用它代替自定义头）。
+    // token 只出现在这个响应头里，不进日志、不进错误信息。
+    push_header(&mut headers, "Set-Cookie", &auth::session_cookie());
+    let len = body.len();
+    if is_head {
+        let resp = Response::new(
+            StatusCode(200),
+            headers,
+            Cursor::new(Vec::new()),
+            Some(len),
+            None,
+        )
+        .with_chunked_threshold(usize::MAX);
+        let _ = rq.respond(resp);
+        return;
+    }
+    let resp = Response::new(StatusCode(200), headers, Cursor::new(body), Some(len), None)
+        .with_chunked_threshold(usize::MAX);
+    let _ = rq.respond(resp);
 }
 
 /// 定长响应。tiny_http 默认超过 32KB 就改用 chunked（会丢掉 Content-Length），

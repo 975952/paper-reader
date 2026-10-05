@@ -5,7 +5,16 @@
  *
  * 真实部分：/api/import-pdf 的输入校验、真正的下载（arXiv 上的小 PDF，
  *   下载完写进 test 的临时 papers 目录，跑完删掉，不动用户的书架）。
- * 浏览器部分：文献关系面板的解析与渲染（/api/ref-search 用桩，免得依赖外网节奏）。
+ * 浏览器部分：参考文献面板的解析与渲染（/api/ref-search 用桩，免得依赖外网节奏）。
+ *
+ * 2026-10 新契约（本套件按它改写）：
+ *   · 参考文献**按需解析** —— 打开论文本身不再后台跑全文引用抽取，只有用户真的打开
+ *     「参考文献」这一块（标题栏展开 / 左栏图标）才开始整理；
+ *   · 面板标题与活动栏文案都叫**参考文献**（原来叫「文献关系」）；
+ *   · `#relFilter`（状态筛选）、`#relSort`（排序）、`#relFindPdf`（批量找未入库 PDF）、
+ *     `#relScanLib`（扫描库内引用）四个控件整体下架 —— 查找改成**逐条**触发
+ *     （行上的「查 PDF / 重查」+ 详情卡片里的「找这篇的 PDF」），库内引用结论跟着解析结果一起给；
+ *   · `#relSearch` 搜索框保留。
  */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
@@ -89,8 +98,8 @@ try {
   check('真实下载导入（联网）', false, String(e.message).slice(0, 90));
 }
 
-/* ═══════════ 三、浏览器：文献关系面板 ═══════════ */
-console.log('\n-- 文献关系面板');
+/* ═══════════ 三、浏览器：参考文献面板 ═══════════ */
+console.log('\n-- 参考文献面板');
 const browser = await puppeteer.launch({
   executablePath: CHROME, headless: 'shell',
   args: ['--no-sandbox', '--disable-gpu', '--window-size=1500,950'],
@@ -127,16 +136,44 @@ await page.evaluate((id) => {
   li.click();
 }, first.docId);
 await page.waitForFunction(() => window.__viewer?.pdf, { timeout: 40000 });
-// 等关系面板自动整理完
+await sleep(1200);
+
+/**
+ * 2026-10 新契约：参考文献是**按需解析**的 —— 打开论文本身不再后台跑全文引用抽取。
+ * 先断言「打开论文后 refs 还是空的、摘要行在提示用户打开这一块」，再展开面板触发解析。
+ */
+const lazy = await page.evaluate(() => ({
+  collapsed: document.getElementById('relSec').classList.contains('panel-collapsed'),
+  refs: (window.__state.refs || []).length,
+  summary: document.getElementById('relSummary').textContent,
+}));
+check('打开论文后不后台解析参考文献（按需模型）', lazy.refs === 0, `refs=${lazy.refs}`);
+check('未整理时摘要行告诉用户去哪儿触发（还没整理 / ↻）',
+  /还没整理|打开/.test(lazy.summary), JSON.stringify(lazy.summary));
+
+/** 展开「参考文献」这一块（= 触发按需解析的唯一入口）。面板隐藏时标题栏点不到，先走左栏活动栏。 */
+async function openRelPanel() {
+  const st = await page.evaluate(() => {
+    const sec = document.getElementById('relSec');
+    const r = sec.getBoundingClientRect();
+    return { collapsed: sec.classList.contains('panel-collapsed'), onScreen: r.height > 0 && r.width > 0 };
+  });
+  if (!st.onScreen) {
+    await page.evaluate(() => document.querySelector('#railLeft .rail-btn[data-rail="rel"]')?.click());
+    await sleep(300);
+  }
+  const stillCollapsed = await page.evaluate(() => document.getElementById('relSec').classList.contains('panel-collapsed'));
+  if (stillCollapsed) await page.click('#relSec .sec-head');
+}
+await openRelPanel();
+await page.waitForFunction(() => !document.getElementById('relSec').classList.contains('panel-collapsed'), { timeout: 5000 });
 await page.waitForFunction(() => (window.__state.refs || []).length > 0, { timeout: 60000 }).catch(() => {});
 await sleep(800);
-
-const relCollapsed = await page.$eval('#relSec', (n) => n.classList.contains('panel-collapsed'));
-check('打开论文后关系面板默认收起但已完成后台整理', relCollapsed && (await page.evaluate(() => (window.__state.refs || []).length > 0)), String(relCollapsed));
-// 标题栏是关系功能的唯一入口；用真实点击展开后再操作搜索 / 查 PDF。
-if (relCollapsed) await page.click('#relSec .sec-head');
-await page.waitForFunction(() => !document.getElementById('relSec').classList.contains('panel-collapsed'), { timeout: 5000 });
-check('点击关系入口可展开列表', await page.$eval('#relSec', (n) => !n.classList.contains('panel-collapsed')));
+const expanded = await page.evaluate(() => ({
+  collapsed: document.getElementById('relSec').classList.contains('panel-collapsed'),
+  refs: (window.__state.refs || []).length,
+}));
+check('展开「参考文献」这一块就开始整理', !expanded.collapsed && expanded.refs > 0, `refs=${expanded.refs}`);
 
 const rel = await page.evaluate(() => ({
   refs: (window.__state.refs || []).length,
@@ -159,7 +196,16 @@ check('条目里能找到它真正引用过的经典工作',
   await page.evaluate(() => (window.__state.refs || []).some((r) => /Attention Is All You Need|Vaswani/i.test(r.text))),
   'Attention Is All You Need');
 
-// 参考文献条目前的 [n] 不能伪装成正文引用；否则在文献列表点它只会回到同一页。
+/**
+ * 参考文献条目前的 [n] 不能伪装成正文引用；否则在文献列表点它只会回到同一页。
+ *
+ * ⚠️ 判据在 2026-10 被收窄过一次（原来要求「参考文献所在的这一页上不许有任何 .cite-link」）。
+ * 那个写法对合成夹具是错的：夹具每页都重复同一段正文，第 16 页既有参考文献条目
+ * **也有**带行内引用的正文（实测压着文字层的 span 是
+ * 「A citation to the original architecture appears here [1].」和
+ *  「A reference marker [3-5] tests clickable citation detection.」）——
+ * 那两条本来就该可点。真正要守的是：**参考文献条目本身**不许被当成正文引用。
+ */
 const refPage = await page.evaluate(() => window.__state.refs?.[0]?.page || 0);
 if (refPage) {
   await page.evaluate((p) => window.__viewer.goToPage(p), refPage);
@@ -167,10 +213,23 @@ if (refPage) {
 }
 const refPageLinks = await page.evaluate((p) => {
   const pageEl = document.querySelector(`.page[data-page="${p}"]`);
-  return pageEl ? pageEl.querySelectorAll('.cite-link').length : -1;
+  if (!pageEl) return { missing: true };
+  const spans = [...pageEl.querySelectorAll('.textLayer span:not(.markedContent)')];
+  const links = [...pageEl.querySelectorAll('.cite-link')];
+  const entries = (window.__state.refs || []).map((r) => (r.text || '').trim().toLowerCase()).filter((t) => t.length > 12);
+  const under = (r) => spans.filter((s) => {
+    const sr = s.getBoundingClientRect();
+    return sr.left < r.right && sr.right > r.left && sr.top < r.bottom && sr.bottom > r.top;
+  });
+  const onEntry = links.filter((l) => under(l.getBoundingClientRect()).some((s) => {
+    const t = (s.textContent || '').trim().toLowerCase();
+    return t.length > 12 && entries.some((e) => e.startsWith(t.slice(0, 24)) || t.startsWith(e.slice(0, 24)));
+  }));
+  return { total: links.length, onEntry: onEntry.length };
 }, refPage);
-check('参考文献表编号不会伪装成正文引用', refPage > 0 && refPageLinks === 0,
-  `p.${refPage} 可点击编号 ${Math.max(0, refPageLinks)}`);
+check('正文里的 [n] 可点，但参考文献条目本身不会被伪装成正文引用',
+  !refPageLinks.missing && refPageLinks.total > 0 && refPageLinks.onEntry === 0,
+  `p.${refPage} 可点编号 ${refPageLinks.total ?? 0} 处 · 压在参考文献条目上的 ${refPageLinks.onEntry ?? '(页面不在)'} 处`);
 
 /* 3.0 阶段 3：分组列表 + 概览计数 + 三个视图控件 */
 console.log('\n-- 分组列表与概览');
@@ -185,7 +244,8 @@ const grouped = await page.evaluate(() => {
       head: g(id)?.querySelector('.rel-group-head')?.textContent.trim() || '',
     })),
     items: document.querySelectorAll('#relList .rel-item').length,
-    controls: ['relSearch', 'relFilter', 'relSort'].every((x) => !!document.getElementById(x)),
+    controls: ['relSearch'].filter((x) => !!document.getElementById(x)),
+    removedControls: ['relFilter', 'relSort', 'relFindPdf', 'relScanLib'].filter((x) => !!document.getElementById(x)),
     summary: document.getElementById('relSummary').textContent,
   };
 });
@@ -202,7 +262,9 @@ check('概览四段数字与分组计数逐项一致', !!nums3
   && Number(nums3[3]) === grouped.groups[1].count
   && Number(nums3[4]) === grouped.groups[2].count,
   grouped.summary);
-check('搜索 / 状态筛选 / 排序三个控件都在', grouped.controls);
+check('搜索框还在（状态筛选 / 排序已下架）', grouped.controls.join() === 'relSearch', grouped.controls.join(',') || '(无)');
+check('下架的筛选 / 排序 / 批量找 PDF / 库内扫描控件确实不在',
+  grouped.removedControls.length === 0, grouped.removedControls.join(',') || '(都没有)');
 
 /* 3.1 单条查 PDF → 只提供打开链接 */
 console.log('\n-- 单条查 PDF 与链接');
@@ -246,33 +308,19 @@ check('详情里给出了已查到的开放版本（打开链接 / 复制链接�
   /打开链接/.test(refDetail.detail) && /复制链接/.test(refDetail.detail), refDetail.detail.slice(0, 60));
 await page.evaluate(() => document.getElementById('citeClose').click());
 
-/* 3.2 批量找 PDF */
-console.log('\n-- 批量找未入库的 PDF');
-await page.click('#relFindPdf');
-await page.waitForFunction(() => !/正在查/.test(document.getElementById('relSummary').textContent), { timeout: 60000 }).catch(() => {});
-await sleep(600);
-const batch = await page.evaluate(() => {
-  const summary = document.getElementById('relSummary').textContent;
-  return {
-    summary,
-    btn: document.getElementById('relFindPdf').textContent,
-    found: (window.__state.refs || []).filter((r) => r.found).length,
-    openCount: Number((summary.match(/查到开放版本\s*(\d+)/) || [])[1] || 0),
-    pdfRows: document.querySelectorAll('#relList .rel-group[data-group="pdf"] .rel-item').length,
-  };
-});
-check('批量查找会推进并给出结果', batch.found > 0, `已查 ${batch.found} 条 · 按钮「${batch.btn}」`);
-check('查完后统计里出现「查到开放版本 N 条」，并与「已找到开放版本」组对得上',
-  batch.openCount > 0 && batch.pdfRows === batch.openCount, `概览 ${batch.openCount} 条 · 组内 ${batch.pdfRows} 行`);
+/* 3.2 批量找 PDF 入口已下架（2026-10）：查找改成**逐条**触发 ——
+   行上的「查 PDF / 重查」+ 详情卡片里的「找这篇的 PDF」（上面 3.1 已经验过）。
+   这里只记录当前的分组分布，供下面的搜索用例对照。 */
+console.log('\n-- 分组分布（批量入口已下架，查找改为逐条）');
+const pdfRows = await page.evaluate(() => document.querySelectorAll('#relList .rel-group[data-group="pdf"] .rel-item').length);
+check('「已找到开放版本」组的行数与状态一致（单条查找的结果落在这一组）',
+  pdfRows === await page.evaluate(() => (window.__state.refs || []).filter((r) => r.found).length),
+  `组内 ${pdfRows} 行`);
 
-/* 3.2b 阶段 3：搜索与状态筛选真的作用于列表 */
+/* 3.2b 搜索真的作用于列表（状态筛选控件已随视图控件一起下架） */
 const viewTest = await page.evaluate(async () => {
-  const snap = () => ({
-    items: document.querySelectorAll('#relList .rel-item').length,
-    groups: [...document.querySelectorAll('#relList .rel-group')].map((x) => x.dataset.group),
-  });
+  const snap = () => ({ items: document.querySelectorAll('#relList .rel-item').length });
   const inp = document.getElementById('relSearch');
-  const sel = document.getElementById('relFilter');
   const before = snap();
   inp.value = 'zzz-no-such-reference';
   inp.dispatchEvent(new Event('input'));
@@ -281,38 +329,20 @@ const viewTest = await page.evaluate(async () => {
   inp.value = '';
   inp.dispatchEvent(new Event('input'));
   await new Promise((r) => setTimeout(r, 80));
-  const cleared = snap();
-  sel.value = 'pdf';
-  sel.dispatchEvent(new Event('change'));
-  await new Promise((r) => setTimeout(r, 80));
-  const onlyPdf = snap();
-  sel.value = 'all';
-  sel.dispatchEvent(new Event('change'));
-  await new Promise((r) => setTimeout(r, 80));
-  return { before, searched, cleared, onlyPdf, restored: snap() };
+  return { before, searched, cleared: snap() };
 });
 check('搜索框能收窄列表、清空后还原',
   viewTest.searched.items === 0 && viewTest.cleared.items === viewTest.before.items && viewTest.cleared.items > 0,
   `全部 ${viewTest.before.items} → 搜不到 ${viewTest.searched.items} → 清空 ${viewTest.cleared.items}`);
-check('状态筛选只留被选中的那一组',
-  viewTest.onlyPdf.groups.join() === 'pdf' && viewTest.onlyPdf.items === batch.pdfRows
-  && viewTest.restored.groups.join() === 'lib,pdf,todo',
-  `只留 ${viewTest.onlyPdf.groups.join(',') || '(空)'} · 还原成 ${viewTest.restored.groups.join(',')}`);
 
-/* 3.3 库内引用扫描 */
-console.log('\n-- 库内引用扫描');
-await page.click('#relScanLib');
-await page.waitForFunction(() => !window.__state.relBusy, { timeout: 120000 }).catch(() => {});
-await sleep(800);
-const scan = await page.evaluate(() => ({
-  cited: (window.__state.citedBy || []).map((p) => p.name),
-  scanned: !!window.__state.relScanned,
-  summary: document.getElementById('relSummary').textContent,
+/* 3.3 库内引用结论：扫描按钮已下架，结论行跟着解析结果一起给 */
+console.log('\n-- 库内引用结论');
+const cited = await page.evaluate(() => ({
   body: document.querySelector('#relList .rel-cited')?.textContent || '',
+  summary: document.getElementById('relSummary').textContent,
 }));
-check('扫描完成并给出库内引用结论', scan.scanned, `被引用：${scan.cited.join(', ') || '(无)'}`);
-check('摘要行里写明了库内引用情况', /引用了本文/.test(scan.summary), scan.summary);
-check('结论行说明了与书架的关系', /书架里|引用了/.test(scan.body), scan.body.slice(0, 70));
+check('列表开头给出「本文有没有引用书架里的论文」的结论', /书架/.test(cited.body), cited.body.slice(0, 70));
+check('摘要行里写明了书架情况', /书架已有/.test(cited.summary), cited.summary);
 
 /* 3.4 文献检索卡片里的链接 */
 console.log('\n-- 文献检索卡片');

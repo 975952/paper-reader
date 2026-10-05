@@ -170,7 +170,8 @@ check('翻回来时选中方块被重新画出来（不会凭空消失）', back
 
 // 用工具条按钮翻页：这是真实点击，但**不该**把选区弄没 ——
 // 选区会记着，翻回来还能看到方块（原生阅读器就是这个行为）
-await page.click('#nextPage');
+// 2026-10：翻页按钮从顶栏搬到底栏，id 由 `#nextPage` 改成 `#footNextPage`。
+await page.click('#footNextPage');
 await sleep(1500);
 const viaBtn = await st();
 check('点工具条翻页按钮不会把选区弄没', viaBtn.stateSel === keptText, `state=${viaBtn.stateSel}`);
@@ -251,7 +252,8 @@ await sleep(1200);
 await selectIn(1, 1, 4);
 await sleep(500);
 const alignBefore = await page.evaluate(() => window.__ctx.alignProbe());
-await page.click('#zoomIn');
+// 2026-10：缩放按钮搬到底栏，id 由 `#zoomIn` 改成 `#footZoomIn`。
+await page.click('#footZoomIn');
 await sleep(1600);
 const alignAfter = await page.evaluate(() => window.__ctx.alignProbe());
 check('缩放后方块仍然跟着选中的文字（没有跑位）',

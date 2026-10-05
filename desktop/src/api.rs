@@ -11,9 +11,21 @@ use serde_json::{json, Map, Value};
 use tiny_http::{Method, Request};
 
 use crate::assets;
-use crate::server::{err_json, send_json, send_raw, send_reader, send_text, Ctx};
+use crate::auth;
+use crate::limits;
+use crate::server::{err_json, send_html, send_json, send_raw, send_reader, send_text, Ctx};
 use crate::store;
 use crate::util::*;
+
+/// 诊断模式（审计 §P2）：只有显式 `PRT_DIAGNOSTICS=1` 才在接口里返回本机绝对路径。
+/// 测试 harness 需要它来做「隔离目录」安全断言（test/_env.mjs 的
+/// assertIsolatedDataDir(resolveDataDir(papers.dir))），所以它们 spawn 服务时要带上。
+fn diagnostics() -> bool {
+    match std::env::var("PRT_DIAGNOSTICS") {
+        Ok(v) => v.trim() == "1",
+        Err(_) => false,
+    }
+}
 
 /* --------------------------------------------------------------- health */
 
@@ -63,11 +75,16 @@ pub fn papers(rq: Request, _ctx: &Ctx) {
         bm.cmp(&am)
     });
 
-    send_json(
-        rq,
-        200,
-        &json!({ "papers": out, "dir": dir.to_string_lossy() }),
-    );
+    // 审计 §P2：默认不返回本机绝对路径；只有显式开启诊断才给
+    let mut payload = Map::new();
+    payload.insert("papers".to_string(), Value::Array(out));
+    if diagnostics() {
+        payload.insert(
+            "dir".to_string(),
+            Value::String(dir.to_string_lossy().to_string()),
+        );
+    }
+    send_json(rq, 200, &Value::Object(payload));
 }
 
 /* ------------------------------------------------------------------ pdf */
@@ -292,10 +309,39 @@ pub fn config(rq: Request, method: &Method, body: &[u8]) {
             send_json(rq, 200, &Value::Object(merged));
         }
         Method::Post => {
-            let patch = match parse_json(body) {
+            let raw = match parse_json(body) {
                 Ok(v) => v,
-                Err(e) => return send_json(rq, 500, &err_json(&e)),
+                // 与 server.js 一致：解析失败回 400
+                Err(e) => return send_json(rq, 400, &err_json(&e)),
             };
+            // 审计 §P1：严格字段白名单 + 范围限制，未知字段忽略
+            let filtered = limits::sanitize_config_patch(&raw);
+            if !filtered.ignored.is_empty() {
+                store::log_line(&format!(
+                    "[diag] /api/config 忽略字段: {}",
+                    filtered.ignored.join(", ")
+                ));
+            }
+            /*
+             * 超长字段 → 400，**绝不截断保存**（审计 §验收：「超限返回 413/400，
+             * 不截断后静默保存」）。从前一个 5000 字的 model 会被悄悄存成 256 字、
+             * 接口还回 200 —— 用户以为保存成功了，设置其实已经被改坏。
+             */
+            if !filtered.capped.is_empty() {
+                let detail = filtered
+                    .capped
+                    .iter()
+                    .map(|(f, n)| format!("{}（上限 {} 字符）", f, n))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                return send_json(
+                    rq,
+                    400,
+                    &err_json(&format!("字段超长：{}。请缩短后重试（未保存任何改动）", detail)),
+                );
+            }
+            let patch = Value::Object(filtered.patch);
+
             let cur = store::read_json("config.json", json!({}));
             let base = Value::Object(default_config());
             let next = store::merge(&store::merge(&base, &cur), &patch);
@@ -363,12 +409,16 @@ pub fn notes(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
         Method::Post => {
             let payload = match parse_json(body) {
                 Ok(v) => v,
-                Err(e) => return send_json(rq, 500, &err_json(&e)),
+                Err(e) => return send_json(rq, 400, &err_json(&e)),
             };
             let items = match payload.get("items") {
                 Some(Value::Array(a)) => Value::Array(a.clone()),
                 _ => json!([]),
             };
+            // 审计 §P1：条目数 + 总字符数（请求体字节上限在 server.rs 里）
+            if let Err(msg) = limits::check_notes(&items) {
+                return send_json(rq, 413, &err_json(&msg));
+            }
             if !store::write_json(&file, &items) {
                 return send_json(rq, 500, &err_json("保存笔记失败，请重试"));
             }
@@ -378,9 +428,83 @@ pub fn notes(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
     }
 }
 
+/** 会话文件名：有 sid 走新布局，没有就用老的单会话文件 */
+fn session_file(doc: &str, sid: &str) -> String {
+    session_file_for(&doc_id_of(doc), sid)
+}
+
+fn session_file_for(key: &str, sid: &str) -> String {
+    if sid.is_empty() {
+        format!("session-{}.json", key)
+    } else {
+        format!("session-{}-{}.json", key, sid)
+    }
+}
+
+/**
+ * 找这个 (doc, sid) 真正对应的文件，**优先认老键**。
+ *
+ * 为什么需要：修 `doc_id_of` 幂等之前，前端传 docId 时会被二次哈希，
+ * 于是同一个文档存在两种键名。已经用老键写过的会话不能因为修了 bug 就"消失"：
+ * 老键文件存在就继续用它，不存在才用新的正确键。
+ */
+fn session_file_resolved(doc: &str, sid: &str) -> String {
+    for key in doc_key_candidates(doc) {
+        let f = session_file_for(&key, sid);
+        if store::read_json_opt(&f).is_some() {
+            return f;
+        }
+    }
+    session_file(doc, sid)
+}
+
+/**
+ * 一个 doc 参数可能对应的所有历史键（新的正确键 + 老的双哈希键 + 文件名形式）。
+ * 与 Node 版 `docKeyCandidates()` 保持一致。
+ */
+fn doc_key_candidates(doc: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |v: String| {
+        if !v.is_empty() && !out.contains(&v) {
+            out.push(v);
+        }
+    };
+    push(doc_id_of(doc));
+    let s = doc.to_string();
+    let mut h: u32 = 5381;
+    for b in s.bytes() {
+        h = (h.wrapping_mul(33)) ^ (b as u32);
+    }
+    let slug: String = s
+        .rsplit_once('.')
+        .map(|(a, _)| a.to_string())
+        .unwrap_or_else(|| s.clone())
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' || (c as u32) >= 0x4e00 { c } else { '_' })
+        .take(48)
+        .collect();
+    push(format!("{}-{:x}", slug, h));
+    out
+}
+
+/**
+ * `/api/session` —— 一篇论文的对话。
+ *
+ * 2026-10 起支持**多会话**（与 Node 版行为一致，用户口径「问答是不是要做多对话分对话」）：
+ *   老： session-<docId>.json                ← 单会话时代的文件，仍然照读照写
+ *   新： session-<docId>-<sid>.json          ← 每个会话一个文件，sid 由前端生成
+ * 不传 `sid` 时行为与以前完全一致（读/写老文件），所以老存档不会读坏。
+ */
 pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
     let doc = query_get(raw_query, "doc").unwrap_or_else(|| "default".to_string());
-    let file = format!("session-{}.json", doc_id_of(&doc));
+    let sid = query_get(raw_query, "sid")
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(40)
+        .collect::<String>();
+    // 读 / 写 / 删都先解析到"真正存在的那一份"，避免修了幂等之后老会话读不到
+    let file = session_file_resolved(&doc, &sid);
     match method {
         Method::Get => send_json(rq, 200, &store::read_json(&file, json!({"entries":[],"history":[],"ops":[]}))),
         Method::Post => {
@@ -388,13 +512,93 @@ pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
                 Ok(v) => v,
                 Err(e) => return send_json(rq, 400, &err_json(&e)),
             };
+            // 审计 §P1：条目数 + 总字符数 + 附件元数据体积
+            if let Err(msg) = limits::check_session(&payload) {
+                return send_json(rq, 413, &err_json(&msg));
+            }
             if !store::write_json(&file, &payload) {
                 return send_json(rq, 500, &err_json("保存阅读会话失败，请重试"));
             }
             send_json(rq, 200, &json!({"ok":true}));
         }
+        // 删掉一个会话文件（不碰论文本身）
+        Method::Delete => {
+            if store::remove_file(&file) {
+                send_json(rq, 200, &json!({"ok":true}))
+            } else {
+                send_json(rq, 500, &err_json("删除会话失败"))
+            }
+        }
         _ => send_text(rq, 405, "Method Not Allowed"),
     }
+}
+
+/**
+ * `/api/sessions?doc=<doc>` —— 会话列表（只回元信息，不回正文）。
+ * 对所有历史键都扫一遍，老的单会话文件以 `sid: ""` 出现（前端当"默认会话"）。
+ */
+pub fn sessions(rq: Request, _method: &Method, raw_query: &str) {
+    let doc = query_get(raw_query, "doc").unwrap_or_else(|| "default".to_string());
+    let keys = doc_key_candidates(&doc);
+
+    let mut out: Vec<Value> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for name in store::list_data_files() {
+        // 先判断这个文件名属于哪个候选键、sid 是什么；不属于任何一个就跳过
+        let sid = keys.iter().find_map(|key| {
+            let legacy = format!("session-{}.json", key);
+            let prefix = format!("session-{}-", key);
+            if name == legacy {
+                Some(String::new())
+            } else if name.starts_with(&prefix) && name.ends_with(".json") {
+                Some(name[prefix.len()..name.len() - 5].to_string())
+            } else {
+                None
+            }
+        });
+        let sid = match sid {
+            Some(s) => s,
+            None => continue,
+        };
+        if seen.contains(&name) {
+            continue;
+        }
+        seen.push(name.clone());
+        let data = store::read_json(&name, json!(null));
+        if data.is_null() {
+            continue;
+        }
+        let entries = data.get("entries").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let first_user = entries.iter().find(|e| e.get("kind").and_then(|k| k.as_str()) == Some("user"));
+        let last_text = entries.iter().rev().find(|e| {
+            e.get("text").and_then(|t| t.as_str()).map(|t| !t.trim().is_empty()).unwrap_or(false)
+        });
+        let clip = |v: Option<&Value>, n: usize| -> String {
+            v.and_then(|x| x.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(n)
+                .collect()
+        };
+        let updated = data.get("updatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        out.push(json!({
+            "sid": sid,
+            "count": entries.len(),
+            "title": clip(first_user, 60),
+            "preview": clip(last_text, 80),
+            "updatedAt": updated,
+        }));
+    }
+    out.sort_by(|a, b| {
+        let av = a.get("updatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let bv = b.get("updatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    send_json(rq, 200, &json!({ "sessions": out }));
 }
 
 /* ------------------------------------------------------------ 静态资源 */
@@ -478,7 +682,7 @@ pub fn upload(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
     );
 }
 
-pub fn static_file(rq: Request, decoded_path: &str) {
+pub fn static_file(rq: Request, decoded_path: &str, is_head: bool) {
     let key = match static_asset_key(decoded_path) {
         Some(k) => k,
         None => return send_text(rq, 400, "Bad path"),
@@ -486,6 +690,12 @@ pub fn static_file(rq: Request, decoded_path: &str) {
 
     if let Some(asset) = assets::get(&key) {
         let ext = extname(&key);
+        // 应用自己的 HTML 页面：注入 token（审计 §P0 第 2 条：只注入本应用页面）
+        if ext.eq_ignore_ascii_case(".html") {
+            let html = String::from_utf8_lossy(&asset.data).to_string();
+            let injected = auth::inject_into_html(&html);
+            return send_html(rq, injected.into_bytes(), is_head);
+        }
         let mime = mime_of(&ext);
         return send_raw(
             rq,
@@ -499,13 +709,9 @@ pub fn static_file(rq: Request, decoded_path: &str) {
     // 单页应用：未知且没有扩展名的路径回落到 index.html
     if extname(&key).is_empty() {
         if let Some(index) = assets::get("index.html") {
-            return send_raw(
-                rq,
-                200,
-                Some(MIME_HTML),
-                index.data.into_owned(),
-                &[("Cache-Control", "no-cache")],
-            );
+            let html = String::from_utf8_lossy(&index.data).to_string();
+            let injected = auth::inject_into_html(&html);
+            return send_html(rq, injected.into_bytes(), is_head);
         }
     }
 
@@ -633,27 +839,244 @@ const MAX_IMPORT: usize = 128 * 1024 * 1024;
 
 /// 内网地址不接：这个接口是「让本机去下载一个外部 URL」，
 /// 不挡的话就成了可被网页利用的内网探测器（SSRF）。导入论文用的都是公网地址。
-fn is_private_host(host: &str) -> bool {
-    let h = host.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
-    if h.is_empty() {
-        return true;
+/// 与 server.js 的 `isPrivateHost()` 逐条一致。
+/// [a,b,c,d] 是不是回环 / 私网 / 链路本地 / 保留地址。
+/// 与 server.js 的 `isPrivateIPv4()` 逐条一致。
+fn is_private_ipv4(quad: [u32; 4]) -> bool {
+    if quad.iter().any(|n| *n > 255) {
+        return true; // 不合法的字面量一律当内网（宁严勿松）
     }
-    if h == "localhost" || h.ends_with(".localhost") || h.ends_with(".local") || h.ends_with(".internal") {
-        return true;
-    }
-    if h == "::1" || h.starts_with("fe80:") || h.starts_with("fc") || h.starts_with("fd") {
-        return true;
-    }
-    let parts: Vec<u32> = h.split('.').filter_map(|x| x.parse::<u32>().ok()).collect();
-    if parts.len() != 4 {
-        return false;
-    }
-    let (a, b) = (parts[0], parts[1]);
+    let (a, b) = (quad[0], quad[1]);
     matches!(a, 0 | 10 | 127)
-        || (a == 169 && b == 254)
+        || (a == 169 && b == 254)          // 链路本地 + 云元数据 169.254.169.254
         || (a == 192 && b == 168)
         || (a == 172 && (16..=31).contains(&b))
         || (a == 100 && (64..=127).contains(&b))
+        || (a == 198 && (b == 18 || b == 19))   // 基准测试网段
+        || a >= 224                              // 组播 / 保留
+}
+
+/// 点分四段 → [a,b,c,d]；段不合法返回 None
+fn parse_ipv4_quad(s: &str) -> Option<[u32; 4]> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let mut out = [0u32; 4];
+    for (i, p) in parts.iter().enumerate() {
+        if p.is_empty() || p.len() > 3 || !p.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        out[i] = p.parse().ok()?;
+    }
+    Some(out)
+}
+
+/// 内网地址不接（SSRF 防护）。与 server.js 的 `isPrivateHost()` 逐条一致。
+///
+/// 两个实测发现的真实绕过口子都在这里堵上：
+///   * `http://localhost./` —— 结尾的点，DNS 上等价于 localhost（解析到 ::1）；
+///   * `http://[::ffff:169.254.169.254]/` —— IPv4-mapped IPv6，会被规范化成十六进制
+///     `[::ffff:a9fe:a9fe]`，按点分四段匹配是匹配不到的。
+fn is_private_host(host: &str) -> bool {
+    let mut h = host.to_ascii_lowercase();
+    // IPv6 字面量可能带方括号（`URL.hostname` 就有；Node 那边同样处理）
+    if h.starts_with('[') && h.ends_with(']') && h.len() >= 2 {
+        h = h[1..h.len() - 1].to_string();
+    }
+    let h = h.trim_end_matches('.').to_string();
+    if h.is_empty() {
+        return true;
+    }
+
+    // 主机名形态
+    if h == "localhost"
+        || h.ends_with(".localhost")
+        || h.ends_with(".local")
+        || h.ends_with(".internal")
+        || h.ends_with(".home.arpa")
+        || h.ends_with(".lan")
+        || h.ends_with(".intranet")
+    {
+        return true;
+    }
+
+    // IPv6：只在确实是 IPv6 字面量（含冒号）时按前缀判，
+    // 避免 `fc…` / `fd…` 开头的主机名被误伤
+    if h.contains(':') {
+        if h == "::1" || h == "::" {
+            return true;
+        }
+        // ::ffff:a9fe:a9fe（IPv4-mapped 的十六进制规范化形式）
+        if let Some(rest) = h.strip_prefix("::ffff:") {
+            if let Some((hi, lo)) = rest.split_once(':') {
+                if let (Ok(a), Ok(b)) = (u32::from_str_radix(hi, 16), u32::from_str_radix(lo, 16)) {
+                    let v = a * 65536 + b;
+                    return is_private_ipv4([
+                        (v >> 24) & 255,
+                        (v >> 16) & 255,
+                        (v >> 8) & 255,
+                        v & 255,
+                    ]);
+                }
+            }
+            // ::ffff:169.254.169.254（点分四段写法的 mapped 地址）
+            if rest.contains('.') {
+                if let Some(q) = parse_ipv4_quad(rest) {
+                    return is_private_ipv4(q);
+                }
+                return true; // 认不出来但确实是 mapped 形式 → 按内网处理
+            }
+        }
+        if h.starts_with("fe80:") || h.starts_with("fec0:") {
+            return true; // 链路本地 / 站点本地
+        }
+        // fc00::/7 唯一本地地址。写法必须是「f」+「c 或 d」+ 最多两位十六进制 +「:」——
+        // `fc00::1` 的冒号在第 5 个字符，`fc::1` 在第 3 个，两种都要认出来。
+        let b = h.as_bytes();
+        if b.len() >= 3 && b[0] == b'f' && (b[1] == b'c' || b[1] == b'd') {
+            let digits = b[2..].iter().take_while(|c| c.is_ascii_hexdigit()).count();
+            if digits <= 2 && b.get(2 + digits) == Some(&b':') {
+                return true;
+            }
+        }
+        if h.starts_with("ff") {
+            return true; // 组播
+        }
+        if h.starts_with("2001:db8:") || h.starts_with("2001:0db8:") {
+            return true; // 文档用网段
+        }
+        if h.starts_with("64:ff9b:") || h.starts_with("2002:") {
+            return true; // NAT64 / 6to4（可能映射到内网）
+        }
+        return false;
+    }
+
+    // IPv4
+    match parse_ipv4_quad(&h) {
+        Some(q) => is_private_ipv4(q),
+        None => false,
+    }
+}
+
+/// 重定向跳数上限（审计 §P1：例如最多 3 跳）
+const MAX_REDIRECTS: usize = 3;
+
+/// 解析一个「允许让本机去下载」的 URL：协议 + 凭证（+ 可选的内网检查）。
+/// 审计 §P1 要求**重定向的每一跳**都重新做检查。
+///
+/// `check_private` 之所以要能关掉：**第一跳**的内网检查由调用方用原始错误码/文案做
+/// （`import_pdf` 顶部的 `check_fetch_url`，回 400「内网地址不允许导入」）。
+/// 用户自己指定、且已经过检查的地址不该被查第二遍；要挡的是**重定向** ——
+/// 所以第 2 跳起每一跳都必须做内网检查。
+fn check_fetch_url(raw: &str, check_private: bool) -> Result<String, String> {
+    let s = raw.trim();
+    if !is_external_url(s) {
+        return Err("只支持 http/https 链接".to_string());
+    }
+    let rest = s.split_once("://").map(|(_, r)| r).unwrap_or("");
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return Err("url 不允许携带用户名密码".to_string());
+    }
+    if check_private {
+        let host = host_of(s);
+        if is_private_host(&host) {
+            return Err("内网地址不允许导入".to_string());
+        }
+    }
+    Ok(s.to_string())
+}
+
+/// 相对 Location 也要能解析：以当前 URL 为基准拼出绝对地址。
+/// （`rust_url` 依赖不在，这里只处理 http(s) 下最常见的三种形式。）
+fn resolve_redirect(base: &str, loc: &str) -> Option<String> {
+    let loc = loc.trim();
+    if loc.is_empty() {
+        return None;
+    }
+    if is_external_url(loc) {
+        return Some(loc.to_string());
+    }
+    if loc.starts_with("//") {
+        let scheme = base.split_once("://").map(|(s, _)| s).unwrap_or("https");
+        return Some(format!("{}:{}", scheme, loc));
+    }
+    let (scheme, rest) = base.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if loc.starts_with('/') {
+        return Some(format!("{}://{}{}", scheme, authority, loc));
+    }
+    // 相对路径：砍掉最后一段再拼
+    let path = &rest[authority.len()..];
+    let base_path = path.split(['?', '#']).next().unwrap_or("/");
+    let dir = match base_path.rfind('/') {
+        Some(i) => &base_path[..=i],
+        None => "/",
+    };
+    Some(format!("{}://{}{}{}", scheme, authority, dir, loc))
+}
+
+/// 手动跟随重定向（最多 MAX_REDIRECTS 跳），**每一跳**重新做协议 + 内网检查。
+///
+/// 从前这里是 `agent.get(&target).call()` —— ureq 默认自动跟随重定向，
+/// 于是公网地址只要 302 到 http://127.0.0.1:… 或 http://169.254.169.254/
+/// 就能绕过全部内网检查（审计 §P1）。
+///
+/// `check_private_on_first_hop`：默认 true（直连地址照旧立刻被拒）。
+/// 传 false 只有一种场合 —— 调用方自己已经在顶层做过第一跳的内网判定
+/// （`import_pdf` 就是这样），避免重复判定、也让直连地址的错误码保持原样。
+///
+/// 返回最终响应，或用户可见的错误文案。
+fn fetch_following_safely(
+    agent: &ureq::Agent,
+    target: &str,
+    check_private_on_first_hop: bool,
+) -> Result<ureq::Response, String> {
+    let mut current = target.to_string();
+    for hop in 0..=MAX_REDIRECTS {
+        let check_private = if hop == 0 { check_private_on_first_hop } else { true };
+        let checked = check_fetch_url(&current, check_private)?;
+        let resp = agent
+            .get(&checked)
+            .set("User-Agent", SEARCH_UA)
+            .set("Accept", "application/pdf,*/*;q=0.8")
+            .call()
+            .map_err(|e| format!("下载失败：{}", sanitize_transport(&e)))?;
+
+        let status = resp.status();
+        if !(300..400).contains(&status) {
+            return Ok(resp);
+        }
+        let loc = resp.header("Location").unwrap_or("").to_string();
+        if loc.is_empty() {
+            drop(resp);
+            return Err("对方返回了一个没有 Location 的跳转".to_string());
+        }
+        drop(resp); // 丢掉这次响应体，再重新检查下一跳
+        if hop == MAX_REDIRECTS {
+            return Err(format!("跳转次数过多（超过 {} 次），已停止", MAX_REDIRECTS));
+        }
+        let next = match resolve_redirect(&checked, &loc) {
+            Some(n) => n,
+            None => return Err("对方返回的跳转地址不合法".to_string()),
+        };
+        store::log_line(&format!("[diag] /api/import-pdf 跟随跳转 -> {}", host_of(&next)));
+        current = next;
+    }
+    Err("跳转次数过多，已停止".to_string())
+}
+
+/// 网络异常 → 用户可见文案（去掉底层细节里的本机信息）
+fn sanitize_transport(e: &ureq::Error) -> String {
+    let raw = match e {
+        ureq::Error::Transport(t) => t
+            .message()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| t.to_string()),
+        other => other.to_string(),
+    };
+    limits::sanitize_message(&raw, "网络请求失败")
 }
 
 /// 从 URL / Content-Disposition 里猜文件名
@@ -712,40 +1135,67 @@ pub fn import_pdf(rq: Request, raw_query: &str) {
     if target.chars().count() > 2000 {
         return send_json(rq, 400, &err_json("url 过长"));
     }
-    if !is_external_url(&target) {
-        return send_json(rq, 400, &err_json("只支持 http/https 链接"));
-    }
-    let host = host_of(&target);
-    if is_private_host(&host) {
-        return send_json(rq, 400, &err_json("内网地址不允许导入"));
+    // 初始 URL 先检查一次（错误码/文案与从前一致），随后**每一跳**都会再检查一次。
+    // 直连就已经挡掉内网地址（不发出任何请求）；重定向目标由 fetch_following_safely
+    // 逐跳检查 —— 所以透传「第一跳已检查过」。
+    if let Err(msg) = check_fetch_url(&target, true) {
+        return send_json(rq, 400, &err_json(&msg));
     }
 
     // 下载用更长的读超时；同样必须带 TLS
     let agent = http_agent_with(15, 60);
 
-    let resp = match agent
-        .get(&target)
-        .set("User-Agent", SEARCH_UA)
-        .set("Accept", "application/pdf,*/*;q=0.8")
-        .call()
-    {
+    // 手动跟随重定向：每一跳重新做协议 / 凭证 / 内网检查（审计 §P1）
+    let resp = match fetch_following_safely(&agent, &target, false) {
         Ok(r) => r,
-        Err(e) => {
-            return send_json(rq, 502, &err_json(&format!("下载失败：{}", e)));
+        Err(msg) => {
+            store::log_line(&format!("[diag] /api/import-pdf 失败 host={} err={}", host_of(&target), msg));
+            return send_json(rq, 502, &err_json(&msg));
         }
     };
+
+    let status = resp.status();
+    if !(200..300).contains(&status) {
+        return send_json(rq, 502, &err_json(&format!("对方返回 {}，没能拿到 PDF", status)));
+    }
     let final_url = resp.get_url().to_string();
     let disposition = resp.header("Content-Disposition").unwrap_or("").to_string();
+    let declared: u64 = resp
+        .header("Content-Length")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    if declared > MAX_IMPORT as u64 {
+        drop(resp);
+        return send_json(
+            rq,
+            413,
+            &err_json(&format!("文件太大（{}MB）", declared / 1048576)),
+        );
+    }
+
     let mut body: Vec<u8> = Vec::new();
     {
         use std::io::Read;
+        // 边读边计数：没有 Content-Length（chunked）时也不能让内存无上限地涨
         let mut limited = resp.into_reader().take((MAX_IMPORT + 1) as u64);
         if let Err(e) = limited.read_to_end(&mut body) {
-            return send_json(rq, 502, &err_json(&format!("读取内容失败：{}", e)));
+            store::log_line(&format!("[diag] /api/import-pdf 读取内容失败: {}", e));
+            return send_json(
+                rq,
+                502,
+                &err_json(&format!(
+                    "读取内容失败：{}",
+                    limits::sanitize_message(&e.to_string(), "网络中断")
+                )),
+            );
         }
     }
     if body.len() > MAX_IMPORT {
-        return send_json(rq, 413, &err_json(&format!("文件太大（{}MB）", body.len() / 1048576)));
+        return send_json(
+            rq,
+            413,
+            &err_json(&format!("文件太大（超过 {}MB）", MAX_IMPORT / 1048576)),
+        );
     }
     if body.is_empty() {
         return send_json(rq, 400, &err_json("下回来的是空文件"));
@@ -769,14 +1219,15 @@ pub fn import_pdf(rq: Request, raw_query: &str) {
     let final_name = unique_pdf_name(&name, size);
     let abs = crate::util::dirs().papers.join(&final_name);
     if std::fs::write(&abs, &body).is_err() {
-        return send_json(rq, 500, &err_json("写入 papers/ 失败"));
+        return send_json(rq, 500, &err_json("写入 papers/ 失败：请检查磁盘空间与目录权限"));
     }
     let real = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(size);
+    // 日志里不打印完整 URL 的查询串（可能带 token / 签名），只留主机名
     store::log_line(&format!(
         "[import] {} ({}KB) <- {}",
         final_name,
         body.len() / 1024,
-        target
+        host_of(&final_url)
     ));
 
     send_json(
@@ -788,7 +1239,6 @@ pub fn import_pdf(rq: Request, raw_query: &str) {
             "size": real,
             "docId": doc_id_of(&final_name),
             "url": format!("/api/pdf?name={}", encode_uri_component(&final_name)),
-            "from": target,
         }),
     );
 }
@@ -1363,10 +1813,39 @@ mod tests {
         assert!(!t.contains(&"x".to_string()), "单字母不该是词元: {:?}", t);
     }
 
+    /// SSRF 主机分类：公开地址放行，回环 / 私网 / 链路本地 / 云元数据 / 各种等价写法全挡。
+    /// 与 server.js 的 `isPrivateHost()` 必须给出完全相同的结论。
+    #[test]
+    fn private_host_classification() {
+        for bad in [
+            "127.0.0.1", "127.0.0.1.", "10.0.0.5", "192.168.1.1", "172.16.0.1", "172.31.255.255",
+            "169.254.169.254",          // 云元数据
+            "100.64.0.1",               // CGNAT
+            "0.0.0.0", "198.18.0.1", "224.0.0.1", "255.255.255.255",
+            "999.1.1.1",                // 不合法字面量 → 宁严勿松
+            "localhost", "localhost.", "LOCALHOST.", "foo.localhost", "x.local", "y.internal",
+            "x.home.arpa", "z.lan", "w.intranet",
+            "::1", "::", "[::1]", "[::]", "fe80::1", "fec0::1", "fc00::1", "fd12:3456::1",
+            "::ffff:127.0.0.1", "::ffff:169.254.169.254",
+            "::ffff:7f00:1", "::ffff:a9fe:a9fe",   // IPv4-mapped 被规范化成十六进制后的形态
+            "[::ffff:a9fe:a9fe]", "[::ffff:7f00:1]",
+            "ff02::1", "2001:db8::1", "64:ff9b::1", "2002::1",
+        ] {
+            assert!(is_private_host(bad), "{} 应该被判为内网/保留", bad);
+        }
+        for good in [
+            "example.com", "api.deepseek.com", "arxiv.org", "export.arxiv.org",
+            "8.8.8.8", "1.1.1.1", "93.184.216.34", "172.32.0.1", "172.15.0.1", "198.20.0.1",
+            "223.5.5.5", "100.63.0.1", "100.128.0.1",
+            "fcmontreal.example", "fdic.example",   // 不能因为前缀像 fc/fd 就被误伤
+        ] {
+            assert!(!is_private_host(good), "{} 是公网地址，不该被挡", good);
+        }
+    }
+
     /// D11 补充：`gpt-4o` / `c++` / `a_b.c` 这类带符号的照旧可用（首字符是字母）。
     #[test]
-    fn query_tokens_keep_symbolic_terms() {
-        let t = query_tokens("gpt-4o c++ a_b.c");
+    fn query_tokens_keep_symbolic_terms() {        let t = query_tokens("gpt-4o c++ a_b.c");
         assert!(t.contains(&"gpt-4o".to_string()), "{:?}", t);
         assert!(t.contains(&"c++".to_string()), "{:?}", t);
         assert!(t.contains(&"a_b.c".to_string()), "{:?}", t);

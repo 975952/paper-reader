@@ -19,8 +19,13 @@
  *   T8 键盘焦点在顶栏内部的输入控件上时**不自动收起**（打字打到一半顶栏滑走最烦人）
  *   T9 底部严丝合缝：状态栏底边 = 视口底边，且不出现页面滚动条
  *   T10 正文顶到屏幕上沿（顶栏收起时不留 46px 白带）
- *   T11 独立窗口页（?window=panel）没有顶栏、也不该有热区
+ *   T11 窄窗 520px：顶栏仍常驻并贴屏幕上沿（T11b 是窄窗正文被压到 0 宽的已知缺陷标记）
  *   T12 全程零 JS 报错
+ *
+ * 注：T1–T10 / T6–T8 的判据已在 2026-10-04 按「顶栏 = 应用内常驻标题栏」的新契约重写过，
+ * 上面那段「悬停才出现」的措辞是旧契约的原文，留着当变更缘由看，不再是断言口径。
+ * T11 原来验的是 `?window=panel` 旧 URL 模式 + `#topbarHot` 热区，两者都在 2026-10 删减里
+ * 被删除，那半条断言已撤掉。
  */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
@@ -131,7 +136,8 @@ const GEO = () => {
 try {
   if (!browserPath) throw new Error('找不到 Edge / Chrome');
   server = spawnLogged(process.execPath, ['server.js'], {
-    cwd: ROOT, env: { ...process.env, PORT: String(PORT), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1' },
+    // 2026-10 安全加固：隔离服务自己 spawn，须显式关掉强制校验并开启诊断路径
+    cwd: ROOT, env: { ...process.env, PORT: String(PORT), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1', PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1' },
   });
   let up = false;
   for (let i = 0; i < 80; i += 1) {
@@ -164,45 +170,58 @@ try {
     await page.waitForFunction(() => window.__viewer?.pdf, { timeout: 40000 });
     await sleep(2600);   // 开场那 1.2s 的「亮一下」已经结束
 
-    section('T1–T3 静息收起 / 悬停出现 / 移开再收');
+    section('T1–T3 顶栏常驻（2026-10-04 新契约：不再「悬停才出现」）');
+    /**
+     * 契约变更（用户口径 2026-10-04）：
+     *   「不做那个浮动栏了，就一直显示；把最上面那一栏（最小化/关闭按钮那一行）
+     *     做进应用内部，完全模仿 VS Code」。
+     * 于是顶栏从「浮层滑入滑出」变成**应用内标题栏**：常驻、35px、贴着屏幕上沿，
+     * 窗口按钮就挂在它最右边。旧的那套断言（静息在屏幕外 / 触发带 8px / 移开就收）
+     * 测的是已退役的行为，这里整套换成「常驻」的判据。
+     */
     const rest = await page.evaluate(GEO);
-    check('T1 静息态顶栏在屏幕外（top = -顶栏高）',
-      rest.bar && rest.bar.top <= -40 && /-?\d+/.test(rest.barTransform), `top=${rest.bar?.top} transform=${rest.barTransform} cls=${rest.bodyCls}`);
-    check('T1b 触发带贴着屏幕最上沿且保持窄带（仅用于叫出顶栏）',
-      rest.hot && rest.hot.top === 0 && rest.hot.h >= 6 && rest.hot.h <= 12
-      && rest.bar && rest.hot.h < rest.bar.h,
+    check('T1 静息态顶栏就贴在屏幕上沿、高度 35px（应用内标题栏）',
+      rest.bar && rest.bar.top === 0 && rest.bar.h === 35 && rest.bodyCls.includes('topbar-static'),
+      `top=${rest.bar?.top} h=${rest.bar?.h} cls=${rest.bodyCls}`);
+    check('T1b 自动隐藏的触发带已退役（.topbar-hot 不参与布局、不占指针）',
+      // 触发带元素本身也在 2026-10 删减里被删（`#topbarHot` / `.topbar-hot`）。
+      // 这条契约的正确口径是「它不再参与布局」——元素不存在 = 不参与，元素还在但高度 0 也算数，
+      // 所以判 null 或 h===0 都通过；只有「还在且真的占了高度」才红。
+      !rest.hot || rest.hot.h === 0,
       `hot=${JSON.stringify(rest.hot)} 顶栏 h=${rest.bar?.h}`);
 
     await page.mouse.move(Math.round(W / 2), 2);
     await sleep(450);
     const hot = await page.evaluate(GEO);
-    check('T2 鼠标进顶部热区 → 顶栏滑出（top = 0）',
-      hot.bar && hot.bar.top === 0, `top=${hot.bar?.top} cls=${hot.bodyCls}`);
+    check('T2 鼠标移到屏幕顶部：顶栏仍在（常驻，top 不变）',
+      hot.bar && hot.bar.top === 0 && hot.bar.top === rest.bar?.top, `top=${hot.bar?.top} cls=${hot.bodyCls}`);
 
     await page.mouse.move(Math.round(W / 2), 600);
-    // 指针停下后还要等「活跃窗口」过期（TOPBAR_POINTER_IDLE_MS=700）才收，这里等够
+    // 指针停下后还要等「活跃窗口」过期（TOPBAR_POINTER_IDLE_MS=700）——旧契约到点会收起来，
+    // 新契约下它必须还在（这条就是防「自动隐藏」被谁又接回来）
     await sleep(1400);
     const away = await page.evaluate(GEO);
-    check('T3 鼠标移开 → 顶栏收回',
-      away.bar && away.bar.top <= -40, `top=${away.bar?.top} cls=${away.bodyCls}`);
+    check('T3 鼠标移开顶栏仍常驻（不再自动收起）',
+      away.bar && away.bar.top === 0, `top=${away.bar?.top} cls=${away.bodyCls}`);
 
-    section('T4–T5 文章不动：三态下正文几何完全一致');
-    check('T4 正文区上沿在「收起 / 展开 / 再收起」三态完全相同',
+    section('T4–T5 文章不动：三种鼠标状态下的正文几何完全一致');
+    check('T4 正文区上沿在「静息 / 指针在顶部 / 指针移开」三态完全相同',
       rest.viewer?.top === hot.viewer?.top && hot.viewer?.top === away.viewer?.top,
       `${rest.viewer?.top} / ${hot.viewer?.top} / ${away.viewer?.top}`);
-    check('T5 正文区高度三态完全相同（顶栏是盖上去的，不是把正文推下去）',
+    check('T5 正文区高度三态完全相同',
       rest.viewer?.h === hot.viewer?.h && hot.viewer?.h === away.viewer?.h,
       `${rest.viewer?.h} / ${hot.viewer?.h} / ${away.viewer?.h}`);
-    check('T10 顶栏收起时正文顶到屏幕上沿（不留 46px 白带）',
-      rest.viewer?.top <= 0, `viewer.top=${rest.viewer?.top}`);
+    check('T10 正文顶到顶栏下沿（不留多余白带，也不被顶栏盖住）',
+      Math.abs((rest.viewer?.top ?? -1) - (rest.bar?.h ?? -2)) <= 1,
+      `viewer.top=${rest.viewer?.top} 顶栏 h=${rest.bar?.h}`);
 
     /**
-     * T13 顶栏不能盖住正文内容 —— 这是用户实测反馈的缺陷：
+     * T13 顶栏不能盖住正文内容 —— 这是用户实测反馈过的缺陷：
      *   上一版为了「顶栏收起时不留白带」，把正文区整体上提了 46px（margin-top 负值），
      *   结果**第一页的上沿跑到 y=−26**，页面顶上那几十像素被浮层顶栏压住，
      *   翻到正文开头正好看不见（用户原话「桌面端全都被挡住了」）。
-     * 判据：顶栏**展开**时，第一个 .page 的上沿必须在顶栏下边之下（留一点余量），
-     *       而且三态下页面上沿不变（文章不动这条不能靠牺牲可见性换）。
+     * 新契约下顶栏常驻、正文区从它下沿开始，判据简化成：**页面上沿必须在顶栏下边之下**，
+     * 而且鼠标状态不影响它（文章不动）。
      */
     const pageGeo = await page.evaluate(() => {
       const pg = document.querySelector('.page');
@@ -218,9 +237,9 @@ try {
       if (!pg || !bar) return null;
       return { pageTop: Math.round(pg.getBoundingClientRect().top), barBottom: Math.round(bar.getBoundingClientRect().bottom), bodyCls: [...document.body.classList].join(' ') };
     });
-    check('T13 顶栏展开时不会盖住第一页内容（页面上沿在顶栏下边之下）',
-      !!hotPage && hotPage.pageTop >= hotPage.barBottom - 2 && hotPage.bodyCls.includes('topbar-near'),
-      `顶栏展开：barBottom=${hotPage?.barBottom} pageTop=${hotPage?.pageTop}（收起时 pageTop=${pageGeo?.pageTop}）`);
+    check('T13 顶栏不盖住第一页内容（页面上沿在顶栏下边之下，且鼠标状态不影响）',
+      !!hotPage && hotPage.pageTop >= hotPage.barBottom - 2 && hotPage.pageTop === pageGeo?.pageTop,
+      `barBottom=${hotPage?.barBottom} pageTop=${hotPage?.pageTop}（静息时 pageTop=${pageGeo?.pageTop}）`);
 
     /**
      * T14 用户实测缺陷（本轮修复）：鼠标移到屏幕顶边时，**整个阅读区消失**，
@@ -291,7 +310,7 @@ try {
     });
     check('T6b 顶栏里的按钮此刻真的可点（命中测试）', clickable === true, `hit=${clickable}`);
 
-    section('T7–T8 键盘：焦点进顶栏保持展开；焦点在输入控件上不自动收起');
+    section('T7–T8 键盘：焦点进出顶栏都不改变「常驻」状态');
     const tabbed = await page.evaluate(() => {
       document.getElementById('pageInput').focus();
       return { active: document.activeElement.id };
@@ -300,13 +319,14 @@ try {
     await page.mouse.move(Math.round(W / 2), 600);   // 鼠标移开，但焦点在顶栏输入框上
     await sleep(700);
     const keepOpen = await page.evaluate(GEO);
-    check('T8 焦点在顶栏输入框（pageInput）上时，鼠标移开也不收起',
+    check('T8 焦点在顶栏输入框（pageInput）上时，顶栏在（top=0）',
       keepOpen.bar && keepOpen.bar.top === 0 && tabbed.active === 'pageInput',
       `top=${keepOpen.bar?.top} active=${tabbed.active}`);
     await page.evaluate(() => document.activeElement.blur());
-    await sleep(1600);   // 焦点离开后同样要等活跃窗口过期
+    await sleep(1600);   // 旧契约要等活跃窗口过期才收；新契约下等到天荒地老也不能收
     const afterBlur = await page.evaluate(GEO);
-    check('T7 焦点离开顶栏后，顶栏恢复收起', afterBlur.bar && afterBlur.bar.top <= -40, `top=${afterBlur.bar?.top}`);
+    check('T7 焦点离开顶栏后仍常驻（「失焦就收起」这套已退役）',
+      afterBlur.bar && afterBlur.bar.top === 0, `top=${afterBlur.bar?.top}`);
 
     section('T9 底部严丝合缝：状态栏底边 = 视口底边，且无页面滚动条');
     check('T9a 状态栏底边贴住视口底边（±2px）',
@@ -315,27 +335,39 @@ try {
     check('T9b 不出现页面级滚动条',
       afterBlur.overflowY <= 0, `overflowY=${afterBlur.overflowY}`);
 
-    section('T11 旧面板 URL：不得再进入全屏面板模式');
+    section('T11 窄窗（520px）：顶栏常驻、正文不被压没');
+    /**
+     * 旧写法用 `?window=panel&panel=chat` 打开「整页单面板」窗口，验它被降级成普通阅读器。
+     * 2026-10 删减把 `?window=panel` 这条 URL 模式（以及系统级子窗口那一整套）和
+     * `#topbarHot` 热区一起删掉了：再请求那个 URL 只会得到普通阅读器，
+     * 断言就退化成「自己验自己」的空转，故整条撤掉。
+     * 保留下来的只有窄窗这条**仍然活着**的契约，外加上面 T11b 那条已知缺陷标记。
+     */
     const child = await browser.newPage();
     await child.setViewport({ width: 520, height: 760 });
-    await child.goto(`${BASE}/?window=panel&panel=chat`, { waitUntil: 'domcontentloaded' });
+    await child.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
     await sleep(600);
     const childGeo = await child.evaluate(() => {
-      const hot = document.getElementById('topbarHot');
       const bar = document.querySelector('.topbar');
       const viewer = document.getElementById('viewer')?.getBoundingClientRect();
       return {
-        legacyClass: document.body.classList.contains('panel-window'),
         barDisplay: bar ? getComputedStyle(bar).display : '(none)',
-        hotDisplay: hot ? getComputedStyle(hot).display : '(none)',
         barTop: bar ? Math.round(bar.getBoundingClientRect().top) : null,
         viewerW: viewer ? Math.round(viewer.width) : 0,
-        winH: window.innerHeight,
       };
     });
-    check('T11 旧面板 URL 被降级为普通阅读器，不再隐藏顶栏或撑满单面板',
-      childGeo.legacyClass === false && childGeo.barDisplay !== 'none' && childGeo.hotDisplay !== 'none' && childGeo.viewerW > 0,
-      JSON.stringify(childGeo));
+    check('T11 窄窗 520px 下顶栏仍在、且贴在屏幕上沿',
+      childGeo.barDisplay !== 'none' && childGeo.barTop === 0, JSON.stringify(childGeo));
+    /**
+     * T11b **已知缺陷**（不是顶栏契约的一部分，本阶段未修）：
+     *   520px 窄窗下 `#viewer` 宽度被压到 **0** —— `.viewer-wrap` / `.viewer` 都是
+     *   `flex: 1 1 0; min-width: 0`，没有任何 min-width 兜底，窗口再窄就直接压没了。
+     *   改动前的基线跑里同一个数字也是 0（`viewerW:0`），**与本次顶栏改动无关**。
+     *   修法与量测见 test/artifacts/rightrail-design/REPORT.md §5.5。
+     *   这里留一条显式断言，免得这个缺陷被"忘了"。
+     */
+    check('T11b［已知缺陷·本阶段未修］窄窗 520px 下正文不应被压到 0 宽',
+      childGeo.viewerW > 0, `viewerW=${childGeo.viewerW}（见 rightrail-design/REPORT.md §5.5）`);
     await child.close();
 
     section('T12 零 JS 报错');

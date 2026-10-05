@@ -157,7 +157,17 @@ const PROBE = () => {
     /** 点活动栏里的某个图标（走真实 click） */
     clickRail(key) { document.querySelector(`#railLeft .rail-btn[data-rail="${key}"]`).click(); },
     /** 点左栏底部的图标坞（左栏四块的另一个入口） */
-    clickDock(id) { document.querySelector(`#panelDock .dock-btn[data-dock-for="${id}"]`).click(); },
+    /**
+     * 2026-10：左栏底部那个图标坞（`#panelDock`）已按用户要求删除 ——
+     * 「A 只留最左边那条窄活动栏」+「那几个点不动……直接删掉就行」。
+     * 所以这里改成点**最左边活动栏**上对应的图标（它现在是左栏唯一的面板入口）。
+     * 注意：点已经开着的那一块是 **no-op**（用户口径「点击已开的图标……不做反应」），
+     * 所以「切到另一块」必须点的是**没开**的那一个。
+     */
+    clickDock(id) {
+      const name = { files: 'files', outline: 'outline', notes: 'notes', relations: 'rel' }[id] || id;
+      document.querySelector(`#railLeft .rail-btn[data-rail="${name}"]`).click();
+    },
     /** 直接设某块可见（模拟「划词翻译顺带打开」这类内部路径） */
     show(id) { window.__ctx.setPanelVisible(id, true); },
     hide(id) { window.__ctx.setPanelVisible(id, false); },
@@ -169,7 +179,15 @@ try {
   if (!browserPath) throw new Error('找不到 Edge / Chrome');
   server = spawnLogged(process.execPath, ['server.js'], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(PORT), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1' },
+    // 2026-10 安全加固：所有 /api/* 都要令牌（只有 /api/health 豁免）。
+    // 本套件自己 spawn 隔离服务并轮询 /api/state 判就绪，所以必须**显式**给子进程
+    // 关掉强制校验（审计允许测试显式注入，不允许生产留后门）。
+    // PRT_DIAGNOSTICS=1 是为了让 /api/papers 返回绝对 dir，喂给 _env 的隔离闸门。
+    env: {
+      ...process.env,
+      PORT: String(PORT), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1',
+      PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1',
+    },
   });
   let up = false;
   for (let i = 0; i < 80; i += 1) {
@@ -266,19 +284,35 @@ try {
      * 「左栏被压到最小（≤80px）且要么活动栏出现、要么栏本身只剩一条」，
      * 关键是「不能还是展开态（>150px）」。
      */
-    check('R3a 再点「文献关系」→ 整条左栏收起（压到最小或收成活动栏）',
-      collapsed.leftW <= 80 && collapsed.noLeft !== undefined
-      && (collapsed.railVisible ? (collapsed.railW >= 30 && collapsed.railW <= 60) : true),
-      `noLeft=${collapsed.noLeft} leftW=${collapsed.leftW} railVisible=${collapsed.railVisible} railW=${collapsed.railW}`);
-    check('R3b 收成活动栏**不等于**把这一块隐藏（visible 仍是 true）',
+    /**
+     * ⚠️ **契约已反转**（2026-10 用户口径，用户原话：
+     *   「点击已开的图标也不会关闭侧栏，**而是不做反应**」）。
+     *
+     * 旧契约（上面 R3a 原本写的）是「再点同一个 → 收成活动栏」。
+     * 新契约是「再点同一块什么都不该发生」：左栏仍然展开、那一块仍然显示。
+     * 收起左栏改成**另一个明确动作** —— 顶栏的「收起左栏」按钮，或拖动分隔条。
+     *
+     * 所以这两条改成验新语义（不是删断言）：no-op + 块没被隐藏。
+     * 「收成活动栏」这条路本身仍然存在，只是不再挂在「点已开图标」上。
+     */
+    check('R3a 再点同一块是 no-op（新契约：不再收成活动栏）',
+      collapsed.leftW > 100 && collapsed.shown.includes('relations'),
+      `noLeft=${collapsed.noLeft} leftW=${collapsed.leftW} shown=[${collapsed.shown.join(',')}]`);
+    check('R3b 再点同一块也不会把它隐藏（visible 仍为 true）',
       collapsed.model.relations.visible === true && collapsed.shown.join() === 'relations',
       `relations.visible=${collapsed.model.relations.visible} shown=[${collapsed.shown.join(',')}]`);
 
-    // 再点同一个 → 原样回来（R6）
+    // R6：从「收起」状态点图标能回来 —— 改用顶栏按钮收起，再点图标展开
+    await page.evaluate(() => document.getElementById('topbarLeftToggle').click());
+    await sleep(500);
+    const viaTopbar = await page.evaluate(() => window.__L.snapshot());
+    check('R6a 顶栏「收起左栏」能把左栏收成活动栏',
+      viaTopbar.noLeft === true && viaTopbar.railVisible === true,
+      `noLeft=${viaTopbar.noLeft} railVisible=${viaTopbar.railVisible}`);
     await page.evaluate(() => window.__L.clickRail('rel'));
-    await sleep(450);
+    await sleep(500);
     const backAgain = await page.evaluate(() => window.__L.snapshot());
-    check('R6 收起后再点同一个图标 → 回来的还是文献关系（不是默认的文件块）',
+    check('R6b 收起后再点同一个图标 → 回来的还是文献关系（不是默认的文件块）',
       backAgain.noLeft === false && backAgain.shown.join() === 'relations',
       `noLeft=${backAgain.noLeft} shown=[${backAgain.shown.join(',')}]`);
 

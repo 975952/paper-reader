@@ -1,0 +1,657 @@
+//! 字段白名单 / 范围限制 / 请求体上限 / 错误脱敏。
+//!
+//! 与 `security.js` 一一对应（审计 §P0 请求体白名单、§P1 配置白名单与大小限制、§P2 脱敏）。
+//! 两套后端的判定结果必须一致，所以这里每个常量都注明 Node 那边的对应值。
+
+use serde_json::{Map, Value};
+
+/* ============================================================ 聊天请求体 */
+
+/// `/api/chat` 允许出现在请求体里的字段（审计 §P0：只允许 messages / stream /
+/// 受限 temperature / max_tokens / 上下文范围）。
+pub const CHAT_FIELDS: [&str; 14] = [
+    "messages", "stream", "temperature", "max_tokens", "idleMs",
+    "context", "scope", "doc", "docId", "page", "files", "meta", "webResults", "history",
+];
+
+/// 出现这些字段说明调用方在试图覆盖密钥 / 地址 / 模型 —— 一律忽略。
+pub const CHAT_FORBIDDEN: [&str; 7] = [
+    "baseURL", "baseUrl", "apiKey", "apikey", "model", "visionModel", "endpoint",
+];
+
+/* ============================================================ 数值范围 */
+
+pub const TEMPERATURE_MIN: f64 = 0.0;
+pub const TEMPERATURE_MAX: f64 = 2.0;
+pub const MAX_TOKENS_MIN: i64 = 1;
+pub const MAX_TOKENS_MAX: i64 = 131_072;
+pub const IDLE_MS_MIN: i64 = 1_000;
+pub const IDLE_MS_MAX: i64 = 900_000;
+pub const FONT_SIZE_MIN: i64 = 8;
+pub const FONT_SIZE_MAX: i64 = 40;
+
+/// 字符串长度上限（字符数），与 security.js 的 LIMITS.str 一致
+pub const MAX_API_KEY_LEN: usize = 4096;
+pub const MAX_BASE_URL_LEN: usize = 2048;
+pub const MAX_MODEL_LEN: usize = 256;
+pub const MAX_TARGET_LANG_LEN: usize = 32;
+pub const MAX_GLOSSARY_LEN: usize = 100_000;
+
+/* ============================================================ 请求体上限 */
+
+/// 与 security.js 的 BODY_LIMITS 一致。
+/// `BODY_CHAT` 就是 server.rs 里的 `MAX_BODY`（通用默认值），列在这里是为了和 Node 对齐。
+pub const BODY_CONFIG: usize = 1024 * 1024;
+pub const BODY_STATE: usize = 1024 * 1024;
+pub const BODY_NOTES: usize = 4 * 1024 * 1024;
+pub const BODY_SESSION: usize = 16 * 1024 * 1024;
+#[allow(dead_code)]
+pub const BODY_CHAT: usize = 64 * 1024 * 1024;
+
+pub const NOTES_MAX_ITEMS: usize = 5_000;
+pub const NOTES_MAX_CHARS: usize = 4 * 1024 * 1024;
+pub const SESSION_MAX_ITEMS: usize = 5_000;
+pub const SESSION_MAX_CHARS: usize = 8 * 1024 * 1024;
+pub const SESSION_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/* ============================================================ 配置白名单 */
+
+/// `/api/config` 只接受这些字段（审计 §P1）
+pub const CONFIG_FIELDS: [&str; 11] = [
+    "apiKey", "baseURL", "model", "visionModel", "targetLang",
+    "temperature", "stream", "idleMs", "theme", "fontSize", "glossary",
+];
+
+fn in_list(list: &[&str], key: &str) -> bool {
+    list.iter().any(|k| *k == key)
+}
+
+pub fn is_chat_field(key: &str) -> bool {
+    in_list(&CHAT_FIELDS, key)
+}
+
+pub fn is_chat_forbidden(key: &str) -> bool {
+    in_list(&CHAT_FORBIDDEN, key)
+}
+
+fn clamp_f64(v: f64, min: f64, max: f64) -> f64 {
+    if v < min {
+        min
+    } else if v > max {
+        max
+    } else {
+        v
+    }
+}
+
+/* --------------------------------------------------------------- URL 校验 */
+
+/// 只能 http/https、无凭证、无控制字符、长度受限。
+/// 返回 Some(规范化后的原串) 或 None。
+pub fn valid_url_string(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s.chars().count() > MAX_BASE_URL_LEN {
+        return None;
+    }
+    if s.chars().any(|c| (c as u32) < 0x20 || (c as u32) == 0x7f) {
+        return None;
+    }
+    let lower = s.to_ascii_lowercase();
+    let rest = match lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+    {
+        Some(r) => r,
+        None => return None,
+    };
+    // 凭证（user:pass@host）不允许
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return None;
+    }
+    // 必须有非空主机名
+    let host = if let Some(inner) = authority.strip_prefix('[') {
+        match inner.split_once(']') {
+            Some((h, _)) => h.to_string(),
+            None => return None,
+        }
+    } else {
+        authority.split(':').next().unwrap_or("").to_string()
+    };
+    if host.is_empty() {
+        return None;
+    }
+    // 结尾的点（localhost. / 127.0.0.1.）拒绝：留着它会让任何按主机名做的判断失效
+    if host.ends_with('.') {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+/* --------------------------------------------------------- 配置 patch 过滤 */
+
+/// 过滤后的 patch + 被忽略的字段名 + 超长（被拒）的字段
+///
+/// `capped` 非空时调用方**必须返回 400 并且不写盘** —— 审计 §验收 要求
+/// 「超限返回 413/400，不截断后静默保存」。绝不静默截断。
+pub struct ConfigPatch {
+    pub patch: Map<String, Value>,
+    pub ignored: Vec<String>,
+    /// (字段名, 上限字符数)
+    pub capped: Vec<(String, usize)>,
+}
+
+/// 严格白名单 + 类型/范围/长度限制（审计 §P1）。
+///
+/// 与 server.js 的 `sanitizeConfigPatch()` 行为一致：
+///   * 未知字段 → 忽略；
+///   * `temperature` / `idleMs` / `fontSize` → 夹到范围内（设置页是滑块，
+///     不能因为一个越界值把用户其它改动一起丢掉）；
+///   * 字符串字段超长 → 记进 `capped`（调用方回 400，**不截断**）；
+///   * `baseURL` → 必须是合法 http(s) URL，非法则忽略；
+///   * `apiKey` 空串 → 由调用方保留原值。
+pub fn sanitize_config_patch(raw: &Value) -> ConfigPatch {
+    let mut patch = Map::new();
+    let mut ignored: Vec<String> = Vec::new();
+    let mut capped: Vec<(String, usize)> = Vec::new();
+
+    let obj = match raw {
+        Value::Object(m) => m,
+        _ => {
+            ignored.push("<非对象请求体>".to_string());
+            return ConfigPatch { patch, ignored, capped };
+        }
+    };
+
+    // 长度检查：超长记 capped，非字符串记 ignored
+    macro_rules! take_str {
+        ($key:expr, $v:expr, $limit:expr) => {
+            match $v {
+                Value::String(s) => {
+                    if s.chars().count() > $limit {
+                        capped.push(($key.clone(), $limit));
+                    } else {
+                        patch.insert($key.clone(), Value::String(s.clone()));
+                    }
+                }
+                _ => ignored.push($key.clone()),
+            }
+        };
+    }
+
+    for (key, v) in obj {
+        if !in_list(&CONFIG_FIELDS, key) {
+            ignored.push(key.clone());
+            continue;
+        }
+        match key.as_str() {
+            "apiKey" => take_str!(key, v, MAX_API_KEY_LEN),
+            "baseURL" => match v {
+                Value::String(s) if s.is_empty() => {
+                    patch.insert(key.clone(), Value::String(String::new()));
+                }
+                Value::String(s) => {
+                    if s.chars().count() > MAX_BASE_URL_LEN {
+                        capped.push((key.clone(), MAX_BASE_URL_LEN));
+                    } else {
+                        match valid_url_string(s) {
+                            Some(u) => {
+                                patch.insert(key.clone(), Value::String(u));
+                            }
+                            None => ignored.push(key.clone()),
+                        }
+                    }
+                }
+                _ => ignored.push(key.clone()),
+            },
+            "model" | "visionModel" => take_str!(key, v, MAX_MODEL_LEN),
+            "targetLang" => take_str!(key, v, MAX_TARGET_LANG_LEN),
+            "glossary" => take_str!(key, v, MAX_GLOSSARY_LEN),
+            "theme" => match v {
+                Value::String(s) if s == "light" || s == "dark" => {
+                    patch.insert(key.clone(), v.clone());
+                }
+                _ => ignored.push(key.clone()),
+            },
+            "temperature" => match v.as_f64() {
+                Some(n) => {
+                    let c = clamp_f64(n, TEMPERATURE_MIN, TEMPERATURE_MAX);
+                    patch.insert(key.clone(), serde_json::json!(c));
+                }
+                None => ignored.push(key.clone()),
+            },
+            "idleMs" => match v.as_f64() {
+                Some(n) => {
+                    let c = clamp_f64(n, IDLE_MS_MIN as f64, IDLE_MS_MAX as f64).round() as i64;
+                    patch.insert(key.clone(), serde_json::json!(c));
+                }
+                None => ignored.push(key.clone()),
+            },
+            "fontSize" => match v.as_f64() {
+                Some(n) => {
+                    let c = clamp_f64(n, FONT_SIZE_MIN as f64, FONT_SIZE_MAX as f64).round() as i64;
+                    patch.insert(key.clone(), serde_json::json!(c));
+                }
+                None => ignored.push(key.clone()),
+            },
+            "stream" => match v {
+                Value::Bool(_) => {
+                    patch.insert(key.clone(), v.clone());
+                }
+                _ => ignored.push(key.clone()),
+            },
+            _ => ignored.push(key.clone()),
+        }
+    }
+
+    ConfigPatch { patch, ignored, capped }
+}
+
+/* ------------------------------------------------------------ 内容上限 */
+
+/// 统计字符串/数组/对象里的总字符数（与 security.js 的 countChars 等价）
+pub fn count_chars(v: &Value) -> usize {
+    match v {
+        Value::String(s) => s.chars().count(),
+        Value::Array(a) => a.iter().map(count_chars).sum(),
+        Value::Object(m) => m
+            .iter()
+            .map(|(k, x)| k.chars().count() + count_chars(x))
+            .sum(),
+        _ => 0,
+    }
+}
+
+/// notes 的条目数 / 总字符数校验；返回 Err(给用户看的文案)
+pub fn check_notes(items: &Value) -> Result<(), String> {
+    let arr = match items {
+        Value::Array(a) => a,
+        _ => return Err("notes.items 必须是数组".to_string()),
+    };
+    if arr.len() > NOTES_MAX_ITEMS {
+        return Err(format!("笔记条目过多（上限 {} 条）", NOTES_MAX_ITEMS));
+    }
+    if count_chars(items) > NOTES_MAX_CHARS {
+        return Err("笔记内容过大，请分文档保存".to_string());
+    }
+    Ok(())
+}
+
+/// session 的条目数 / 总字符数 / 体积校验
+pub fn check_session(payload: &Value) -> Result<(), String> {
+    let obj = match payload {
+        Value::Object(m) => m,
+        _ => return Err("会话必须是对象".to_string()),
+    };
+    for key in ["entries", "history", "ops", "attachments", "files"] {
+        if let Some(Value::Array(a)) = obj.get(key) {
+            if a.len() > SESSION_MAX_ITEMS {
+                return Err(format!("会话 {} 条目过多（上限 {} 条）", key, SESSION_MAX_ITEMS));
+            }
+        }
+    }
+    if count_chars(payload) > SESSION_MAX_CHARS {
+        return Err("会话内容过大".to_string());
+    }
+    match serde_json::to_string(payload) {
+        Ok(s) if s.len() > SESSION_MAX_BYTES => Err("会话体积过大".to_string()),
+        Err(_) => Err("会话包含无法序列化的内容".to_string()),
+        Ok(_) => Ok(()),
+    }
+}
+
+/* -------------------------------------------------------------- 脱敏 */
+
+/// 请求体里的 temperature：必须落在 [0,2] 内。
+/// `None` 表示「没传」（用默认值）；`Some(Err)` 表示越界，调用方回 400。
+pub fn pick_temperature(v: Option<&Value>) -> Result<Option<f64>, String> {
+    let raw = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(x) => x,
+    };
+    let n = match raw.as_f64() {
+        Some(n) if raw.is_number() => n,
+        _ => return Err("temperature 必须是数字".to_string()),
+    };
+    if !n.is_finite() || n < TEMPERATURE_MIN || n > TEMPERATURE_MAX {
+        return Err(format!(
+            "temperature 超出范围（允许 {} ~ {}）",
+            TEMPERATURE_MIN, TEMPERATURE_MAX
+        ));
+    }
+    Ok(Some(n))
+}
+
+/// 请求体里的 max_tokens：正整数且不超上限
+pub fn pick_max_tokens(v: Option<&Value>) -> Result<Option<i64>, String> {
+    let raw = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(s)) if s.is_empty() => return Ok(None),
+        Some(x) => x,
+    };
+    let n = match raw.as_i64() {
+        Some(n) if raw.is_number() => n,
+        _ => return Err("max_tokens 必须是正整数".to_string()),
+    };
+    if n < MAX_TOKENS_MIN {
+        return Err("max_tokens 必须是正整数".to_string());
+    }
+    if n > MAX_TOKENS_MAX {
+        return Err(format!("max_tokens 超出上限（最大 {}）", MAX_TOKENS_MAX));
+    }
+    Ok(Some(n))
+}
+
+/// 把底层异常 / 上游响应变成可以给用户看的文案。
+/// 与本机路径无关的信息保留，绝对路径 / 完整 URL / token 打码。
+pub fn sanitize_message(msg: &str, fallback: &str) -> String {
+    let raw = msg.trim();
+    if raw.is_empty() {
+        return fallback.to_string();
+    }
+    let first = raw
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let t = scrub_text(first);
+    let t: String = t.chars().take(300).collect();
+    if t.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        t
+    }
+}
+
+/// 日志 / 用户文案里的敏感内容打码（与 security.js 的 scrubText 等价）。
+///
+/// 三件事：密文（Bearer / apiKey / token 的值）、本机绝对路径、本次的 token 本身。
+pub fn scrub_text(s: &str) -> String {
+    let mut t = s.to_string();
+    t = redact_after(&t, "Bearer ", 6);
+    t = redact_key_values(&t);
+    t = redact_paths(&t);
+    let tok = crate::auth::token();
+    if !tok.is_empty() {
+        t = t.replace(tok, "***");
+    }
+    t
+}
+
+/// 键值对里的密文：支持 `"apiKey": "sk-xxx"` / `apiKey=sk-xxx` / `apiKey: sk-xxx`，
+/// 也支持被截断的 JSON（尾部引号已经丢了）。
+fn redact_key_values(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let keys = ["apikey", "authorization", "token", "x-prt-token"];
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        // 键名可能带引号，所以从后一个字符开始比对
+        let start = if chars[i] == '"' || chars[i] == '\'' { i + 1 } else { i };
+        let mut matched: Option<usize> = None;
+        for k in keys {
+            let n = k.chars().count();
+            if start + n <= chars.len() {
+                let cand: String = chars[start..start + n].iter().collect::<String>().to_ascii_lowercase();
+                if cand == k {
+                    matched = Some(start + n);
+                    break;
+                }
+            }
+        }
+        let after = match matched {
+            Some(a) => a,
+            None => {
+                out.push(chars[i]);
+                i += 1;
+                continue;
+            }
+        };
+        // 键名整段照抄，再找分隔符
+        out.extend(&chars[i..after]);
+        let mut j = after;
+        // 允许 "key" : value（键名后面还有个引号）
+        if j < chars.len() && (chars[j] == '"' || chars[j] == '\'') {
+            out.push(chars[j]);
+            j += 1;
+        }
+        while j < chars.len() && chars[j] == ' ' {
+            out.push(chars[j]);
+            j += 1;
+        }
+        if j >= chars.len() || (chars[j] != '=' && chars[j] != ':') {
+            i = after;
+            continue;
+        }
+        out.push(chars[j]);
+        j += 1;
+        while j < chars.len() && chars[j] == ' ' {
+            out.push(chars[j]);
+            j += 1;
+        }
+        // 值：可选引号包裹，到引号 / 逗号 / 空白为止；够长才打码
+        let mut quote: Option<char> = None;
+        if j < chars.len() && (chars[j] == '"' || chars[j] == '\'') {
+            quote = Some(chars[j]);
+            out.push(chars[j]);
+            j += 1;
+        }
+        let vstart = j;
+        while j < chars.len() {
+            let c = chars[j];
+            match quote {
+                Some(q) if c == q => break,
+                Some(_) => j += 1,
+                None if c.is_whitespace() || c == ',' || c == '&' || c == '}' || c == ']' => break,
+                None => j += 1,
+            }
+        }
+        if j - vstart >= 6 {
+            out.push_str("***");
+        } else {
+            out.extend(&chars[vstart..j]);
+        }
+        i = j;
+    }
+    out
+}
+
+fn redact_after(s: &str, needle: &str, min_len: usize) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find(needle) {
+        out.push_str(&rest[..i + needle.len()]);
+        out.push_str("***");
+        let tail = &rest[i + needle.len()..];
+        // 吃掉紧跟其后的密文
+        let n = tail
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || "-._~+/=".contains(*c))
+            .count();
+        if n >= min_len {
+            rest = &tail[tail.char_indices().nth(n).map(|(i, _)| i).unwrap_or(tail.len())..];
+        } else {
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 本机绝对路径 → `<path>`。
+///
+/// 难点：同一个路径在日志里可能是原样的（`C:\Users\Wang Wenbo\…`），也可能被 JSON
+/// 转义过（`C:\\Users\\Wang Wenbo\\…`）。所以分隔符统一按「一个或多个 `\` / `/`」处理，
+/// 段内允许空格 —— 否则 `Wang Wenbo` 会把路径截成两半。
+fn redact_paths(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        let drive = i + 2 < chars.len()
+            && c.is_ascii_alphabetic()
+            && chars[i + 1] == ':'
+            && (chars[i + 2] == '\\' || chars[i + 2] == '/');
+        // UNC（\\server\share）或 JSON 转义后的分隔符
+        let unc = c == '\\'
+            && i + 2 < chars.len()
+            && chars[i + 1] == '\\'
+            && (chars[i + 2].is_alphanumeric() || chars[i + 2] == '_');
+        if !drive && !unc {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        out.push_str("<path>");
+        i += if drive { 3 } else { 2 };
+        let mut prev_sep = true;
+        while i < chars.len() {
+            let ch = chars[i];
+            if ch == '\\' || ch == '/' {
+                prev_sep = true;
+                i += 1;
+                continue;
+            }
+            if ch.is_whitespace() {
+                // 路径里允许空格，但下一个字符必须还是路径的一部分（首字符不能是分隔符）
+                match chars.get(i + 1) {
+                    Some(n) if !n.is_whitespace() && *n != '\\' && *n != '/' => {
+                        prev_sep = false;
+                        i += 1;
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
+            if "\"',;)]}".contains(ch) {
+                break;
+            }
+            let _ = prev_sep;
+            i += 1;
+        }
+        continue;
+    }
+    out
+}
+
+/// 本机绝对路径 → <path>
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn config_whitelist_blocks_unknown_and_clamps() {
+        let raw = json!({
+            "apiKey": "sk-secret",
+            "temperature": 99.0,
+            "idleMs": 5,
+            "evil": "x",
+            "baseURL": "file:///etc/passwd",
+            "theme": "neon"
+        });
+        let got = sanitize_config_patch(&raw);
+        assert_eq!(got.patch.get("apiKey").unwrap(), &json!("sk-secret"));
+        assert_eq!(got.patch.get("temperature").unwrap(), &json!(2.0));
+        assert_eq!(got.patch.get("idleMs").unwrap(), &json!(1000));
+        assert!(!got.patch.contains_key("evil"));
+        assert!(!got.patch.contains_key("baseURL"));
+        assert!(!got.patch.contains_key("theme"));
+        assert!(got.ignored.contains(&"evil".to_string()));
+        assert!(got.capped.is_empty(), "没有超长字段时 capped 必须为空");
+    }
+
+    /// 审计 §验收：「超限返回 413/400，不截断后静默保存」。
+    /// 5000 字的 model 必须出现在 capped 里、**不能**被截成 256 字写进 patch。
+    #[test]
+    fn oversized_strings_are_rejected_not_truncated() {
+        let long_model = "m".repeat(5000);
+        let got = sanitize_config_patch(&json!({ "model": long_model, "theme": "dark" }));
+        assert!(!got.patch.contains_key("model"), "超长 model 不能进 patch");
+        assert_eq!(got.capped, vec![("model".to_string(), MAX_MODEL_LEN)]);
+        assert_eq!(got.patch.get("theme").unwrap(), &json!("dark"), "同批次的合法字段照常处理");
+
+        // baseURL 超长同样拒绝（不是先截断再 parse）
+        let got = sanitize_config_patch(&json!({ "baseURL": format!("https://x.com/{}", "a".repeat(3000)) }));
+        assert!(!got.patch.contains_key("baseURL"));
+        assert_eq!(got.capped.len(), 1);
+
+        // apiKey / targetLang / glossary 也一样
+        for (field, limit) in [
+            ("apiKey", MAX_API_KEY_LEN),
+            ("targetLang", MAX_TARGET_LANG_LEN),
+            ("glossary", MAX_GLOSSARY_LEN),
+        ] {
+            let got = sanitize_config_patch(&json!({ field: "z".repeat(limit + 1) }));
+            assert!(!got.patch.contains_key(field), "{} 不该被保存", field);
+            assert_eq!(got.capped, vec![(field.to_string(), limit)]);
+        }
+
+        // 恰好等于上限：必须放行（既有测试套件会 POST 正常长度的值）
+        let got = sanitize_config_patch(&json!({ "model": "m".repeat(MAX_MODEL_LEN) }));
+        assert!(got.capped.is_empty(), "恰好等于上限不该被拒");
+        assert_eq!(got.patch.get("model").unwrap().as_str().unwrap().chars().count(), MAX_MODEL_LEN);
+    }
+
+    #[test]
+    fn config_url_requires_http_without_credentials() {
+        assert!(valid_url_string("https://api.deepseek.com/v1").is_some());
+        assert!(valid_url_string("http://127.0.0.1:11434/v1").is_some());
+        assert!(valid_url_string("file:///C:/x").is_none());
+        assert!(valid_url_string("https://user:pass@evil.com/v1").is_none());
+        assert!(valid_url_string("https://evil.com/\r\nX: y").is_none());
+        assert!(valid_url_string("javascript:alert(1)").is_none());
+        assert!(valid_url_string("").is_none());
+    }
+
+    #[test]
+    fn chat_limits_match_node() {
+        assert!(pick_temperature(Some(&json!(0.2))).unwrap() == Some(0.2));
+        assert!(pick_temperature(Some(&json!(2.0))).is_ok());
+        assert!(pick_temperature(Some(&json!(2.5))).is_err());
+        assert!(pick_temperature(Some(&json!(-0.1))).is_err());
+        assert!(pick_temperature(Some(&json!("x"))).is_err());
+        assert!(pick_temperature(None).unwrap().is_none());
+        assert_eq!(pick_max_tokens(Some(&json!(10))).unwrap(), Some(10));
+        assert!(pick_max_tokens(Some(&json!(0))).is_err());
+        assert!(pick_max_tokens(Some(&json!(1.5))).is_err());
+        assert!(pick_max_tokens(Some(&json!(200000))).is_err());
+        assert!(pick_max_tokens(Some(&json!(131072))).is_ok());
+    }
+
+    #[test]
+    fn content_limits() {
+        let ok = json!([{"text": "hi"}]);
+        assert!(check_notes(&ok).is_ok());
+        let many: Vec<Value> = (0..NOTES_MAX_ITEMS + 1).map(|_| json!({})).collect();
+        assert!(check_notes(&Value::Array(many)).is_err());
+        assert!(check_notes(&json!({"not": "array"})).is_err());
+        assert!(check_session(&json!({"entries": [], "history": []})).is_ok());
+        assert!(check_session(&json!([1, 2])).is_err());
+    }
+
+    #[test]
+    fn scrub_hides_keys_and_paths() {
+        // 真实形态一：Windows 路径被 JSON 转义了一遍
+        let s = scrub_text(r"connect C:\\Users\\Wang Wenbo\\Desktop\\prt\\data\\config.json failed");
+        assert!(!s.contains("Users"), "转义路径没打码: {}", s);
+        assert!(s.contains("<path>"), "{}", s);
+        // 真实形态二：未转义的裸路径
+        let s = scrub_text(r"写入 C:\Users\Wang Wenbo\Desktop\prt\data\a.json 失败");
+        assert!(!s.contains("Users"), "裸路径没打码: {}", s);
+        // 密钥：完整 JSON / 等号形式 / 被截断的 JSON 都要打码
+        for raw in [
+            r#"{"apiKey": "sk-abcdef123456"}"#,
+            "apiKey=sk-abcdef123456",
+            r#"{"apiKey": "sk-abcdef12345"#,
+            "Authorization: Bearer sk-abcdef123456",
+        ] {
+            let got = scrub_text(raw);
+            assert!(!got.contains("sk-abcdef123456"), "{} -> {}", raw, got);
+            assert!(!got.contains("abcdef12345"), "{} -> {}", raw, got);
+        }
+        // 不该误伤正常文案
+        assert_eq!(scrub_text("模型没有返回任何内容"), "模型没有返回任何内容");
+    }
+}

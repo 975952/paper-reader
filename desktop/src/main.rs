@@ -10,8 +10,10 @@
 
 mod api;
 mod assets;
+mod auth;
 mod chat;
 mod icon_geometry;
+mod limits;
 mod server;
 mod store;
 mod util;
@@ -88,6 +90,10 @@ fn main() {
 
     let dirs = util::init_dirs();
 
+    // 审计 §P0：per-boot 随机 token。必须在起 HTTP 服务之前生成，
+    // 保证「注入页面的 token」和「校验用的 token」是同一个。
+    auth::init();
+
     if console {
         log_line("");
         log_line("  📖  论文阅读器（桌面版）");
@@ -95,6 +101,15 @@ fn main() {
         log_line(&format!("      papers : {}", dirs.papers.display()));
         log_line(&format!("      data   : {}", dirs.data.display()));
         log_line(&format!("      内嵌前端文件: {} 个", assets::count()));
+        // 绝不打印 token 本身
+        log_line(&format!(
+            "      API 令牌校验: {}",
+            if auth::enforced() {
+                "已启用（所有 /api/* 需带 X-PRT-Token）"
+            } else {
+                "已关闭（PRT_REQUIRE_TOKEN=0）"
+            }
+        ));
     }
 
     if want_help {
@@ -108,6 +123,28 @@ fn main() {
 
     if !assets::contains("index.html") {
         log_line("[warn] 没有内嵌 index.html，界面会是空白的");
+    }
+
+    // 认证默认开启，但要能一眼看出「有没有可用的 token 注入」，
+    // 否则前端加载失败时只会看到一片 401、无从下手。
+    if auth::enforced() {
+        log_line("[boot] API 认证已启用；页面必须由本服务提供（token 由 index.html 注入）");
+    }
+
+    // 机器可读的 token 行：给「自己 spawn 隔离服务」的测试 harness 用。
+    //
+    // 注意这里**刻意不走 log_line**：log_line 会落一份到 data/paper-reader.log，
+    // 那就把 token 写进日志文件了（审计 §P0 第 5 条要求 token 不进日志）。
+    // 所以它只写 stdout，而且：
+    //   * `PRT_API_TOKEN` 已注入（调用方本来就知道）→ 不打印
+    //   * `PRT_QUIET_TOKEN=1`（交付版）→ 不打印
+    //
+    // （原来是 /** */ 文档注释，但文档注释挂在表达式上是无效的，rustc 会报
+    //   unused_doc_comments；正式构建不该留这种噪声，所以改回普通注释。）
+    if let Some(line) = auth::token_announcement() {
+        let mut out = std::io::stdout();
+        let _ = writeln!(out, "{}", line);
+        let _ = out.flush();
     }
 
     let start_port = parse_port(&args).unwrap_or(8787);

@@ -44,6 +44,28 @@ pub fn read_json_opt(name: &str) -> Option<Value> {
     serde_json::from_slice::<Value>(&bytes).ok()
 }
 
+/**
+ * data/ 目录下所有文件名（只取文件名本身，不含路径）。
+ * 给 `/api/sessions` 列会话用：它要扫出 `session-<docId>*.json` 这一族文件。
+ * 目录不存在 / 读不到就返回空表 —— 调用方按"没有会话"处理，不该因此报错。
+ */
+pub fn list_data_files() -> Vec<String> {
+    let dir = data_path("");
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 删除一个数据文件（删不掉 / 本来就不在都返回 false，调用方自己决定怎么提示）
+pub fn remove_file(name: &str) -> bool {
+    let _guard = lock();
+    std::fs::remove_file(data_path(name)).is_ok()
+}
+
 /// 原子写 JSON。调用方必须检查返回值，失败时向客户端返回错误。
 pub fn write_json(name: &str, value: &Value) -> bool {
     let _guard = lock();

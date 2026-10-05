@@ -30,13 +30,9 @@ const INCLUDE = [
   'desktop/build.rs',
   'desktop/tools',
   'docs',
-  'test/cards.mjs',
   'test/cjk.mjs',
   'test/context.mjs',
   'test/desktop.mjs',
-  'test/diag.mjs',
-  'test/diag2.mjs',
-  'test/diag3.mjs',
   'test/e2e.mjs',
   'test/export.mjs',
   'test/isolate.mjs',
@@ -73,6 +69,17 @@ const DENY = [
   /\.log$/i,
   /webview2/,
   /\.desktop-port$/,
+  /**
+   * 只给自己看的东西 —— 明确不进发布包。
+   *   docs/internal/    私人说明（给同学的转发文案、挂 GPT 的网络笔记、VPS 部署笔记）。
+   *                     VPS 那份里有服务器地址与账号；docs 整个在白名单里，
+   *                     所以必须在这里挡一道，否则它会跟着源码 zip 发到 GitHub。
+   *   tools/internal/   与论文阅读器无关的个人脚本（codex / bridge / watch / 手机桥）。
+   *   test/archive/     已删功能的旧测试套件，只作参考，不进交付。
+   *   archive/          已归档的 Android 工程（无发布计划）。
+   */
+  /(^|[\\/])internal([\\/]|$)/,
+  /(^|[\\/])archive([\\/]|$)/,
 ];
 
 /**

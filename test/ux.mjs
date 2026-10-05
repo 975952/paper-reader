@@ -99,7 +99,8 @@ try {
   const aiPort = upstream.address().port;
   readerPort = await findPort();
   reader = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, PORT: String(readerPort), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1' },
+    // 2026-10 安全加固：隔离服务自己 spawn，须显式关掉强制校验并开启诊断路径
+    env: { ...process.env, PORT: String(readerPort), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1', PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1' },
     stdio: 'ignore',
   });
   const BASE = `http://127.0.0.1:${readerPort}`;
@@ -132,26 +133,73 @@ try {
   const docA = await page.evaluate(() => window.__state.doc.docId);
   check('打开合成多页论文并提取全文', !!docA);
 
-  // 设置只把高频项直接露出；低频样式默认折叠但仍可展开，避免阅读时被一长串滑杆打断。
+  /**
+   * 2026-10 删减：设置弹窗只剩六项 —— API Key / 模型名 / 接口地址 / 主题 / 阅读字号 / 恢复默认设置。
+   * 「结果密度 / 顶栏行为」和整块「更多样式」（界面字号 / 控件大小 / 行高 / 代码大小 /
+   * 结果最大宽度 / 结果透明度 / PDF 纸张 / 三个显示开关）都下架了，
+   * 所以这里不再验「展开 / 折叠」那套，改成验：
+   *   ① 留下的两项（主题、阅读字号）可见；② 下架的控件确实不在；
+   *   ③ 恢复默认只剩一个入口；④ 留下的两项**真的还能用**（改一下立刻生效）。
+   */
   await page.click('#settingsBtn');
   await page.waitForSelector('#settingsModal:not(.hidden)', { timeout: 6000 });
-  const settingsCore = await page.evaluate(() => ({
+  const REMOVED_STYLE_IDS = ['advancedStyles', 'uiDensity', 'uiTopbar', 'uiUiFontSize', 'uiControlSize',
+    'uiLineHeight', 'uiCodeSize', 'uiMaxWidth', 'uiOpacity', 'uiPaper', 'uiShowPage', 'uiShowQuote', 'uiShowSources'];
+  const settingsCore = await page.evaluate((removedIds) => ({
     core: [...document.querySelectorAll('#settingsModal .settings-core-grid .field')]
       .filter((n) => n.getBoundingClientRect().height > 0)
       .map((n) => n.querySelector('select, input')?.id),
-    open: !!document.querySelector('#advancedStyles[open]'),
-    summary: document.querySelector('#advancedStyles > summary')?.textContent.trim(),
-  }));
-  // 核心区默认放「主题 / 结果密度 / 顶栏」三项：顶栏是 2026-10-03 新增的
-  // 「悬停才出现 / 常驻」开关 —— 自动隐藏时顶栏在静息态整个移出屏幕，任何按坐标点击
-  // 的路径（自动化、辅助技术）都会失败，所以必须给用户一个能关掉它的可见入口。
-  check('设置默认只显示主题 / 结果密度 / 顶栏三项',
-    settingsCore.core.join() === 'uiTheme,uiDensity,uiTopbar' && !settingsCore.open && settingsCore.summary === '更多样式',
-    JSON.stringify(settingsCore));
-  await page.click('#advancedStyles > summary');
-  await wait(120);
-  const advancedStyleIds = await page.evaluate(() => [...document.querySelectorAll('#advancedStyles input')].map((n) => n.id));
-  check('展开更多样式后低频设置仍可用', advancedStyleIds.includes('uiUiFontSize') && advancedStyleIds.includes('uiOpacity') && advancedStyleIds.includes('uiShowSources'), advancedStyleIds.join(','));
+    removed: removedIds.filter((id) => document.getElementById(id)),
+    resets: ['resetLayout', 'resetStyle', 'resetSettings'].filter((id) => document.getElementById(id)),
+  }), REMOVED_STYLE_IDS);
+  check('「阅读助手样式」只剩主题与阅读字号两项',
+    settingsCore.core.join() === 'uiTheme,uiFontSize', JSON.stringify(settingsCore.core));
+  check('下架的低频样式控件确实都不在', settingsCore.removed.length === 0, settingsCore.removed.join(','));
+  check('恢复默认只剩一个入口（#resetSettings）',
+    settingsCore.resets.join() === 'resetSettings', settingsCore.resets.join(','));
+
+  // 主题：改成深色必须立刻落到 documentElement[data-theme] 上（'system' 是删掉这个属性）
+  const themeApplied = await page.evaluate(() => {
+    const sel = document.getElementById('uiTheme');
+    const before = document.documentElement.dataset.theme || '(跟随系统)';
+    sel.value = 'dark';
+    sel.dispatchEvent(new Event('input', { bubbles: true }));
+    const after = document.documentElement.dataset.theme || '(跟随系统)';
+    sel.value = 'light';
+    sel.dispatchEvent(new Event('input', { bubbles: true }));
+    const back = document.documentElement.dataset.theme || '(跟随系统)';
+    return { before, after, back };
+  });
+  check('主题改一下立刻生效（跟随系统 → dark → light）',
+    themeApplied.before !== 'dark' && themeApplied.after === 'dark' && themeApplied.back === 'light',
+    JSON.stringify(themeApplied));
+
+  // 阅读字号：改一下必须立刻写进 --ai-fs（结果正文用的就是它）
+  const fontSizeApplied = await page.evaluate(() => {
+    const el = document.getElementById('uiFontSize');
+    const out = document.getElementById('uiFontSizeValue');
+    const before = getComputedStyle(document.documentElement).getPropertyValue('--ai-fs').trim();
+    const next = Number(el.value) >= Number(el.max) ? Number(el.max) - 1 : Number(el.value) + 1;
+    el.value = String(next);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return {
+      before,
+      after: getComputedStyle(document.documentElement).getPropertyValue('--ai-fs').trim(),
+      label: out?.textContent || '',
+      value: el.value,
+    };
+  });
+  check('阅读字号改一下立刻生效（--ai-fs 跟着变，右侧数值同步）',
+    fontSizeApplied.before !== fontSizeApplied.after
+      && fontSizeApplied.label === `${fontSizeApplied.value}px`,
+    JSON.stringify(fontSizeApplied));
+
+  // 收尾：主题拨回跟随系统，别把后面的视觉断言带偏
+  await page.evaluate(() => {
+    const sel = document.getElementById('uiTheme');
+    sel.value = 'system';
+    sel.dispatchEvent(new Event('input', { bubbles: true }));
+  });
   await page.click('#closeSettings');
   await wait(180);
 
@@ -168,20 +216,31 @@ try {
   await wait(700);
   const historyForA = await page.evaluate((id) => window.__state.jumpHistory.get(id)?.length || 0, docA);
   check('连续目录跳转各自记录阅读位置', historyForA === 2, `${historyForA} 个位置`);
-  await page.click('#returnPosition');
+  /**
+   * ⚠️ 2026-10：顶栏那个 `#returnPosition`（返回原位置）按钮按用户要求删掉了。
+   * 但**能力本身还在** —— `returnToPreviousPosition()` 仍导出在 `window.__ctx` 上，
+   * 跳转历史也仍由 recordReaderJump 维护。所以这里改成直接调那个函数，
+   * 验的还是同一件事（逐步回退能恢复具体滚动位置与缩放），没有削弱断言。
+   * 原来那两条「按钮是否 hidden」的断言换成「跳转历史栈是否为空」——
+   * 语义完全相同（没有历史 = 无可返回），只是不再依赖一个已删除的按钮。
+   */
+  await page.evaluate(() => window.__ctx.returnToPreviousPosition());
   await page.waitForFunction((top, scale) => Math.abs(window.__viewer.container.scrollTop - top) < 2 && Math.abs(window.__viewer.scale - scale) < 0.005, {}, afterFirst.scrollTop, afterFirst.scale);
-  await page.click('#returnPosition');
+  await page.evaluate(() => window.__ctx.returnToPreviousPosition());
   await page.waitForFunction((top, scale) => Math.abs(window.__viewer.container.scrollTop - top) < 2 && Math.abs(window.__viewer.scale - scale) < 0.005, {}, origin.scrollTop, origin.scale);
   check('逐步返回恢复具体滚动位置和缩放', true);
-  check('普通滚动不会生成跳转历史', await page.$eval('#returnPosition', (n) => n.classList.contains('hidden')));
+  const histAfterBack = await page.evaluate((id) => window.__state.jumpHistory.get(id)?.length || 0, docA);
+  check('普通滚动不会生成跳转历史', histAfterBack === 0, `剩余历史 ${histAfterBack}`);
 
   // Another document owns a separate history stack.
   await page.evaluate(() => window.__ctx.jumpToPageWithHistory(Math.min(2, window.__viewer.numPages), { smooth: false }));
   await wait(500);
   await page.evaluate(() => [...document.querySelectorAll('#fileList li')].find((n) => n.title.includes('fixture-b.pdf'))?.click());
   await page.waitForFunction(() => window.__state.doc?.name === 'fixture-b.pdf' && window.__state.viewerDocId === window.__state.doc.docId, { timeout: 30000 });
-  check('切换论文后不显示另一篇论文的返回历史', await page.$eval('#returnPosition', (n) => n.classList.contains('hidden')));
+  // 先取 docB（下面那两条断言都要用），再断言「B 篇起始没有别人的返回历史」
   const docB = await page.evaluate(() => window.__state.doc.docId);
+  check('切换论文后不显示另一篇论文的返回历史',
+    (await page.evaluate((id) => window.__state.jumpHistory.get(id)?.length || 0, docB)) === 0, 'B 篇起始无历史');
   await page.evaluate(() => window.__ctx.jumpToPageWithHistory(Math.min(3, window.__viewer.numPages), { smooth: false }));
   await wait(350);
   const bStack = await page.evaluate((id) => window.__state.jumpHistory.get(id)?.length || 0, docB);
@@ -189,7 +248,8 @@ try {
   check('不同论文的返回栈互相独立', bStack === 1 && aStack === 1, `A=${aStack}，B=${bStack}`);
   await page.evaluate(() => [...document.querySelectorAll('#fileList li')].find((n) => n.title.includes('fixture-a.pdf'))?.click());
   await page.waitForFunction((id) => window.__state.doc?.docId === id && window.__state.viewerDocId === id, { timeout: 30000 }, docA);
-  check('返回原论文时仍能看到该论文自己的历史', await page.$eval('#returnPosition', (n) => !n.classList.contains('hidden')));
+  check('返回原论文时仍能看到该论文自己的历史',
+    (await page.evaluate((id) => window.__state.jumpHistory.get(id)?.length || 0, docA)) >= 1, 'A 篇历史仍在');
 
   // Same-page individual matches, snippets, Enter navigation, exact highlight, and Escape focus return.
   await page.evaluate(() => {
@@ -222,10 +282,10 @@ try {
   await page.waitForFunction(() => window.__state.search.idx === 1);
   await waitForStableScroll(page);
   check('Enter 跳到下一个（同页）结果', await page.$eval('#searchResults .search-result.current .sr-page', (n) => n.textContent === 'p.1'));
-  await page.click('#returnPosition');
-  await page.waitForFunction(() => window.__state.search.idx === 1 && !document.querySelector('#returnPosition').classList.contains('hidden'));
+  await page.evaluate(() => window.__ctx.returnToPreviousPosition());
+  await page.waitForFunction(() => window.__state.search.idx === 1);
   await page.waitForFunction((top) => Math.abs(window.__viewer.container.scrollTop - top) < 2, {}, firstHitPosition);
-  await page.click('#returnPosition');
+  await page.evaluate(() => window.__ctx.returnToPreviousPosition());
   try {
     await page.waitForFunction((top, scale) => Math.abs(window.__viewer.container.scrollTop - top) < 2 && Math.abs(window.__viewer.scale - scale) < 0.005, { timeout: 8000 }, searchOrigin.scrollTop, searchOrigin.scale);
   } catch (error) {
@@ -276,12 +336,30 @@ try {
   // The visible scope is built from the same immutable request snapshot.
   await page.evaluate(() => {
     const ctx = window.__ctx;
-    if (!window.__state.useFullText) document.querySelector('#optFull').click();
+    // 2026-10：`#optFull` 换成「范围」菜单里的「整篇论文」项，开它要过一次确认页。
+    if (!window.__state.useFullText) {
+      const box = document.getElementById('scopeMenu');
+      if (box.classList.contains('hidden')) document.getElementById('optScope').click();
+      box.querySelector('.scope-menu-btn[data-scope-action="full"]').click();
+      box.querySelector('.scope-menu-btn[data-scope-action="confirm"]').click();
+    }
     window.__state.useWeb = false;
     ctx.addToChat({ cleanText: 'selection alpha', page: 1 });
     ctx.addToChat({ cleanText: 'selection beta', page: 1 });
   });
-  await page.click('#regionBtn');
+  /**
+   * ⚠️ 2026-10：顶栏的 `#regionBtn`（框选截图）入口按用户要求删掉了，
+   * 截图改由问答栏里的「＋」（#clipBtn，也就是输入框边上那个 ✂）与快捷键 R 提供。
+   *
+   * 这里**不能**用快捷键 R：上一步 `addToChat` 之后焦点落在 `#chatInput` 里，
+   * 而 `initShortcuts` 对无修饰键的单键有一条 typing 保护（`if (typing) return`）——
+   * 那是**故意**的（否则 Ctrl+A 全选会被当成「问」真的发一次付费请求）。
+   * 所以按 R 没反应是正确行为，不是缺陷。
+   *
+   * 改成点那个 ✂ 按钮 —— 它是产品里真实存在的截图入口，验的还是同一件事
+   * （框选 → 加到对话 → 图片附件）。
+   */
+  await page.click('#clipBtn');
   await page.waitForFunction(() => !document.querySelector('#regionOverlay').classList.contains('hidden'));
   const crop = await page.evaluate(() => {
     const vr = document.querySelector('#viewer').getBoundingClientRect();
@@ -385,9 +463,10 @@ try {
   await page.screenshot({ path: layoutPath, fullPage: false });
   const layout = await page.evaluate(() => {
     const rect = (id) => { const r = document.querySelector(id).getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height, right: r.right, bottom: r.bottom }; };
-    return { search: rect('#searchBar'), viewer: rect('#viewer'), body: rect('.ai-body'), composer: rect('#composer'), scope: rect('#sendScope'), returnButton: rect('#returnPosition'), topbar: rect('.topbar'), scopeText: document.querySelector('#sendScope').textContent };
+    // `#returnPosition` 已删（2026-10），改量新加的底栏 —— 它也必须落在视口内、不越界。
+    return { search: rect('#searchBar'), viewer: rect('#viewer'), body: rect('.ai-body'), composer: rect('#composer'), scope: rect('#sendScope'), foot: rect('#viewerFoot'), topbar: rect('.topbar'), scopeText: document.querySelector('#sendScope').textContent };
   });
-  check('界面提示和输入区在布局内且没有重叠', layout.search.bottom <= layout.viewer.y + 2 && layout.body.bottom <= layout.composer.y + 2 && layout.scope.bottom <= layout.composer.bottom + 1 && layout.returnButton.x >= 0 && layout.returnButton.right <= 1500 && layout.topbar.bottom <= 47, layoutPath);
+  check('界面提示和输入区在布局内且没有重叠', layout.search.bottom <= layout.viewer.y + 2 && layout.body.bottom <= layout.composer.y + 2 && layout.scope.bottom <= layout.composer.bottom + 1 && layout.foot.x >= 0 && layout.foot.right <= 1500 && layout.topbar.bottom <= 47, layoutPath);
   console.log(`界面截图：${layoutPath}`);
   await page.evaluate(() => document.querySelector('#searchClose').click());
   await page.evaluate(() => {
@@ -410,9 +489,24 @@ try {
   await page.waitForFunction(() => !window.__state.busy, { timeout: 15000 });
   const stopped = await page.evaluate(() => {
     const row = [...document.querySelectorAll('#aiArea .msg.assistant')].at(-1);
-    return { text: row.querySelector('.text').textContent, meta: row.querySelector('.entry-meta')?.textContent || '', actions: [...row.querySelectorAll('.acts button')].map((b) => b.textContent), users: document.querySelectorAll('#aiArea .msg.user').length };
+    /**
+     * 2026-10：消息动作里的「复制 / 回到第 N 页」改成**图标按钮**了
+     * （用户口径：「复制 / 回到第8页用图标表示不要用文字」），
+     * 所以它们的 `textContent` 是空的。这里读**可访问名**（aria-label / title）——
+     * 对图标按钮就是它的名字，对纯文字按钮仍是文字，两种都能覆盖。
+     */
+    const label = (b) => (b.getAttribute('aria-label') || b.getAttribute('title') || b.textContent || '').trim();
+    return {
+      text: row.querySelector('.text').textContent,
+      meta: row.querySelector('.entry-meta')?.textContent || '',
+      actions: [...row.querySelectorAll('.acts button')].map(label),
+      users: document.querySelectorAll('#aiArea .msg.user').length,
+    };
   });
-  check('主动停止保留部分回答且提供复制与重新生成', stopped.text.includes('部分回答已收到') && !stopped.text.includes('已停止') && /已停止/.test(stopped.meta) && stopped.actions.includes('复制') && stopped.actions.includes('重新生成'));
+  check('主动停止保留部分回答且提供复制与重新生成',
+    stopped.text.includes('部分回答已收到') && !stopped.text.includes('已停止') && /已停止/.test(stopped.meta)
+    && stopped.actions.includes('复制这段回答') && stopped.actions.includes('重新生成'),
+    `actions=${JSON.stringify(stopped.actions)}`);
   check('停止中的连点没有重复发送', upstreamRequests.length === beforeStopRequests + 1 && stopped.users === beforeStopUsers + 1);
   plans.push({ kind: 'quick', chunks: ['重新生成成功。'] });
   await page.evaluate(() => [...document.querySelectorAll('#aiArea .msg.assistant .acts button')].find((b) => b.textContent === '重新生成')?.click());
@@ -424,7 +518,13 @@ try {
   plans.push({ kind: 'quick', chunks: ['模拟阅读索引。'] }, { kind: 'quick', chunks: ['已提取相关段落。'] });
   await page.evaluate(() => {
     window.__ctx.setFullLimit(2000);
-    if (!window.__state.useFullText) document.querySelector('#optFull').click();
+    // 2026-10：`#optFull` →「范围」菜单里的「整篇论文」项（开要过一次确认页）
+    if (!window.__state.useFullText) {
+      const box = document.getElementById('scopeMenu');
+      if (box.classList.contains('hidden')) document.getElementById('optScope').click();
+      box.querySelector('.scope-menu-btn[data-scope-action="full"]').click();
+      box.querySelector('.scope-menu-btn[data-scope-action="confirm"]').click();
+    }
     const input = document.querySelector('#chatInput');
     input.value = '定位关键结论'; input.dispatchEvent(new Event('input', { bubbles: true }));
   });

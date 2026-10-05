@@ -14,7 +14,8 @@ fs.mkdirSync(DATA); fs.mkdirSync(PAPERS);
 const PORT = 9010 + Math.floor(Math.random() * 4000);
 const BASE = `http://127.0.0.1:${PORT}`;
 const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-  env: { ...process.env, PORT: String(PORT), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1' },
+  // 2026-10 安全加固：隔离服务自己 spawn，须显式关掉强制校验并开启诊断路径
+  env: { ...process.env, PORT: String(PORT), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1', PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1' },
   stdio: 'ignore',
 });
 const stop = () => { try { child.kill(); } catch {} };

@@ -59,7 +59,8 @@ try {
   const aiPort = upstream.address().port;
   const port = await pickPort();
   reader = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, PORT: String(port), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1' },
+    // 2026-10 安全加固：隔离服务自己 spawn，须显式关掉强制校验并开启诊断路径
+    env: { ...process.env, PORT: String(port), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1', PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1' },
     stdio: 'ignore',
   });
   const BASE = `http://127.0.0.1:${port}`;
@@ -111,30 +112,51 @@ try {
     errors: [...document.querySelectorAll('#toastWrap .toast.err')].map((x) => x.textContent),
     entries: window.__state.sessionEntries.map((x) => ({ block: x.block, status: x.status, retry: !!x.retry })),
     blocks: Object.keys(window.__state.blockMeta),
-    chatCount: document.querySelectorAll('[data-block="chat"] .msg').length,
-    translateCount: document.querySelectorAll('[data-block="translate"] .msg').length,
+    // ⚠️ 别用 document.querySelectorAll('[data-block=…] .msg')：2026-10 删减后右栏恒为单列，
+    // 没显示的那块节点被停进脱离文档的 #panelPark，DOM 查询恒为 0，会误读成「没恢复」。
+    // 块节点本身活在 state.blockEls 上，用它是可靠的。
+    chatCount: window.__state.blockEls?.chat?.querySelectorAll('.msg').length ?? 0,
+    translateCount: window.__state.blockEls?.translate?.querySelectorAll('.msg').length ?? 0,
     retryButtons: [...document.querySelectorAll('.msg .acts button')].map((x) => x.textContent),
   }));
   check('恢复历史无页面异常或错误 toast', pageErrors.length === 0 && restored.errors.length === 0, pageErrors.join(' | ') || restored.errors.join(' | '));
   check('隐藏结果块恢复前已创建且非法 block 归入问答', restored.blocks.includes('chat') && restored.blocks.includes('translate') && restored.entries.every((x) => ['chat', 'translate'].includes(x.block)));
+  /**
+   * 2026-10 删减后右栏**恒为单列**：一列只开一个面板，译文与问答不可能同时摆在台面上。
+   * 旧写法用 `setPanelColumn('chat', 1)` / `('translate', 2)` 把两块并排摆成两栏 —— 那套栏位 API
+   * 连同第 2 栏一起删了。恢复出来的消息按块落在 `state.blockEls` 上，所以「两块都恢复」这件事
+   * 改成直接查块节点，不再要求它们同时在文档里。
+   */
+  const restoredByBlock = await page.evaluate(() => {
+    const msgs = (id) => [...(window.__state.blockEls?.[id]?.querySelectorAll('.msg') || [])];
+    return {
+      chatMsgs: msgs('chat').length,
+      translateMsgs: msgs('translate').length,
+      acts: msgs('chat').concat(msgs('translate'))
+        .flatMap((m) => [...m.querySelectorAll('.acts button')].map((b) => b.textContent)),
+    };
+  });
+  check('恢复后两块的消息都回来了（问答 / 译文各一条以上）',
+    restoredByBlock.chatMsgs >= 1 && restoredByBlock.translateMsgs >= 1,
+    `chat=${restoredByBlock.chatMsgs} 条 translate=${restoredByBlock.translateMsgs} 条 · acts=${restoredByBlock.acts.join(' / ')}`);
+  // 单列里把问答摆到台面上，才有「重试这次发送」这个入口可点
   await page.evaluate(() => {
-    // 2026-10-04 起右栏是**多列**的：一列只开一个面板。#aiBar 那排按钮点下去带栏位语义
-    // （点第 2 栏的图标会把这块挪到第 2 栏），所以这里直接用栏位 API 摆好两块：
-    // 问答在第 1 栏、译文在第 2 栏 —— 恢复出来的消息正好分属这两块。
-    window.__ctx.setPanelColumn('chat', 1);
-    window.__ctx.setPanelColumn('translate', 2);
+    window.__ctx.setPanelVisible('chat', true);
     window.__ctx.applyPanels();
   });
   await wait(250);
   restored.panels = await page.evaluate(() => ({
     chat: !!document.querySelector('#aiArea .ai-block[data-block="chat"]'),
-    translate: !!document.querySelector('#aiArea2 .ai-block[data-block="translate"]'),
-    acts: [...document.querySelectorAll('.ai-block .msg .acts button')].map((x) => x.textContent),
+    blocksInPane: [...document.querySelectorAll('#aiArea .ai-block')].map((b) => b.dataset.block),
+    acts: [...document.querySelectorAll('#aiArea .ai-block .msg .acts button')].map((x) => x.textContent),
+    colCount: document.querySelectorAll('#rightCols > .side.right').length,
   }));
   restored.retryButtons = restored.panels.acts;
-  check('恢复后译文 / 问答各占一栏，两块的重试入口都在',
-    restored.panels.chat && restored.panels.translate && restored.panels.acts.length >= 2,
-    `${restored.panels.acts.join(' / ')} · entries=${JSON.stringify(restored.entries)}`);
+  check('单列里问答块占据 #aiArea（同时只有 1 块），问答的重试入口在',
+    restored.panels.chat && restored.panels.colCount === 1 && restored.panels.blocksInPane.length === 1
+      && restored.panels.acts.includes('重试这次发送'),
+    `blocks=[${restored.panels.blocksInPane.join(',')}] 列数=${restored.panels.colCount}`
+    + ` · acts=${restored.panels.acts.join(' / ')} · entries=${JSON.stringify(restored.entries)}`);
 
   const beforeRetry = chatBodies.length;
   await page.evaluate(() => {
@@ -161,6 +183,17 @@ try {
   await wait(250);
   const secondTranslate = await page.evaluate(() => ({ n: window.__state.sessionEntries.length, calls: window.__state.sessionEntries.filter((x) => x.quote === '重复选区').length }));
   check('缓存命中不重复追加翻译 entry', firstTranslate.calls === 1 && secondTranslate.calls === 1 && secondTranslate.n === firstTranslate.n, JSON.stringify({ beforeTranslate, firstTranslate, secondTranslate }));
+  /**
+   * 上面两次 doTranslate 会把译文块推到台面上（单列里同一时刻只有一块可见）。
+   * 这条前置断言是必须的：下面的 「重新生成」 用 `?.click()` 找按钮，按钮找不到就是静默 no-op，
+   * 而再下面那条「不误发请求」照样通过 —— 假绿。先把「入口真的在」钉死。
+   */
+  const translateStage = await page.evaluate(() => ({
+    block: document.querySelector('#aiArea .ai-block')?.dataset.block || '',
+    regen: [...document.querySelectorAll('#aiArea .ai-block .msg .acts button')].some((b) => b.textContent === '重新生成'),
+  }));
+  check('译文块此刻在 #aiArea 台面上，且「重新生成」入口在',
+    translateStage.block === 'translate' && translateStage.regen, JSON.stringify(translateStage));
   const beforeNoKey = chatBodies.length;
   await page.evaluate(() => {
     window.__settings.data.hasApiKey = false;

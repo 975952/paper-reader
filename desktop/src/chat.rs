@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use tiny_http::Request;
 
 use crate::api::{default_config, js_string, truthy, DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_TEMPERATURE, DEFAULT_IDLE_MS};
+use crate::limits;
 use crate::server::{err_json, send_json, send_raw, send_sse, Ctx};
 use crate::store;
 use crate::util::normalize_chat_url;
@@ -44,40 +45,56 @@ pub fn handle(rq: Request, body: &[u8], _ctx: &Ctx) {
         Err(e) => return send_json(rq, 400, &err_json(&e)),
     };
 
-    /* ---------- 取配置（缺省回落 data/config.json） ---------- */
+    /*
+     * 审计 §P0：**只使用已保存配置**里的 baseURL / apiKey / model。
+     *
+     * 从前这里写的是 `pick("baseURL", "baseURL", ...)`，于是任何拿到本机 API 调用权的
+     * 页面都能把用户的 Key 转发到任意主机、或让服务端带着 Key 去请求任意 URL。
+     * 现在请求体里出现这三个字段一律忽略（旧前端还会带，忽略同样安全）。
+     */
+    let mut forbidden: Vec<String> = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
+    if let Value::Object(m) = &payload {
+        for k in m.keys() {
+            if limits::is_chat_forbidden(k) {
+                forbidden.push(k.clone());
+            } else if !limits::is_chat_field(k) {
+                unknown.push(k.clone());
+            }
+        }
+    }
+    if !forbidden.is_empty() {
+        store::log_line(&format!(
+            "[diag] /api/chat 请求体里的 {} 已忽略（只能来自 data/config.json）",
+            forbidden.join(", ")
+        ));
+    }
+    if !unknown.is_empty() {
+        store::log_line(&format!("[diag] /api/chat 忽略未知字段: {}", unknown.join(", ")));
+    }
+
+    /* ---------- 取配置（**只**从 data/config.json 读，缺省用内置默认值） ---------- */
     let stored = store::read_json("config.json", json!({}));
     let defaults = default_config();
 
-    let pick = |key: &str, fallback_key: &str, def: &Value| -> Value {
-        let from_payload = payload.get(key).filter(|v| truthy(v));
-        if let Some(v) = from_payload {
-            return v.clone();
-        }
-        let from_stored = stored.get(fallback_key).filter(|v| truthy(v));
-        if let Some(v) = from_stored {
-            return v.clone();
-        }
-        def.clone()
+    let from_stored = |key: &str, def: &Value| -> Value {
+        stored
+            .get(key)
+            .filter(|v| truthy(v))
+            .cloned()
+            .unwrap_or_else(|| def.clone())
     };
 
-    let base_url_raw = pick(
-        "baseURL",
+    let base_url = js_string(&from_stored(
         "baseURL",
         defaults.get("baseURL").unwrap_or(&json!(DEFAULT_BASE_URL)),
-    );
-    let base_url = js_string(&base_url_raw);
-
-    // Node: payload.apiKey !== undefined && payload.apiKey !== '' ? payload.apiKey : stored.apiKey || ''
-    let api_key: Value = match payload.get("apiKey") {
-        None => stored.get("apiKey").cloned().unwrap_or(json!("")),
-        Some(Value::String(s)) if s.is_empty() => {
-            stored.get("apiKey").cloned().unwrap_or(json!(""))
-        }
-        Some(v) => v.clone(),
+    ));
+    // Node: stored.apiKey || ''
+    let api_key: Value = match stored.get("apiKey") {
+        Some(v) if truthy(v) => v.clone(),
+        _ => json!(""),
     };
-
-    let model = js_string(&pick(
-        "model",
+    let model = js_string(&from_stored(
         "model",
         defaults.get("model").unwrap_or(&json!(DEFAULT_MODEL)),
     ));
@@ -92,14 +109,23 @@ pub fn handle(rq: Request, body: &[u8], _ctx: &Ctx) {
         _ => return send_json(rq, 400, &err_json("messages 不能为空")),
     };
 
+    // 向后兼容：payload 里显式给 false 才是非流式（和 Node 的 `!== false` 一致）
     let stream = !matches!(payload.get("stream"), Some(Value::Bool(false)));
 
-    let temperature = match payload.get("temperature") {
-        Some(Value::Number(n)) => Value::Number(n.clone()),
-        _ => defaults
+    // temperature：必须落在 [0,2]，超范围 400（不静默改写用户请求）
+    let temperature = match limits::pick_temperature(payload.get("temperature")) {
+        Ok(Some(n)) => json!(n),
+        Ok(None) => defaults
             .get("temperature")
             .cloned()
             .unwrap_or(json!(DEFAULT_TEMPERATURE)),
+        Err(msg) => return send_json(rq, 400, &err_json(&msg)),
+    };
+
+    // max_tokens：正整数且在上限内
+    let max_tokens = match limits::pick_max_tokens(payload.get("max_tokens")) {
+        Ok(v) => v,
+        Err(msg) => return send_json(rq, 400, &err_json(&msg)),
     };
 
     let mut upstream_body = json!({
@@ -108,21 +134,25 @@ pub fn handle(rq: Request, body: &[u8], _ctx: &Ctx) {
         "stream": stream,
         "temperature": temperature,
     });
-    if let Some(mt) = payload.get("max_tokens") {
-        if let Some(n) = mt.as_f64() {
-            if n > 0.0 {
-                if let Value::Object(m) = &mut upstream_body {
-                    m.insert("max_tokens".into(), mt.clone());
-                }
-            }
+    if let Some(n) = max_tokens {
+        if let Value::Object(m) = &mut upstream_body {
+            m.insert("max_tokens".into(), json!(n));
         }
     }
 
-    let idle_ms = stored
+    // idleMs：请求体可以缩短看门狗，但同样夹在范围内；否则用已保存配置，再否则默认
+    let idle_ms = payload
         .get("idleMs")
         .and_then(|v| v.as_f64())
-        .filter(|f| *f > 0.0)
-        .map(|f| f as u64)
+        .map(|f| f.round() as i64)
+        .map(|n| n.clamp(limits::IDLE_MS_MIN, limits::IDLE_MS_MAX))
+        .or_else(|| {
+            stored
+                .get("idleMs")
+                .and_then(|v| v.as_f64())
+                .map(|f| (f.round() as i64).clamp(limits::IDLE_MS_MIN, limits::IDLE_MS_MAX))
+        })
+        .map(|n| n as u64)
         .unwrap_or(DEFAULT_IDLE_MS);
 
     /* ---------- 发起上游请求 ---------- */
@@ -157,9 +187,11 @@ pub fn handle(rq: Request, body: &[u8], _ctx: &Ctx) {
                 .message()
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| t.to_string());
+            // 审计 §P2：不回显完整上游 URL 和底层网络异常原文，细节只进本地日志
+            store::log_line(&format!("[diag] 连接上游失败 url={} err={}", url, reason));
             let msg = format!(
-                "连接 {} 失败：{}。请检查 API 地址 / 网络 / 代理。",
-                url, reason
+                "连接 API 地址失败：{}。请到设置页检查 API 地址 / 网络 / 代理。",
+                limits::sanitize_message(&reason, "网络请求失败")
             );
             return send_json(rq, 502, &err_json(&msg));
         }

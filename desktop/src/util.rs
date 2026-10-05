@@ -89,9 +89,38 @@ pub fn extname(path: &str) -> String {
 
 /* --------------------------------------------------------------- docId */
 
+/**
+ * 这个字符串看起来是否**已经**是一个 docId（`slug-十六进制`）。
+ *
+ * 判据（与 server.js 的 `DOC_ID_RE` 对齐，故意从严，避免把正常文件名误判成 id）：
+ *   · 不含点（文件名几乎都带 `.pdf`，而 slug 里的点已经被换成下划线）
+ *   · 结尾是 `-` + 6~10 位小写十六进制
+ *   · 总长不超过 64
+ */
+fn looks_like_doc_id(s: &str) -> bool {
+    if s.len() > 64 || s.contains('.') {
+        return false;
+    }
+    let Some(dash) = s.rfind('-') else { return false };
+    let (head, tail) = s.split_at(dash);
+    if head.is_empty() {
+        return false;
+    }
+    let hex = &tail[1..];
+    (6..=10).contains(&hex.len()) && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// 文档 id：与 server.js 的 `docIdOf()` 完全一致
 /// djb2（按 UTF-16 code unit）+ slug + '-' + 十六进制哈希
+///
+/// ⚠️ **必须幂等**：`doc_id_of(doc_id_of(x)) == doc_id_of(x)`（2026-10 真 bug 修复）。
+/// 前端两处传的 `doc` 参数格式不同 —— 有的传文件名，有的传 docId（`state.doc.docId`）。
+/// 老实现无条件再哈希一次，同一个文档于是有两个 key：会话文件按一个名字写、
+/// 列表按另一个名字扫，**界面就永远是「还没有会话」**。
 pub fn doc_id_of(name: &str) -> String {
+    if looks_like_doc_id(name) {
+        return name.to_string();
+    }
     let mut h: u32 = 5381;
     for cu in name.encode_utf16() {
         h = h.wrapping_mul(33) ^ (cu as u32);

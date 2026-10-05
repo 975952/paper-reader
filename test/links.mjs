@@ -14,6 +14,7 @@
  */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
+import { setScope } from './_scope.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -199,10 +200,28 @@ if (citeInfo.pt) {
 
 /* ═══════════ 二、联网来源列表里的链接 ═══════════ */
 console.log('\n-- 联网来源里的链接');
-await page.evaluate(() => {
-  const f = document.querySelector('#optFull'); if (f.classList.contains('on') && f) f.click();
-  const w = document.querySelector('#optWeb'); if (!w.classList.contains('on')) w.click();
-});
+/**
+ * 2026-10：发送范围搬进设置页（`#cfgUseFullText` / `#cfgUseWeb`），不再是输入框旁边
+ * 那个「范围」菜单（`#optScope` → `#scopeMenu`）。口径没变，只是入口和语义变了：
+ * 这两个现在是全局偏好，默认都开着，改一次就一直算数。
+ * 联网来源列表要验的是「开着联网」，所以这里关整篇、开联网。
+ */
+await setScope(page, { full: false, web: true });
+/**
+ * 2026-10：右栏在「译文 / 问答一块都没开」时会收成右侧活动栏（`body.right-empty`），
+ * 输入框 `#chatInput` 跟着变成 0×0 —— 直接 `page.click('#chatInput')` 会抛
+ * 「Node is either not clickable or not an Element」。想打字必须先点活动栏把右栏拉回来。
+ */
+async function ensureComposer() {
+  const visible = await page.evaluate(() => (document.getElementById('chatInput')?.getBoundingClientRect().width || 0) > 0);
+  if (visible) return;
+  // 2026-10：右侧那条小的活动栏（#railRightBtn）已按用户要求删除
+  //（「最右边那个小的侧边栏不要」）。右栏显隐现在只有顶栏的 #topbarRightToggle 一个入口。
+  await page.click('#topbarRightToggle');
+  await sleep(500);
+}
+
+await ensureComposer();
 await page.click('#chatInput');
 await page.type('#chatInput', '注意力机制是什么');
 await page.keyboard.press('Enter');

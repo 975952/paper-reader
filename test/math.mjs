@@ -10,6 +10,7 @@
  */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
+import { setScope } from './_scope.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -206,12 +207,28 @@ check('只有竖线、没有分隔行的不会被误判成表格', !notTable.has
 
 /* ── 四、走一遍真实问答，确认消息里也渲染 ── */
 console.log('\n-- 走一遍问答');
-await page.evaluate(() => {
-  const f = document.querySelector('#optFull'); if (f.classList.contains('on')) f.click();
-});
+/**
+ * 2026-10：发送范围搬进设置页（`#cfgUseFullText` / `#cfgUseWeb`），默认都开着。
+ * 这一节只要「不要带整篇」——所以去设置里把它关掉（全局偏好，关一次一直算数）。
+ */
+await setScope(page, { full: false });
 // 等「这一条新回答」按**增量**等：会话恢复会把旧消息连同已完成的动作条一起重放出来，
 // 写死 `> 0` 在脏 data 下会立刻满足，断言就会读到上一批套件留下的旧消息。
 const doneBefore = await page.evaluate(() => document.querySelectorAll('#aiArea .msg.assistant .acts:not(.hidden)').length);
+/**
+ * 2026-10：右栏在「一块都没开」时会收成右侧活动栏（`body.right-empty`），`#chatInput`
+ * 跟着变成 0×0 —— `page.click('#chatInput')` 会抛「Node is either not clickable」。
+ */
+async function ensureComposer() {
+  const visible = await page.evaluate(() => (document.getElementById('chatInput')?.getBoundingClientRect().width || 0) > 0);
+  if (visible) return;
+  // 2026-10：右侧那条小的活动栏（#railRightBtn）已按用户要求删除
+  //（「最右边那个小的侧边栏不要」）。右栏显隐现在只有顶栏的 #topbarRightToggle 一个入口。
+  await page.click('#topbarRightToggle');
+  await sleep(500);
+}
+
+await ensureComposer();
 await page.click('#chatInput');
 await page.type('#chatInput', '把公式列一下');
 await page.keyboard.press('Enter');

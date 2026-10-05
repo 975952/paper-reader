@@ -128,21 +128,39 @@ check('PDF 打开成功', numPages > 0, `${numPages} 页`);
 
 /* 默认状态（全新 profile，localStorage 是空的） */
 const defaults = await page.evaluate(() => ({
-  f: document.querySelector('#optFull').classList.contains('on'),
-  w: document.querySelector('#optWeb').classList.contains('on'),
-  lsF: localStorage.getItem('reader.fullText'),
-  lsW: localStorage.getItem('reader.web'),
+  // 2026-10 用户口径：「范围 / 选中文本 + 当前页 / 清空会话这些……第一个应该是默认全文加联网，
+  // 在设置里面调节」。输入框那一排的范围菜单整个撤掉了，开关搬到设置页（#cfgUseFullText / #cfgUseWeb）。
+  f: !!window.__state.useFullText,
+  w: !!window.__state.useWeb,
+  scope: document.getElementById('sendScope')?.textContent || '',
+  noMenu: !document.getElementById('scopeMenu') && !document.getElementById('optScope'),
+  noClear: !document.getElementById('clearSession'),
+  lsF: localStorage.getItem('reader.useFullText'),
+  lsW: localStorage.getItem('reader.useWeb'),
 }));
-check('「整篇」默认关闭（不会跨会话扩大提问范围）', defaults.f === false && defaults.lsF === null, JSON.stringify(defaults));
-check('「联网」默认关着（不让每条消息都白等一两秒）', defaults.w === false);
+check('「整篇」默认开着（用户口径：默认全文）', defaults.f === true, JSON.stringify(defaults));
+check('「联网」默认开着（用户口径：默认联网）', defaults.w === true);
+check('输入框那一排不再有范围菜单和「清空会话」', defaults.noMenu && defaults.noClear, JSON.stringify(defaults));
+check('范围提示当场写明这次会发什么',
+  defaults.scope.includes('整篇论文') && defaults.scope.includes('联网搜索'), JSON.stringify(defaults.scope));
 
-/** 把开关拨到想要的状态（默认值会变，所以不能盲目 click） */
-async function setChip(id, want) {
-  return page.evaluate((sel, w) => {
-    const b = document.querySelector(sel);
-    if (b.classList.contains('on') !== w) b.click();
-    return b.classList.contains('on');
-  }, id, want);
+/**
+ * 把「发送范围」开关拨到想要的状态 —— 走**设置页**（默认值会变，所以不能盲目 click）。
+ * 2026-10 之前是输入框旁边的范围菜单（`#optScope` → `#scopeMenu`），现在是设置里的
+ * `#cfgUseFullText` / `#cfgUseWeb`：打开设置、点勾选框、点保存。
+ * 行为口径变了：这两个不再是「本次发送」的一次性开关，而是全局偏好，改一次就一直算数。
+ */
+async function setScope(which, want) {
+  return page.evaluate(async (w, on) => {
+    const id = w === 'full' ? 'cfgUseFullText' : 'cfgUseWeb';
+    document.getElementById('settingsBtn').click();
+    const box = document.getElementById(id);
+    if (box.checked !== on) box.checked = on;
+    document.getElementById('saveSettings').click();
+    await new Promise((r) => setTimeout(r, 260));
+    document.getElementById('closeSettings').click();
+    return w === 'full' ? !!window.__state.useFullText : !!window.__state.useWeb;
+  }, which, want);
 }
 
 /* ═══════════ 一、纯逻辑：相关段落检索 ═══════════ */
@@ -196,30 +214,42 @@ check('末页正文也在里面（没被截断）', fullCtx.lastPageChars > 100,
 check('同一份文档第二次调用用的是缓存',
   await page.evaluate(() => window.__state.docTextDoc === window.__state.doc?.docId));
 
-const chip = await page.evaluate(() => {
-  const b = document.querySelector('#optFull');
-    if (!b.classList.contains('on')) b.click();      // 明确选择本次发送的范围
-  return {
-    on: b.classList.contains('on'),
-    ls: localStorage.getItem('reader.fullText'),
-    dis: b.disabled,
-  };
+const chip = await page.evaluate(async () => {
+  /**
+   * 2026-10：开关从「范围」菜单搬到了设置页（`#cfgUseFullText`）。
+   * 这一条同时钉住两件事：① 勾选框的状态就是 state.useFullText；② 改动会写进 reader.ui 存档
+   * （全局偏好，刷新后仍算数）。
+   */
+  document.getElementById('settingsBtn').click();
+  const box = document.getElementById('cfgUseFullText');
+  const ui = JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {};
+  const checked = box.checked;
+  box.checked = false;
+  const off = !!window.__state.useFullText;
+  box.checked = true;
+  document.getElementById('saveSettings').click();
+  await new Promise((r) => setTimeout(r, 260));
+  const on = !!window.__state.useFullText;
+  const ls = JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {};
+  document.getElementById('closeSettings').click();
+  return { on, off, checked, uiOn: ui.useFullText, savedOn: ls.useFullText };
 });
-check('点「整篇」后进入本次开启态', chip.on === true, `localStorage=${chip.ls}`);
-check('单次范围不写入 localStorage', chip.ls === null, `localStorage=${chip.ls}`);
-check('打开文档后「整篇」可点', chip.dis === false);
-check('关一次再开一次只改变当前页状态', await (async () => {
-  await setChip('#optFull', false);
-  const off = await page.evaluate(() => localStorage.getItem('reader.fullText'));
-  await setChip('#optFull', true);
-  const on = await page.evaluate(() => localStorage.getItem('reader.fullText'));
-  return off === null && on === null && await page.$eval('#optFull', (b) => b.classList.contains('on'));
+check('设置里的勾选框反映当前状态（默认已勾上）', chip.checked === true, JSON.stringify(chip));
+check('取消勾选立刻关掉整篇范围', chip.off === false, JSON.stringify(chip));
+check('重新勾选后 state.useFullText 打开', chip.on === true, JSON.stringify(chip));
+check('发送范围是全局偏好：写进了 reader.ui 存档', chip.savedOn === true, JSON.stringify(chip));
+check('关一次再开一次只改偏好，不影响当前这次提问的内容', await (async () => {
+  await setScope('full', false);
+  const off = await page.evaluate(() => (JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {}).useFullText);
+  await setScope('full', true);
+  const on = await page.evaluate(() => (JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {}).useFullText);
+  return off === false && on === true && await page.evaluate(() => window.__state.useFullText === true);
 })());
 
 await page.waitForFunction(() => window.__state.docText && window.__state.docText.length > 0, { timeout: 30000 })
   .catch(() => {});
 const warmed = await page.evaluate(() => (window.__state.docText || '').length);
-check('点「整篇」后才读取全文', warmed > 500, `${warmed} 字`);
+check('打开论文后全文已读进来（默认全文）', warmed > 500, `${warmed} 字`);
 
 /* ═══════════ 三、超长论文：索引 + 相关段落 ═══════════ */
 console.log('\n-- 超长论文走「索引 + 相关段落」分支');
@@ -270,10 +300,11 @@ check('英文问句丢掉 what/recent/the 只留实词',
   queries.en);
 check('术语提取有结果', Array.isArray(queries.terms) && queries.terms.length > 0, JSON.stringify(queries.terms));
 
-await setChip('#optWeb', true);
-check('点「联网」变为开启态',
-  await page.evaluate(() => document.querySelector('#optWeb').classList.contains('on')
-    && localStorage.getItem('reader.web') === '1'));
+await setScope('web', true);
+check('设置里勾上「联网」后立刻是开启态',
+  await page.evaluate(() => window.__state.useWeb === true
+    && (JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {}).useWeb === true
+    && (document.getElementById('sendScope')?.textContent || '').includes('联网搜索')));
 
 /* ═══════════ 五、发一条真实的问题，检查真正送出去的 prompt ═══════════ */
 console.log('\n-- 送出去的 prompt');
@@ -286,6 +317,19 @@ const i1 = chatRequests.length;   // 上一节生成索引已经花掉一次请�
  */
 const done1 = await page.evaluate(() => document.querySelectorAll('#aiArea .msg.assistant .acts:not(.hidden)').length);
 const histBefore = await page.evaluate(() => window.__state.history.length);
+/**
+ * 2026-10：右栏在「译文 / 问答一块都没开」时会收成右侧活动栏（`body.right-empty`），
+ * 输入框 `#chatInput` 跟着变成 0×0 —— 直接 `page.click('#chatInput')` 会抛
+ * 「Node is either not clickable or not an Element」。想打字必须先点活动栏把右栏拉回来。
+ */
+async function ensureComposer() {
+  const visible = await page.evaluate(() => (document.getElementById('chatInput')?.getBoundingClientRect().width || 0) > 0);
+  if (visible) return;
+  await page.click('#railRightBtn');
+  await sleep(500);
+}
+
+await ensureComposer();
 await page.click('#chatInput');
 await page.type('#chatInput', '注意力机制到底是什么？');
 await page.keyboard.press('Enter');
@@ -347,20 +391,21 @@ check('回答正文渲染正常', await page.evaluate(() => {
 const histLen = await page.evaluate(() => window.__state.history.length);
 check('问答写进了历史（用于多轮）', histLen === histBefore + 2, `${histLen} 条（本轮之前 ${histBefore} 条）`);
 
-/* ═══════════ 八、单次范围发送后自动复位 ═══════════ */
-console.log('\n-- 单次范围发送后复位');
-await page.evaluate(() => {
-  const web = document.querySelector('#optWeb');
-  if (web.classList.contains('on')) web.click();
-});
+/* ═══════════ 八、发送范围是全局偏好：关掉之后提问就不带那些东西 ═══════════ */
+console.log('\n-- 关掉范围后提问');
+await setScope('web', false);
 const offState = await page.evaluate(() => ({
-  f: document.querySelector('#optFull').classList.contains('on'),
-  w: document.querySelector('#optWeb').classList.contains('on'),
-  lsF: localStorage.getItem('reader.fullText'),
-  lsW: localStorage.getItem('reader.web'),
+  f: !!window.__state.useFullText,
+  w: !!window.__state.useWeb,
+  scope: document.getElementById('sendScope')?.textContent || '',
+  ls: JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {},
 }));
-check('回答完成后「整篇」自动复位且联网关闭', offState.f === false && offState.w === false, JSON.stringify(offState));
-check('整篇单次范围没有写进 localStorage', offState.lsF === null && offState.lsW === '0');
+check('关掉联网后 state 立刻是关的（整篇保持默认开着）',
+  offState.f === true && offState.w === false, JSON.stringify(offState));
+check('范围偏好写进了 reader.ui 存档（不再是一次性的）',
+  offState.ls.useWeb === false && offState.ls.useFullText === true, JSON.stringify(offState.ls));
+check('输入框上方的提示跟着变（只说联网没了）',
+  offState.scope.includes('整篇论文') && !offState.scope.includes('联网搜索'), JSON.stringify(offState.scope));
 
 const searchBefore = searchQueries.length;
 const i2 = chatRequests.length;
@@ -386,7 +431,7 @@ check('关掉后不再显示来源列表', await page.evaluate(() => {
 console.log('\n-- 搜索失败降级');
 searchMode = 'fail';
 expectingFetchFailure = true;
-await setChip('#optWeb', true);
+await setScope('web', true);
 const i3 = chatRequests.length;
 const done3 = await page.evaluate(() => document.querySelectorAll('#aiArea .msg.assistant .acts:not(.hidden)').length);
 await page.click('#chatInput');
@@ -405,17 +450,20 @@ check('搜索失败没有把页面搞崩（无未捕获异常）', pageErrors.le
 expectingFetchFailure = false;
 searchMode = 'ok';
 
-/* ═══════════ 十、刷新后开关状态保留 ═══════════ */
+/* ═══════════ 十、刷新后偏好保留（发送范围是全局设置，跨启动算数） ═══════════ */
 console.log('\n-- 刷新后状态保留');
 await page.reload({ waitUntil: 'domcontentloaded' });
 await page.waitForSelector('#fileList li', { timeout: 20000 });
 await sleep(400);
 const afterReload = await page.evaluate(() => ({
-  w: document.querySelector('#optWeb').classList.contains('on'),
-  f: document.querySelector('#optFull').classList.contains('on'),
+  w: !!window.__state.useWeb,
+  f: !!window.__state.useFullText,
+  scope: document.getElementById('sendScope')?.textContent || '',
 }));
-check('刷新后「联网」仍是开的', afterReload.w === true);
-check('刷新后「整篇」仍是关的', afterReload.f === false);
+check('刷新后「联网」仍是开始的（上一步刚打开）', afterReload.w === true);
+check('刷新后「整篇」仍是默认开着的', afterReload.f === true);
+check('刷新后范围提示写着「整篇论文 + 联网搜索」',
+  afterReload.scope.includes('整篇论文') && afterReload.scope.includes('联网搜索'), JSON.stringify(afterReload.scope));
 
 /* ═══════════ 十一、竞态：自动恢复和手点撞车 ═══════════ */
 // 真实事故：启动时 boot() 会自动恢复「上次那篇」，如果用户同时点了列表里的同一篇，
@@ -440,14 +488,22 @@ try {
   const race = await p2.evaluate(() => ({
     doc: window.__state.doc?.name || null,
     name: document.getElementById('docName').textContent,
-    welcome: !document.getElementById('welcome').classList.contains('hidden'),
-    fullDisabled: document.querySelector('#optFull').disabled,
+    // 2026-10：#welcome 升级成了独立的首页 #home，阅读态由 body.reading 表达。
+    // 这里要验的语义没变 ——「打开论文之后不该还停在首页」。
+    reading: document.body.classList.contains('reading'),
+    homeHidden: document.getElementById('home')?.classList.contains('hidden'),
+    // 2026-10：常驻的 `#optFull` 没了，「整篇论文」项在「范围」菜单里（点开才渲染）。
+    // 这里仍然用它的 disabled 当「文档状态是好的」的探针 —— 语义没变，只是要先把菜单点开。
+    // 2026-10：范围菜单整个撤掉了（发送范围搬进设置页），原来拿 `#optScope` 里「整篇论文」项的
+    // disabled 当「文档状态是好的」探针就没得点了。换成同样语义、但更直接的探针：
+    // 输入框可用 —— 文档没打开成功时它是被禁用的（界面还停在「未打开文档」）。
+    chatUsable: !document.getElementById('chatInput').disabled,
     pages: document.querySelectorAll('.page canvas').length,
   }));
   check('自动恢复与手点撞车后状态一致（不是「PDF 显示着但未打开文档」）',
-    race.doc === first.name && !race.welcome && race.name === first.name,
+    race.doc === first.name && race.reading && race.homeHidden && race.name === first.name,
     JSON.stringify(race));
-  check('撞车后「整篇」按钮可用（说明文档状态是好的）', race.fullDisabled === false, JSON.stringify(race));
+  check('撞车后输入框可用（说明文档状态是好的）', race.chatUsable === true, JSON.stringify(race));
   check('撞车后页面确实渲染了', race.pages >= 1, `${race.pages} 个画布`);
 } finally {
   await p2.close();
