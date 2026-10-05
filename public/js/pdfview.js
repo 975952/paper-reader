@@ -526,6 +526,14 @@ export class PdfViewer {
     }
   }
 
+  /** 首屏布局完成后重画指定页，避免首页在侧栏/窗口尺寸尚未稳定时留下低密度首帧。 */
+  async refreshPage(pageNum = 1) {
+    const i = Number(pageNum);
+    if (!this.pdf || !Number.isInteger(i) || i < 1 || i > this.numPages) return;
+    this._teardownPage(i);
+    await this._renderPage(i, { force: true, priority: true, gen: this._gen });
+  }
+
   /**
    * 算出这一页当前需要渲染的区域（CSS px，相对页面左上角）。
    * 放大到一定程度后整页渲染会撑爆显存，只渲染视口附近这一块。

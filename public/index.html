@@ -182,19 +182,19 @@
          现在：标题栏去掉，切换器搬到顶部，当前是哪一个由这里的选中态表达。 -->
     <div class="aibar" id="aiBar" role="tablist" aria-label="译文 / 问答切换"></div>
     <!-- 多会话（2026-10 用户口径：「问答是不是要做多对话分对话」）：
-         显示当前会话名，点开是会话列表（切换 / 删除 / 新建）。 -->
+         只在**问答块开着**时出现（会话 = 一篇论文的对话，跟译文无关）；
+         一个很轻的小胶囊，显示当前会话名，点开是会话列表（切换 / 删除 / 新建）。 -->
     <div class="sessbar hidden" id="sessBar">
       <button type="button" class="sess-btn" id="sessBtn" title="会话" aria-haspopup="menu" aria-expanded="false">
-        <span class="sess-dot" aria-hidden="true"></span>
-        <span class="sess-label" id="sessLabel">默认会话</span>
-        <span class="sess-caret" aria-hidden="true">▾</span>
+        <span class="sess-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.1V12l3.3 2"/></svg></span>
+        <span class="sess-label" id="sessLabel">会话</span>
+        <span class="sess-caret" aria-hidden="true"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6.6 9.5 12 14.6l5.4-5.1"/></svg></span>
       </button>
       <div class="sess-menu hidden" id="sessionMenu" role="menu" aria-label="会话列表"></div>
     </div>
     <div class="ai" id="aiArea"></div>
     <form class="composer" id="composer">
       <div class="attach-row" id="attachRow"></div>
-      <div class="send-scope hidden" id="sendScope" aria-live="polite"></div>
       <div class="composer-row">
         <textarea id="chatInput" rows="1" placeholder="问点什么…（Enter 发送）"></textarea>
         <button type="button" class="clip" id="clipBtn" title="截图 / 长截图，加进对话"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6.6 2.6v14.8a1.6 1.6 0 0 0 1.6 1.6h13.2"/><path d="M2.6 6.6h14.8a1.6 1.6 0 0 1 1.6 1.6v13.2"/></svg></button>
@@ -203,14 +203,19 @@
       </div>
       <div class="composer-opts">
         <!--
-          2026-10 用户口径：「范围 / 选中文本 + 当前页 / 清空会话这些……第一个应该是默认全文加联网，
-          在设置里面调节」。
-          所以这一排不再放「范围」菜单与「清空会话」：
-            · 发送范围（全文）+ 联网 → **默认就开着**，开关搬到设置页（#cfgUseFullText / #cfgUseWeb）
-            · 清空会话 → 收藏进会话菜单旁边，不常驻
-          这里只留一行状态提示，告诉用户「这一次会发什么」。
+          发送范围（2026-10-05 用户拍板第 2 步）：范围**回到发送框**，但形态与当年不同 ——
+             · 一个常驻芯片显示当前范围（图标 + 极短标签），点它 / 点芯片展开四选项上拉栏；
+             · 四个互斥选项：当前内容 / 整篇论文 / 联网搜索 / 整篇论文 + 联网搜索
+               （覆盖原来两个独立开关的全部组合，**不丢「只联网」**）；
+             · 「当前内容」由上下文自动决定：有选中文字发选中文字，没有就发当前页上下文；
+             · 范围只对下一次发送生效，之后沿用；设置页那两个偏好仍然是**默认值**（只决定初始值）。
+          面板 #sendScope 是绝对定位浮层（anchor 在 .composer-opts 上），不占布局高度。
+          这行 #composerHint 不再被清空：闲时显示「这次会发什么」，忙时显示进度。
         -->
+        <button type="button" class="scope-chip" id="composerScope" aria-haspopup="true" aria-expanded="false"
+                title="发送范围。点击可改：当前内容 / 整篇论文 / 联网搜索 / 整篇论文 + 联网搜索"></button>
         <span class="composer-hint" id="composerHint"></span>
+        <div class="scope-panel hidden" id="sendScope" role="radiogroup" aria-label="发送范围"></div>
       </div>
     </form>
   </aside>

@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-state="answer-basic">
+<head>
+<meta charset="utf-8">
+<title>论文阅读器 · 阅读助手界面设计稿</title>
+<link rel="stylesheet" href="reader.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     状态切换条（仅设计稿用，落地时整体删除；不影响窗口内布局）
+     每一条对应需求里的一个界面状态，也是截图脚本的入口（?state=<id>）
+     ═══════════════════════════════════════════════════════════════════════ -->
+<div class="demo-switcher" role="navigation" aria-label="设计稿状态切换">
+  <span class="ds-label">设计稿状态</span>
+  <div class="ds-tabs" id="dsTabs"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     应用窗口
+     顶栏 35px（应用内标题栏）／左活动栏 44px／左窄栏 208px／正文自适应／右助手面板 372px
+     ═══════════════════════════════════════════════════════════════════════ -->
+<div class="app" id="app">
+
+  <!-- ── 顶栏 ────────────────────────────────────────────────────────── -->
+  <header class="topbar">
+    <div class="tb-left">
+      <span class="tb-brand">论文阅读器</span>
+      <span class="tb-sep" aria-hidden="true"></span>
+      <span class="tb-doc" id="tbDocName" title="Attention Is All You Need.pdf">Attention Is All You Need.pdf</span>
+    </div>
+
+    <div class="tb-right">
+      <!-- 主题三态：跟随系统 / 浅色 / 深色，只显示图标，低频大动作可以带文字 -->
+      <div class="seg" role="group" aria-label="主题">
+        <button class="seg-btn" data-theme-set="system" aria-label="主题：跟随系统" data-tip="主题：跟随系统">
+          <span class="ic" data-icon="monitor" data-size="17"></span>
+        </button>
+        <button class="seg-btn" data-theme-set="light" aria-label="主题：浅色" data-tip="主题：浅色">
+          <span class="ic" data-icon="sun" data-size="17"></span>
+        </button>
+        <button class="seg-btn" data-theme-set="dark" aria-label="主题：深色" data-tip="主题：深色">
+          <span class="ic" data-icon="moon" data-size="17"></span>
+        </button>
+      </div>
+      <span class="tb-sep" aria-hidden="true"></span>
+      <button class="ic-btn" id="btnSettings" aria-label="打开设置" data-tip="设置">
+        <span class="ic" data-icon="sliders" data-size="17"></span>
+      </button>
+      <span class="tb-sep" aria-hidden="true"></span>
+      <div class="win-ctl" role="group" aria-label="窗口控制">
+        <button class="wc-btn" aria-label="最小化窗口" data-tip="最小化"><span class="ic" data-icon="wmin" data-size="17"></span></button>
+        <button class="wc-btn" aria-label="最大化窗口" data-tip="最大化"><span class="ic" data-icon="wmax" data-size="17"></span></button>
+        <button class="wc-btn wc-close" aria-label="关闭窗口" data-tip="关闭"><span class="ic" data-icon="wclose" data-size="17"></span></button>
+      </div>
+    </div>
+  </header>
+
+  <div class="main-row">
+
+    <!-- ── 左活动栏 ─────────────────────────────────────────────────── -->
+    <nav class="rail" aria-label="面板切换">
+      <button class="rail-btn is-active" aria-label="论文列表" data-tip="论文列表">
+        <span class="ic" data-icon="files" data-size="17"></span>
+      </button>
+      <button class="rail-btn" aria-label="目录" data-tip="目录">
+        <span class="ic" data-icon="outline" data-size="17"></span>
+      </button>
+      <button class="rail-btn" id="railNotes" aria-label="笔记" data-tip="笔记">
+        <span class="ic" data-icon="note" data-size="17"></span>
+        <span class="rail-count" id="railNotesCount" aria-label="笔记数量">0</span>
+      </button>
+      <button class="rail-btn" aria-label="参考文献" data-tip="参考文献">
+        <span class="ic" data-icon="refs" data-size="17"></span>
+      </button>
+    </nav>
+
+    <!-- ── 左窄栏：论文 / 笔记（保存的笔记在这里同步增加） ───────────── -->
+    <aside class="side" aria-label="论文与笔记">
+      <div class="side-sec">
+        <div class="side-head">论文</div>
+        <ul class="side-list" id="paperList">
+          <li class="side-item is-current" id="paperItem" tabindex="0">
+            <span class="ic" data-icon="page" data-size="16"></span>
+            <span class="side-name" id="paperName">Attention Is All You Need.pdf</span>
+          </li>
+          <li class="side-item" tabindex="0">
+            <span class="ic" data-icon="page" data-size="16"></span>
+            <span class="side-name">BERT Pre-training.pdf</span>
+          </li>
+          <li class="side-item" tabindex="0">
+            <span class="ic" data-icon="page" data-size="16"></span>
+            <span class="side-name">Retrieval-Augmented Generation.pdf</span>
+          </li>
+        </ul>
+      </div>
+
+      <div class="side-sec side-sec-notes">
+        <div class="side-head">
+          笔记
+          <span class="side-count" id="notesCount">0</span>
+        </div>
+        <ul class="side-list side-notes" id="notesList"></ul>
+        <p class="side-empty" id="notesEmpty">还没有笔记。回答卡片右下角的纸张图标可以保存。</p>
+      </div>
+    </aside>
+
+    <!-- ── 正文区：PDF ──────────────────────────────────────────────── -->
+    <main class="viewer" id="viewer" aria-label="论文正文">
+      <div class="pdf-scroll" id="pdfScroll" tabindex="0">
+        <article class="page" id="page3">
+          <header class="pg-head">
+            <span class="pg-run">Attention Is All You Need</span>
+            <span class="pg-num">3</span>
+          </header>
+
+          <h2 class="pg-title">3 &nbsp;Model Architecture</h2>
+          <p>Most competitive neural sequence transduction models have an encoder-decoder structure.
+            Here, the encoder maps an input sequence of symbol representations to a sequence of continuous
+            representations. The decoder then generates an output sequence one element at a time.</p>
+          <p id="p-sa">The Transformer follows this overall architecture using stacked self-attention and
+            point-wise, fully connected layers for both the encoder and decoder, shown in the left and right
+            halves of Figure 1, respectively. <span class="cite-mark">[1]</span></p>
+          <p id="p-attn">An attention function can be described as mapping a query and a set of key-value pairs
+            to an output, where the query, keys, values, and output are all vectors. The output is computed as
+            a weighted sum of the values, where the weight assigned to each value is computed by a compatibility
+            function of the query with the corresponding key.</p>
+          <p>We call our particular attention &ldquo;Scaled Dot-Product Attention&rdquo;. The input consists of
+            queries and keys of dimension d<sub>k</sub>, and values of dimension d<sub>v</sub>.</p>
+
+          <figure class="pg-fig">
+            <div class="fig-box">
+              <div class="fig-row"><span class="fig-node">Query</span><span class="fig-node">Key</span><span class="fig-node">Value</span></div>
+              <div class="fig-arrow" aria-hidden="true"></div>
+              <div class="fig-row"><span class="fig-node fig-node-wide">Scaled Dot-Product Attention</span></div>
+            </div>
+            <figcaption>Figure 1: The Transformer — model architecture.</figcaption>
+          </figure>
+
+          <footer class="pg-foot">3</footer>
+        </article>
+
+        <article class="page" id="page4">
+          <header class="pg-head">
+            <span class="pg-run">Attention Is All You Need</span>
+            <span class="pg-num">4</span>
+          </header>
+
+          <h2 class="pg-title">3.2 &nbsp;Attention</h2>
+          <p id="p-long">While for small values of d<sub>k</sub> the two mechanisms perform similarly, additive
+            attention outperforms dot product attention without scaling for larger values of d<sub>k</sub>. To
+            counteract this effect we scale the dot products by 1/&radic;d<sub>k</sub>.</p>
+          <p id="p-dep">Multi-head attention allows the model to jointly attend to information from different
+            representation subspaces at different positions. Because each head works in a lower-dimensional
+            space, the total computational cost is similar to that of single-head attention with full
+            dimensionality.</p>
+          <p>A residual connection around each of the two sub-layers is employed, followed by layer
+            normalization. The output of each sub-layer is LayerNorm(x + Sublayer(x)).</p>
+
+          <figure class="pg-fig">
+            <div class="fig-box">
+              <div class="fig-row"><span class="fig-node">Linear</span><span class="fig-node">Concat</span><span class="fig-node">Scaled Dot-Product</span></div>
+            </div>
+            <figcaption>Figure 2: Multi-Head Attention consists of several attention layers running in parallel.</figcaption>
+          </figure>
+
+          <footer class="pg-foot">4</footer>
+        </article>
+      </div>
+
+      <div class="float-jump" id="jumpBack" hidden>
+        <button class="jump-btn" id="btnBackPos" aria-label="返回跳转前的阅读位置" data-tip="返回跳转前的阅读位置">
+          <span class="ic" data-icon="back" data-size="16"></span>
+          <span class="jump-txt">返回原位置</span>
+        </button>
+      </div>
+
+      <!-- 划选气泡：只负责「选一个动作」，结果一律进右侧助手面板 -->
+      <div class="sel-bubble" id="selBubble" hidden role="toolbar" aria-label="对选中文字的操作">
+        <button class="ic-btn" data-sel-act="translate" aria-label="翻译选中文字" data-tip="翻译">
+          <span class="ic" data-icon="translate" data-size="16"></span>
+        </button>
+        <button class="ic-btn" data-sel-act="explain" aria-label="解释选中文字" data-tip="解释">
+          <span class="ic" data-icon="explain" data-size="16"></span>
+        </button>
+        <button class="ic-btn" data-sel-act="ask" aria-label="加入对话" data-tip="加入对话">
+          <span class="ic" data-icon="chat-add" data-size="16"></span>
+        </button>
+        <button class="ic-btn" data-sel-act="bookmark" aria-label="在页边留标记" data-tip="留标记">
+          <span class="ic" data-icon="bookmark" data-size="16"></span>
+        </button>
+        <button class="ic-btn" data-sel-act="copy" aria-label="复制选中文字" data-tip="复制">
+          <span class="ic" data-icon="copy" data-size="16"></span>
+        </button>
+      </div>
+
+      <div class="viewer-foot">
+        <button class="ft-btn" aria-label="上一页" data-tip="上一页"><span class="ic" data-icon="back" data-size="16"></span></button>
+        <span class="ft-page"><span id="curPage">3</span> / 11</span>
+        <button class="ft-btn" aria-label="下一页" data-tip="下一页"><span class="ic" data-icon="next" data-size="16"></span></button>
+        <span class="ft-sep" aria-hidden="true"></span>
+        <button class="ft-btn" aria-label="缩小" data-tip="缩小"><span class="ic" data-icon="minus" data-size="16"></span></button>
+        <span class="ft-zoom">100%</span>
+        <button class="ft-btn" aria-label="放大" data-tip="放大"><span class="ic" data-icon="plus" data-size="16"></span></button>
+      </div>
+    </main>
+
+    <!-- ── 右栏：AI 阅读助手 ────────────────────────────────────────── -->
+    <aside class="assistant" aria-label="AI 阅读助手">
+      <div class="as-head">
+        <span class="as-title">阅读助手</span>
+        <div class="as-head-right">
+          <!-- 论文操作：一句话速览 / 阅读路线 / 方法拆解 / 术语表，其余收在「更多」里 -->
+          <button class="ic-btn" id="btnOps" aria-label="论文操作" aria-haspopup="menu" aria-expanded="false" data-tip="论文操作">
+            <span class="ic" data-icon="sparkle" data-size="16"></span>
+          </button>
+          <button class="ic-btn" aria-label="会话历史" data-tip="会话历史"><span class="ic" data-icon="history" data-size="16"></span></button>
+          <button class="ic-btn" aria-label="新建会话" data-tip="新建会话"><span class="ic" data-icon="plus" data-size="16"></span></button>
+          <button class="ic-btn" aria-label="折叠助手面板" data-tip="折叠面板"><span class="ic" data-icon="collapse" data-size="16"></span></button>
+        </div>
+      </div>
+
+      <div class="as-scroll" id="asScroll">
+        <div class="as-list" id="asList"></div>
+      </div>
+
+      <div class="composer" id="composer">
+        <!-- 发送范围上拉栏：默认收起，位于发送框上方 -->
+        <section class="range-panel" id="rangePanel" hidden aria-label="发送范围">
+          <div class="rp-head">
+            <span class="rp-title">发送范围</span>
+            <button class="ic-btn" id="btnRangeCollapse" aria-label="收起发送范围" data-tip="收起">
+              <span class="ic" data-icon="chev-down" data-size="16"></span>
+            </button>
+          </div>
+          <div class="rp-opts" id="rpOpts" role="radiogroup" aria-label="本次发送范围">
+            <button class="rp-opt" role="radio" aria-checked="false" data-scope="selection" id="optSelection">
+              <span class="rp-dot" aria-hidden="true"></span>
+              <span class="rp-txt">当前选中文字</span>
+            </button>
+            <button class="rp-opt" role="radio" aria-checked="false" data-scope="page">
+              <span class="rp-dot" aria-hidden="true"></span>
+              <span class="rp-txt">当前页面</span>
+            </button>
+            <button class="rp-opt" role="radio" aria-checked="false" data-scope="paper">
+              <span class="rp-dot" aria-hidden="true"></span>
+              <span class="rp-txt">整篇论文</span>
+            </button>
+            <button class="rp-opt" role="radio" aria-checked="false" data-scope="paper-web">
+              <span class="rp-dot" aria-hidden="true"></span>
+              <span class="rp-txt">整篇论文 + 联网搜索</span>
+              <span class="rp-opt-ic"><span class="ic" data-icon="web" data-size="16"></span></span>
+            </button>
+          </div>
+          <p class="rp-note" id="rpNote">范围只对下一次发送生效，之后沿用当前选择。</p>
+        </section>
+
+        <!-- 选中文字附件（有选中文字时出现） -->
+        <div class="attach" id="attachRow" hidden>
+          <span class="at-quote" aria-hidden="true"><span class="ic" data-icon="quote" data-size="14"></span></span>
+          <span class="at-text" id="attachText"></span>
+          <button class="ic-btn at-close" id="btnAttachClose" aria-label="移除选中的文字" data-tip="移除">
+            <span class="ic" data-icon="close" data-size="14"></span>
+          </button>
+        </div>
+
+        <div class="cp-box" id="cpBox">
+          <label class="sr-only" for="chatInput">输入问题</label>
+          <textarea id="chatInput" class="cp-input" rows="2" placeholder="输入问题……"
+                    data-placeholder="输入问题……"></textarea>
+          <div class="cp-bar" id="cpBar"></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- ── 设置：论文阅读器内部卡片页（非大型弹窗，非永久展开的设置栏） ──── -->
+<section class="settings" id="settings" hidden aria-label="设置">
+  <header class="st-head">
+    <span class="st-title">设置</span>
+    <button class="ic-btn" id="btnCloseSettings" aria-label="关闭设置" data-tip="关闭设置">
+      <span class="ic" data-icon="close" data-size="17"></span>
+    </button>
+  </header>
+
+  <div class="st-body">
+    <!-- 卡片一：连接 -->
+    <section class="st-card" aria-labelledby="stc1">
+      <h3 class="st-card-title" id="stc1">连接</h3>
+
+      <div class="st-row">
+        <label class="st-label" for="cfgApiKey">API Key</label>
+        <div class="st-ctl">
+          <div class="field field-key">
+            <input id="cfgApiKey" type="password" class="inp" value="sk-demo-not-a-real-key-0000"
+                   autocomplete="off" spellcheck="false" aria-describedby="cfgApiKeyHint">
+            <button class="ic-btn field-ic" id="btnEye" aria-label="显示 API Key" aria-pressed="false" data-tip="显示">
+              <span class="ic" data-icon="eye" data-size="16"></span>
+            </button>
+          </div>
+          <p class="st-hint" id="cfgApiKeyHint">只保存在本机 <code>data/config.json</code>，不随界面导出。</p>
+        </div>
+      </div>
+
+      <div class="st-row">
+        <label class="st-label" for="cfgModel">模型名</label>
+        <div class="st-ctl">
+          <input id="cfgModel" type="text" class="inp" value="deepseek-chat" spellcheck="false" autocomplete="off">
+        </div>
+      </div>
+
+      <div class="st-row">
+        <label class="st-label" for="cfgBaseURL">接口地址</label>
+        <div class="st-ctl">
+          <div class="field">
+            <input id="cfgBaseURL" type="text" class="inp" value="https://api.apiyi.com/v1" spellcheck="false" autocomplete="off">
+            <button class="ic-btn field-ic" id="btnBaseReset" aria-label="恢复默认接口地址" data-tip="恢复默认地址">
+              <span class="ic" data-icon="restore" data-size="16"></span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 卡片二：阅读助手样式 -->
+    <section class="st-card" aria-labelledby="stc2">
+      <h3 class="st-card-title" id="stc2">阅读助手样式</h3>
+
+      <div class="st-row">
+        <span class="st-label" id="stThemeLabel">主题</span>
+        <div class="st-ctl">
+          <div class="seg seg-block" id="themeSeg" role="radiogroup" aria-labelledby="stThemeLabel">
+            <button class="seg-opt" role="radio" aria-checked="false" data-theme-set="system">
+              <span class="ic" data-icon="monitor" data-size="16"></span><span>跟随系统</span>
+            </button>
+            <button class="seg-opt" role="radio" aria-checked="true" data-theme-set="light">
+              <span class="ic" data-icon="sun" data-size="16"></span><span>浅色</span>
+            </button>
+            <button class="seg-opt" role="radio" aria-checked="false" data-theme-set="dark">
+              <span class="ic" data-icon="moon" data-size="16"></span><span>深色</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="st-row">
+        <span class="st-label" id="stSizeLabel">阅读字号</span>
+        <div class="st-ctl">
+          <div class="stepper" role="group" aria-labelledby="stSizeLabel">
+            <button class="ic-btn" id="btnSizeDown" aria-label="减小阅读字号" data-tip="减小">
+              <span class="ic" data-icon="minus" data-size="16"></span>
+            </button>
+            <span class="step-val" id="sizeValue" aria-live="polite">17 px</span>
+            <button class="ic-btn" id="btnSizeUp" aria-label="增大阅读字号" data-tip="增大">
+              <span class="ic" data-icon="plus" data-size="16"></span>
+            </button>
+          </div>
+          <p class="st-preview" id="sizePreview" style="--preview-fs:17px">
+            自注意力把序列中任意两个位置直接连起来，长距离依赖不再需要逐步传递。
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 卡片三：默认发送范围 -->
+    <section class="st-card" aria-labelledby="stc3">
+      <h3 class="st-card-title" id="stc3">默认发送范围</h3>
+      <p class="st-hint st-hint-top">只决定发送框的初始值；实际发送时可以在发送框里临时改。</p>
+      <div class="rp-opts st-opts" id="defaultScope" role="radiogroup" aria-label="默认发送范围">
+        <button class="rp-opt" role="radio" aria-checked="false" data-scope="selection">
+          <span class="rp-dot" aria-hidden="true"></span><span class="rp-txt">当前选中文字</span>
+        </button>
+        <button class="rp-opt" role="radio" aria-checked="false" data-scope="page">
+          <span class="rp-dot" aria-hidden="true"></span><span class="rp-txt">当前页面</span>
+        </button>
+        <button class="rp-opt" role="radio" aria-checked="true" data-scope="paper">
+          <span class="rp-dot" aria-hidden="true"></span><span class="rp-txt">整篇论文</span>
+        </button>
+        <button class="rp-opt" role="radio" aria-checked="false" data-scope="paper-web">
+          <span class="rp-dot" aria-hidden="true"></span><span class="rp-txt">整篇论文 + 联网搜索</span>
+          <span class="rp-opt-ic"><span class="ic" data-icon="web" data-size="16"></span></span>
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <footer class="st-foot">
+    <button class="link-btn" id="btnRestoreDefaults">恢复默认设置</button>
+    <span class="st-foot-note" id="restoreNote" hidden>已恢复主题、阅读字号与默认发送范围；API Key、论文、笔记与历史问答都保留。</span>
+  </footer>
+</section>
+
+<!-- 更多操作菜单（卡片内 & 输入框 & 论文操作），同一时刻只开一个 -->
+<div class="menu" id="cardMenu" role="menu" hidden aria-label="更多操作"></div>
+<div class="menu" id="inputMenu" role="menu" hidden aria-label="更多输入操作"></div>
+<div class="menu" id="opsMenu" role="menu" hidden aria-label="论文操作"></div>
+
+<!-- tooltip：所有图标按钮必须有；aria-label 由按钮自身承担 -->
+<div class="tip" id="tip" role="tooltip" hidden></div>
+
+<!-- 首次进入的轻量引导条（可关闭，不遮挡正文；截图状态里默认收起） -->
+<div class="hintbar" id="hintbar" hidden>
+  <span class="hint-ic"><span class="ic" data-icon="info" data-size="16"></span></span>
+  <span class="hint-text" id="hintText"></span>
+  <button class="ic-btn" id="btnHintClose" aria-label="关闭提示" data-tip="关闭">
+    <span class="ic" data-icon="close" data-size="14"></span>
+  </button>
+</div>
+
+<!-- 经典脚本（非 ES module）：双击 reader.html 直接以 file:// 打开也能跑，无需起服务 -->
+<script src="js/icons.js"></script>
+<script src="js/parts.js"></script>
+<script src="js/reader.js"></script>
+</body>
+</html>

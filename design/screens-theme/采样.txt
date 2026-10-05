@@ -1,0 +1,10 @@
+真实渲染像素取色（浅色主题）
+  左栏底                #FDFBF5
+  正文区底               #F1EDE0
+  顶栏底                #FDFBF4
+  PDF 纸面             #DEDCCC
+  阅读区底（纸外）           #FCFAF2
+  弹窗底                #F8F5EB
+  遮罩后的页面             #B9B3A6
+
+参考：工作台底 #F8F5EB / 卡片面板底 #FDFBF5 / 凹陷底 #F1EDE0 / PDF 纸面 #FCFAF2 / 品牌绿 #556B2F

@@ -207,6 +207,14 @@ export function renderMarkdown(src) {
 
   let text = String(src);
 
+  // 模型常把一个段落吐成三到六个空行；正文只保留一个段落间隔。
+  // 代码围栏内部必须原样保留，避免破坏示例代码的行号和缩进。
+  const markdownParts = text.split(/(```[\s\S]*?```)/g);
+  for (let i = 0; i < markdownParts.length; i += 2) {
+    markdownParts[i] = markdownParts[i].replace(/\n[ \t]*(?:\n[ \t]*){2,}/g, '\n\n');
+  }
+  text = markdownParts.join('');
+
   // 1) 围栏代码块
   text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => (
     hold(`<pre><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`)
@@ -268,6 +276,9 @@ export function renderMarkdown(src) {
       const lv = Math.min(6, m[1].length + 2);
       out.push(`<h${lv}>${m[2]}</h${lv}>`);
     } else if (!line.trim()) {
+      // 列表项目之间的空行仍属于同一个列表，避免完成渲染时拆成多个
+      // <ul>/<ol>，导致列表外边距叠加成明显的大空行。
+      if (inList) continue;
       closeList();
       out.push('');
     } else {
@@ -279,6 +290,9 @@ export function renderMarkdown(src) {
   text = out.join('\n');
   text = text.replace(/\n{2,}/g, '</p><p>');
   text = text.replace(/\n/g, '<br />');
+  // 列表项之间的源码换行不应渲染成额外的可见换行。
+  text = text.replace(/<\/li>\s*<br \/>/g, '</li>');
+  text = text.replace(/<br \/>\s*<li>/g, '<li>');
   text = `<p>${text}</p>`;
   text = text.replace(/<p>\s*<\/p>/g, '');
   // 独立成段的占位块（代码块 / 表格）先脱掉 <p>，再统一还原

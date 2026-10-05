@@ -99,6 +99,14 @@ function applyBodyScroll(id) {
   const box = state.blockMeta[id]?.body;
   if (box && box.clientHeight > 0 && box.__prtScrollTop > 0) box.scrollTop = box.__prtScrollTop;
 }
+/** 右栏重新打开时从最新结果开始看；用户随后可以手动滑动查看旧结果。
+ *  译文块是 column-reverse（最新在最上面），所以「最新」那一端是 scrollTop = 0 ——
+ *  统一交给 scrollToNewest() 判断，别在这里写死 scrollHeight。 */
+function scrollBodyToBottom(id) {
+  const box = state.blockMeta[id]?.body;
+  if (!box || box.clientHeight <= 0) return;
+  scrollToNewest(box);
+}
 /** 把节点搬进目标容器（同一个节点，内容与滚动位置都不动）；已经在里面就什么都不做 */
 function parkRightPanel(id, target) {
   const node = state.blockEls[id];
@@ -493,7 +501,10 @@ function setPanelVisible(id, on) {
   savePanels();
   applyPanels();
   applyResponsiveLayout();
-  if (on && !wasVisible) requestAnimationFrame(() => applyBodyScroll(id));
+  if (on && !wasVisible) requestAnimationFrame(() => {
+    applyBodyScroll(id);
+    scrollBodyToBottom(id);
+  });
 }
 
 /* ── 面板部件 ── */
@@ -836,6 +847,12 @@ const state = {
   search: { hits: [], idx: 0, query: '' },
   jumpHistory: new Map(), // docId -> [{ scrollTop, scale }]
   activeSendScope: '',
+  /* 发送框当前范围（四选项之一，2026-10 第 2 步）：只对下一次发送生效，之后沿用。
+     初始值由设置页的「默认发送范围」偏好决定（syncScopePrefs → rangeFromPrefs）。 */
+  scopeRange: 'paper-web',
+  /* 发送框当前范围（四选项之一，2026-10 第 2 步）：只对下一次发送生效，之后沿用。
+     初始值由设置页的「默认发送范围」偏好决定（syncScopePrefs → rangeFromPrefs）。 */
+  scopeRange: 'paper-web',
   // 统一面板注册表（左栏四块 + 右栏两块）：见「面板注册表」一节。
   // 右栏两块的高度（px）就存在各自的 size 里，缺省=自适应平分。
   // 真正的值在 boot() 第一步由 loadPanels() 装进来（那时才拿得到当前论文，迁移要用）。
@@ -934,6 +951,9 @@ let serverState = {};
   initRegion();
   initSearch();
   initSettings();
+  // 设置页那两个「默认发送范围」偏好也是即时生效控件（第 2 步起范围回到发送框，两个入口必须同一套语义）
+  ['cfgUseFullText', 'cfgUseWeb']
+    .forEach((id) => document.getElementById(id)?.addEventListener('input', applyUiSettingsFromControls));
   initShortcuts();
   initExternalLinks();
   initDraggableCards();
@@ -1255,6 +1275,14 @@ function setSideCollapsed(side, collapsed, pin = false) {
   saveUi();
   // 收起 / 展开是 display 切换，宽度瞬间到位：立刻重排就不会出现「正文停在旧尺寸」
   refitViewer(changed ? 0 : REFIT_AFTER_MS);
+  if (side === 'right' && !collapsed) requestAnimationFrame(() => {
+    const id = rightPanelInCol(1);
+    if (id) {
+      scrollBodyToBottom(id);
+      requestAnimationFrame(() => scrollBodyToBottom(id));
+      setTimeout(() => scrollBodyToBottom(id), 0);
+    }
+  });
 }
 
 /** 顶栏像 VS Code 一样提供左右栏的独立收展按钮。 */
@@ -1683,6 +1711,8 @@ function bindSplitter(node, cssVar, min, max, collapseBelow) {
 
   let startX = 0;
   let startW = 0;
+  let dragFrame = 0;
+  let pendingW = null;
   let lastDownAt = 0;      // 双击判定：两次 pointerdown 挨得很近、且位置几乎没动
   let lastDownX = 0;
   let lastToggleAt = 0;    // pointerdown 自检和原生 dblclick 只能有一个生效，别翻两次
@@ -1700,10 +1730,17 @@ function bindSplitter(node, cssVar, min, max, collapseBelow) {
     if (Math.abs(dx) > 4) lastDownAt = 0;   // 这是一次真拖动，别让下一次 pointerdown 被当成双击
     // 左栏往右拖变宽；右栏往左拖才是变宽
     const w = clamp(isLeft ? startW + dx : startW - dx, dragFloor, max);
-    setW(w);
+    pendingW = w;
+    if (!dragFrame) dragFrame = requestAnimationFrame(() => {
+      dragFrame = 0;
+      if (pendingW !== null) { setW(pendingW); pendingW = null; }
+    });
     node.classList.toggle('will-collapse', w < collapseBelow);
   };
   const up = () => {
+    if (dragFrame) cancelAnimationFrame(dragFrame);
+    dragFrame = 0;
+    if (pendingW !== null) { setW(pendingW); pendingW = null; }
     node.classList.remove('dragging', 'will-collapse');
     document.body.classList.remove('dragging');
     window.removeEventListener('pointermove', move);
@@ -1909,6 +1946,19 @@ function initViewer() {
     jumpToPageWithHistory, jumpToDestWithHistory, returnToPreviousPosition,
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
     renderAttachments, refreshReturnButton,
+    // 发送范围四选项（2026-10 第 2 步）：让自动化直接验「范围 → 本次发送带什么」
+    setScopeRange, toggleScopePanel, SCOPE_RANGES, rangeOverview, currentRange,
+    get scopeRange() { return currentRange(); },
+    // 结果区排布 / 滚动：译文块是 column-reverse（最近的在最上面）
+    scrollToNewest, markReversedBodies,
+    // 流式渲染目标（自动化造「一条已完成的结果」时走它，与真实链路同一个契约）
+    streamTarget,
+    // 回答存笔记（2026-10 第 1 步）：允许自动化直接验证存储结构与写入结果
+    answerNoteButton, openAnswerNoteEditor, confirmAnswerNote, syncAllAnswerNoteButtons,
+    addEntry, finishEntry,
+    // 布局常量：CSS 的 .splitter 宽度与这里的 SPLIT_W 必须一致（有断言盯着）
+    SPLIT_W, VIEWER_MIN, RAIL_W,
+    get highlights() { return state.highlights; },
     get uiStyle() { return uiStyle; },
     applyUiSettingsFromControls, resetSettings, fillUiSettings,
     // 面板：显隐与重启布局（自动化测试直接用这两条，不必去点界面）
@@ -2106,6 +2156,9 @@ function setView(view) {
   $('#home')?.classList.toggle('hidden', !home);
   syncFootEnabled(!home);
   if (!home) return;
+  // 首页是书架 / 目录，不需要两侧阅读工具栏；进入时自动让正文占满窗口。
+  setSideCollapsed('left', true);
+  setSideCollapsed('right', true);
   state.homeReady = true;
   renderHome();
 }
@@ -2299,7 +2352,8 @@ function initFiles() {
       drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); });
     }
     for (const ev of ['dragleave', 'drop']) drop.addEventListener(ev, () => drop.classList.remove('over'));
-    drop.addEventListener('click', () => $('#fileInput')?.click());
+    // 拖放区只处理拖入，不再绑定点击打开文件选择器。
+    // 「打开 PDF」是唯一的点击选文件入口，两个入口保持明确分工。
   }
 }
 
@@ -2383,7 +2437,8 @@ async function openDoc({ name, url, docId }) {
   state.docText = null;
   state.docTextDoc = null;
   state.docDigest = null;
-  state.useFullText = false;
+  // 让 state 的两个标记重新对齐当前范围（同一套推导，不重复实现）
+  applyRangeForSend(currentRange());
   // 换论文了：参考文献列表作废，等用户再打开这一块时才重新解析（按需，不在这里跑）。
   // 阶段 3：先把代际令牌抬一格，再清状态 —— 旧论文在途的解析 / 查询回来时
   // 会发现自己是上一代，整批丢弃，一个字都不写进新论文（R1/R2/R3/R5）。
@@ -2402,7 +2457,8 @@ async function openDoc({ name, url, docId }) {
   state.opsDoc = null;
   hideOpsMenu();
   renderRelations();
-  setHint('');
+  // 换论文时把「这次会发什么」重新播报一遍（范围没变，但可用性变了：整篇要有一篇装好的论文）
+  updateComposerHint();
   renderScopeMenu();
   for (const li of $$('#fileList li')) li.classList.toggle('active', li.dataset.id === docId);
 
@@ -2446,6 +2502,11 @@ async function openDoc({ name, url, docId }) {
   } else {
     viewer.fitWidth();
   }
+  if (superseded()) return;
+  // 侧栏状态和正文宽度在打开后才最终稳定；首页先前可能按旧宽度留下低密度位图。
+  // 等一帧布局完成后重画第一页，避免出现「第一页糊、第二页清楚」的首屏差异。
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  await viewer.refreshPage?.(1);
   if (superseded()) return;
   syncZoom(viewer.scale);
   // 底栏的页码也要在打开时立刻有值：`onPageChange` 不保证在这个时点已经触发过
@@ -2521,6 +2582,8 @@ async function renderNotes() {
   if (state.doc?.docId !== myDoc) return;
   viewer?.setHighlights(state.highlights);
   $('#notesCount').textContent = state.highlights.length ? `(${state.highlights.length})` : '';
+  // 笔记可能在别处被删（左栏删除 / 换论文），回答卡片上的图标要跟着回到「未保存」
+  syncAllAnswerNoteButtons();
   if (!state.highlights.length) {
     list.append(el('li', { class: 'empty', text: '还没有笔记' }));
     return;
@@ -2535,6 +2598,8 @@ async function renderNotes() {
       },
     },
       el('div', { class: 'np', text: `p.${h.page}${h.note ? ' · 有笔记' : ''}` }),
+      // 回答存下来的笔记标一下来源，免得和「正文划选收藏」混在一起（只是一个提示词，不是新数据）
+      h.source === 'answer' ? el('div', { class: 'nflag', text: '来自回答' }) : null,
       el('div', { class: 'nt', text: h.text }),
       h.note ? el('div', { class: 'nt nnote', text: h.note }) : null,
       el('div', { class: 'nact' },
@@ -2578,6 +2643,140 @@ async function addHighlight(sel, note = '') {
   await saveNotes();
   await renderNotes();
   return added[0];
+}
+
+/* ═══════════════════════ 回答存笔记（source: 'answer'） ═══════════════════════
+ *
+ * 2026-10 用户拍板：**不新建存储**。回答存下来的笔记就是 `state.highlights[]` 里的一条，
+ * 只是多一个 `source: 'answer'` 分支 —— 左侧笔记列表、编辑、删除、`/api/notes` 全部复用：
+ *
+ *   { id, source: 'answer', text: question, note: answerMarkdown, page, rects: [], ts }
+ *
+ * 字段分工（照抄现有划选笔记的语义，不发明新结构）：
+ *   · `text`  = 用户的问题（当标题；笔记列表本来就把 text 当主行显示）
+ *   · `note`  = AI 回答正文（Markdown 原样存；就是列表里那行彩色的补充内容）
+ *   · `page`  = **只记一个主依据页**（方案里明确：第一版不扩展存储，回答卡片本身仍保留多条依据）
+ *   · `rects` = 空数组 —— 明确表示「不参与 PDF 页边书签定位」，pdfview 的 setHighlights 会自动跳过
+ *
+ * 四种状态：未保存（纸张折角 + 加号）/ 编辑标题（窄行 + 确认 + 取消）/ 已保存（加号变对勾）/ 列表同步。
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/** 这篇论文里，byId 对应的那条笔记还在不在（可能在左栏被删掉了） */
+function findAnswerNote(byId) {
+  if (!byId) return null;
+  return state.highlights.find((h) => h.id === byId) || null;
+}
+
+/** 回答卡片的笔记按钮：已保存态用同一张纸把加号换成对勾，并常亮强调色 */
+function answerNoteButton(entry) {
+  const saved = !!findAnswerNote(entry.root.__noteId);
+  const label = saved ? '已在笔记中' : '添加到笔记';
+  const btn = el('button', {
+    class: `act-icon note-act${saved ? ' saved' : ''}`,
+    title: label,
+    'aria-label': label,
+    onclick: () => openAnswerNoteEditor(entry),
+  }, iconEl(saved ? 'note-check' : 'note-plus'));
+  entry.root.__noteBtn = btn;
+  return btn;
+}
+
+/** 状态 2：窄标题行（默认就是用户的问题），右侧只有确认 / 取消两个图标 */
+function openAnswerNoteEditor(entry) {
+  const root = entry.root;
+  if (root.__noteEditor) { root.__noteEditor.querySelector('input')?.focus(); return; }
+  const existing = findAnswerNote(root.__noteId);
+  const input = el('input', {
+    class: 'note-title',
+    type: 'text',
+    value: (existing?.text || root.__question || '').slice(0, 120),
+    placeholder: '笔记标题（默认用你的问题）',
+    'aria-label': '笔记标题',
+  });
+  const row = el('div', { class: 'note-edit' },
+    el('span', { class: 'ic' }, iconEl('note-plus', { size: 14 })),
+    input,
+    el('span', { class: 'note-edit-acts' },
+      el('button', {
+        class: 'act-icon', title: '保存笔记', 'aria-label': '保存笔记',
+        onclick: () => confirmAnswerNote(entry),
+      }, iconEl('check')),
+      el('button', {
+        class: 'act-icon', title: '取消', 'aria-label': '取消保存笔记',
+        onclick: () => { closeAnswerNoteEditor(entry); toast('已取消，没有写入笔记', '', 1400); },
+      }, iconEl('close')),
+    ),
+  );
+  row.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); confirmAnswerNote(entry); }
+    if (e.key === 'Escape') { e.preventDefault(); closeAnswerNoteEditor(entry); }
+  });
+  root.__noteEditor = row;
+  root.append(row);
+  setTimeout(() => { input.focus(); input.select(); }, 20);
+}
+
+function closeAnswerNoteEditor(entry) {
+  const row = entry.root.__noteEditor;
+  if (row) { row.remove(); entry.root.__noteEditor = null; }
+}
+
+/** 状态 3/4：写进 notes 存储 → 按钮变已保存 → 左栏列表同步增加一项 */
+async function confirmAnswerNote(entry) {
+  const root = entry.root;
+  const row = root.__noteEditor;
+  if (!row) return;
+  const rec = root.__sessionRecord || {};
+  const question = String(root.__question || rec.quote || '').trim();
+  const answer = String(rec.text || '').trim();
+  if (!answer) { toast('这条回答还没有内容，先等它生成完', 'err', 2200); return; }
+  const title = (row.querySelector('input')?.value || '').trim() || question || '来自回答的笔记';
+  // 只记一个主依据页：优先记录里那一页（发问时那一页 / 引用所在页），退回当前页
+  const page = Number(rec.page || viewer?.current || 0) || 0;
+
+  const existing = findAnswerNote(root.__noteId);
+  const item = existing || {
+    id: `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    source: 'answer',
+    rects: [],
+    ts: Date.now(),
+  };
+  item.text = title.slice(0, 2000);
+  item.note = answer.slice(0, 8000);
+  item.page = page;
+  item.ts = Date.now();
+  if (!existing) state.highlights.unshift(item);   // 列表按 ts 倒序，直接把新的排最前
+  root.__noteId = item.id;
+  closeAnswerNoteEditor(entry);
+
+  try {
+    await saveNotes();
+    await renderNotes();
+    syncAnswerNoteButton(root);
+    toast('已存进笔记', 'ok', 1300);
+  } catch (e) {
+    toastAction(`笔记保存失败：${e.message}，内容仍保留在这一条上。`, '重试',
+      async () => { await saveNotes(); await renderNotes(); syncAnswerNoteButton(root); toast('已存进笔记', 'ok'); },
+      'err', 12000);
+  }
+}
+/** 按当前是否已保存，把按钮切到「加号 / 对勾」两态之一 */
+function syncAnswerNoteButton(root) {
+  const btn = root.__noteBtn;
+  if (!btn) return;
+  const saved = !!findAnswerNote(root.__noteId);
+  const label = saved ? '已在笔记中' : '添加到笔记';
+  btn.replaceChildren(iconEl(saved ? 'note-check' : 'note-plus'));
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+  btn.classList.toggle('saved', saved);
+}
+
+/** 会话恢复 / 左栏删除笔记之后，让按钮重新对上真实状态（找不到就是未保存） */
+function syncAllAnswerNoteButtons() {
+  for (const node of $$('#aiArea .msg.assistant')) {
+    if (node.__noteBtn) syncAnswerNoteButton(node);
+  }
 }
 
 /* ══════════════════════════════ 正文引用 → 文献 ══════════════════════════════ */
@@ -2853,11 +3052,12 @@ async function deleteNoteItem(id) {
   const previous = state.highlights;
   state.highlights = state.highlights.filter((x) => x.id !== id);
   viewer?.setHighlights(state.highlights);
-  try { await saveNotes(); await renderNotes(); }
+  try { await saveNotes(); await renderNotes(); syncAllAnswerNoteButtons(); }
   catch (e) {
     state.highlights = previous;
     viewer?.setHighlights(previous);
     await renderNotes();
+    syncAllAnswerNoteButtons();
     toastAction(`删除未保存：${e.message}，笔记已恢复。`, '重试', () => deleteNoteItem(id), 'err', 12000);
   }
 }
@@ -3076,6 +3276,8 @@ function ensureBlock(id) {
 
   state.blockEls[id] = root;
   state.blockMeta[id] = { body, count };
+  // 排布方向（译文块是 column-reverse）要等节点进文档、拿到计算样式之后才知道
+  requestAnimationFrame(markReversedBodies);
   return root;
 }
 
@@ -3321,6 +3523,8 @@ function renderCols() {
   fitBlockSizes();
   refreshCounts();
   renderAiBar();
+  // 会话条跟着「问答块开没开」走（译文页不该挂着会话信息）
+  renderSessionBar();
 }
 
 function renderAiArea() {
@@ -3386,6 +3590,8 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   if (!restore && !state.panels[block].visible) setPanelVisible(block, true);
   const bodyEl = state.blockMeta[block].body;
   const isUser = kind === 'user';
+  /** 译文条目：本条的界面要「纯净」（无动作按钮，role 行也不留回原文图标） */
+  const isTranslateEntry = block === 'translate';
 
   /**
    * 2026-10 用户口径：「问答里面不需要专门表一个『你』，直接删掉，就用现在的那种框就行了」。
@@ -3395,14 +3601,31 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   const role = el('div', { class: `role${!isUser && !page ? ' hidden' : ''}` },
     tag ? el('span', { class: 'tag', text: tag, 'aria-hidden': 'true' }) : null,
     page && uiStyle.showPage ? el('span', { class: 'pg', text: `第${page}页` }) : null,
-    !isUser && page && uiStyle.showPage ? el('button', {
+    // 译文块不要动作按钮（「最纯净的界面」）：连 role 行里这个「回原文」图标也去掉，
+    // 跳回原文统一由下面那块**可点击的原文引用**承担。
+    !isUser && page && uiStyle.showPage && !isTranslateEntry ? el('button', {
       class: 'tbtn',
       title: `回到第${page}页原文`,
       'aria-label': `回到第${page}页原文`,
       onclick: () => jumpToPageWithHistory(page, { smooth: true }),
     }, iconEl('jump-back')) : null,
   );
-  const ref = quote && uiStyle.showQuote ? el('div', { class: 'ref', text: quote, title: quote }) : null;
+  /**
+   * 原文引用块（2026-10 用户口径：「把原文引用的那一块做成可点击的，点击就自动跳回」）。
+   * 有页码时整块就是一个跳回原文的按钮：鼠标手型、悬停变强调色、键盘也能按（Enter / Space），
+   * 可访问名写明「跳回第 N 页原文」。没有页码（纯提问）时保持只读文本，不做假按钮。
+   */
+  const refText = quote && uiStyle.showQuote ? quote : '';
+  const refClickable = !!refText && !!page && !isUser;
+  const ref = refText
+    ? el(refClickable ? 'button' : 'div', {
+      class: `ref${refClickable ? ' ref-jump' : ''}`,
+      type: refClickable ? 'button' : null,
+      title: refClickable ? `跳回第 ${page} 页原文：${refText}` : refText,
+      'aria-label': refClickable ? `跳回第 ${page} 页原文` : null,
+      onclick: refClickable ? () => jumpToPageWithHistory(page, { smooth: true }) : null,
+    }, refText)
+    : null;
   const shots = (imageSrc ? [imageSrc] : (thumbs || [])).filter(Boolean);
   const shot = shots.length
     ? el('div', { class: 'shots' }, ...shots.map((src) => el('img', { class: 'shot-img', src })))
@@ -3416,14 +3639,27 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   // 全局序号：分块之后 DOM 顺序 ≠ 时间顺序，取「最新一条」要靠它
   state.msgSeq = (state.msgSeq || 0) + 1;
   root.dataset.seq = String(state.msgSeq);
-  bodyEl.append(root);
+  /**
+   * 译文块：**最新的插到最前面**（2026-10 用户口径：「最近的翻译应该要放在最上面」）。
+   *
+   * 这里刻意不用 `column-reverse` 那种"只改视觉顺序"的写法 —— 实测（Chrome 154）：
+   *   · `column-reverse` + 默认 `flex-start`：短内容贴**底**、长内容能滚；
+   *   · `column-reverse` + `justify-content: flex-end`：短内容能贴上沿，但**溢出被吃掉**
+   *     （scrollHeight 恒等于 clientHeight，多出来的内容够不到，滚动条不出现）。
+   * 两条都满足不了「最新在上 + 长了能滚」，所以改成老老实实把节点插到最前：
+   * 视觉顺序 = DOM 顺序 = 新 → 旧，滚动就是普通向下滚，容器用 `margin-top:auto`
+   * 在内容不足时把整块压到上沿（见 style.css）。
+   */
+  if (block === 'translate') bodyEl.prepend(root);
+  else bodyEl.append(root);
   const record = { block, tag: tag || '', page: page || null, quote: quote || '', kind, text: text || '', screenshot: !!shots.length, sources: [], meta: '', status: isUser ? 'user' : (text !== undefined ? 'complete' : 'pending'), retry: retry || null };
   root.__sessionRecord = record;
   if (!restore) {
     state.sessionEntries.push(record);
     scheduleSessionSave();
   }
-  scrollBody(bodyEl);
+  // 新结果进入时把它放到结果区顶部，用户可以继续向上滚查看更早的结果。
+  scrollEntryToTop(bodyEl, root);
   refreshCounts();
   return { root, body: textEl, acts, role };
 }
@@ -3444,22 +3680,28 @@ function finishEntry(entry, fullText, { page, onAsk, onRetry, sources, meta, sta
   entry.root.querySelectorAll('.entry-meta, .src-list').forEach((node) => node.remove());
   entry.acts.replaceChildren();
   entry.acts.classList.remove('hidden');
-  // 必须用 appendAll：Element.append(null) 会把 null 变成文本节点 "null" 显示出来
   /**
-   * 消息动作按钮（2026-10 用户口径）：「复制 / 回到第8页用图标表示不要用文字」。
-   * 所以这两个改图标 + title，不再占一行文字宽度；「接着问 / 重试」保留文字
-   * （它们是**语义动作**，图标说不清是"接着问"还是"重新生成"）。
+   * 译文块是「最纯净的界面」（2026-10 用户口径：「翻译的去掉所有的功能按键」）：
+   * 整条译文上不留任何按钮 —— 复制、回原文、接着问、保存笔记全部撤掉，
+   * 只保留「原文引用」这一块，点它就跳回原文（见 initReferenceJump）。
+   *
+   * ⚠️ 这里仍然把 `acts` 容器**显形**（只是清空），不能用 `.hidden` 藏起来：
+   *   context / links 等套件是拿 `#aiArea .msg.assistant .acts:not(.hidden)` 当
+   *   「这条回答收尾了」的信号的，隐藏会让那些套件误判成"还没生成完"。
+   *   视觉上用 CSS 的 `display:none` 收掉（见 style.css 里 .ai-block[data-block="translate"] .acts）。
    */
-  appendAll(entry.acts,
-    el('button', {
+  const bare = entry.root.dataset.operation === 'translation';  appendAll(entry.acts,
+    bare ? null : el('button', {
       class: 'act-icon', title: '复制这段回答', 'aria-label': '复制这段回答',
       onclick: () => copyText(fullText),
     }, iconEl('copy')),
-    page ? el('button', {
+    // 回答存笔记：与复制、回原文并排的小图标；已保存态变对勾（2026-10 第 1 步）
+    bare ? null : answerNoteButton(entry),
+    !bare && page ? el('button', {
       class: 'act-icon', title: `回到第 ${page} 页原文`, 'aria-label': `回到第 ${page} 页原文`,
       onclick: () => jumpToPageWithHistory(page, { smooth: true }),
     }, iconEl('jump-back')) : null,
-    onAsk ? el('button', { text: '接着问', onclick: onAsk }) : null,
+    bare ? null : (onAsk ? el('button', { text: '接着问', onclick: onAsk }) : null),
     onRetry ? el('button', { text: status === 'stopped' ? '重新生成' : '重试', onclick: onRetry }) : null,
   );
   const extra = [];
@@ -3734,6 +3976,8 @@ async function restoreSession(docId, { only = 'all' } = {}) {
       const entry = addEntry({ ...row, text, restore: true });
       entry.root.__sessionRecord = row;
       const priorUser = [...state.sessionEntries.slice(0, rowIndex)].reverse().find((x) => x?.kind === 'user');
+      // 恢复出来的回答也要能存笔记：标题默认用上一条用户消息（重放时补上 __question）
+      if (row.kind !== 'user' && priorUser) entry.root.__question = String(priorUser.text || '').slice(0, 600);
       const retry = restoreRetryCallback(row, entry, priorUser);
       if (row.kind !== 'user' && (row.text || row.status === 'stopped' || row.status === 'complete')) finishEntry(entry, row.text || '', {
         page: row.page, sources: row.sources, meta: row.meta,
@@ -3782,6 +4026,7 @@ function closeSessionMenu() {
   sessionStore.open = false;
   const menu = $('#sessionMenu');
   if (menu) { menu.classList.add('hidden'); menu.replaceChildren(); }
+  $('#sessBtn')?.setAttribute('aria-expanded', 'false');
 }
 
 /** 拉这篇论文的会话列表（只取元信息，不取正文） */
@@ -3815,13 +4060,15 @@ function renderSessionMenu() {
         type: 'button', class: 'sess-go', title: label,
         onclick: () => switchSession(s.sid || ''),
       },
-      el('span', { class: 'sess-title', text: label })),
+      el('span', { class: 'sess-title', text: label }),
+      // 条数与时间放在标题下面一行：菜单里要能一眼看出哪条是刚才在聊的
+      el('span', { class: 'sess-meta', text: [s.count ? `${s.count} 条` : '', rel(s.ts)].filter(Boolean).join(' · ') })),
       el('button', {
-        type: 'button', class: 'sess-del', text: '×',
+        type: 'button', class: 'sess-del',
         title: '删除这个会话（不影响论文和笔记）',
         'aria-label': `删除会话「${label}」`,
         onclick: (e) => { e.stopPropagation(); deleteSession(s.sid || ''); },
-      }));
+      }, iconEl('close', { size: 14 })));
     return row;
   });
   if (!rows.length) rows.push(el('div', { class: 'sess-empty', text: '还没有会话' }));
@@ -3833,7 +4080,7 @@ function renderSessionMenu() {
       onclick: () => clearCurrentSession(),
     }),
     el('button', {
-      type: 'button', class: 'sess-new', text: '＋ 新建会话',
+      type: 'button', class: 'sess-new', text: '新建会话',
       onclick: () => newSession(),
     }),
   );
@@ -3845,6 +4092,7 @@ async function toggleSessionMenu() {
   if (sessionStore.open) { closeSessionMenu(); return; }
   sessionStore.open = true;
   menu.classList.remove('hidden');
+  $('#sessBtn')?.setAttribute('aria-expanded', 'true');
   menu.replaceChildren(el('div', { class: 'sess-empty', text: '读取中…' }));
   await loadSessionList();
   if (sessionStore.open) renderSessionMenu();
@@ -3915,17 +4163,29 @@ async function deleteSession(sid) {
   toast('会话已删除', 'ok', 1600);
 }
 
-/** 右栏顶栏那一小块：显示当前会话标题 + 打开会话菜单 */
+/**
+ * 右栏顶栏那一小块：显示当前会话标题 + 打开会话菜单。
+ *
+ * 2026-10 收口（用户口径：「问答和翻译都有那个多对话的标」）：
+ *   · **只有问答块才显示会话条** —— 会话是「一篇论文的对话」，跟译文没有关系，
+ *     译文页挂着一条会话信息纯属噪声（原来只要开着论文就显示，所以两边都有）。
+ *   · 去掉那个绿色圆点：它不承载任何信息，只是把面板顶部压得发绿、显得吵。
+ *     改成右上角一个很轻的「会话」小胶囊（细线图标 + 标题），要换会话才点它。
+ */
 function renderSessionBar() {
   const btn = $('#sessBtn');
-  if (!btn) return;
-  if (!state.doc) { btn.classList.add('hidden'); $('#sessBar')?.classList.add('hidden'); return; }
-  btn.classList.remove('hidden');
-  $('#sessBar')?.classList.remove('hidden');
+  const bar = $('#sessBar');
+  if (!btn || !bar) return;
+  // 会话条只在问答块开着的时候出现
+  const chatActive = !!state.doc && rightPanelInCol(1) === 'chat';
+  if (!chatActive) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
   const cur = activeSidFor(state.doc.docId);
   const row = sessionStore.list.find((s) => (s.sid || '') === cur);
-  const name = row?.title || (cur ? '新会话' : '默认会话');
-  btn.title = `会话：${name}（点击切换 / 新建）`;
+  // 默认会话（老的单会话文件，sid 为空）不撒谎：有标题就用标题，没标题就叫「会话」
+  const name = row?.title || (cur ? '新会话' : '会话');
+  btn.title = `${name} · 点击切换或新建会话`;
+  btn.setAttribute('aria-label', `当前会话：${name}。点击切换或新建会话`);
   const label = $('#sessLabel');
   if (label) label.textContent = name;
 }
@@ -4758,11 +5018,60 @@ function initExternalLinks() {
   };
 }
 
-/** 只在用户已经在底部时才自动跟随，上滚阅读时不抢滚动条 */
+/** 只在用户已经贴着「最新」时才自动跟随，往回翻旧结果时不抢滚动条。
+ *  方向感知：译文块是 column-reverse（最新在 scrollTop = 0），问答流是普通列（最新在底部）。 */
 function scrollBody(node) {
   if (!node) return;
-  const near = node.scrollHeight - node.scrollTop - node.clientHeight < 100;
-  if (near) requestAnimationFrame(() => { node.scrollTop = node.scrollHeight; });
+  const reversed = node.dataset?.reversed === '1'
+    || getComputedStyle(node).flexDirection === 'column-reverse';
+  const near = reversed
+    ? node.scrollTop < 100
+    : node.scrollHeight - node.scrollTop - node.clientHeight < 100;
+  if (near) requestAnimationFrame(() => { scrollToNewest(node); });
+}
+
+function scrollEntryToTop(body, entry) {
+  if (!body || !entry) return;
+  requestAnimationFrame(() => {
+    if (!body.isConnected) return;
+    const reversed = body.dataset?.reversed === '1'
+      || getComputedStyle(body).flexDirection === 'column-reverse';
+    if (reversed) {
+      // 反转排布：最新那条本来就在最上面，滚到顶就够（不用算 offsetTop）
+      body.scrollTop = 0;
+    } else if (entry.isConnected) {
+      body.scrollTop = Math.max(0, entry.offsetTop);
+    }
+  });
+}
+
+/**
+ * 把结果区滚到「最新一条」。
+ *
+ * 两种排布方向必须分开处理，判据是容器的 flex-direction：
+ *   · 普通（column，问答流）：最新在最下面 → scrollTop = scrollHeight；
+ *   · 反转（column-reverse，译文块，2026-10：「最近的翻译放在最上面」）：最新在最上面 → scrollTop = 0。
+ * 写错方向的表现很隐蔽 —— 滚动条会停在最旧那一端，用户以为新结果没出来。
+ */
+function scrollToNewest(el) {
+  const body = el?.closest?.('.ai-body') || el;
+  if (!body) return;
+  const reversed = body.dataset?.reversed === '1'
+    || (typeof getComputedStyle === 'function' && getComputedStyle(body).flexDirection === 'column-reverse');
+  body.scrollTop = reversed ? 0 : body.scrollHeight;
+}
+
+/** 把「最新那一端在哪个方向」写到容器上（免得每处都去算计算样式）。
+ *  译文块 = 新在上（app.js 的 addEntry 用 prepend + style.css 的 margin-bottom:auto），
+ *  所以它的「最新」是 scrollTop = 0，与问答流（普通列、最新在底部）相反。 */
+function markReversedBodies() {
+  for (const id of Object.keys(state.blockEls || {})) {
+    const block = state.blockEls[id];
+    const body = block?.querySelector?.('.ai-body');
+    if (!body) continue;
+    const newestOnTop = id === 'translate' || getComputedStyle(body).flexDirection === 'column-reverse';
+    body.dataset.reversed = newestOnTop ? '1' : '0';
+  }
 }
 
 /**
@@ -4793,7 +5102,9 @@ function streamTarget(node) {
     stopTimers();
     if (pending === null) return;
     const parent = node.closest('.ai-body');
-    const follow = parent && parent.scrollHeight - parent.scrollTop - parent.clientHeight < 100;
+    const entry = node.closest('.msg');
+    // 新结果保持在视口顶部；一旦用户手动上滑，后续分块不再抢回滚动位置。
+    const follow = parent && entry && Math.abs(parent.scrollTop - entry.offsetTop) < 100;
     if (!pending.startsWith(paintedText)) {
       node.replaceChildren();
       rawNode = null;
@@ -4810,7 +5121,7 @@ function streamTarget(node) {
       paintedText = pending.slice(0, safeEnd);
     }
     rawNode.data = pending.slice(paintedText.length);
-    if (follow) requestAnimationFrame(() => { parent.scrollTop = parent.scrollHeight; });
+    if (follow) requestAnimationFrame(() => { parent.scrollTop = entry.offsetTop; });
   };
   return {
     push(text) {
@@ -4824,14 +5135,14 @@ function streamTarget(node) {
       pending = null;
       node.innerHTML = renderMarkdown(finalText);
       rawNode = null; cursorNode = null; paintedText = '';
-      scrollBody(node.closest('.ai-body'));
+      scrollEntryToTop(node.closest('.ai-body'), node.closest('.msg'));
     },
     fail(msg) {
       stopTimers();
       pending = null;
       node.innerHTML = `<span style="color:var(--err)">${esc(msg)}</span>`;
       rawNode = null; cursorNode = null; paintedText = '';
-      scrollBody(node.closest('.ai-body'));
+      scrollEntryToTop(node.closest('.ai-body'), node.closest('.msg'));
     },
   };
 }
@@ -4913,8 +5224,10 @@ function setBusy(on, hint = '') {
   if (!on) state.activeSendScope = '';
   $('#stopBtn')?.classList.toggle('hidden', !on || !state.abort);
   $('#sendBtn').disabled = on;
-  $('#composerHint').textContent = on ? hint : '';
   $('#clipBtn').disabled = on;
+  // 忙时那行显示进度；闲下来立刻回到「这次会发什么」的短状态（用户口径：不再清空）
+  if (on) setHint(hint);
+  else updateComposerHint();
   /**
    * ⚠️ `#regionBtn` 已从顶栏删除（2026-10），这里必须用可选链：
    * 少了这个 `?.` 的时候，setBusy() 会在这一行抛
@@ -4932,7 +5245,7 @@ function setBusy(on, hint = '') {
   // 「Cannot set properties of null」，那是在流式响应结束时调用的，界面会永远停在「生成中」。
   const scopeBtn = $('#optScope');
   if (scopeBtn) scopeBtn.disabled = on;
-  if (on) closeScopeMenu();
+  if (on) closeScopePanel();
   else renderScopeMenu();
   const clearBtn = $('#clearSession');
   if (clearBtn) clearBtn.disabled = on;
@@ -4974,9 +5287,9 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
 function updateSendScope() {
   const node = $('#sendScope');
   if (!node) return;
-  // 范围与联网是设置里的偏好，右栏不重复播报内部上下文统计。
-  node.textContent = '';
-  node.classList.add('hidden');
+  // 范围上拉栏现在**真的有用**了（2026-10 第 2 步）：内容由 renderScopeRange() 填，
+  // 收起态由 .hidden 控制。这里只保证「不忙的时候两处状态一致」。
+  renderScopeRange();
 }
 
 /**
@@ -4991,6 +5304,9 @@ function updateSendScope() {
 function syncScopePrefs() {
   state.useFullText = uiStyle.useFullText !== false;
   state.useWeb = uiStyle.useWeb !== false;
+  // 设置页的「默认发送范围」= 初始值：偏好一变，发送框的范围跟着变（之后用户可临时改）
+  state.scopeRange = rangeFromPrefs();
+  renderScopeRange();
   updateSendScope();
 }
 
@@ -5192,7 +5508,7 @@ function flashHint(msg, ms = 3200) {
 
 function initComposer() {
   $('#composer').addEventListener('submit', (e) => { e.preventDefault(); send(); });
-  $('#stopBtn').onclick = () => { abortStream('user'); $('#composerHint').textContent = '正在停止…'; };
+  $('#stopBtn').onclick = () => { abortStream('user'); setHint('正在停止…'); };
   $('#clipBtn').onclick = () => state.startRegion?.();
   // 「清空会话」不再常驻在输入框下面（2026-10 用户口径），改挂在会话菜单里。
   // 这里的绑定用可选链，元素不在也不抛。
@@ -5201,16 +5517,27 @@ function initComposer() {
   renderAttachments();
 
   /**
-   * 发送范围 / 联网现在是**默认开着、在设置里调**（用户口径：
-   * 「第一个应该是默认全文加联网，在设置里面调节」），所以输入框下面不再有
-   * `#optScope` 这个常驻菜单入口，`#scopeMenu` 这个菜单本体也一起删掉了。
-   * 这一段不再装任何点击 / 关闭绑定 —— 没有入口，就没有可关的菜单。
+   * 发送范围（2026-10 第 2 步）：范围芯片 + 四选项上拉栏。
+   * 事件委托挂在 form 上（芯片与面板都在 form 里），键盘 / 点选走同一条路径。
    */
+  $('#composer')?.addEventListener('click', (e) => {
+    if (e.target.closest('#composerScope')) { e.preventDefault(); toggleScopePanel(); return; }
+    const opt = e.target.closest('#sendScope .scope-opt');
+    if (opt && !opt.disabled) {
+      e.preventDefault();
+      setScopeRange(opt.dataset.range);
+      toast(`发送范围：${SCOPE_RANGES[opt.dataset.range].short}`, '', 1200);
+    }
+  });
+  // 面板里点到空白不要冒泡成提交
+  $('#sendScope')?.addEventListener('click', (e) => { if (!e.target.closest('.scope-opt')) e.preventDefault(); });
   renderScopeMenu();
+  renderScopeRange();
 
   const ta = $('#chatInput');
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    if (e.key === 'Escape') closeScopePanel();
   });
   ta.addEventListener('input', () => {
     ta.style.height = 'auto';
@@ -5238,11 +5565,159 @@ function initComposer() {
 const fullScopeAvailable = () => !!state.doc && !!viewer?.pdf && state.viewerDocId === state.doc?.docId;
 
 /**
- * 兼容壳：范围菜单已经整个删掉（发送范围搬进设置页），但历史上很多地方（含 `window.__ctx`
- * 的导出与 `initComposer`）都会调它。保留一个空的同名函数最省事也最稳：没有菜单可渲染，
- * 也不会有任何节点被创建 —— 比把 7 处调用点全改一遍安全得多。
+ * 兼容壳：范围菜单曾经整个删掉（发送范围搬进设置页），历史上很多地方（含 `window.__ctx`
+ * 的导出与 `initComposer`）都会调它，所以保留同名函数最省事。
+ *
+ * 2026-10-05 更新（用户拍板第 2 步）：**范围又回到发送框了**，但形态与当年不同 ——
+ * 设置里的默认范围仍然只决定初始值，实际发送前可以在发送框上拉栏里临时改，改完沿用到下一次。
+ * 真正的内容渲染在 `renderScopeRange()`（下面「发送范围（四选项）」一节）。
  */
-function renderScopeMenu() {}
+function renderScopeMenu() { renderScopeRange(); }
+
+/* ═════════════════════ 发送范围（四选项，第 2 步） ═════════════════════
+ *
+ * 用户 2026-10 拍板：
+ *   · 发送框上拉栏里四个互斥选项：当前内容 / 整篇论文 / 联网搜索 / 整篇论文 + 联网搜索
+ *   · 设置页保留「默认发送范围」，只决定初始值
+ *   · `#composerHint` 不再清空 —— 收起状态显示当前范围的短状态
+ *   · 四个选项覆盖原来两个独立开关的**全部组合**（含「只联网」，不丢能力）
+ *   · 「当前内容」由上下文自动决定：有选中文字发选中文字，没有就发当前页上下文
+ *
+ * 关键约束（改这块必须遵守）：**范围只对下一次发送生效、之后沿用**，
+ * 而设置页那两个偏好（uiStyle.useFullText / useWeb）是**默认值**，不被发送框写坏。
+ * 所以每次发送前把范围固定进 pending，`state.useFullText/useWeb` 跟着当次范围走 ——
+ * 重试闭包捕获的是当次的 pending，因此重试绝不会串范围
+ * （test/context.mjs 与 test/stream.mjs 都在盯这条）。
+ * ═════════════════════════════════════════════════════════════════════ */
+
+const SCOPE_RANGES = {
+  current: { key: 'current', short: '当前内容', icon: 'region', full: false, web: false,
+    desc: '只发送你选中的文字；没有选中就发送当前页上下文' },
+  paper: { key: 'paper', short: '整篇论文', icon: 'book', full: true, web: false,
+    desc: '发送整篇论文作为上下文' },
+  web: { key: 'web', short: '联网搜索', icon: 'link', full: false, web: true,
+    desc: '带论文片段的同时联网查一次资料' },
+  'paper-web': { key: 'paper-web', short: '论文 + 联网', icon: 'book', full: true, web: true,
+    desc: '发送整篇论文，并先联网查一次资料' },
+};
+const SCOPE_RANGE_ORDER = ['current', 'paper', 'web', 'paper-web'];
+
+/** 设置页两个偏好 → 初始范围（沿用老存档语义，不改变既有默认「整篇 + 联网」）
+ *  ⚠️ 只读 uiStyle（偏好本身），**不要**读 state.useFullText：那是「当次发送」的运行时值，
+ *  混用会出现「默认开着整篇、范围却是当前内容」这种自相矛盾的初始态。 */
+function rangeFromPrefs() {
+  const full = uiStyle.useFullText !== false;
+  const web = uiStyle.useWeb !== false;
+  if (full && web) return 'paper-web';
+  if (full) return 'paper';
+  if (web) return 'web';
+  return 'current';
+}
+
+function currentRange() {
+  return SCOPE_RANGES[state.scopeRange] ? state.scopeRange : 'paper-web';
+}
+
+/** 「整篇论文」此刻能不能用：要有一篇真的装好的论文 */
+function rangeAvailable(key) {
+  if (key === 'paper' || key === 'paper-web') return fullScopeAvailable();
+  return true;
+}
+
+/** 按给定范围开关 state 的两个标记（发送前 / 换论文后调用；同一套推导，不重复实现） */
+function applyRangeForSend(rangeKey) {
+  const r = SCOPE_RANGES[rangeKey] || SCOPE_RANGES['paper-web'];
+  state.useFullText = r.full;
+  state.useWeb = r.web;
+  return r;
+}
+
+/** 这次到底会发什么 —— 给发送框那句短状态用（不让人猜范围） */
+function rangeOverview() {
+  const r = SCOPE_RANGES[currentRange()];
+  const sel = String(state.selection || '').replace(/\s+/g, ' ').trim();
+  const head = sel ? `选中 ${sel.slice(0, 24)}${sel.length > 24 ? '…' : ''}` : '当前页上下文';
+  const tail = [];
+  if (r.full) tail.push(fullScopeAvailable() ? '整篇论文' : '整篇论文（暂不可提取）');
+  if (r.web) tail.push('联网搜索');
+  return tail.length ? `${head} · ${tail.join(' · ')}` : head;
+}
+
+/** 收起状态的那句短状态（用户口径：不再清空 #composerHint） */
+function updateComposerHint() {
+  if (state.busy) return;                    // 忙的时候那行归进度文案用
+  setHint(rangeOverview());
+}
+
+/** 发送框上的范围芯片 + 上拉栏里的选中态（两处必须同步） */
+function renderScopeRange() {
+  const key = currentRange();
+  const r = SCOPE_RANGES[key];
+  const chip = $('#composerScope');
+  if (chip) {
+    chip.dataset.range = key;
+    // ⚠️ 必须是 iconHTML（返回字符串）：iconEl 返回节点，拼进模板字符串会变成
+    //    "[object SVGSVGElement]" —— 界面上表现为芯片里出现一行鬼话。
+    chip.innerHTML = `${iconHTML(r.icon, { size: 14 })}<span>${r.short}</span>`;
+    chip.title = `发送范围：${r.short} —— ${r.desc}`;
+    chip.setAttribute('aria-label', `发送范围：${r.desc}。点击可改。`);
+  }
+  const panel = $('#sendScope');
+  if (panel) {
+    panel.innerHTML = SCOPE_RANGE_ORDER.map((k) => {
+      const item = SCOPE_RANGES[k];
+      const on = k === key;
+      const ok = rangeAvailable(k);
+      return `<button type="button" class="scope-opt${on ? ' is-on' : ''}" role="radio"
+        aria-checked="${on ? 'true' : 'false'}" data-range="${k}" ${ok ? '' : 'disabled'}
+        title="${item.desc}${ok ? '' : '（先打开一篇论文）'}">
+        <span class="scope-dot" aria-hidden="true"></span>
+        <span class="scope-ico">${iconHTML(item.icon, { size: 14 })}</span>
+        <span class="scope-txt">${item.desc}</span>
+      </button>`;
+    }).join('');
+  }
+  updateComposerHint();
+}
+
+/** 点范围面板 / 芯片之外的地方 → 收起（一次性自摘） */
+function scopeAway(e) {
+  if (e.target.closest && (e.target.closest('#sendScope') || e.target.closest('#composerScope'))) return;
+  closeScopePanel();
+}
+
+function closeScopePanel() {
+  const panel = $('#sendScope');
+  document.removeEventListener('pointerdown', scopeAway, true);
+  if (!panel || panel.classList.contains('hidden')) return;
+  panel.classList.add('hidden');
+  $('#composerScope')?.setAttribute('aria-expanded', 'false');
+}
+
+function toggleScopePanel() {
+  const panel = $('#sendScope');
+  if (!panel) return;
+  if (panel.classList.contains('hidden')) {
+    renderScopeRange();
+    panel.classList.remove('hidden');
+    $('#composerScope')?.setAttribute('aria-expanded', 'true');
+    // 点面板外面就收起。监听挂在 document 捕获阶段，且**每次打开重新挂**
+    // （不用 setTimeout 延迟挂 —— 那会和「点完立刻点别处」的竞态撞车）。
+    document.addEventListener('pointerdown', scopeAway, true);
+  } else {
+    closeScopePanel();
+  }
+}
+
+function setScopeRange(key) {
+  if (!SCOPE_RANGES[key]) return;
+  state.scopeRange = key;
+  renderScopeRange();
+  closeScopePanel();
+  // ⚠️ 这里**不写** uiStyle 的两个偏好：范围是「本次发送」的，
+  // 设置页的默认范围才是长期意图。state 的两个标记跟着当前范围走（发送时同源）。
+  applyRangeForSend(key);
+}
 
 /** 输入框下面那行小字，用于显示进度；传空字符串清掉 */
 function setHint(t) {
@@ -5421,9 +5896,17 @@ async function send(retryPending = null) {
       docId: state.doc?.docId || null,
       docTitle: state.doc?.name || '',
       history: state.history.map((m) => ({ role: m.role, content: m.content })),
-      useFullText: state.useFullText,
-      useWeb: state.useWeb,
+      // 本次发送按**发送框当前范围**决定（四选项里选的那个），不再直接读设置页偏好
+      useFullText: SCOPE_RANGES[currentRange()].full,
+      useWeb: SCOPE_RANGES[currentRange()].web,
+      scopeRange: currentRange(),
     };
+    // 提交后立即清空输入框；问题已经写入右侧会话记录，等待模型返回时不再把旧问题留在编辑区。
+    ta.value = '';
+    ta.style.height = 'auto';
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    // 这条待发记录的范围固定下来：重试 / 停止后恢复都复用它，不会被之后改的范围串掉
+    pending.scope = SCOPE_RANGES[currentRange()].short;
     // 同一条待发问题在失败或停止后重试时复用这两行，不再追加用户消息。
     pending.userEntry = addEntry({
       block: 'chat', kind: 'user', text: question, quote: quoteText,
@@ -5438,6 +5921,10 @@ async function send(retryPending = null) {
         useFullText: pending.useFullText, useWeb: pending.useWeb,
       },
     });
+    // 回答存笔记时标题默认用用户的问题（会话恢复时另有一处从历史里回填）
+    if (pending.entry) {
+      pending.entry.root.__question = pending.question || '';
+    }
   } else {
     pending.entry.body.replaceChildren();
     pending.entry.acts.replaceChildren();
@@ -5450,6 +5937,8 @@ async function send(retryPending = null) {
 
   const ctl = makeController();
   if (!ctl) return;
+  // 这条待发记录的范围固定下来：state 的两个标记跟着它走（重试时 pending 原样复用，不会串范围）
+  applyRangeForSend(pending.scopeRange || currentRange());
   const images = pending.attachments.filter((a) => a.kind === 'image');
   const baseScope = sendScopeText({
     attachments: pending.attachments,
@@ -5547,10 +6036,6 @@ async function send(retryPending = null) {
     state.history.push({ role: 'user', content: pending.question });
     state.history.push({ role: 'assistant', content: full });
     finishEntry(pending.entry, full, { page: pending.firstPage, sources, meta, status: 'complete' });
-    if (ta.value.trim() === pending.inputValue.trim()) {
-      ta.value = '';
-      ta.style.height = 'auto';
-    }
     const sentIds = new Set(pending.attachments.map((a) => a.id));
     state.attachments = state.attachments.filter((a) => !sentIds.has(a.id));
     renderAttachments();
@@ -6050,8 +6535,10 @@ function initSettings() {
     updateEndpointNote();
   };
   $('#cfgBaseURL').addEventListener('input', updateEndpointNote);
-  // 设置页只剩两个即时生效的控件：主题、阅读字号
-  ['uiTheme', 'uiFontSize']
+  // 设置页里「即时生效」的控件：主题、阅读字号，以及两个默认发送范围偏好
+  // （第 2 步起范围回到发送框，设置页这两个勾 = 默认值；两个入口必须同一套语义，
+  //   所以勾选也走 applyUiSettingsFromControls → syncScopePrefs → renderScopeRange）。
+  ['uiTheme', 'uiFontSize', 'cfgUseFullText', 'cfgUseWeb']
     .forEach((id) => document.getElementById(id)?.addEventListener('input', applyUiSettingsFromControls));
   $('#resetSettings').onclick = () => resetSettings();
 

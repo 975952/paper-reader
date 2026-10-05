@@ -4,44 +4,53 @@
 
 :root {
   /* ── 暖灰 / 米白 / 深灰 / 油橄榄绿工作台色板（浅色）──
-     颜色只在这里定义；散落处的硬编码颜色一律换成这套 token。
-     蓝色系（#2563eb / #3b6ef5 / #6b93ff / #78a2ff / #eaf1ff / rgba(59,110,245,*) 等）全部退役。 */
-  --bg: #F3E8C3;
-  --bg-elev: #FFF8DE;
-  --bg-sunken: #E8DFC0;
+   2026-10 调色：背景族整体提到"白底 + 很淡暖黄"（用户口径：「还是带一点浅黄，
+   就在这个白的上面稍微偏一点颜色」）。油橄榄绿 --accent 与深色模式一个字没动。
+   颜色只在这里定义；散落处的硬编码颜色一律换成这套 token。
+   蓝色系（#2563eb / #3b6ef5 / #6b93ff / #78a2ff / #eaf1ff / rgba(59,110,245,*) 等）全部退役。
+   ⚠️ 浅色色板在四块里同步（本块 / :root[data-theme="light"] / 文件末尾的"更轻的暖色工作台"
+   / 系统深色的媒体查询），改一处必须四处一起改。 */
+  --bg: #F8F5EB;
+  --bg-elev: #FDFBF5;
+  --bg-sunken: #F1EDE0;
   --fg: #3F4038;
-  /* 次要文字：目标色板给的是 #77786C，但它对面板底 #FFF8DE 只有 4.21:1；
-     这里把「次要」压深一档到 #63645A（5.61:1），把 #77786C 让给更弱的 --fg-faint，
-     这样「主文字 > 次要 > 弱化」的层级和可读性都不受损。 */
+  /* 次要文字 #63645A：对新的面板底 #FDFBF5 是 5.90:1、对工作台底 #F8F5EB 是 5.50:1；
+     更弱的 --fg-faint 让给 #77786C。层级「主文字 > 次要 > 弱化」不变。 */
   --fg-dim: #63645A;
-  /* R7 D1 的暖色版：弱化文字用目标色板给的 #77786C —— 对面板底 #FFF8DE 4.21:1、
-     对正文纸面 #FFFDF4 4.40:1、对主底 #F3E8C3 3.66:1；仍明显弱于 --fg-dim(#63645A 5.61:1)
-     的层级关系（该变量有 58 处在用：页码 / 原文引用 / 占位符 / 空态 / 各种次级说明）。 */
+  /* 弱化文字 #77786C：2026-10 底色提亮后对比度**反而上升** —— 对 #FDFBF5 4.33:1、
+     对 #F8F5EB 4.11:1、对凹陷底 #F1EDE0 3.83:1、对纸面 #FCFAF2 4.44:1
+     （旧米黄底分别是 4.21 / 3.66 / 3.36 / 4.40）。该变量有 58 处在用：
+     页码 / 原文引用 / 占位符 / 空态 / 各种次级说明。 */
   --fg-faint: #77786C;
-  --border: #D8CFAD;
-  --border-strong: #C4B892;
+  --border: #E4DEC9;
+  --border-strong: #D5CEB4;
   --accent: #556B2F;
   --accent-soft: #D5E1C7;
   --accent-fg: #FBFDF4;
   /* 主按钮（发送 / 保存 / 检索主操作）用柔和的油橄榄绿 + 深橄榄文字；
-     --accent 留给链接、焦点框、选中强调这些需要更高对比的角色（#556B2F 对面板底 5.59:1）。 */
+     --accent 留给链接、焦点框、选中强调这些需要更高对比的角色（#556B2F 对面板底 5.75:1）。 */
   --btn: #A8BFA7;
   --btn-fg: #3F5140;
   --ok: #7F9D78;
   --err: #B87568;
   /* --ok / --err 是**底色与边框色**（低饱和才不刺眼），直接当文字色对比度不够：
-     实测对面板底 #FFF8DE 只有 2.82:1 / 3.41:1，达不到 WCAG AA 的 4.5:1。
-     所以文字场景改用下面这两个同族、深一档的色（对 #FFF8DE 分别 4.97:1 / 4.91:1）。
+     对面板底 #FDFBF5 只有 2.9:1 / 3.5:1 量级，达不到 WCAG AA 的 4.5:1。
+     所以文字场景改用下面这两个同族、深一档的色（对 #FDFBF5 分别 5.20:1 / 5.14:1）。
      深色模式在各自的主题块里覆盖成浅一档（见 :root[data-theme="dark"] 与系统深色媒体查询）。 */
   --ok-text: #57734F;
   --err-text: #9E5A4C;
-  --paper: #FFFDF4;
-  --shadow: 0 1px 2px rgba(74, 64, 38, .08), 0 8px 24px rgba(74, 64, 38, .10);
-  --shadow-sm: 0 1px 3px rgba(74, 64, 38, .14);
+  --paper: #FCFAF2;
+  --shadow: 0 1px 2px rgba(74, 64, 38, .06), 0 8px 24px rgba(74, 64, 38, .08);
+  --shadow-sm: 0 1px 3px rgba(74, 64, 38, .10);
   /* 选区：暖沙色（半透明），叠在纸面 / 正文上仍看得清，且不再是原来那套蓝。 */
-  --sel: rgba(190, 172, 104, .45);
-  --hit: rgba(255, 196, 0, .45);
-  --hl: rgba(255, 226, 84, .5);
+  --sel: rgba(190, 172, 104, .42);
+  --hit: rgba(255, 196, 0, .42);
+  --hl: rgba(255, 226, 84, .48);
+  /* 滚动条滑块（2026-10 用户口径：「PDF 上下滚动的那个栏稍微做宽一点」）：
+     之前用的是 Chrome 默认样式（约 15px、系统灰），与应用色板不搭、也偏细不好抓。
+     现在统一的宽度写在下面的 `::-webkit-scrollbar` 规则里，这里只管颜色。 */
+  --scroll-thumb: #D5CEB4;
+  --scroll-thumb-hover: #BFB79A;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
   --font-reading: "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
   --mono: "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
@@ -125,16 +134,20 @@
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, .5);
     --sel: rgba(168, 191, 167, .35);
     --hl: rgba(255, 226, 84, .38);
+    --scroll-thumb: #5C5648;
+    --scroll-thumb-hover: #7A7264;
   }
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg: #F3E8C3; --bg-elev: #FFF8DE; --bg-sunken: #E8DFC0; --fg: #3F4038;
-  --fg-dim: #63645A; --fg-faint: #77786C; --border: #D8CFAD; --border-strong: #C4B892;
+  /* 白底 + 很淡暖黄（2026-10 用户口径：在白的上面稍微偏一点颜色）；
+     背景族只有明度差：bg-elev > bg > bg-sunken > hover 更深一档 */
+  --bg: #F8F5EB; --bg-elev: #FDFBF5; --bg-sunken: #F1EDE0; --fg: #3F4038;
+  --fg-dim: #63645A; --fg-faint: #77786C; --border: #E4DEC9; --border-strong: #D5CEB4;
   --accent: #556B2F; --accent-soft: #D5E1C7; --accent-fg: #FBFDF4;
   --btn: #A8BFA7; --btn-fg: #3F5140;
-  --sel: rgba(190, 172, 104, .45); --hl: rgba(255, 226, 84, .5);
+  --sel: rgba(190, 172, 104, .42); --hl: rgba(255, 226, 84, .5);
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -153,6 +166,7 @@
   --ok-text: #9CC08C; --err-text: #D89A8A; --accent-fg: #1E2418;
   --btn: #5C7358; --btn-fg: #EDF2E6;
   --sel: rgba(168, 191, 167, .35); --hl: rgba(255, 226, 84, .38);
+  --scroll-thumb: #5C5648; --scroll-thumb-hover: #7A7264;
 }
 
 * { box-sizing: border-box; }
@@ -466,6 +480,12 @@ body.dragging .viewer { pointer-events: none; }
 }
 .notes .nact button:hover { background: var(--bg-elev); color: var(--accent); }
 .notes .nact button.del:hover { color: var(--err-text); }
+/* 来自回答的笔记：只是一个来源提示词，不是新数据（见 app.js「回答存笔记」一节） */
+.notes .nflag {
+  display: inline-block; margin-top: 2px; padding: 0 5px;
+  border: 1px solid var(--border); border-radius: 999px;
+  color: var(--fg-faint); font-size: var(--ui-fs-2xs); line-height: 1.5;
+}
 
 /* ───────────────────────── 参考文献（左栏） ───────────────────────── */
 
@@ -637,6 +657,51 @@ body.dragging .viewer { pointer-events: none; }
 .viewer { flex: 1 1 0; min-height: 0; overflow: auto; position: relative; outline: none; }
 .pages { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 14px 0 50px; }
 
+/* ── 滚动条（2026-10 用户口径：「PDF 上下滚动的那个栏稍微做宽一点」） ──────────
+   之前全应用没有一条滚动条样式，用的是 Chrome 默认外观：约 15px、系统灰、
+   和这套暖色工作台不搭，而且细得不好抓。这里统一成：
+     · 宽 16px（比默认宽一档，鼠标好落）；
+     · 轨道用面板底（跟内容同底，不抢注意力）；
+     · 滑块用 --border-strong 同族色，悬停加深一档；
+     · 圆角 8px + 2px 透明边（滑块看起来细一点，但**命中区仍是 16px**）。
+   只给「整块面板 / 正文区」这类主滚动容器加，不给短列表加 —— 内联小列表用细滚动条更好。 */
+.viewer::-webkit-scrollbar,
+.ai::-webkit-scrollbar,
+.ai-body::-webkit-scrollbar,
+.side::-webkit-scrollbar,
+.modal-box::-webkit-scrollbar,
+.sess-menu::-webkit-scrollbar { width: 16px; height: 16px; }
+.viewer::-webkit-scrollbar-track,
+.ai::-webkit-scrollbar-track,
+.ai-body::-webkit-scrollbar-track,
+.side::-webkit-scrollbar-track,
+.modal-box::-webkit-scrollbar-track,
+.sess-menu::-webkit-scrollbar-track { background: transparent; }
+.viewer::-webkit-scrollbar-thumb,
+.ai::-webkit-scrollbar-thumb,
+.ai-body::-webkit-scrollbar-thumb,
+.side::-webkit-scrollbar-thumb,
+.modal-box::-webkit-scrollbar-thumb,
+.sess-menu::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 8px;
+  min-height: 40px;
+}
+.viewer::-webkit-scrollbar-thumb:hover,
+.ai::-webkit-scrollbar-thumb:hover,
+.ai-body::-webkit-scrollbar-thumb:hover,
+.side::-webkit-scrollbar-thumb:hover,
+.modal-box::-webkit-scrollbar-thumb:hover,
+.sess-menu::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); background-clip: content-box; }
+.viewer::-webkit-scrollbar-corner,
+.ai::-webkit-scrollbar-corner,
+.ai-body::-webkit-scrollbar-corner,
+.side::-webkit-scrollbar-corner { background: transparent; }
+/* Firefox（应用壳是 WebView2/Chromium，这条是给浏览器模式兜底的） */
+.viewer, .ai, .ai-body, .side, .modal-box, .sess-menu { scrollbar-width: auto; scrollbar-color: var(--scroll-thumb) transparent; }
+
 .page {
   position: relative; background: var(--paper);
   box-shadow: var(--shadow); border-radius: 3px; flex: 0 0 auto;
@@ -722,56 +787,81 @@ body.dragging .viewer { pointer-events: none; }
    用户口径：「问答是不是要做多对话分对话」→ 会话列表 + 新建 + 切换。
    位置：右栏顶栏（#aiBar）下面一条，显示当前会话名；点开是列表。
    全部用现有主题令牌，不新增颜色。 */
-.sessbar { position: relative; flex: 0 0 auto; padding: 4px 10px 6px; background: var(--bg-elev); }
+/* ── 会话条（多对话）—— 2026-10 收口 ──────────────────────────────────────
+   用户口径：「问答和翻译都有那个多对话的标」。两条一起改：
+     · 只在问答块开着时出现（renderSessionBar 按 rightPanelInCol(1) === 'chat' 判断）；
+     · 去掉那个不承载信息的绿色圆点，换成一个细线「会话」图标；
+     · 不再是一个占满整行的带边框输入框样子的块 —— 改成右上角一个很轻的小胶囊，
+       文字用次级灰，只有悬停 / 打开时才变强调色。面板顶部因此安静下来，
+       和「白底 + 淡暖黄」的底色连成一片，不再有一条绿边压在上面。 */
+.sessbar {
+  position: relative; flex: 0 0 auto;
+  display: flex; justify-content: flex-end;
+  /* ⚠️ 底色必须透明：右栏面板底是 --bg（#F8F5EB），而 .aibar / 结果区的底也是它。
+     这里若写 --bg-elev，会话条那一行会变成一条更亮的色带，标签行与结果区之间
+     就多出一道横杠（像素取样实测过：#FDFBF5 vs #F8F5EB）。 */
+  padding: 2px 10px 4px; background: transparent;
+}
 .sessbar.hidden { display: none; }
 .sess-btn {
-  width: 100%; display: flex; align-items: center; gap: 7px;
-  padding: 5px 8px; border: 1px solid var(--border); border-radius: 7px;
-  background: var(--bg); color: var(--fg); cursor: pointer;
-  font: inherit; font-size: var(--ui-fs-sm); text-align: left;
+  max-width: 100%; display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px 2px 6px;
+  border: 1px solid transparent; border-radius: 999px;
+  background: transparent; color: var(--fg-faint); cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-xs); line-height: 1.6; text-align: left;
 }
-.sess-btn:hover { border-color: var(--accent); color: var(--accent); }
+.sess-btn:hover { background: var(--bg-sunken); color: var(--accent); }
 .sess-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.sess-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
-.sess-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess-caret { flex: 0 0 auto; color: var(--fg-faint); font-size: 10px; }
+.sess-btn[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent); }
+.sess-ic { flex: 0 0 auto; display: inline-flex; color: inherit; }
+.sess-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-caret { flex: 0 0 auto; color: var(--fg-faint); font-size: 9px; opacity: .8; }
+.sess-btn:hover .sess-caret, .sess-btn[aria-expanded="true"] .sess-caret { color: inherit; opacity: 1; }
 
+/* 会话菜单：与卡片「更多操作」菜单同一套安静口径 —— 细线边框、小字、无渐变无发光，
+   「新建 / 清空」降为两行普通菜单项，不再用虚线框和大按钮抢注意力。 */
 .sess-menu {
-  position: absolute; left: 10px; right: 10px; top: calc(100% - 2px); z-index: 30;
+  position: absolute; right: 10px; left: auto; min-width: 208px; max-width: calc(100% - 20px);
+  top: calc(100% - 2px); z-index: 30;
   max-height: 320px; overflow-y: auto;
-  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 9px;
-  box-shadow: var(--shadow); padding: 5px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: 9px;
+  box-shadow: var(--shadow); padding: 4px;
 }
 .sess-menu.hidden { display: none; }
-.sess-head { padding: 5px 7px 7px; font-size: var(--ui-fs-xs); color: var(--fg-faint);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess-row { display: flex; align-items: stretch; gap: 3px; border-radius: 7px; }
+.sess-head {
+  padding: 5px 7px 6px; font-size: var(--ui-fs-2xs); color: var(--fg-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border-bottom: 1px solid var(--border); margin-bottom: 4px;
+}
+.sess-row { display: flex; align-items: stretch; gap: 2px; border-radius: 6px; }
 .sess-row:hover { background: var(--bg-sunken); }
 .sess-row.on { background: var(--accent-soft); }
 .sess-go {
-  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px;
-  padding: 6px 7px; border: 0; background: none; cursor: pointer; text-align: left;
-  color: var(--fg); font: inherit; font-size: var(--ui-fs-sm);
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+  padding: 5px 7px; border: 0; background: none; cursor: pointer; text-align: left;
+  color: var(--fg); font: inherit; font-size: var(--ui-fs-xs);
 }
 .sess-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sess-row.on .sess-title { color: var(--accent); font-weight: 600; }
-.sess-meta { font-size: var(--ui-fs-xs); color: var(--fg-faint); }
+.sess-meta { font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
 .sess-del {
-  flex: 0 0 auto; width: 28px; border: 0; background: none; cursor: pointer;
-  color: var(--fg-faint); font-size: 15px; line-height: 1; border-radius: 7px; font-family: inherit;
+  flex: 0 0 auto; width: 24px; border: 0; background: none; cursor: pointer;
+  color: var(--fg-faint); font-size: 14px; line-height: 1; border-radius: 6px; font-family: inherit;
+  opacity: 0; transition: opacity .12s, color .12s;
 }
+.sess-row:hover .sess-del, .sess-del:focus-visible { opacity: 1; }
 .sess-del:hover { color: var(--err-text, var(--fg)); background: var(--bg); }
-.sess-new {
-  width: 100%; margin-top: 4px; padding: 7px; border: 1px dashed var(--border); border-radius: 7px;
-  background: none; color: var(--accent); cursor: pointer; font: inherit; font-size: var(--ui-fs-sm);
+/* 新建 / 清空：与「更多操作」里的菜单项同构（一行图标 + 文字，无边框） */
+.sess-new, .sess-clear {
+  width: 100%; margin-top: 2px; padding: 6px 7px;
+  border: 0; border-radius: 6px; background: none; cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-xs); text-align: left;
 }
-.sess-new:hover { border-color: var(--accent); background: var(--accent-soft); }
-.sess-clear {
-  width: 100%; margin-top: 4px; padding: 7px; border: 1px solid var(--border); border-radius: 7px;
-  background: none; color: var(--fg-dim); cursor: pointer; font: inherit; font-size: var(--ui-fs-sm);
-}
-.sess-clear:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-.sess-empty { padding: 10px 7px; color: var(--fg-faint); font-size: var(--ui-fs-sm); text-align: center; }
+.sess-new { color: var(--fg-dim); }
+.sess-clear { color: var(--fg-dim); }
+.sess-new:hover, .sess-clear:hover { background: var(--bg-sunken); color: var(--accent); }
+.sess-clear { border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; margin-top: 4px; }
+.sess-empty { padding: 10px 7px; color: var(--fg-faint); font-size: var(--ui-fs-xs); text-align: center; }
 
 /* ═══════════ 底栏（2026-10） ═══════════
    用户口径：「底栏应该是横着一整栏，而且现在的太扁了」。
@@ -855,7 +945,7 @@ body.reading .home { display: none; }
 }
 .home-open:hover { filter: brightness(1.06); }
 .home-drop {
-  flex: 1 1 auto; min-height: 44px; border-radius: 10px; cursor: pointer;
+  flex: 1 1 auto; min-height: 44px; border-radius: 10px; cursor: default;
   border: 1px dashed var(--border); background: var(--bg-elev); color: var(--fg-dim);
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   font-size: var(--ui-fs-sm); transition: border-color .12s, color .12s;
@@ -865,7 +955,14 @@ body.reading .home { display: none; }
 .home-item-go:focus-visible, .home-item-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .home-drop.over, .home-drop:hover { border-color: var(--accent); color: var(--fg); }
 
-.home-recent { max-width: 720px; margin: 0 auto; }
+.home-recent {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
 .home-sec-title { font-size: var(--ui-fs-sm); color: var(--fg-faint); margin: 0 0 10px; }
 .home-continue-wrap:empty { display: none; }
 
@@ -876,6 +973,14 @@ body.reading .home { display: none; }
   font-family: inherit; font-size: var(--ui-fs);
 }
 .home-continue:hover { border-color: var(--accent); }
+.home-recent .home-continue {
+  border: 0;
+  border-radius: 5px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+  padding-left: 4px;
+  padding-right: 4px;
+}
 .hc-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .hc-label { font-size: var(--ui-fs-xs); color: var(--accent); letter-spacing: .5px; }
 .hc-name { font-size: var(--ui-fs-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -947,6 +1052,21 @@ body.reading .home { display: none; }
 .ai-block.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .ai-block.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 
+/* 译文与问答各自保留独立的视觉底色，避免结果内容在右栏里连成一片。 */
+.ai-block[data-block="translate"] {
+  background: color-mix(in srgb, var(--bg) 94%, var(--accent-soft));
+  border-radius: 6px;
+}
+.ai-block[data-block="chat"] {
+  background: color-mix(in srgb, var(--bg) 97%, var(--bg-sunken));
+  border-radius: 6px;
+}
+.ai-block[data-block="translate"] + .ai-block[data-block="chat"],
+.ai-block[data-block="chat"] + .ai-block[data-block="translate"] {
+  margin-top: 5px;
+  border-top: 1px solid var(--border-strong);
+}
+
 /* .ai-head 已删除（2026-10）：译文 / 问答的结果块不再自带标题栏，
    标题由右栏顶部的 #aiBar 选中态表达。下面这条是兜底，防止历史 DOM
    （或缓存里的旧页面）残留标题栏时又冒出来。 */
@@ -957,6 +1077,35 @@ body.reading .home { display: none; }
 body.row-dragging { cursor: row-resize; user-select: none; }
 
 .ai-body { flex: 1 1 0; min-height: 0; overflow: auto; padding: calc(var(--ctl-gap) * .5) 0 var(--panel-pad); display: flex; flex-direction: column; }
+
+/* ── 译文块：最近的一条翻译在最上面（2026-10 用户口径：「最近的翻译应该要放在最上面」）──
+   实现是 **DOM 顺序就是新 → 旧**（app.js 的 addEntry 对译文块用 prepend），
+   配合普通 `column` 布局 —— 这样最新一条天然在顶部，滚动也是普通的向下滚。
+
+   ⚠️ 不要退回 `column-reverse`：那条路在 Chrome 154 上测过两种写法，都满足不了需求 ——
+     · `column-reverse` + 默认 flex-start：短内容贴底、长内容能滚；
+     · `column-reverse` + `justify-content: flex-end`：短内容能贴上沿，但**溢出被吃掉**
+       （scrollHeight 恒等于 clientHeight，多出来的内容够不到，滚动条不出现）。
+   也不要给条目加 `flex: 0 0 auto` 之类的补丁去救它：根因是反向轴的溢出语义，
+   不是条目被压扁（实测条目高度是对的 1507px，容器就是不认）。
+
+   `margin-top: auto` 是这里的关键一条：内容不足一屏时，把整块**压到上沿**
+   （否则 flex 会把它留在底部）；内容超过一屏时 margin 自动变成 0，滚动照常。 */
+.ai-block[data-block="translate"] > .ai-body {
+  flex-direction: column;
+  padding: var(--panel-pad) 0 calc(var(--ctl-gap) * .5);
+}
+/* `margin-bottom: auto` 是这里的关键一条：它挂在**最后一条**（视觉上最旧的那条）上，
+   把剩余空间全部吃掉，于是上面所有条目被顶到上沿（内容不足一屏时）；
+   内容超过一屏时剩余空间为 0、margin 自动变 0，滚动照常。
+   ⚠️ 两个容易写错的地方（都踩过）：
+     · 挂 `margin-top: auto` 会**反过来**把内容推到下面（auto 上边距吃的是上方的自由空间）；
+     · 用 `:first-child` / `:last-child` 会挂到那句提示 `.ai-hint` 上 —— 消息的类型是 `.msg`，
+       必须用 `:first-of-type` / `:last-of-type`。 */
+.ai-block[data-block="translate"] > .ai-body > .msg:last-of-type { margin-bottom: auto; }
+/* 译文块是「最纯净的界面」：没有动作条（保存笔记那条窄标题行例外，它是编辑中的输入区）。 */
+.ai-block[data-block="translate"] .acts,
+.ai-block[data-block="translate"] .acts * { display: none !important; }
 /* R7：结果块底部渐隐提示。
    原因：.ai-body 是 overflow:auto 的滚动容器，公式/文字被滚动边界"切断"时，
    视觉上像渲染失败或被裁掉（视觉验收在 09/11/12 三张图上都报了这个观感）。
@@ -970,6 +1119,10 @@ body.row-dragging { cursor: row-resize; user-select: none; }
 }
 .ai-block.has-scroll::after { opacity: .96; }
 @media (prefers-reduced-motion: reduce) { .ai-block::after { transition: none; } }
+/* 注：译文块虽然反转了排布，但**渐隐提示仍然留在底边、不需要覆盖** ——
+   反转后最新一条在顶部，更早的那些被往下推，「下面还有」指的就是它们。
+   （曾经在这里写过一条 `bottom:auto; top:0` 的覆盖，既与通用规则同特异性互相打架，
+   逻辑上也是错的：那样会把提示指向"上面还有"，而上面永远是最新那条。） */
 .ai-body .empty { color: var(--fg-faint); font-size: var(--ui-fs-sm); line-height: 1.9; padding: 18px 14px; text-align: center; }
 .ai-hint { color: var(--fg-faint); font-size: var(--ui-fs-xs); line-height: 1.8; padding: 14px 13px; text-align: center; }
 .ai-hint.hidden { display: none; }
@@ -1025,6 +1178,26 @@ body.row-dragging { cursor: row-resize; user-select: none; }
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
 .msg:hover .ref { opacity: 1; }
+/* 可点击的原文引用（2026-10 用户口径：「把原文引用的那一块做成可点击的，点击就自动跳回」）：
+   整块是按钮，悬停时竖线变强调色 + 文字变深，明确"这是一条能跳回原文的引用"；
+   右侧补一个小箭头，点哪儿都行（不是只有箭头能点）。 */
+.msg .ref.ref-jump {
+  cursor: pointer; width: 100%; text-align: left;
+  background: transparent; border: 0; border-left: 2px solid var(--border-strong);
+  border-radius: 0 4px 4px 0; font-family: inherit;
+  padding: 2px 22px 2px 8px; position: relative;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.msg .ref.ref-jump::after {
+  content: ''; position: absolute; right: 6px; top: 50%; width: 7px; height: 7px;
+  margin-top: -4px; border-top: 1.5px solid currentColor; border-right: 1.5px solid currentColor;
+  transform: rotate(45deg); opacity: .55;
+}
+.msg .ref.ref-jump:hover {
+  color: var(--accent); border-left-color: var(--accent); background: var(--accent-soft);
+}
+.msg .ref.ref-jump:hover::after { opacity: 1; }
+.msg .ref.ref-jump:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* 这一段是阅读字号（--ai-fs / --ai-lh / --ai-code-fs）唯一的消费者：
    界面字号与控件大小都不参与，所以三者互不影响 */
@@ -1060,6 +1233,34 @@ body.row-dragging { cursor: row-resize; user-select: none; }
   font-size: calc(11px * var(--ctl-scale)); padding: calc(2px * var(--ctl-scale)) calc(6px * var(--ctl-scale)); border-radius: 5px; line-height: 1.5;
 }
 .msg .acts button:hover { background: var(--bg-sunken); color: var(--accent); }
+
+/* ── 回答存笔记（2026-10 第 1 步）：加号 → 对勾的原地切换 + 一条窄标题行 ──────
+   图标跟着消息动作条既有口径（默认很低对比度，悬停消息才亮）；
+   「已保存」靠**图标形状变成对勾**表达，不额外加常亮色块 —— 保持整条回答安静。 */
+.msg .acts button.note-act:hover,
+.msg .acts button.note-act.saved,
+.msg .acts button.note-act.saved:hover { color: var(--accent); }
+
+/* 窄标题行：整行只比正文窄一点，右侧只有确认 / 取消两个图标（不弹任何大提示框） */
+.msg .note-edit {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 6px; padding: 3px 4px 3px 7px;
+  border: 1px solid var(--border); border-left: 2px solid var(--accent);
+  border-radius: 7px; background: var(--bg-sunken);
+  animation: noteEditIn .14s ease-out;
+}
+@keyframes noteEditIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.msg .note-edit > .ic { color: var(--fg-faint); display: inline-flex; flex: none; }
+.msg .note-edit input.note-title {
+  flex: 1; min-width: 0; height: calc(22px * var(--ctl-scale));
+  border: 0; background: transparent; color: var(--fg);
+  font: inherit; font-size: var(--ui-fs-lg); outline: none;
+}
+.msg .note-edit input.note-title::placeholder { color: var(--fg-faint); }
+.msg .note-edit .note-edit-acts { display: flex; align-items: center; gap: 1px; flex: none; }
+.msg .note-edit .note-edit-acts button.act-icon { width: 24px; height: 22px; }
+.msg .note-edit .note-edit-acts button.act-icon > svg { width: 14px; height: 14px; }
+.msg .note-edit .note-edit-acts button:hover { background: var(--bg-elev); color: var(--accent); }
 
 .msg.err .text { color: var(--err-text); }
 .msg .ref { max-width: 58ch; font-family: var(--font-reading); font-size: var(--ui-fs-xs); line-height: 1.6; }
@@ -1117,7 +1318,7 @@ body.row-dragging { cursor: row-resize; user-select: none; }
   background: var(--bg); padding: calc(5px * var(--ctl-scale)) calc(5px * var(--ctl-scale)) calc(5px * var(--ctl-scale)) calc(10px * var(--ctl-scale));
   transition: border-color .15s, box-shadow .15s;
 }
-.composer-row:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.composer-row:focus-within { border-color: var(--border-strong); box-shadow: none; }
 .composer textarea {
   flex: 1 1 auto; min-width: 0; border: 0; outline: none; background: transparent; color: var(--fg);
   font: inherit; font-size: var(--ui-fs); line-height: 1.5; resize: none; max-height: 132px; padding: calc(4px * var(--ctl-scale)) 0;
@@ -1145,9 +1346,58 @@ body.row-dragging { cursor: row-resize; user-select: none; }
 .draggable-card.dragging { box-shadow: 0 14px 34px rgba(74, 64, 38, .30); }
 .modal-box { cursor: default; }
 
-.composer-opts { display: flex; align-items: center; gap: calc(var(--ctl-gap) + 3px); padding: 3px 2px 0; min-height: 22px; }
+.composer-opts { display: flex; align-items: center; gap: calc(var(--ctl-gap) + 3px); padding: 3px 2px 0; min-height: 22px; position: relative; }
 .send-scope { color: var(--fg-faint); font-size: var(--ui-fs-2xs); line-height: 1.4; padding: 0 3px; overflow-wrap: anywhere; }
 .send-scope:not(.hidden) { min-height: 14px; }
+
+/* ── 发送范围芯片 + 四选项上拉栏（2026-10 第 2 步） ─────────────────────────
+   口径：当前范围**必须一眼看见**（不能让用户猜），所以芯片上写极短标签；
+   完整含义放 title 与面板里。面板是绝对定位浮层，不占布局高度 —— 打开时输入框不会跳。 */
+.scope-chip {
+  display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
+  height: calc(20px * var(--ctl-scale));
+  padding: 0 calc(6px * var(--ctl-scale)) 0 calc(5px * var(--ctl-scale));
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-elev); color: var(--fg-dim);
+  font: inherit; font-size: var(--ui-fs-2xs); line-height: 1;
+  cursor: pointer; white-space: nowrap;
+}
+.scope-chip:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.scope-chip > svg { flex: 0 0 auto; }
+.scope-chip[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+
+.scope-panel {
+  position: absolute; left: 0; right: 0; bottom: calc(100% + 4px); z-index: 20;
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 4px;
+  border: 1px solid var(--border-strong); border-radius: 9px;
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+  animation: scopeIn .14s ease-out;
+}
+@keyframes scopeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.scope-opt {
+  display: flex; align-items: center; gap: 7px;
+  width: 100%; min-height: calc(26px * var(--ctl-scale));
+  padding: calc(3px * var(--ctl-scale)) calc(7px * var(--ctl-scale));
+  border: 0; border-radius: 6px;
+  background: transparent; color: var(--fg-dim);
+  font: inherit; font-size: var(--ui-fs-xs); line-height: 1.35; text-align: left;
+  cursor: pointer;
+}
+.scope-opt:hover:not(:disabled) { background: var(--bg-sunken); color: var(--fg); }
+.scope-opt.is-on { background: var(--accent-soft); color: var(--accent); }
+.scope-opt:disabled { color: var(--fg-faint); opacity: .55; cursor: not-allowed; }
+.scope-ico { display: inline-flex; flex: 0 0 auto; color: inherit; opacity: .85; }
+.scope-txt { flex: 1 1 auto; min-width: 0; }
+.scope-dot {
+  flex: 0 0 auto; width: 11px; height: 11px; border-radius: 50%;
+  border: 1px solid var(--border-strong); position: relative;
+}
+.scope-opt.is-on .scope-dot { border-color: var(--accent); }
+.scope-opt.is-on .scope-dot::after {
+  content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--accent);
+}
 .opt-chip {
   flex: 0 0 auto; display: inline-flex; align-items: center; gap: calc(5px * var(--ctl-scale));
   font: inherit; font-size: calc(10.5px * var(--ctl-scale)); line-height: 1.2;
@@ -1378,6 +1628,30 @@ body[data-density="comfortable"] {
   .settings-grid { grid-template-columns: 1fr; }
 }
 
+/* 输入区保持安静：只做颜色反馈，不做弹跳、缩放和强外发光。 */
+.composer-row {
+  transition: border-color .14s ease, background-color .14s ease;
+}
+.composer-row:focus-within {
+  border-color: var(--border-strong);
+  box-shadow: none;
+}
+.composer .send:hover,
+.composer .stop:hover {
+  filter: none;
+}
+.scope-panel {
+  animation: scopeFadeIn .1s ease-out;
+}
+@keyframes scopeFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-row,
+  .scope-panel { transition: none; animation: none; }
+}
+
 @media print { .topbar, .side, .rail, .statusbar, .bubble, .searchbar, .splitter { display: none !important; } }
 
 
@@ -1388,28 +1662,31 @@ body[data-density="comfortable"] {
 
 /* ─────────────────────── UI refresh / phase 1 ───────────────────────
    只调整视觉层，不改变面板 ID、停靠规则或拖拽行为。阅读区保持安静，
-   工具区用清晰的层级和状态色告诉用户“现在在哪里、下一步能做什么”。 */
+   工具区用清晰的层级和状态色告诉用户“现在在哪里、下一步能做什么”。
+   ⚠️ 这一块**重复定义**了浅色色板（历史遗留），必须和文件顶部 / 末尾那两处保持同一个值；
+   改色时四处一起改，否则「保存设置」前后会看到两种底色。 */
 :root {
-  --bg: #F3E8C3;
-  --bg-elev: #FFF8DE;
-  --bg-sunken: #E8DFC0;
-  --border: #D8CFAD;
-  --border-strong: #C4B892;
+  --bg: #F8F5EB;
+  --bg-elev: #FDFBF5;
+  --bg-sunken: #F1EDE0;
+  --border: #E4DEC9;
+  --border-strong: #D5CEB4;
   --accent: #556B2F;
   --accent-soft: #D5E1C7;
   --btn: #A8BFA7;
   --btn-fg: #3F5140;
-  --shadow-sm: 0 1px 2px rgba(74, 64, 38, .14);
-  --shadow: 0 10px 30px rgba(74, 64, 38, .14);
+  --shadow-sm: 0 1px 2px rgba(74, 64, 38, .10);
+  --shadow: 0 10px 30px rgba(74, 64, 38, .12);
   /* 与 :root 的 35px 保持一致（用户口径：应用内标题栏 = VS Code 的 35px）。 */
   --topbar-h: 35px;
   --panel-pad: 10px;
   --ctl-gap: 6px;
 }
 :root[data-theme="light"] {
-  --bg: #F3E8C3; --bg-elev: #FFF8DE; --bg-sunken: #E8DFC0;
-  --border: #D8CFAD; --border-strong: #C4B892; --accent: #556B2F; --accent-soft: #D5E1C7;
+  --bg: #F8F5EB; --bg-elev: #FDFBF5; --bg-sunken: #F1EDE0;
+  --border: #E4DEC9; --border-strong: #D5CEB4; --accent: #556B2F; --accent-soft: #D5E1C7;
   --btn: #A8BFA7; --btn-fg: #3F5140;
+  --sel: rgba(190, 172, 104, .42); --hit: rgba(255, 196, 0, .42); --hl: rgba(255, 226, 84, .48);
 }
 :root[data-theme="dark"] {
   /* 与文件顶部两处深色定义保持一致（深色底提亮一档） */
@@ -1454,14 +1731,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .ai-empty .ai-add-btns { justify-content: flex-start; }
 /* .ai-head 的整组样式随标题栏一起删除（见 812 行附近的说明与兜底规则） */
 .ai-split { flex-basis: 6px; }
-/* 切换器在顶部：下边框由主规则给，这里只覆盖间距与尺寸 */
+/* 切换器在顶部：下边框由主规则给，这里只覆盖间距与尺寸。
+   底色在文件末尾那条最终生效的 .aibar 里统一成 transparent（别在这里再写一遍，
+   写了也会被后面覆盖 —— 这个坑踩过一次）。 */
 .aibar { gap: 7px; padding: 8px 10px; }
 .aibar-btn { min-height: 28px; border-radius: 7px; padding: 4px 10px; background: transparent; }
 /* 选中态在顶部用「下沿高亮」会像贴了个底板；改成上沿 + 底色，与顶栏位置匹配 */
 .aibar-btn.on { background: var(--accent-soft); box-shadow: inset 0 2px 0 var(--accent); }
 .composer { padding: 10px; background: var(--bg-elev); border-top-color: var(--border); }
 .composer-row { min-height: 44px; border-radius: 9px; background: var(--bg-elev); box-shadow: 0 1px 1px rgba(74, 64, 38, .05); }
-.composer-row:focus-within { box-shadow: 0 0 0 3px var(--accent-soft); }
+.composer-row:focus-within { box-shadow: none; }
 .composer .send, .composer .stop, .composer .clip { width: 32px; height: 32px; border-radius: 7px; }
 .composer .send { box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 30%, transparent); }
 .composer .clip { background: transparent; }
@@ -1574,6 +1853,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
  * `.ai-head` 标题栏则整个去掉（标题与条数都由这里的选中态表达）。
  *
  * 样式按「顶栏」写：下边框分隔，而不是以前的上边框。
+ *
+ * ⚠️ 底色用 transparent，**不要**写 --bg-elev（2026-10 收口）：
+ *   面板本体（#rightSide）的底是 --bg，紧挨在标签行下面的会话条与结果区也都是它。
+ *   标签行单独用 --bg-elev 会在右栏顶部压出一条更亮的横条 —— 两行挨着两种底色，
+ *   看起来就是一条脏边。分隔交给下边框，层次交给选中态。
+ *   这个文件里 .aibar 一共有 5 处定义（1015 / 1599 / 1604 / 1724 / 1809），
+ *   **只有本条是最后生效的**，改底色只改这里。
  */
 .aibar {
   flex: 0 0 auto;
@@ -1582,7 +1868,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  background: var(--bg-elev);
+  background: transparent;
   border-bottom: 1px solid var(--border);
   order: -1;                      /* 兜底：即使 DOM 顺序被改也仍然在右栏最上面 */
 }
@@ -1815,19 +2101,25 @@ body.side-squeezed #leftSide { min-width: 60px; }
 body.side-squeezed.no-right #rightCols { display: flex; width: var(--right-w, 60px); }
 body.side-squeezed.no-left #leftSide { display: flex; width: var(--left-w, 60px); }
 
-/* 更轻的暖色工作台；PDF 纸张默认跟随 --paper-tint，设置里可切回纯白。 */
+/* 更轻的暖色工作台：**白底带一点很淡的暖黄**（2026-10 用户口径：
+   「还是带一点浅黄，就在这个白的上面稍微偏一点颜色」）。
+   PDF 纸张默认跟随 --paper-tint，设置里可切回纯白。
+   ⚠️ 浅色色板在**四块**里同步定义（文件顶部 :root / :root[data-theme="light"] /
+   这里 / 顶部系统深色的媒体查询），改一处不算改完 —— 本块位置最后，浅色实际生效的是它。
+   实测（对各自的底色）：--fg 9.6–10.4:1、--fg-dim 5.1–5.9:1、--fg-faint 3.8–4.4:1、
+   --accent 5.1–5.9:1；elev 与 bg 的亮度差 0.052、bg 与 sunken 差 0.066，卡片仍浮得起来。 */
 :root {
-  --bg: #F7F0DC;
-  --bg-elev: #FFFBF0;
-  --bg-sunken: #F0E8D0;
-  --paper-tint: #F8F1DF;
-  --paper: #F8F1DF;
+  --bg: #F8F5EB;
+  --bg-elev: #FDFBF5;
+  --bg-sunken: #F1EDE0;
+  --paper-tint: #FCFAF2;
+  --paper: #FCFAF2;
 }
 :root[data-theme="light"] {
-  --bg: #F7F0DC;
-  --bg-elev: #FFFBF0;
-  --bg-sunken: #F0E8D0;
-  --paper-tint: #F8F1DF;
+  --bg: #F8F5EB;
+  --bg-elev: #FDFBF5;
+  --bg-sunken: #F1EDE0;
+  --paper-tint: #FCFAF2;
 }
 :root[data-theme="dark"] {
   --paper-tint: #2A2721;
@@ -1916,3 +2208,140 @@ body.window-blurred .topbar > * { opacity: .6; }
 .win-resize[data-dir="se"] { bottom: 0; right: 0; width: 6px; height: 6px; cursor: nwse-resize; }
 body.no-window-chrome .win-resize,
 body.window-maximized .win-resize { display: none; }
+
+/* 输入区保持安静：只做颜色反馈，不做弹跳、缩放和强外发光。 */
+.composer-row {
+  transition: border-color .14s ease, background-color .14s ease;
+}
+.composer-row:focus-within {
+  border-color: var(--border-strong);
+  box-shadow: none;
+}
+.composer .send:hover,
+.composer .stop:hover {
+  filter: none;
+}
+.scope-panel {
+  animation: scopeFadeIn .1s ease-out;
+}
+@keyframes scopeFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-row,
+  .scope-panel { transition: none; animation: none; }
+}
+
+/* 输入框不显示任何焦点框：焦点仍保留给键盘，但视觉上不画绿色描边。 */
+#composer .composer-row:focus-within,
+#composer .composer-row:focus,
+#composer textarea:focus,
+#composer button:focus {
+  outline: none !important;
+  border-color: var(--border-strong) !important;
+  box-shadow: none !important;
+}
+
+/* 工作台层级：用留白和很轻的内阴影分区，避免整屏贯穿的硬直线。 */
+.side.left,
+.side.right {
+  border-left: 0;
+  border-right: 0;
+}
+.side.left {
+  box-shadow: inset -10px 0 18px -22px rgba(74, 64, 38, .42);
+}
+.side.right {
+  box-shadow: inset 10px 0 18px -22px rgba(74, 64, 38, .42);
+}
+.topbar,
+.statusbar,
+.composer {
+  border-color: color-mix(in srgb, var(--border) 58%, transparent);
+}
+.sec {
+  border-top-color: color-mix(in srgb, var(--border) 52%, transparent);
+  margin-top: 5px;
+  padding-top: 3px;
+}
+.ai-block + .ai-block,
+.ai-split + .ai-block {
+  border-top-color: color-mix(in srgb, var(--border) 48%, transparent);
+}
+.splitter,
+.ai-split {
+  background: transparent;
+}
+.splitter:hover,
+.splitter.dragging,
+.ai-split:hover,
+.ai-split.dragging {
+  background: color-mix(in srgb, var(--accent-soft) 58%, transparent);
+}
+
+/* 分割栏拖动：短促的追随缓动，避免文字和页面跟着指针一格一格跳。 */
+.side { transition: width .11s cubic-bezier(.22, .72, .28, 1); }
+body.dragging .side { transition: width .07s linear; }
+
+/* AI 结果的阅读节奏：段落之间收紧，避免回答像被空行切成很多块。 */
+.ai-body > .msg {
+  gap: 4px;
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+.ai-body .msg + .msg {
+  padding-top: 10px;
+}
+.ai-body .msg .text p {
+  margin: 0 !important;
+}
+.ai-body .msg .text p + p { margin-top: 4px !important; }
+.ai-body .msg .text ul,
+.ai-body .msg .text ol {
+  margin-top: 2px !important;
+  margin-bottom: 4px !important;
+  padding-left: 22px;
+}
+.ai-body .msg .text li,
+.ai-body .msg .text li p {
+  margin-top: 0 !important;
+  margin-bottom: 2px !important;
+}
+.ai-body .msg .text li {
+  margin: 0 0 5px !important;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.ai-body .msg .text p:empty,
+.ai-body .msg .text p:has(> br:only-child) {
+  min-height: 4px;
+  margin: 0 0 4px;
+}
+.ai-body .msg .text {
+  line-height: 1.58;
+}
+.ai-body .msg .text h3,
+.ai-body .msg .text h4,
+.ai-body .msg .text h5,
+.ai-body .msg .text h6 {
+  margin-top: 10px;
+  margin-bottom: 4px;
+}
+
+/* 三个工作区域各自成为整体面板，内容本身不再套卡片。 */
+#main > .main-row { padding: 6px; background: var(--bg-sunken); }
+.main-row .side.left,
+.main-row .side.right,
+.main-row .viewer-wrap {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: none;
+}
+.main-row .side.left { overflow-y: auto; }
+.main-row .rail { background: transparent; }
+.main-row #railLeft { margin-right: 5px; border: 0; }
+.main-row #railRight { margin-left: 5px; border: 0; }

@@ -215,9 +215,14 @@ await setScope(page, { full: false, web: true });
 async function ensureComposer() {
   const visible = await page.evaluate(() => (document.getElementById('chatInput')?.getBoundingClientRect().width || 0) > 0);
   if (visible) return;
-  // 2026-10：右侧那条小的活动栏（#railRightBtn）已按用户要求删除
-  //（「最右边那个小的侧边栏不要」）。右栏显隐现在只有顶栏的 #topbarRightToggle 一个入口。
-  await page.click('#topbarRightToggle');
+  // 2026-10：右侧那条小的活动栏（#railRightBtn）已按用户要求删除，
+  // 而顶栏的 #topbarRightToggle 只切「右栏这一整条的展开/收起」，
+  // 右栏展开后**仍然可能一块面板都没开**（问答块 visible=false）→ 输入框还是 0×0。
+  // 所以直接走面板 API 把「问答」显出来，语义与当年点活动栏一致（与 context.mjs 同法）。
+  await page.evaluate(() => {
+    window.__ctx.setPanelVisible('chat', true);
+    document.body.classList.remove('no-right');
+  });
   await sleep(500);
 }
 

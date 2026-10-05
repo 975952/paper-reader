@@ -128,11 +128,15 @@ check('PDF 打开成功', numPages > 0, `${numPages} 页`);
 
 /* 默认状态（全新 profile，localStorage 是空的） */
 const defaults = await page.evaluate(() => ({
-  // 2026-10 用户口径：「范围 / 选中文本 + 当前页 / 清空会话这些……第一个应该是默认全文加联网，
-  // 在设置里面调节」。输入框那一排的范围菜单整个撤掉了，开关搬到设置页（#cfgUseFullText / #cfgUseWeb）。
+  // 2026-10-05 第 2 步（用户拍板）：范围**回到发送框**，四选项上拉栏；
+  // 设置页那两个勾仍然是**默认值**（只决定初始值）。所以这里同时钉住：
+  //   · 偏好默认都开 → 范围初始值 = 「整篇论文 + 联网搜索」；
+  //   · 范围以「芯片 + 上拉栏」的形式出现在发送框，不再是右栏那行只读文字。
   f: !!window.__state.useFullText,
   w: !!window.__state.useWeb,
-  scope: document.getElementById('sendScope')?.textContent || '',
+  range: window.__ctx.scopeRange,
+  chipText: (document.getElementById('composerScope')?.textContent || '').trim(),
+  options: [...document.querySelectorAll('#sendScope .scope-opt')].map((b) => b.dataset.range),
   noMenu: !document.getElementById('scopeMenu') && !document.getElementById('optScope'),
   noClear: !document.getElementById('clearSession'),
   lsF: localStorage.getItem('reader.useFullText'),
@@ -141,8 +145,11 @@ const defaults = await page.evaluate(() => ({
 check('「整篇」默认开着（用户口径：默认全文）', defaults.f === true, JSON.stringify(defaults));
 check('「联网」默认开着（用户口径：默认联网）', defaults.w === true);
 check('输入框那一排不再有范围菜单和「清空会话」', defaults.noMenu && defaults.noClear, JSON.stringify(defaults));
-check('范围提示当场写明这次会发什么',
-  defaults.scope.includes('整篇论文') && defaults.scope.includes('联网搜索'), JSON.stringify(defaults.scope));
+check('默认范围 = 整篇论文 + 联网搜索（两个偏好都开）', defaults.range === 'paper-web', defaults.range);
+check('发送框上写着当前范围（一眼看得见，不用猜）',
+  defaults.chipText.includes('论文') && defaults.chipText.includes('联网'), defaults.chipText);
+check('上拉栏里是四个互斥选项（含「只联网」，没丢能力）',
+  defaults.options.join('|') === 'current|paper|web|paper-web', defaults.options.join(' | '));
 
 /**
  * 把「发送范围」开关拨到想要的状态 —— 走**设置页**（默认值会变，所以不能盲目 click）。
@@ -156,6 +163,9 @@ async function setScope(which, want) {
     document.getElementById('settingsBtn').click();
     const box = document.getElementById(id);
     if (box.checked !== on) box.checked = on;
+    // 第 2 步起这两个勾是即时生效控件（input 事件）——只改 checked 不派发，界面不会动
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 80));
     document.getElementById('saveSettings').click();
     await new Promise((r) => setTimeout(r, 260));
     document.getElementById('closeSettings').click();
@@ -216,28 +226,33 @@ check('同一份文档第二次调用用的是缓存',
 
 const chip = await page.evaluate(async () => {
   /**
-   * 2026-10：开关从「范围」菜单搬到了设置页（`#cfgUseFullText`）。
-   * 这一条同时钉住两件事：① 勾选框的状态就是 state.useFullText；② 改动会写进 reader.ui 存档
-   * （全局偏好，刷新后仍算数）。
+   * 2026-10-05 第 2 步（用户拍板）：`#cfgUseFullText` 现在是**默认发送范围**，
+   * 改它 = 改「初始值」。它同时是即时生效控件（input 事件），所以这里必须派发 input —— 
+   * 只改 checked 不派发，界面不会动（这正是之前 setScope() 靠「点保存」蒙对的地方）。
+   * 三条一起钉：① 勾选框反映状态；② 取消勾选立刻关掉整篇；③ 偏好仍然写进 reader.ui 存档。
    */
   document.getElementById('settingsBtn').click();
   const box = document.getElementById('cfgUseFullText');
   const ui = JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {};
   const checked = box.checked;
   box.checked = false;
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 80));
   const off = !!window.__state.useFullText;
+  const rangeOff = window.__ctx.scopeRange;
   box.checked = true;
-  document.getElementById('saveSettings').click();
-  await new Promise((r) => setTimeout(r, 260));
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 80));
   const on = !!window.__state.useFullText;
   const ls = JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {};
   document.getElementById('closeSettings').click();
-  return { on, off, checked, uiOn: ui.useFullText, savedOn: ls.useFullText };
+  return { on, off, checked, uiOn: ui.useFullText, savedOn: ls.useFullText, rangeOff };
 });
 check('设置里的勾选框反映当前状态（默认已勾上）', chip.checked === true, JSON.stringify(chip));
 check('取消勾选立刻关掉整篇范围', chip.off === false, JSON.stringify(chip));
+check('取消勾选后发送框的范围也跟着退到「只联网」', chip.rangeOff === 'web', chip.rangeOff);
 check('重新勾选后 state.useFullText 打开', chip.on === true, JSON.stringify(chip));
-check('发送范围是全局偏好：写进了 reader.ui 存档', chip.savedOn === true, JSON.stringify(chip));
+check('默认发送范围是全局偏好：写进了 reader.ui 存档', chip.savedOn === true, JSON.stringify(chip));
 check('关一次再开一次只改偏好，不影响当前这次提问的内容', await (async () => {
   await setScope('full', false);
   const off = await page.evaluate(() => (JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {}).useFullText);
@@ -304,7 +319,7 @@ await setScope('web', true);
 check('设置里勾上「联网」后立刻是开启态',
   await page.evaluate(() => window.__state.useWeb === true
     && (JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {}).useWeb === true
-    && (document.getElementById('sendScope')?.textContent || '').includes('联网搜索')));
+    && (document.getElementById('composerScope')?.textContent || '').includes('联网')));
 
 /* ═══════════ 五、发一条真实的问题，检查真正送出去的 prompt ═══════════ */
 console.log('\n-- 送出去的 prompt');
@@ -320,12 +335,19 @@ const histBefore = await page.evaluate(() => window.__state.history.length);
 /**
  * 2026-10：右栏在「译文 / 问答一块都没开」时会收成右侧活动栏（`body.right-empty`），
  * 输入框 `#chatInput` 跟着变成 0×0 —— 直接 `page.click('#chatInput')` 会抛
- * 「Node is either not clickable or not an Element」。想打字必须先点活动栏把右栏拉回来。
+ * 「Node is either not clickable or not an Element」。想打字必须先把右栏拉回来。
+ *
+ * ⚠️ 这里**不再点 `#railRightBtn`**：那个按钮已随「右侧活动栏」一起删除
+ * （见 app.js 里 `#railRightBtn` 的说明，2026-10 口径），点了必然 selectors 失败。
+ * 改用面板 API 把「问答」块显出来 —— 与当年点活动栏的语义完全一样，只是走现在的入口。
  */
 async function ensureComposer() {
   const visible = await page.evaluate(() => (document.getElementById('chatInput')?.getBoundingClientRect().width || 0) > 0);
   if (visible) return;
-  await page.click('#railRightBtn');
+  await page.evaluate(() => {
+    window.__ctx.setPanelVisible('chat', true);
+    document.body.classList.remove('no-right');
+  });
   await sleep(500);
 }
 
