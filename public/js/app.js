@@ -9,25 +9,13 @@
  */
 import { $, $$, el, appendAll, toast, toastAction, cleanText, renderMarkdown, escapeHtml, debounce, throttle, clamp, fmtSize } from './util.js';
 import { iconEl, iconHTML, hasIcon } from './icons.js';
-import { PdfViewer, extractPdfText } from './pdfview.js';
-import { OPS, COACH, opById, opGroups } from './ops.js';
+import { PdfViewer } from './pdfview.js';
+import { OPS, opById } from './ops.js';
 import {
   Settings, streamChat, testConnection, targetLangFor,
   translateMessages, askMessages, explainMessages, regionMessages,
   digestMessages, webQueryFor, opMessages,
 } from './ai.js';
-
-/**
- * 旧版的 `?window=panel&panel=...` 只为系统级子窗口服务，现已彻底停用。
- * 即使用户从旧书签 / 旧子窗口刷新，也必须回到普通阅读器布局，不能再把某一块面板
- * 撑成覆盖整个窗口的“遮挡块”。当前的浮窗唯一入口是主页面内的 #floatLayer 卡片。
- */
-const panelWindow = Object.freeze({ enabled: false, id: '' });
-let panelBus = null;
-
-function publishPanelMessage(message) {
-  try { panelBus?.postMessage(message); } catch { /* 窗口关闭时忽略 */ }
-}
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
 function readFlag(key, dflt = false) {
@@ -46,31 +34,31 @@ const AI_BLOCKS = [
   { id: 'chat', title: '问答', hint: '点「释」在这里解释这段；「＋对话」加入选中的文字或截图，然后你自己提问' },
 ];
 
-/* ══════════════════════════════ 右栏列（译文 / 问答的归属） ══════════════════════════════
-   用户口径（2026-10-04）：
-     「翻译和问答部分应该只放在右边部分，而且应该是独占右侧一整个栏，就是一栏只能开一个，
-       或者可以右键图标选择再开一栏，或者按住图标拖动出一个新窗口。」
+/* ══════════════════════════════ 右栏（译文 / 问答的单栏标签切换） ══════════════════════════════
+   用户口径（删减后）：右栏**永远只有一栏**。
 
-   所以右栏是一组**列**，不是「一堆块叠在一起」：
-       · 译文 / 问答**只**能在右栏（dock 恒为 'right'）—— 不能被停靠到左栏 / 底部。
-         需要暂时展开时，使用阅读器内部卡片，不创建系统级窗口。
-     · 一列同时最多渲染**一个**面板（默认第 1 列）。
-     · 右键图标「在右侧再开一栏」→ 现建第 2 列，两块可以各占一列并排看。
-     · 面板的列归属存在 p.col（1|2）；它声明的列没开或已被占，这个面板就自动收起，
-       **不**改归属、也不挤掉别人 —— 这样「右键→放到第 2 栏」的结果永远可预测。
-   DOM：#rightCols > #splitRight + #rightSide(.col-1) + [#rightColSplit + #rightCol2(.col-2)]。
-   第 2 列只在「列数 = 2」时存在；body.right-col2-off 是窗口放不下时的临时隐藏（不动模型）。 */
+     · 译文 / 问答**只**能在右栏（dock 恒为 'right'）—— 不能被停靠到左栏 / 底部。
+     · 一栏同时最多渲染**一个**面板；右栏顶部只显示当前面板标题，
+       底部只留一组「译文 / 问答」标签切换（#aiBar）。
+     · 不再有第 2 栏、不再有列归属、不再有应用内浮窗 ——
+       「一栏只能开一个 + 标签切换」已经覆盖了原来的并排需求。
+   DOM：#rightCols > #splitRight + #rightSide（内含 #aiArea + #composer + #aiBar）。 */
 
 /** 只许待在右栏的面板（= PANEL_DEFS 里 dock:'right' 的那两个） */
 const isRightPanel = (id) => PANEL_IDS_RIGHT.includes(id);
-/** 右栏第 n 列的结果区（第 1 列永远是文档里的 #aiArea；第 2 列现建于 openRightColumn） */
-const rightAreaEl = (n) => (n === 2 ? document.getElementById('aiArea2') : document.getElementById('aiArea'));
-/** 右栏第 n 列的 <aside>（模型里的列数，不看临时隐藏） */
-const rightColEl = (n) => (n === 2 ? document.getElementById('rightCol2') : document.getElementById('rightSide'));
-/** 右栏当前请求的列数（1 或 2）—— 用户意图，窗口宽度导致的临时隐藏不算 */
-const rightColsWanted = () => (Number(state.panels?.rightCols?.count) === 2 ? 2 : 1);
-/** 右栏面板的列归属：非法值一律算第 1 列 */
-const colOf = (id) => (Number(state.panels?.[id]?.col) === 2 ? 2 : 1);
+/** 右栏的结果区。参数 n 是历史遗留（曾经有第 2 栏），现恒为 1，保留签名以免改动 30+ 处调用点 */
+const rightAreaEl = (_n) => document.getElementById('aiArea');
+/** 右栏的 <aside>。参数 n 同上，恒为 1 */
+const rightColEl = (_n) => document.getElementById('rightSide');
+/** 右栏恒为一栏：第 2 栏（列数 / 宽度 / 栏位归属）整套已在批次一删除。
+ *
+ *  这里**故意保留** `rightColsWanted()` 与 `colOf()` 两个恒为 1 的函数：
+ *  「这一栏在不在」「这块面板属于哪一栏」的判断散落在 10 多处调用点，
+ *  留一对常量函数比改 30 行调用点更不容易出错，语义也仍然正确。
+ *  老存档里的 `reader.panels.rightCols` 不再读写 —— 它只是一个没人看的字段。 */
+const rightColsWanted = () => 1;
+/** 右栏面板的列归属：恒为第 1 栏（见上） */
+const colOf = (_id) => 1;
 /**
  * 隐藏面板的停放区。
  * **故意是脱离文档的**（不 append 到 body）：译文 / 问答的节点永不重建（消息与滚动位置都挂在
@@ -83,24 +71,21 @@ function panelPark() {
   if (!panelParkEl) panelParkEl = el('div', { id: 'panelPark', 'aria-hidden': 'true' });
   return panelParkEl;
 }
-/** 面板节点此刻应该在哪个容器里：visible 且列可用 → 结果区；否则 → 停放区 */
+/**
+ * 面板节点此刻应该在哪个容器里：可见且右栏没被收起 → 结果区；否则 → 停放区。
+ * 只有**这一份**可见的那个面板进结果区（一栏只开一个），其余一律停放。
+ */
 function dockedAreaFor(id) {
   const p = state.panels?.[id];
   if (!p || !isRightPanel(id)) return null;
-  // 应用内卡片已经在 #floatLayer 中，不能再被右栏重排搬进隐藏停放区。
-  if (p.dock === 'float') return null;
   if (!p.visible) return panelPark();
   if (p.dock !== 'right') return panelPark();          // 模型被外部改坏时的兜底
-  if (!document.body.classList.contains('no-right')) {
-    const n = colOf(id);
-    if (n === 1) return rightAreaEl(1);
-    if (rightColsWanted() === 2 && rightAreaEl(2)) return rightAreaEl(2);
-  }
-  return panelPark();
+  if (document.body.classList.contains('no-right')) return panelPark();
+  return rightPanelInCol(1) === id ? rightAreaEl(1) : panelPark();
 }
 /**
  * 右栏面板的滚动位置：**脱离文档时浏览器会把 scrollTop 归零**，所以任何一次「搬走节点」
- * （隐藏 → 停放区、换栏 → 另一列）之前都要先把位置记在节点自己身上，重新挂回文档后再放回去。
+ * （隐藏 → 停放区）之前都要先把位置记在节点自己身上，重新挂回文档后再放回去。
  * 挂在节点上而不是共享表里：位置跟着这一块走，先记的不会被后记的覆盖。
  */
 function rememberBodyScroll(id) {
@@ -131,182 +116,12 @@ function parkRightPanel(id, target) {
   if (!parked) applyBodyScroll(id);
 }
 
-/** 读 reader.panels.rightCols（列数 + 第 2 列宽度）；老存档没有这一项时回落 1 列 / 360px */
-function loadRightCols() {
-  let raw = null;
-  try { raw = JSON.parse(localStorage.getItem('reader.panels') || 'null'); } catch { raw = null; }
-  const src = raw && typeof raw === 'object' ? raw.rightCols : null;
-  const out = {
-    count: Number(src?.count) === 2 ? 2 : 1,
-    w2: Number.isFinite(Number(src?.w2)) && Number(src.w2) > 0 ? Math.round(Number(src.w2)) : 360,
-  };
-  state.panels = state.panels || {};
-  state.panels.rightCols = out;
-  return out;
-}
-/** 列状态变化后写盘：列数 / 第 2 栏宽度都在 state.panels.rightCols 里，savePanels 一次写完 */
-
-/** 把列数落到 DOM：够 = 现建第 2 列（含把手）；不够 = 现收（节点搬回停放区，模型不动） */
-function applyRightColsDom() {
-  const wrap = document.getElementById('rightCols');
-  if (!wrap) return;
-  const want2 = rightColsWanted() === 2;
-  let split = document.getElementById('rightColSplit');
-  let col2 = document.getElementById('rightCol2');
-  if (want2 && (!split || !col2)) {
-    if (!split) {
-      split = el('div', { class: 'splitter', id: 'rightColSplit', title: '拖动调整第 2 栏宽度' });
-      wrap.append(split);
-      bindSplitter(split, '--right-w2', 240, 720, 200);
-    }
-    if (!col2) {
-      col2 = el('aside', { class: 'side right col-2', id: 'rightCol2', dataset: { col: '2' } },
-        el('div', { class: 'ai', id: 'aiArea2' }),
-        // 第 2 栏底部的切换器：与第 1 栏同构、但只反映**第 2 栏**的状态
-        el('div', { class: 'aibar', id: 'aiBar2', role: 'tablist', 'aria-label': '第 2 栏面板切换' }),
-      );
-      wrap.append(col2);
-      renderAiBar();
-    }
-  }
-  // 显示 / 隐藏**无条件**同步一次：`col2.hidden` 是「用户要不要第 2 栏」的唯一 DOM 开关，
-  // 只在建/删分支里写它是不够的 —— 「先收起（hidden=true，DOM 留着）→ 再点放到第 2 栏」
-  // 这条路上根本没有建/删分支可走，栏就会一直藏着（R12 实测复现：点了「放到第 2 栏」没反应）。
-  if (col2) col2.hidden = !want2;
-  if (split) split.hidden = !want2;
-  if (!want2 && col2) {
-    // 收栏：第 2 栏里的节点搬回停放区（模型里的 col 归属保留，下次开栏还在那一栏）
-    for (const id of PANEL_IDS_RIGHT) if (colOf(id) === 2 && state.blockEls[id]?.parentElement === rightAreaEl(2)) parkRightPanel(id, panelPark());
-  }
-  // 第 2 栏宽度的来源：模型（拖动松手写入）
-  document.documentElement.style.setProperty('--right-w2', `${state.panels.rightCols?.w2 || 360}px`);
-  syncPanelDock();
-}
-
-/** 用户明确要「再开一栏」：列数置 2（面板 null 时只开一栏空列，用户随后右键选面板） */
-function openRightColumn() {
-  if (rightColsWanted() === 2) return false;
-  state.panels.rightCols = { ...(state.panels.rightCols || {}), count: 2 };
-  // 第 2 栏是用户明确打开的布局意图；窄窗下它会暂时不可见，但仍必须立刻写盘，
-  // 否则 applyResponsiveLayout() 结束后只剩内存里的 count=2，刷新就会退回一栏。
-  savePanels();
-  applyRightColsDom();
-  // 开了空列立刻重排：让用户看到「第 2 栏在这儿，往里放个面板」
-  renderCols();
-  applyResponsiveLayout();
-  refitViewer(REFIT_AFTER_MS);
-  toast('已再开一栏：右键右栏图标选「放到第 2 栏」，或把图标拖成应用内卡片', 'ok', 4200);
-  return true;
-}
-/** 收起第 2 栏：里面的面板回到「收起」状态（列归属保留，下次开栏还在那一栏） */
-function closeRightColumn() {
-  if (rightColsWanted() !== 2) return false;
-  for (const id of PANEL_IDS_RIGHT) {
-    if (colOf(id) === 2 && state.panels[id].visible) setPanelVisible(id, false);
-  }
-  state.panels.rightCols = { ...(state.panels.rightCols || {}), count: 1 };
-  // 只收 DOM，不动模型：栏位归属（p.col）留着，下次「放到第 2 栏」直接回到那一栏
-  const col2 = document.getElementById('rightCol2');
-  if (col2) {
-    for (const id of PANEL_IDS_RIGHT) if (state.blockEls[id]?.parentElement === rightAreaEl(2)) parkRightPanel(id, panelPark());
-    col2.hidden = true;
-    const split = document.getElementById('rightColSplit');
-    if (split) split.hidden = true;
-  }
-  document.documentElement.style.setProperty('--right-w2', `${state.panels.rightCols?.w2 || 360}px`);
-  savePanels();
-  syncPanelDock();
-  renderCols();
-  applyResponsiveLayout();
-  refitViewer(REFIT_AFTER_MS);
-  return true;
-}
-
-/**
- * 把面板放到右栏第 n 栏：n=2 时按需要先把第 2 栏开出来。
- * 同一栏里原来显示着的另一个面板会收起（**一栏只开一个**），这是用户点图标时的既有口径。
- * 返回是否真的改了归属。
- */
-function setPanelColumn(id, n) {
-  const p = state.panels?.[id];
-  const col = Number(n) === 2 ? 2 : 1;
-  if (!p || !isRightPanel(id)) return false;
-  // 「放到第 2 栏」隐含「第 2 栏要有」：列数还是 1 就先把栏开出来。
-  // **这一步必须在下面的早退之前** —— 否则「面板已经归在第 2 栏、但第 2 栏被收起了」这一态
-  //（closeRightColumn 之后 panel.col 是保留的）会被早退吃掉，点了没反应（R12 实测复现）。
-  if (col === 2 && rightColsWanted() === 1) {
-    state.panels.rightCols = { ...(state.panels.rightCols || {}), count: 2 };
-    applyRightColsDom();
-  }
-  if (colOf(id) === col && p.visible) {
-    // 归属已经对了：只补一次「栏要开着 + 节点挂到位」，不再动同栏别的面板
-    renderCols();
-    applyResponsiveLayout();
-    fitBlockSizes();
-    return true;
-  }
-  p.col = col;
-  p.dock = 'right';
-  p.home = 'right';
-  p.rect = null;
-  p.visible = true;
-  // 一栏只开一个：同栏里在显示的那一个收起来
-  for (const other of PANEL_IDS_RIGHT) {
-    if (other !== id && colOf(other) === col && state.panels[other].visible) setPanelVisible(other, false);
-  }
-  // 换栏会把节点从一列搬到另一列（脱离文档 → scrollTop 归零），搬之前先记下这一块停在哪
-  rememberBodyScroll(id);
-  savePanels();
-  applyPanels();
-  applyResponsiveLayout();
-  fitBlockSizes();
-  return true;
-}
-
-/**
- * 老存档 / 老版本的归位（boot 里跑一次，loadPanels 之后）：
- *   1. 右栏两块曾经能「浮出到应用内浮窗」或「并排再开一栏」（那一版是浮窗）——
- *      现在右栏只有列，历史浮窗一律归位到右栏第 1 栏（可见性保留）。
- *   2. rightCols.count=2 但两个面板都在第 1 栏 → 把后一个挪到第 2 栏，
- *      否则第 2 栏会空着，用户看到的是「开了一栏什么都没有」。
- *   3. 同栏两块都 visible（老存档可能同时开着）→ 保留 order/col 更靠后的那个。
- */
-function normalizeRightPanelModel() {
-  let changed = false;
-  for (const id of PANEL_IDS_RIGHT) {
-    const p = state.panels[id];
-    if (p.dock === 'float' || p.dock !== 'right') { p.dock = 'right'; changed = p.rect !== null || changed; p.rect = null; }
-    if (p.home !== 'right') { p.home = 'right'; changed = true; }
-    if (![1, 2].includes(Number(p.col))) { p.col = 1; changed = true; }
-  }
-  if (rightColsWanted() === 2) {
-    const c1 = PANEL_IDS_RIGHT.filter((id) => state.panels[id].visible && colOf(id) === 1);
-    if (!PANEL_IDS_RIGHT.some((id) => state.panels[id].visible && colOf(id) === 2) && c1.length > 1) {
-      const move = c1.sort((a, b) => state.panels[b].order - state.panels[a].order)[0];
-      state.panels[move].col = 2;
-      changed = true;
-    }
-  }
-  return changed;
-}
-
-/**
- * 老存档里「译文 + 问答同时开着」（2.2b 允许，之后被互斥规则收敛成只留一块）：
- * 新模型下这一态只能靠**两栏**表达，所以开第 2 栏把它们各放一栏。
- * 不这样做的话，进 boot 的归一化时总得把其中一块悄悄隐藏 —— 那是**用户设置被吃掉**。
- * 窗口放不下时由 applyResponsiveLayout 临时收起（模型不动），窗口一变宽两块就都回来。
- */
-function adoptLegacyBothBlocks() {
-  // 按 order 排（与屏幕上「谁在上面」一致），不是按注册表顺序 ——
-  // 否则老存档里 order 更靠前的那块会被塞到第 2 栏，用户看到两块左右调了个个儿。
-  const both = PANEL_IDS_RIGHT
-    .filter((id) => state.panels[id].visible && state.panels[id].dock === 'right')
-    .sort((a, b) => (state.panels[a].order - state.panels[b].order) || (PANEL_IDS.indexOf(a) - PANEL_IDS.indexOf(b)));
-  if (both.length < 2 || rightColsWanted() === 2) return false;
-  state.panels.rightCols = { ...(state.panels.rightCols || {}), count: 2 };
-  for (const [i, id] of both.entries()) state.panels[id].col = i === 0 ? 1 : 2;
-  return true;
-}
+/* 删减（2026-10 批次一 / 批次三）：「再开一栏 / 收起第 2 栏 / 放到第 N 栏」整套已删除，
+   连同它的存档读写一起 —— `openRightColumn / closeRightColumn / setPanelColumn /
+   normalizeRightPanelModel / adoptLegacyBothBlocks / loadRightCols / applyRightColsDom`
+   七个函数全部不存在。右栏恒为一栏，「一栏只开一个 + 底部标签切换」已经覆盖了原来的
+   并排需求；老存档里 `reader.panels.rightCols` 那种字段没人再读，也不会有人去清它。
+   老存档里「译文 + 问答同时可见」的状态由 setPanelVisible 的互斥规则收敛成只留一块。 */
 
 /* ══════════════════════════════ 面板注册表（阶段 2.2a / 2.2b） ══════════════════════════════
    左栏四块（section.sec）与右栏两块（section.ai-block）统一成**一个** state.panels 注册表：
@@ -326,14 +141,20 @@ function adoptLegacyBothBlocks() {
    section.ai-block[data-block] + .ai-head / .ai-body / .ai-split，只是两边都补了 data-panel。
    切换永远不重建节点（只改 hidden 类 / DOM 顺序 / 换容器），否则消息与滚动位置会丢。 */
 
-/** 六个面板的固定 id 与默认值：左栏文件/目录/笔记/文献关系，右栏译文/问答 */
+/** 六个面板的固定 id 与默认值：左栏文件/目录/笔记/参考文献，右栏译文/问答 */
 const PANEL_DEFS = [
+  // 2026-10 用户口径：「左侧边栏一次开一个，现在一打开有四个」。
+  // 所以左栏四块里**只有「文件」默认可见**，其余三块默认收起 ——
+  // 它们仍留在左栏底部那排图标里，点一下才显示（点开的那个会自动顶掉前一个，
+  // 见 setPanelVisible 的互斥规则）。这样打开论文时左栏只占一块的位置。
   { id: 'files', title: '文件', dock: 'left' },
-  { id: 'outline', title: '目录', dock: 'left' },
-  { id: 'notes', title: '笔记', dock: 'left' },
-  // 关系整理会在后台准备，但默认只留入口，避免打开论文时把阅读空间铺满。
-  // 老用户保存过 reader.panels 的展开状态仍按存档恢复（见 readPanelDescriptor）。
-  { id: 'relations', title: '文献关系', dock: 'left', collapsed: true },
+  { id: 'outline', title: '目录', dock: 'left', visible: false },
+  { id: 'notes', title: '笔记', dock: 'left', visible: false },
+  // 参考文献同理：默认只留图标入口；列表**按需**解析
+  //（见 ensureRelationsBuilt），打开论文时不再后台跑全文引用抽取。
+  // 老用户保存过 reader.panels 的展开状态仍按存档恢复（见 readPanelDescriptor），
+  // 但会被 normalizeLeftPanels() 收敛成「只有一块可见」。
+  { id: 'relations', title: '参考文献', dock: 'left', visible: false, collapsed: true },
   // 右栏两块默认**不显示**：结果区是可选输出，用到哪块自动出现
   //（addEntry / showAiBlock），也能用输入框下面的开关栏或面板管理器打开。
   // 这与 2.2a 之前的状态完全一致（老 state.ai.visible 默认也是 false），
@@ -352,10 +173,7 @@ const PANEL_IDS_RIGHT = PANEL_DEFS.filter((d) => d.dock === 'right').map((d) => 
 function defaultPanels() {
   return Object.fromEntries(PANEL_DEFS.map((d, i) => [d.id, {
     id: d.id, dock: d.dock, home: d.dock, order: i, visible: d.visible !== false,
-    collapsed: d.collapsed === true, pinned: false, size: null,
-    rect: null, z: 0, w: null, docId: '',
-    // 右栏面板在第几栏（1|2）；左栏 / 底部面板不用这一项
-    col: d.dock === 'right' ? 1 : 0,
+    collapsed: d.collapsed === true, size: null,
   }]));
 }
 
@@ -388,29 +206,18 @@ const panelHeadEl = (id) => {
     : root.querySelector('.side-head, .sec-head, .ai-head');
 };
 
-/** 合法 dock 取值（'tab' / 中央标签页本阶段不做） */
-const PANEL_DOCKS = ['left', 'right', 'bottom', 'float', 'hidden'];
-/** 能真正装下面板的停靠区（浮窗回停靠 / 管理器「停靠到…」只认这三个） */
-const PANEL_DOCKS_REAL = ['left', 'right', 'bottom'];
-const DOCK_LABEL = { left: '左栏', right: '右栏', bottom: '底部', float: '浮动', hidden: '隐藏' };
-
-/** 读一个合法矩形：四个数都有限、宽高为正才算数，否则返回 null（调用方回落到默认浮窗位置） */
-function readPanelRect(raw) {
-  const left = Number(raw?.left);
-  const top = Number(raw?.top);
-  const w = Number(raw?.w);
-  const h = Number(raw?.h);
-  if (![left, top, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return null;
-  return { left, top, w, h };
-}
+/**
+ * 合法 dock 取值。删减后只剩三种：左栏 / 右栏 / 隐藏。
+ * **老存档里的 'bottom' / 'float' 不再合法** —— readPanelDescriptor 会把它们落回面板自己的
+ * 注册位置（左栏四块回左栏、右栏两块回右栏），这正是我们要的：历史浮窗与底部停靠自动归位。
+ */
+const PANEL_DOCKS = ['left', 'right', 'hidden'];
 
 /** 读一份合法描述符：非法值全部回落到默认值，宁可用默认值也不能出 NaN / undefined */
 function readPanelDescriptor(id, raw, fallback) {
   const dock = PANEL_DOCKS.includes(raw?.dock) ? raw.dock : fallback.dock;
   const size = Number(raw?.size);
-  const w = Number(raw?.w);
-  const z = Number(raw?.z);
-  const home = PANEL_DOCKS_REAL.includes(raw?.home) ? raw.home : (PANEL_DOCKS_REAL.includes(fallback.home) ? fallback.home : 'left');
+  const home = PANEL_DOCKS.includes(raw?.home) ? raw.home : fallback.home;
   return {
     id,
     dock,
@@ -418,14 +225,7 @@ function readPanelDescriptor(id, raw, fallback) {
     order: Number.isFinite(raw?.order) ? raw.order : fallback.order,
     visible: typeof raw?.visible === 'boolean' ? raw.visible : fallback.visible,
     collapsed: typeof raw?.collapsed === 'boolean' ? raw.collapsed : fallback.collapsed,
-    pinned: typeof raw?.pinned === 'boolean' ? raw.pinned : fallback.pinned,
     size: Number.isFinite(size) && size > 0 ? size : null,
-    rect: readPanelRect(raw?.rect) || (dock === 'float' ? defaultFloatRect(id) : null),
-    z: Number.isFinite(z) && z >= 0 ? z : 0,
-    w: Number.isFinite(w) && w > 0 ? w : null,
-    docId: typeof raw?.docId === 'string' ? raw.docId : '',
-    // 右栏面板的列归属（1|2）。旧存档没有这个字段 → 第 1 栏。
-    col: PANEL_IDS_RIGHT.includes(id) ? (Number(raw?.col) === 2 ? 2 : 1) : 0,
   };
 }
 
@@ -536,17 +336,11 @@ function resolvePanelDocId(byDoc) {
   return '';
 }
 
-/** 写回 reader.panels（整份快照，不再按论文分叉） */
+/** 写回 reader.panels（整份快照，不再按论文分叉）。
+ *  别的窗口改了同一份存档时由 initPanelSync() 的 storage 监听收回来。 */
 function savePanels(panels = state.panels) {
-  // 独立窗口只改自己的面板描述；把变更发回主窗口，不能把「只显示一个面板」的临时快照写回全局。
-  if (panelWindow.enabled) {
-    const own = panels?.[panelWindow.id];
-    if (own) publishPanelMessage({ type: 'panel-patch', id: panelWindow.id, panel: { ...own } });
-    return;
-  }
   try {
     localStorage.setItem('reader.panels', JSON.stringify(panels));
-    publishPanelMessage({ type: 'panels', panels });
   } catch { /* 忽略 */ }
 }
 
@@ -557,287 +351,22 @@ function applyPanelPatch(id, raw) {
   if (id === 'translate' || id === 'chat') fitBlockSizes();
 }
 
-/* ══════════════════ 面板「暂离」= 正在独立窗口里：唯一状态模型 ══════════════════
-   用户口径（2026-10-03，原话）：
-     「你现在看到『窗口已经关了，主界面仍然显示在独立窗口状态』……关闭时必须统一执行：
-      删除 detached 标记 / 恢复 panel.visible / 恢复原来的 dock、col / 刷新右栏 DOM /
-      刷新图标按钮 / 刷新面板管理器。不能只依赖 beforeunload。」
-
-   **状态只有五种，且只有一个真相源**：
-     ① 停靠在第 1 栏   ② 停靠在第 2 栏   ③ 隐藏   ④ 独立窗口中
-     （① ② ③ 由 state.panels[id].visible + .dock + .col 表达；④ 由 reader.detachedWindows 表达）
-   「独立窗口中」与前三者是**互斥**的：只要 detachedWindows 里还有这个 id，面板在主窗口一律不显示。
-
-   关闭路径不允许各改各的 —— ⑤detached → ①/②/③ 的**每一条**路径都必须调用
-   releaseDetachedWindow()，由它串起 clearDetachedState → restoreDockState →
-   refreshPanelButtons → refreshPanelManager。少调一个就会出现「看起来回来了，
-   但按钮仍然显示独立窗口」的半恢复态（这正是用户报的那个 bug）。
-
-   关闭信号的可靠性分层（设计要求，不能只靠一个事件）：
-     · 一层：子窗口 pagehide / beforeunload / unload —— 正常关窗、正常刷新
-     · 二层：子窗口 BroadcastChannel「我走了」 —— 上面那条没触发时的兜底
-     · 三层：子窗口定时心跳 + 主窗口看门狗 —— **窗口被强杀 / 宿主直接销毁 WebView** 时
-              pagehide 与 close 消息都不会来，只有心跳会停（Chromium 对隐藏页的定时器
-              会限流到约 1/min，所以阈值取 75s，宁可慢一点也不能误判） */
-const DETACH_KEY = 'reader.detachedWindows';
-function readDetachedWindows() {
-  try { return JSON.parse(localStorage.getItem(DETACH_KEY) || '{}') || {}; } catch { return {}; }
-}
-function writeDetachedWindows(map) {
-  try { localStorage.setItem(DETACH_KEY, JSON.stringify(map)); } catch { /* 忽略 */ }
-}
-function markPanelDetached(id) {
-  const m = readDetachedWindows();
-  m[id] = Date.now();
-  writeDetachedWindows(m);
-}
-/** 主窗口侧的独立窗口运行时台账（不落盘）：window 引用、心跳时刻、看门狗定时器 */
-const detachedRuntime = new Map();
-const detachedRt = (id) => {
-  let rt = detachedRuntime.get(id);
-  if (!rt) { rt = { win: null, lastSeen: 0, timer: 0 }; detachedRuntime.set(id, rt); }
-  return rt;
-};
-/** 子窗口心跳超时阈值。隐藏页的 setInterval 被 Chromium 限流到约 1 次/分钟，留足余量。 */
-const DETACH_ALIVE_MS = 75000;
-
-/** 这个面板此刻是不是「暂离」在系统级独立窗口里（= 状态模型里的第 ④ 种）。
- *  **所有** UI 判断（图标坞、底部切换器、面板管理器）都必须问这一个函数，
- *  不许各自去读 localStorage —— 那样就会重现「一处恢复了、另一处还写着独立窗口」。 */
-const panelDetached = (id) => !!readDetachedWindows()[id];
-
-/** ④ → ①/②/③ 的唯一出口：把「暂离」标记清干净。
- *  **只清标记与定时器，不动 rt.restore 快照** —— 快照由随后的 restoreDockState() 消费，
- *  顺序反了就会「清完再恢复」，面板回不到原来的栏位。幂等，重复调用无副作用。 */
-function clearDetachedState(id) {
-  const m = readDetachedWindows();
-  const wasDetached = id in m;
-  if (wasDetached) { delete m[id]; writeDetachedWindows(m); }
-  const rt = detachedRuntime.get(id);
-  if (rt?.timer) { clearInterval(rt.timer); rt.timer = 0; }
-  return wasDetached;
-}
-
-/** 恢复这个面板停靠时的状态。**只在确实处于「暂离」时才动状态**：
-    否则用户在独立窗口里把面板设成隐藏、关窗后又被这里强行打开，等于替他做决定。
-    返回「有没有真的改过模型」，调用方据此决定要不要落盘。 */
-function restoreDockState(id) {
-  const rt = detachedRuntime.get(id);
-  const snap = rt?.restore;
-  if (rt) rt.restore = null;
-  const p = state.panels?.[id];
-  if (!p) return false;
-  let changed = false;
-  if (snap) {
-    if (snap.visible !== p.visible) { p.visible = snap.visible; changed = true; }
-    if (snap.dock && snap.dock !== p.dock) { p.dock = snap.dock; changed = true; }
-    if (Number.isFinite(snap.col) && snap.col >= 1 && snap.col <= 2 && Number(snap.col) !== Number(p.col)) { p.col = Number(snap.col); changed = true; }
-    if (snap.floatRect && p.dock === 'float') { p.rect = { ...snap.floatRect }; changed = true; }
-  }
-  // 独立窗口里一定是「不显示」的：如果快照丢了（换过页面 / 存档被外部改过），
-  // 这里至少要让它回到看得见的地方，绝不能留下「没有独立窗口但面板还是不可见」的孤儿态。
-  if (!p.visible) { p.visible = true; changed = true; }
-  if (p.dock === 'hidden') { p.dock = isRightPanel(id) ? 'right' : 'left'; changed = true; }
-  return changed;
-}
-
-/** 刷「同一类操作的唯一入口」的按钮状态：左栏图标坞 / 右栏每一栏底部的译文·问答切换器 */
-function refreshPanelButtons() {
-  try { renderAiBar(); } catch { /* 右栏还没装好（boot 早期）时忽略 */ }
-  syncPanelDock();
-}
-
-/** 管理器是不是「开着」（.closed 是关闭动画的那一帧，也算关着） */
-const panelMenuOpen = () => !!panelMenuEl
-  && !panelMenuEl.classList.contains('hidden')
-  && !panelMenuEl.classList.contains('closed');
-
 /**
- * 面板管理器开着的话重画它，让「显示中 / 独立窗口」立刻跟上（关着就什么都不做）。
- * ⚠️ 必须走 panelMenuOpen()，不能只判 .hidden —— 关闭序列里菜单先是 `.closed`（这一帧隐藏、
- * 下一帧才补 `.hidden`），此时重画会把刚聚焦的元素从 DOM 里换掉、焦点又丢回 <body>。
+ * 多窗口 / 跨标签页的布局同步：另一个窗口（或另一个标签页）改了 reader.panels，
+ * 这边把六个面板的描述重新套一遍。
+ *
+ * 原来这里还挂着一整套「系统级独立窗口」的收发：BroadcastChannel 总线、心跳、看门狗、
+ * 关闭信号三层兜底 —— 那一套（panelWindow / panelBus / detachedRuntime / releaseDetachedWindow…）
+ * 已随「独立窗口」功能整体删除，只留下这条真正有用的 storage 监听。
  */
-function refreshPanelManager() {
-  if (panelMenuOpen()) renderPanelMenu();
-}
-
-/**
- * 「独立窗口没了」的**唯一收敛点** —— 无论消息来自哪一层、无论调几次，
- * 结果都必须是同一个完整状态。返回是否真的恢复了一个「暂离」面板。
- */
-function releaseDetachedWindow(id, { via = 'message', silent = false } = {}) {
-  const p = state.panels?.[id];
-  const wasDetached = clearDetachedState(id);
-  // 这条路径必须无条件走完：以前「visible 已经是 true 就整个跳过」正是半恢复态的根因
-  const restored = restoreDockState(id);
-  const changed = !!(wasDetached || restored);
-  if (changed) {
-    try { savePanels(); } catch { /* 忽略 */ }
-    applyPanels();
-  }
-  refreshPanelButtons();
-  refreshPanelManager();
-  const label = panelTitle(id);
-  if (p && changed && !silent) {
-    toast(
-      via === 'watchdog' ? `「${label}」的独立窗口已意外结束，已回到主窗口` : `「${label}」已回到主窗口`,
-      via === 'watchdog' ? 'err' : '',
-      via === 'watchdog' ? 3200 : 1800,
-    );
-  }
-  return changed;
-}
-
-/** 主窗口看到「子窗口已经没了」时调用（心跳超时 / window.closed / 通道说再见都走这里） */
-function notePanelWindowGone(id, via) {
-  if (panelWindow.enabled) return;
-  const rt = detachedRuntime.get(id);
-  if (rt) { rt.win = null; clearDetachedState(id); }
-  releaseDetachedWindow(id, { via });
-}
-
-/** 子窗口心跳：它只要还在，看门狗就不动它。主窗口同时也收得到（同一个频道）。 */
-function notePanelWindowAlive(id) {
-  detachedRt(id).lastSeen = Date.now();
-}
-
-/** 心跳看门狗（只在主窗口跑）：超时就认定那个窗口已经不存在了，把面板收回来 */
-function detachWatchdogTick() {
-  if (panelWindow.enabled) return;
-  const now = Date.now();
-  for (const id of Object.keys(readDetachedWindows())) {
-    if (!PANEL_IDS.includes(id)) continue;
-    const rt = detachedRt(id);
-    // 浏览器版拿得到 window 引用，window.closed 是最快最准的判据（桌面壳一律是 null）
-    if (rt.win && rt.win.closed) { notePanelWindowGone(id, 'closed'); continue; }
-    if (rt.lastSeen && now - rt.lastSeen > DETACH_ALIVE_MS) {
-      const stillOpen = !!(rt.win && !rt.win.closed);
-      if (!stillOpen) { notePanelWindowGone(id, 'watchdog'); continue; }
-      rt.lastSeen = now;   // 引用还在：只续命，不动状态
-    }
-  }
-}
-
-/* 看门狗从脚本加载起就跑（不是从 initPanelSync 起）—— 只在主窗口装。
-   放这里而不是 boot 里：boot 是个 async IIFE，「独立窗口被强杀」完全可能发生在
-   它跑完之前，晚装就可能错过一整轮。 */
-const detachWatchdogTimer = panelWindow.enabled ? 0 : setInterval(detachWatchdogTick, 5000);
-
-/** boot 时清账（只在主窗口跑）：子窗口不会跨进程存活，残留标记一律恢复显示并落盘。 */
-function reconcileDetachedPanels() {  const m = readDetachedWindows();
-  const ids = Object.keys(m).filter((id) => PANEL_IDS.includes(id));
-  if (!ids.length) {
-    // 非面板的脏键一并清掉，别让存档里越攒越多
-    if (Object.keys(m).length) writeDetachedWindows({});
-    return false;
-  }
-  for (const id of ids) {
-    const p = state.panels?.[id];
-    if (!p) continue;
-    if (!p.visible) p.visible = true;
-    if (p.dock === 'hidden') p.dock = isRightPanel(id) ? 'right' : 'left';
-  }
-  writeDetachedWindows({});
-  return true;
-}
-
-/** 主窗口和系统级面板窗口共用同一份布局；窗口关闭后监听器随页面一起释放。 */
-function handlePanelMessage(message) {
-  if (!message || typeof message !== 'object') return;
-  // 子窗口加载完成后会报到：桌面壳自己建 Tao 窗口时 window.open 必然返回 null，
-  // 靠这条消息才能区分「真的被系统拦了」和「窗口其实已经开了」。
-  if (message.type === 'panel-window-open') {
-    if (!panelWindow.enabled) {
-      state._panelWinSeen = state._panelWinSeen || {};
-      state._panelWinSeen[message.id] = performance.now();
-      notePanelWindowAlive(message.id);
-    }
-    return;
-  }
-  // 子窗口还活着：刷新心跳时刻（看门狗据此判断它有没有被强杀）
-  if (message.type === 'panel-window-heartbeat') {
-    if (!panelWindow.enabled) notePanelWindowAlive(message.id);
-    return;
-  }
-  // 子窗口关闭：④ → ①/②/③ 走**唯一**收敛点（无条件刷新按钮与管理器）
-  if (message.type === 'panel-window-close') {
-    if (!panelWindow.enabled) releaseDetachedWindow(message.id, { via: message.via || 'message' });
-    return;
-  }
-  if (message.type === 'panel-patch') {
-    if (!panelWindow.enabled) {
-      applyPanelPatch(message.id, message.panel);
-      try { localStorage.setItem('reader.panels', JSON.stringify(state.panels)); } catch { /* 忽略 */ }
-    } else if (message.id === panelWindow.id) {
-      applyPanelPatch(message.id, message.panel);
-    }
-    return;
-  }
-  if (message.type !== 'panels' || !message.panels || typeof message.panels !== 'object') return;
-  if (panelWindow.enabled) {
-    applyPanelPatch(panelWindow.id, message.panels[panelWindow.id]);
-  }
-}
-
-/**
- * 桌面壳在独立窗口被销毁时直接调用（Rust 侧 CloseRequested → evaluate_script）。
- * 子页面的 pagehide / beforeunload 在宿主直接销毁 WebView 时不保证触发，这条是
- * 「关掉窗口，面板一定回来」的兜底；releaseDetachedWindow 自身幂等，三条路都走到也不会重复。
- */
-if (!panelWindow.enabled) {
-  window.__prtPanelWindowClosed = (id) => {
-    clearDetachedState(id);                                  // 宿主说它没了，先摘掉运行时台账
-    releaseDetachedWindow(id, { via: 'host' });
-  };
-}
-
 function initPanelSync() {
-  try {
-    panelBus = new BroadcastChannel('prt-panel-sync-v1');
-    panelBus.addEventListener('message', (e) => handlePanelMessage(e.data));
-  } catch { panelBus = null; }
   window.addEventListener('storage', (e) => {
     if (e.key !== 'reader.panels' || !e.newValue) return;
     try {
       const panels = JSON.parse(e.newValue);
-      if (panelWindow.enabled) applyPanelPatch(panelWindow.id, panels?.[panelWindow.id]);
-      else if (panels && typeof panels === 'object') {
-        // 右栏列数与第 2 栏宽度也要跟着走（另一个窗口改了列数，这边得现建 / 现收）
-        const rc = panels.rightCols;
-        if (rc && typeof rc === 'object') {
-          const count = Number(rc.count) === 2 ? 2 : 1;
-          const w2 = Number.isFinite(Number(rc.w2)) && Number(rc.w2) > 0 ? Math.round(Number(rc.w2)) : 360;
-          if (state.panels && (state.panels.rightCols?.count !== count || state.panels.rightCols?.w2 !== w2)) {
-            state.panels.rightCols = { count, w2 };
-            applyRightColsDom();
-          }
-        }
-        for (const id of PANEL_IDS) applyPanelPatch(id, panels[id]);
-      }
+      if (panels && typeof panels === 'object') for (const id of PANEL_IDS) applyPanelPatch(id, panels[id]);
     } catch { /* 忽略损坏的旧存档 */ }
   });
-  // 面板窗口（子窗口）侧的关闭信号：三层一起发，任何一层到达主窗口都够。
-  // 为什么不能只靠一个事件：宿主（Tao/wry）直接销毁 WebView 时 pagehide / beforeunload
-  // 都不保证触发（见 window.rs 的 CloseRequested 注释），所以还有下面这套心跳：
-  //   · pagehide / beforeunload / unload —— 正常关窗、正常刷新
-  //   · BroadcastChannel 说再见 —— 主窗口据此把面板收回去（幂等，重复发没关系）
-  //   · 定时心跳 —— 窗口被强杀时上面两条都不会来，只有心跳会停，主窗口的看门狗兜底
-  if (panelWindow.enabled) {
-    const announce = () => {
-      publishPanelMessage({ type: 'panel-window-open', id: panelWindow.id });
-      publishPanelMessage({ type: 'panel-window-heartbeat', id: panelWindow.id });
-    };
-    const beat = () => publishPanelMessage({ type: 'panel-window-heartbeat', id: panelWindow.id });
-    announce();
-    window.addEventListener('load', announce);
-    window.addEventListener('focus', beat);
-    window.addEventListener('visibilitychange', () => { if (!document.hidden) beat(); });
-    window.addEventListener('pagehide', () => panelWindowGoodbye('pagehide'));
-    window.addEventListener('beforeunload', () => panelWindowGoodbye('beforeunload'));
-    window.addEventListener('unload', () => panelWindowGoodbye('unload'));
-    // 4s 一次：隐藏页会被限流到约 1/min，主窗口的阈值（75s）给足了余量
-    setInterval(beat, 4000);
-  }
 }
 
 /** 同一 dock 内按 order 排好的面板 id（order 相同时按注册表顺序，稳定排序） */
@@ -846,55 +375,20 @@ const panelsOfDock = (dock) => PANEL_IDS
   .sort((a, b) => (state.panels[a].order - state.panels[b].order) || (PANEL_IDS.indexOf(a) - PANEL_IDS.indexOf(b)));
 const visiblePanelsOfDock = (dock) => (state.panels ? panelsOfDock(dock).filter((id) => state.panels[id].visible) : []);
 
-/** 当前浮出（dock==='float'）的面板；传 home 就只挑「从这一侧浮出去的」 */
-const floatPanels = (home) => PANEL_IDS.filter((id) => state.panels?.[id]?.dock === 'float' && (!home || state.panels[id].home === home));
-/** 右栏「在右栏里 + 从右栏浮出去的」全部面板（输入框下面那排开关要用它，浮出不该让开关消失） */
+/** 右栏「在右栏里」的全部面板（输入框上面那排「译文 / 问答」开关要用它） */
 const rightPanelsAll = () => PANEL_IDS
-  .filter((id) => state.panels[id].dock === 'right' || (state.panels[id].dock === 'float' && state.panels[id].home === 'right'))
+  .filter((id) => state.panels[id].dock === 'right')
   .sort((a, b) => (state.panels[a].order - state.panels[b].order) || (PANEL_IDS.indexOf(a) - PANEL_IDS.indexOf(b)));
 
-/**
- * 一个停靠区里要渲染的东西，按 order 排好：
- *   { kind:'panel', id }   —— 面板本体
- *   { kind:'slot', id }    —— 从这一侧浮出去的面板留下的占位块
- * 浮出面板的 order 不参与 panelsOfDock(dock)，但它原来站的位置要由占位块顶上，
- * 所以这里把两类合起来按 order 排（回停靠时占位块正好被面板本体换回来）。
- * 注意：这里**只算不建**，占位块由各停靠区的重排循环 ensurePanelSlot() 现取，
- * 免得在别的地方（比如管理器）调用它时凭空造出一堆没人挂上去的占位块。
- */
-function dockItems(dock) {
-  const items = [];
-  for (const id of PANEL_IDS) {
-    const p = state.panels[id];
-    const at = p.dock === 'float' ? p.home : p.dock;
-    if (at !== dock) continue;
-    items.push({ kind: p.dock === 'float' ? 'slot' : 'panel', id, order: p.order });
-  }
-  items.sort((a, b) => (a.order - b.order) || (PANEL_IDS.indexOf(a.id) - PANEL_IDS.indexOf(b.id)));
-  return items;
-}
-
-/** 面板管理器里行的顺序：左栏 → 底部 → 右栏（浮出的排进它 home 那一区），与屏幕上的三个停靠区一致 */
-function panelMenuIds() {
-  const out = [];
-  for (const dock of ['left', 'bottom', 'right']) for (const item of dockItems(dock)) out.push(item.id);
-  for (const id of PANEL_IDS) if (!out.includes(id)) out.push(id);   // 兜底：dock='hidden' 之类
-  return out;
-}
-
-/** 右栏当前显示的面板签名（列数 / 可见集合变了才重排右栏，见 applyPanels 的 ④b） */
+/** 右栏当前显示的面板签名（可见集合变了才重排右栏，见 applyPanels 的 ③） */
 const rightPanelsSig = () => `${rightColsWanted()}|${PANEL_IDS_RIGHT.map((id) => `${id}#${colOf(id)}${state.panels[id].visible ? '1' : '0'}`).join(',')}`;
 
 /**
- * 把注册表刷到 DOM 上（阶段 2.2b 起五件事，顺序不能换）：
+ * 把注册表刷到 DOM 上（删减后只剩三件事，顺序不能换）：
  *   ① 每个面板 root 补 data-panel / data-dock，visible / collapsed 落类；
- *   ② **先**把浮出的面板搬进 #floatLayer —— 右栏的 renderAiArea() 会 replaceChildren，
- *      还留在 #aiArea 里的浮窗会被它摘掉，所以浮出的必须先搬走；
- *   ③ 占位块：还给浮着可见的面板留 .panel-slot，其余淡出；
- *   ④ 左栏 / 右栏 / 底部三个停靠区各自按 order 重排（占位块也算在顺序里）；
- *   ⑤ 顶栏 ▤ 的小圆点。
- * 右栏只在「显示集合 / 浮出集合真的变了」时才走 renderAiArea()。
- * 搬节点永远走 withPanelMove()：滚动位置、焦点、输入内容一个都不丢。
+ *   ② 左栏按 order 重排（搬的是同一批节点，走 withPanelMove 保住滚动位置 / 焦点 / 输入内容）；
+ *   ③ 右栏整个走一遍 renderCols()：换块或变空态。
+ * 不再有浮层 / 占位块 / 底部停靠区 —— 面板只有「在左栏 / 在右栏 / 藏着」三种去向。
  */
 function applyPanels() {
   for (const id of PANEL_IDS) {
@@ -905,174 +399,47 @@ function applyPanels() {
     node.dataset.dock = p.dock;
     const panelHidden = !p.visible || p.dock === 'hidden';
     node.classList.toggle('hidden', panelHidden);
-    // 文件面板的拖入区/文件列表是它的兄弟节点：只藏标题栏会留下半截侧栏
+    // 文件面板的拖入区 / 文件列表是它的兄弟节点：只藏标题栏会留下半截侧栏
     if (id === 'files') for (const part of panelParts('files')) part.classList.toggle('hidden', panelHidden);
     node.classList.toggle('panel-collapsed', p.collapsed);
     if (p.collapsed) node.setAttribute('data-collapsed', '');
     else node.removeAttribute('data-collapsed');
     const head = panelHeadEl(id);
     if (head) head.setAttribute('aria-expanded', String(!p.collapsed));
-    syncPanelActions(id);
-    // 已经不在浮动状态了：把浮窗留下的定位样式与类清干净（安全网，正常路径在 dockPanelTo 里已清）。
-    // 节点还赖在 #floatLayer 里的（比如 resetPanels 把它变成「不可见的右栏面板」，右栏那次重排
-    // 就不会再认领它）也要搬回它自己的停靠容器去，不许留在浮层里。
-    if (p.dock !== 'float') {
-      const box = floatBoxOf(id);
-      if (box) {
-        clearFloatStyle(box);
-        if (box.parentElement === floatLayer()) {
-          // 右栏两块的「家」是它自己那一列的结果区（不是无脑 #aiArea）
-          const home = PANEL_IDS_RIGHT.includes(id) ? dockedAreaFor(id) : $('#leftSide');
-          const parts = panelParts(id);
-          if (home && parts.length) withPanelMove(parts, () => { for (const part of parts) home.append(part); });
-        }
-      }
-    }
   }
 
-  // 右栏两块的节点去向（结果区 ↔ 停放区）永远由这一条统管 —— 绝不重建节点。
-  // 顺手把「一栏只开一个」这条硬不变量**在这里强制一遍**：任何路径（旧存档、跨窗口补丁、
-  // 拖拽排序、我们自己漏调 setPanelVisible）把两块留在同一栏时，都只保留 order 靠前的那块。
-  // 放在渲染之前，所以「模型里有几块可见」和「屏幕上真有几块」永远一致。
-  enforceOnePerColumn();
-  for (const id of PANEL_IDS_RIGHT) parkRightPanel(id, dockedAreaFor(id));
-
-  syncPanelDock();
   // 左栏活动栏的高亮跟着「此刻真正显示的是哪一块」走（一次只开一个 → 高亮唯一）
   try { syncRailActive(); } catch { /* 活动栏还没装好（boot 早期）时忽略 */ }
-  // 左栏没有任何可见面板时，不保留一整块只有背景色的空栏；活动栏仍作为入口。
-  // 浮出去的面板不算左栏可见内容，它的占位只服务于回停靠，不应阻止左栏收起。
-  document.body.classList.toggle(
-    'left-empty',
-    !panelWindow.enabled && visiblePanelsOfDock('left').length === 0,
-  );
-  /**
-   * 右栏同理（用户实测 2026-10-04）：「右边侧栏的下面两个都关闭的时候还会有一个问答的口」。
-   * 译文与问答都关掉以后，右栏会变成一条只剩切换器的空栏，看起来像个没有归属的输入框。
-   * 现在两块都不显示时把右栏收成右侧活动栏（图标仍在，点一下就能把栏拉回来），
-   * 与左栏的 left-empty 完全对称。
-   */
-  document.body.classList.toggle(
-    'right-empty',
-    !panelWindow.enabled && visiblePanelsOfDock('right').length === 0,
-  );
+  // 左栏没有任何可见面板时，不保留一整块只有背景色的空栏；活动栏仍作为入口
+  document.body.classList.toggle('left-empty', visiblePanelsOfDock('left').length === 0);
+  // 右栏同理：译文与问答都关掉以后，右栏收成右侧活动栏（图标仍在，点一下就能拉回来）
+  document.body.classList.toggle('right-empty', visiblePanelsOfDock('right').length === 0);
 
-  // ② 浮出的面板先搬进浮层（见函数头注释：必须在 renderAiArea 之前）
-  for (const id of floatPanels()) applyFloatRect(id);
-
-  // ③ 占位块：浮着且可见的留下，其余淡出
-  syncPanelSlots(floatPanels().filter((id) => state.panels[id].visible));
-
-  // ④a 左栏按 order 重排（隐藏的也一起排，顺序里保留它的位置；浮出的位置由占位块顶上）。
-  // 搬的是同一批节点，所以走 withPanelMove：滚动位置 / 焦点 / 输入内容一个都不丢
-  //（面板头常常是**当前有焦点**的节点，被搬走时浏览器会 blur 它，搬完必须 focus 回去，
-  //  否则「按一次 Alt+↑ 之后键盘就不响应了」）。
+  // ② 左栏按 order 重排。搬的是同一批节点，走 withPanelMove：滚动位置 / 焦点 / 输入内容一个都不丢
+  //（面板头常常是**当前有焦点**的节点，被搬走时浏览器会 blur 它，搬完必须 focus 回去）
   const leftEl = $('#leftSide');
   if (leftEl) {
-    // 占位块先解析成元素（ensurePanelSlot 会建），后面两处都用同一个节点，别建出两个来
-    const items = dockItems('left').map((item) => (item.kind === 'slot' ? { ...item, node: ensurePanelSlot(item.id, 'left') } : item));
-    const parts = items.flatMap((item) => (item.kind === 'slot' ? [item.node] : panelParts(item.id)));
-    for (const id of PANEL_IDS) if (state.panels[id].dock === 'hidden') parts.push(...panelParts(id));
+    const shownIds = panelsOfDock('left');
+    const hiddenIds = PANEL_IDS.filter((id) => state.panels[id].dock === 'hidden');
+    const parts = [...shownIds, ...hiddenIds].flatMap((id) => panelParts(id));
     if (parts.length) {
       withPanelMove(parts, () => {
-        for (const item of items) {
-          if (item.kind === 'slot') { leftEl.append(item.node); continue; }
-          for (const part of panelParts(item.id)) leftEl.append(part);
-        }
-        // dock='hidden' 的面板（等价 visible:false）节点收进左栏待着：display:none 不占地方，
-        // 又不会被底部停靠区的重排连带删掉（重新显示时它还在文档里）
-        for (const id of PANEL_IDS) {
-          if (state.panels[id].dock !== 'hidden') continue;
-          for (const part of panelParts(id)) leftEl.append(part);
-        }
+        for (const id of shownIds) for (const part of panelParts(id)) leftEl.append(part);
+        // dock='hidden' 的面板节点收进左栏待着：display:none 不占地方，重新显示时它还在文档里
+        for (const id of hiddenIds) for (const part of panelParts(id)) leftEl.append(part);
       });
     }
   }
 
-  // 底部图标坞永远贴在左栏最底：④a 的重排只认面板节点，普通子节点会被顶到别处
-  const dockEl = $('#panelDock');
-  if (dockEl && dockEl.parentElement) dockEl.parentElement.append(dockEl);
-
-  // ④b 右栏：列结构 + 每列的块序列（见「右栏列」一节）。
-  // 这里**无条件**走一遍 renderCols()：renderCol() 内部对「已经是对的那块」有短路，
+  // ③ 右栏：无条件走一遍。renderCol() 内部对「已经是对的那块」有短路，
   // 真正的 replaceChildren 只在换块 / 变空态时发生，所以不会把消息和滚动位置洗掉。
-  // （曾经按「可见集合签名」跳过一次重排，结果隐藏的那块虽然停了车、却还留在结果区的 DOM 里。）
   state._aiVisibleSig = rightPanelsSig();
   renderCols();
-
-  // ④c 底部停靠区：横向排布；没有面板停靠到底部时整块（含高度把手）收起，零占用
-  applyBottomDock();
-
-  // 多节点面板（文件）搬回左栏后可能留下空壳，扫一遍清掉
-  for (const shell of $$('.panel-shell')) if (!shell.children.length) shell.remove();
-
-  // ⑤ 有面板被隐藏时给顶栏 ▤ 挂个点，否则用户看不出「还有东西藏着」
-  $('#panelBtn')?.classList.toggle('has-hidden', PANEL_IDS.some((id) => !state.panels[id].visible));
 }
 
-/**
- * 底部停靠区：每个面板一个 .panel-col 列（列宽 = p.w，没存过就各列平分），
- * 相邻两列之间插一条 .dock-vsplit 宽度把手。空的时候整块 display:none —— 默认零占用。
- * 格子与把手都按 data 属性复用（不重建），只有顺序真的变了才重排一次。
- */
-function applyBottomDock() {
-  const dock = dockBottomEl();
-  if (!dock) return;
-  const items = dockItems('bottom');
-  const wanted = [];
-  let prevId = '';
-  for (const item of items) {
-    if (item.kind === 'slot') { wanted.push(ensurePanelSlot(item.id, 'bottom')); prevId = ''; continue; }
-    if (prevId) wanted.push(ensureDockSplit(prevId, item.id));
-    wanted.push(ensureDockCell(item.id));
-    prevId = item.id;
-  }
-  const same = dock.children.length === wanted.length && wanted.every((n, i) => dock.children[i] === n);
-  if (!same) {
-    const parts = items.filter((x) => x.kind === 'panel').flatMap((x) => panelParts(x.id));
-    withPanelMove(parts, () => dock.replaceChildren(...wanted));
-  }
-  applyPanelWidths();
-  const empty = items.length === 0;
-  dock.classList.toggle('hidden', empty);
-  $('#dockBottomSplit')?.classList.toggle('hidden', empty);
-  if (empty && $('#dockPreview')?.dataset.zone === 'bottom') hideDockPreview();
-}
-
-/** 底部一列的 .panel-col：同一个面板永远复用同一个格子（部件搬进去 = 移动，不重建） */
-function ensureDockCell(id) {
-  let cell = document.querySelector(`.dock-bottom > .panel-col[data-col="${id}"]`);
-  if (!cell) cell = el('div', { class: 'panel-col', dataset: { col: id } });
-  const parts = panelParts(id);
-  if (parts.some((part) => part.parentElement !== cell)) {
-    withPanelMove(parts, () => { for (const part of parts) cell.append(part); });
-  }
-  return cell;
-}
-
-/** 相邻两列之间的宽度把手（同一个组合复用同一条） */
-function ensureDockSplit(a, b) {
-  const key = `${a}|${b}`;
-  let node = document.querySelector(`.dock-bottom > .dock-vsplit[data-split="${key}"]`);
-  if (!node) {
-    node = bindDockColumnSplit(a, b);
-    node.dataset.split = key;
-  }
-  return node;
-}
-
-/** 右栏里浮出面板的占位块：右栏两块现在只走「列」，不会浮出 → 这里只处理历史遗留的浮窗 */
-function renderRightSlots() {
-  const area = $('#aiArea');
-  if (!area) return;
-  const ids = floatPanels('right').filter((id) => state.panels[id].visible && colOf(id) === 1);
-  for (const id of ids) {
-    const slot = ensurePanelSlot(id, 'right');
-    const anchor = [...area.querySelectorAll('.ai-block')]
-      .find((b) => state.panels[b.dataset.block]?.order > state.panels[id].order);
-    area.insertBefore(slot, anchor || null);
-  }
-}
+/* 说明：applyPanels 走到这里就结束了。原来跟在后面的「④c 底部停靠区」「⑤ 顶栏 ▤ 小圆点」
+   以及 applyBottomDock / ensureDockCell / ensureDockSplit / renderRightSlots 四个函数，
+   都在批次一里随面板管理器与底部停靠区一起删除。 */
 
 function togglePanelCollapsed(id) {
   const p = state.panels[id];
@@ -1099,28 +466,19 @@ function setPanelVisible(id, on) {
   if (!p) return;
   const wasVisible = p.visible;
   p.visible = !!on;
-  // 隐藏浮窗 = 先把它收回原来的停靠区（再藏），免得「藏起来又浮着」这种自相矛盾的状态；
-  // 反过来，重新显示一个 dock='hidden' 的面板时也让它回到自己的停靠区。
-  // 右栏两块永远不浮出（它们只有「第 1 / 第 2 栏」），所以这一类判断跳过它们。
-  if (isRightPanel(id)) {
-    if (p.dock !== 'right') { p.dock = 'right'; p.home = 'right'; p.rect = null; }
-  } else if (!on && p.dock === 'float') { p.dock = p.home || 'left'; p.rect = null; }
-  if (!isRightPanel(id) && on && p.dock === 'hidden') { p.dock = p.home || 'left'; }
-  // 同一栏一次只放一块：显示译文 / 问答时，把**同一栏**里那一块（还在右栏里的）收起来。
-  // 另一栏不动 —— 第 2 栏就是给「两块同时看」用的。
-  if (on && isRightPanel(id) && p.dock === 'right') {
-    const col = colOf(id);
+  // 右栏两块只有「在右栏」这一种去向；左栏面板重新显示时从 hidden 回到左栏
+  if (isRightPanel(id) && p.dock !== 'right') p.dock = 'right';
+  if (!isRightPanel(id) && on && p.dock === 'hidden') p.dock = 'left';
+  // 同一栏一次只放一块：右栏两块互斥（「一栏只开一个 + 底部标签切换」）
+  if (on && isRightPanel(id)) {
     for (const other of PANEL_IDS_RIGHT) {
-      if (other === id) continue;
-      if (colOf(other) !== col) continue;
-      if (state.panels[other].dock === 'right' && state.panels[other].visible) state.panels[other].visible = false;
+      if (other === id || !state.panels[other].visible) continue;
+      if (state.panels[other].dock === 'right') state.panels[other].visible = false;
     }
   }
-  // 左栏同理，而且更严：**整个左栏一次只显示一块**（用户口径 2026-10-03）：
-  //   「左侧应该也做成一次只能打开一个」
-  // 以前四块是竖着堆叠、互不影响的，结果「文件 + 目录 + 笔记 + 文献关系」能一起摊开，
-  // 左栏被塞满、下面几块其实已经被挤出视口。现在的规则是：打开哪一块，其余三块自动收起，
-  // 但**块自己的折叠状态（p.collapsed）不动** —— 那是另一回事，不该被这次切换改掉。
+  // 左栏更严，而且更早：**整个左栏一次只显示一块**（用户口径 2026-10-03：
+  //   「左侧应该也做成一次只能打开一个」）—— 打开哪一块，其余三块自动收起，
+  //   但每块自己的折叠状态（p.collapsed）不动，那是另一回事。
   if (on && !isRightPanel(id) && p.dock === 'left') {
     for (const other of PANEL_IDS) {
       if (other === id || isRightPanel(other)) continue;
@@ -1129,146 +487,24 @@ function setPanelVisible(id, on) {
   }
   // 自动打开一个右栏面板 = 用户明确要这一侧，别让它被自动收起（2.1 的临时豁免）
   if (on && p.dock === 'right') sideIntent.pinned.right = true;
-  // 隐藏之前先把滚动位置记下来 —— **必须在 applyPanels() 之前**：
-  // applyPanels 会把节点停进脱离文档的停放区，那之后 scrollTop 已经是 0 了。
-  if (!on && wasVisible) rememberBlockScroll();
+  // 隐藏是 display:none，滚动容器量不到高度、scrollTop 会归零：
+  // 先把这一块 body 的滚动位置记下来，重新显示之后再放回去。
+  if (!on && wasVisible) rememberBodyScroll(id);
   savePanels();
   applyPanels();
   applyResponsiveLayout();
-  if (on && !wasVisible) restoreBlockScroll();
+  if (on && !wasVisible) requestAnimationFrame(() => applyBodyScroll(id));
 }
 
+/* ── 面板部件 ── */
+
 /**
- * 记住右栏每块 .ai-body 的滚动位置（隐藏之前调）。
+ * 一个面板由哪些节点组成。左栏四块是 index.html 里的静态 DOM（section.sec / .side-head），
+ * 右栏两块是**按需现建**的（用到才 ensureBlock）。
  *
- * 位置记在**节点自己身上**（`__prtScrollTop`），不是记在一个「最近一次」的共享表里：
- * 右栏面板隐藏时节点会脱离文档，而脱离文档的元素 `scrollTop` 会被浏览器归零 ——
- * 等到「显示」那一步再去读，读到的永远是 0（R12 实测：隐藏前后 1167 → 0）。
- * 挂在节点上还顺带解决了顺序问题：先记的位置不会被后记的覆盖。
- */
-function rememberBlockScroll() {
-  for (const id of PANEL_IDS_RIGHT) rememberBodyScroll(id);
-}
-
-/** 把记住的滚动位置放回去（重新显示之后调；同一帧的同步补位在 parkRightPanel / renderCol 里） */
-function restoreBlockScroll() {
-  requestAnimationFrame(() => {
-    for (const id of PANEL_IDS_RIGHT) applyBodyScroll(id);
-  });
-}
-
-/** 固定 / 取消固定：只影响「窗口放不下时先收哪一侧」，不影响用户手动收起 */
-function setPanelPinned(id, on) {
-  const p = state.panels[id];
-  if (!p) return;
-  p.pinned = !!on;
-  savePanels();
-  applyResponsiveLayout();
-}
-
-/**
- * 直接设一个面板的显示 / 隐藏并立刻刷 UI（管理器按钮、面板头的 Alt+H、截图自动开「问答」
- * 走的都是 setPanelVisible；resetPanels 之外的批量预置也用它，避免只改模型不刷界面）。
- * 与 setPanelVisible 同一个口径：隐藏**不动 size**（那是用户拖出来的高度偏好）。
- */
-function setPanelsVisible(ids, on) {
-  const anyVisible = ids.some((id) => state.panels[id]?.visible);
-  if (!on && anyVisible) rememberBlockScroll();
-  for (const id of ids) {
-    const p = state.panels[id];
-    if (!p) continue;
-    p.visible = !!on;
-  }
-  savePanels();
-  applyPanels();
-  applyResponsiveLayout();
-  if (on) restoreBlockScroll();
-}
-
-/** 同 dock 内上移 / 下移一位（到边界就什么都不做） */
-function movePanel(id, dir) {
-  const p = state.panels[id];
-  if (!p || p.dock === 'hidden') return;
-  const list = panelsOfDock(p.dock);
-  const i = list.indexOf(id);
-  const j = i + dir;
-  if (i < 0 || j < 0 || j >= list.length) return;
-  const other = list[j];
-  const tmp = p.order;
-  p.order = state.panels[other].order;
-  state.panels[other].order = tmp;
-  savePanels();
-  applyPanels();
-}
-
-/* ══════════════════════════════ 阶段 2.2b：停靠 / 应用内浮动 / 动效 ══════════════════════════════
-   三件事，一条铁律：**搬的是同一批 DOM 节点**，绝不重建。
-     · dock='bottom' 的面板搬进 .viewer-wrap 里 #viewer 之后、.statusbar 之前的 #dockBottom；
-     · dock='float'  的面板搬进 body > #floatLayer，自己 position:fixed + left/top/width/height；
-     · 浮出的面板在原停靠区留一个 .panel-slot 占位块，拖回左 / 右 / 底部时先出停靠预览，
-       松手用 FLIP 平滑收缩回去。
-   搬动前后必须保全：滚动位置 / 焦点 / #chatInput 内容与光标 / 消息条数（见 withPanelMove）。
-   动效一律 100–260ms 的短 ease-out，可被下一次拖动或停靠打断（cancelPanelAnims），
-   prefers-reduced-motion: reduce 时全部关掉（motionMs 返回 0）。 */
-
-const FLOAT_MIN_W = 260;      // 浮窗最小宽（用户要求的 260×180）
-const FLOAT_MIN_H = 180;
-const FLOAT_GAP = 6;          // 浮窗与视口边缘 / 顶栏之间至少留这么多
-const FLOAT_DEFAULT_W = 340;
-const FLOAT_DEFAULT_H = 300;
-const DOCK_BOTTOM_MIN_H = 90;
-/** 各条动效的时长（ms）——都在用户要求的 100–260ms 区间内 */
-const ANIM = { lift: 120, slot: 160, preview: 120, flip: 200, close: 160, settle: 140 };
-const EASE = 'cubic-bezier(.2,.7,.3,1)';   // 短 ease-out，不做弹跳、不做长缓动
-
-/** 用户要求减少动态效果吗（读不到就当 false；测试里可以用 page.emulateMediaFeatures 切） */
-function prefersReducedMotion() {
-  try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
-}
-const motionMs = (ms) => (prefersReducedMotion() ? 0 : ms);
-
-/** 正在跑的浮窗动画句柄：新拖动 / 新停靠一开始就全部 cancel（动画必须能被下一次操作打断） */
-const panelAnims = new Set();
-function cancelPanelAnims() {
-  for (const a of panelAnims) { try { a.cancel(); } catch { /* 忽略 */ } }
-  panelAnims.clear();
-}
-
-/**
- * 记一条动效日志并返回**实际时长**（reduced-motion 下是 0）。
- * 日志是给自动化探针看的原始证据：每条动效的时长 / 缓动都能逐条核对。
- */
-function logPanelAnim(kind, ms) {
-  const dur = motionMs(ms);
-  if (state._panelAnimLog) {
-    state._panelAnimLog.push({ kind, ms: dur, easing: EASE, at: Math.round(performance.now()) });
-    while (state._panelAnimLog.length > 80) state._panelAnimLog.shift();
-  }
-  return dur;
-}
-
-/** 跑一条 WAAPI 动效（时长 0 或没有 animate 时什么都不做）；句柄记下来供打断 */
-function panelAnim(node, frames, { kind = 'anim', ms = ANIM.flip, easing = EASE } = {}) {
-  const dur = logPanelAnim(kind, ms);
-  if (!node?.animate || dur <= 0) return null;
-  let a = null;
-  try { a = node.animate(frames, { duration: dur, easing, fill: 'none' }); } catch { return null; }
-  panelAnims.add(a);
-  a.finished.then(() => panelAnims.delete(a), () => panelAnims.delete(a));
-  return a;
-}
-
-/* ── DOM 定位：浮层 / 底部停靠区 / 面板部件 ── */
-
-const floatLayer = () => document.getElementById('floatLayer');
-const dockBottomEl = () => document.getElementById('dockBottom');
-
-/**
- * 一个面板由哪些节点组成。五个面板就是它自己；**文件面板是三兄弟**
- *（.side-head 标题栏 + .dropzone 拖入区 + .filelist 文件列表，内部 id 一个都没动）。
- * 移动时三兄弟要一起走，否则浮出去的文件面板只剩一个筛选框。
- * 右栏两块是**按需建**的（用到才 ensureBlock）：管理器直接点「浮出」时这里先把节点建出来，
- * 否则浮出会静默失败（DOM 里根本没有那个面板）。
+ * 文件面板是**三兄弟**：.side-head 标题栏 + .dropzone 拖入区 + .filelist 文件列表
+ *（内部 id 一个都没动）。删掉浮窗之后三兄弟不会再被搬到别的容器，但 applyPanels() 收起
+ * 「文件」面板时仍然要**一起**收起它们 —— 只藏标题栏会在左栏留下半截拖入区。
  */
 function panelParts(id) {
   let node = panelEl(id);
@@ -1280,582 +516,46 @@ function panelParts(id) {
   if (id !== 'files') return [node];
   return [node, $('#dropzone'), $('#fileList')].filter(Boolean);
 }
+/** 各条动效的时长（ms）——都在用户要求的 100–260ms 区间内 */
+const ANIM = { flip: 200 };
+const EASE = 'cubic-bezier(.2,.7,.3,1)';   // 短 ease-out，不做弹跳、不做长缓动
 
-/** 多节点面板（文件）需要一个 .panel-shell 把三兄弟装在一起；单节点面板直接用自己 */
-function panelShell(id) {
-  const parts = panelParts(id);
-  if (parts.length <= 1) return parts[0] || null;
-  let shell = document.querySelector(`.panel-shell[data-shell="${id}"]`);
-  if (!shell) shell = el('div', { class: 'panel-shell', dataset: { shell: id } });
-  for (const part of parts) if (part.parentElement !== shell) shell.append(part);
-  return shell;
+/** 用户要求减少动态效果吗（读不到就当 false；测试里可以用 page.emulateMediaFeatures 切） */
+function prefersReducedMotion() {
+  try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
 }
+const motionMs = (ms) => (prefersReducedMotion() ? 0 : ms);
 
-/** 当前真正带着 .panel-float（position:fixed）的那个盒子；没浮出就返回 null */
-const floatBoxOf = (id) => document.querySelector(
-  `#floatLayer > .panel-float[data-panel="${id}"], #floatLayer > .panel-float[data-shell="${id}"]`,
-);
+/* ══════════════ 删减记录（批次一）：浮窗 / 拖拽停靠 / 底部停靠 全部删除 ══════════════
+   这里原来装着「把面板放哪儿」的整套编排（约 900 行），连同底部停靠区一起删掉了：
 
-/** 停靠状态下代表这个面板的盒子（文件面板是 shell，其余是节点自己） */
-function dockedBody(id) {
-  const parts = panelParts(id);
-  if (parts.length <= 1) return parts[0] || null;
-  return document.querySelector(`.panel-shell[data-shell="${id}"]`) || parts[0];
-}
+     · 浮窗几何与钳制：floatSafeBox / composerRect / rectsOverlap / overlapArea /
+       clampFloatRect / defaultFloatRect / floatCssRect / unionRect / visibleRect
+     · 浮出与回停靠：floatPanel / dockPanelTo / floatPanels / bringFloatToFront /
+       syncFloatFocus / nextFloatZ / applyFloatRect / ensureFloatChrome / floatBoxOf
+     · 收起与落位动画：closeFloatPanel / settleFloat / nearestEdgeRect / flipPanel /
+       cancelPanelAnims / panelAnim / logPanelAnim
+     · 占位块与停靠预览：ensurePanelSlot / removePanelSlot / syncPanelSlots /
+       dockZoneAt / floatRedockTarget / dockZoneRect / showDockPreview / hideDockPreview
+     · 浮窗拖动 / 缩放：bindFloatDrag / bindFloatResize
+     · 底部停靠区：setDockBottomHeight / bindDockBottomSplitter / bindDockColumnSplit
 
-/** 清掉浮窗留下的一切（类 + inline 定位），回停靠 / 隐藏时都要走一遍 */
-function clearFloatStyle(box) {
-  if (!box) return;
-  box.classList.remove('panel-float', 'dragging', 'focused');
-  box.style.left = ''; box.style.top = ''; box.style.width = ''; box.style.height = ''; box.style.zIndex = '';
-}
+   **为什么可以整段删掉**：审计显示这一整套只有两个真正的入口 —— 面板管理器里的
+   「浮出 / 停靠到…」按钮，和图标坞的右键菜单。两个入口都在同一批里删掉了，
+   于是这张调用网没有任何外部调用者。
 
-/* ── 几何：钳进视口 + 避开顶栏与 #composer ── */
+   随之删除的状态字段：p.rect / p.z / p.w / p.home / p.pinned（见 defaultPanels 与
+   readPanelDescriptor）。老存档里 dock='float' / 'bottom' 的面板会被 PANEL_DOCKS 白名单
+   落回它自己的注册位置，不需要额外迁移代码。
 
-const rectOf = (node) => {
-  const r = node?.getBoundingClientRect?.();
-  return r && (r.width > 0 || r.height > 0) ? { left: r.left, top: r.top, w: r.width, h: r.height } : null;
-};
-/**
- * 浮窗的「CSS 矩形」：位置读 inline left/top，宽高读模型。
- * 拖动刚结束时面板身上还有 120ms 的 scale(1.01) 在回落，getBoundingClientRect() 会量到放大的值，
- * 拿它当起点 / 存盘会把浮窗越拖越大（实测 320 → 323），所以浮窗一律走这一条。
- */
-function floatCssRect(id) {
-  const p = state.panels[id];
-  const box = floatBoxOf(id);
-  if (!p || !box) return null;
-  const w = p.rect?.w || FLOAT_DEFAULT_W;
-  const h = p.rect?.h || FLOAT_DEFAULT_H;
-  const left = parseFloat(box.style.left);
-  const top = parseFloat(box.style.top);
-  return {
-    left: Number.isFinite(left) ? left : (p.rect?.left ?? 0),
-    top: Number.isFinite(top) ? top : (p.rect?.top ?? 0),
-    w, h,
-  };
-}
-/** 一组节点的外接矩形（文件面板三兄弟要合成一个盒子来算） */
-function unionRect(nodes) {
-  const rs = nodes.map(rectOf).filter(Boolean);
-  if (!rs.length) return null;
-  const left = Math.min(...rs.map((r) => r.left));
-  const top = Math.min(...rs.map((r) => r.top));
-  const right = Math.max(...rs.map((r) => r.left + r.w));
-  const bottom = Math.max(...rs.map((r) => r.top + r.h));
-  return { left, top, w: right - left, h: bottom - top };
-}
-const visibleRect = (nodes) => unionRect(nodes);
-
-/**
- * 可以让浮窗待的区域：**正文阅读区**（`.viewer-wrap`）之内、顶栏之下。
- *
- * ⚠️ 这里**不能**用整屏（用户实测缺陷 2026-10-04：「左边的也还是会被挡住」）。
- * `#floatLayer` 是 `position:fixed; inset:0; z-index:60`，卡片浮在**所有侧栏与正文之上**；
- * 原来的可用区是「顶栏以下 + 整个视口」，于是卡片可以停在左栏 / 右栏正上方，
- * 且没有任何避让 —— 实测：译文卡片停在左栏上时，左栏整体被压 **64.2%**、
- * 目录块 `#outlineList` 被压 **88.5%**、文件块 `#fileList` 被压 **77.4%**（不浮窗时 0%）。
- *
- * 改成「只在正文区内活动」后，卡片再怎么拖也压不到左右栏。
- * 阅读区本身很窄时（窄窗）退回视口，避免卡片被挤到 0 宽。
- */
-function floatSafeBox() {
-  const wrap = document.querySelector('.viewer-wrap');
-  const r = wrap?.getBoundingClientRect?.();
-  const mainTop = Math.round($('#main')?.getBoundingClientRect().top || 46);
-  if (r && r.width > FLOAT_MIN_W + FLOAT_GAP * 2 && r.height > FLOAT_MIN_H + FLOAT_GAP * 2) {
-    return {
-      left: Math.round(r.left), top: Math.max(Math.round(r.top), mainTop),
-      right: Math.round(r.right), bottom: Math.round(r.bottom),
-    };
-  }
-  return { left: 0, top: mainTop, right: window.innerWidth, bottom: window.innerHeight };
-}
-/** #composer 的矩形；收起右栏 / 没有输入框时返回 null（这时不需要避让） */
-function composerRect() {
-  const node = $('#composer');
-  if (!node) return null;
-  const r = node.getBoundingClientRect();
-  return r.width > 2 && r.height > 2 ? r : null;
-}
-const rectsOverlap = (a, b) => a.left < b.right && a.left + a.w > b.left && a.top < b.bottom && a.top + a.h > b.top;
-const overlapArea = (a, b) => {
-  const w = Math.min(a.left + a.w, b.left + b.w) - Math.max(a.left, b.left);
-  const h = Math.min(a.top + a.h, b.top + b.h) - Math.max(a.top, b.top);
-  return w > 0 && h > 0 ? w * h : 0;
-};
-
-/**
- * 把浮窗矩形钳进视口：最小 260×180，最大不超过视口；
- * 且**不许盖住 #composer**（输入框被浮窗挡住就没法提问了）。
- * 避让顺序：先挪到输入框左边，再挪到上边，再挪到下边；都放不下就挑重叠最小的那个。
- * （钳制思路沿用 placeCard/clampCard —— 拖到 4000,4000 会被拉回屏幕里。）
- */
-function clampFloatRect(raw, { w, h } = {}) {
-  const box = floatSafeBox();
-  const maxW = Math.max(FLOAT_MIN_W, box.right - box.left - FLOAT_GAP * 2);
-  const maxH = Math.max(FLOAT_MIN_H, box.bottom - box.top - FLOAT_GAP * 2);
-  const W = Math.round(clamp(Number(w) || FLOAT_DEFAULT_W, FLOAT_MIN_W, maxW));
-  const H = Math.round(clamp(Number(h) || FLOAT_DEFAULT_H, FLOAT_MIN_H, maxH));
-  const put = (left, top) => ({
-    left: Math.round(clamp(left, box.left + FLOAT_GAP, Math.max(box.left + FLOAT_GAP, box.right - W - FLOAT_GAP))),
-    top: Math.round(clamp(top, box.top + FLOAT_GAP, Math.max(box.top + FLOAT_GAP, box.bottom - H - FLOAT_GAP))),
-    w: W, h: H,
-  });
-  const want = put(Number(raw?.left) || box.left + FLOAT_GAP, Number(raw?.top) || box.top + FLOAT_GAP);
-  const comp = composerRect();
-  if (!comp || !rectsOverlap(want, comp)) return want;
-  const candidates = [
-    put(comp.left - W - FLOAT_GAP, want.top),                                   // 输入框左边
-    put(want.left, comp.top - H - FLOAT_GAP),                                   // 输入框上边
-    put(want.left, comp.bottom + FLOAT_GAP),                                    // 输入框下边
-    put(comp.left - W - FLOAT_GAP, box.top + FLOAT_GAP),
-  ];
-  const clean = candidates.find((c) => !rectsOverlap(c, comp));
-  if (clean) return clean;
-  return candidates.reduce((best, c) => (overlapArea(c, comp) < overlapArea(best, comp) ? c : best), want);
-}
-
-/** 浮窗的默认位置与大小（按面板在注册表里的次序错开一点，别叠成一摞） */
-function defaultFloatRect(id) {
-  const i = Math.max(0, PANEL_IDS.indexOf(id));
-  return clampFloatRect(
-    { left: 90 + i * 26, top: 90 + i * 22 },
-    { w: FLOAT_DEFAULT_W, h: FLOAT_DEFAULT_H },
-  );
-}
-
-/* ── 浮出 / 回停靠 / 收起 ── */
-
-/** 把注册表里的 rect 写到浮窗的 inline 样式上（每次都重新钳一遍：窗口变小也不会跑到屏幕外） */
-function applyFloatRect(id) {
-  const p = state.panels[id];
-  const parts = panelParts(id);
-  if (!p || !parts.length) return null;
-  const box = parts.length === 1 ? parts[0] : panelShell(id);
-  if (!box) return null;
-  const layer = floatLayer();
-  box.classList.add('panel-float');
-  // 搬进浮层（已经在里面就别再 append，免得把兄弟浮窗的层叠顺序洗牌）
-  if (layer && box.parentElement !== layer) withPanelMove(parts, () => layer.append(box));
-  const prev = p.rect || defaultFloatRect(id);
-  const r = clampFloatRect(prev, { w: prev.w, h: prev.h });
-  p.rect = r;
-  box.style.left = `${r.left}px`;
-  box.style.top = `${r.top}px`;
-  box.style.width = `${r.w}px`;
-  box.style.height = `${r.h}px`;
-  box.style.zIndex = String(Math.max(1, Math.round(p.z) || 1));
-  // 右栏两块是按需建的：initPanels() 跑的时候它们还不存在，拖动绑定要在这儿补一次
-  bindFloatDrag(id);
-  ensureFloatChrome(id, box);
-  return r;
-}
-
-/**
- * 浮窗的缩放抓手：**四条边 + 四个角共 8 个**（用户口径 2026-10-04：
- *   「窗口要做成左右上下都能直接拉伸而且也可以在角落直接拉伸的样子」）。
- *
- * 原来只有右下角一个 `.panel-resize`。现在按方向生成 `n / s / e / w / ne / nw / se / sw`，
- * 每个用 CSS 定位到对应的边或角（见 style.css 的 .panel-grip 一族）。
- * 停靠状态下这些抓手由 CSS `display:none` 隐藏，不参与布局；只加一次。
- */
-const FLOAT_GRIPS = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
-function ensureFloatChrome(id, box) {
-  if (!box || box.querySelector(':scope > .panel-grip')) return;
-  for (const dir of FLOAT_GRIPS) {
-    const grip = el('div', {
-      class: `panel-grip panel-grip-${dir}`, 'aria-hidden': 'true',
-      title: '拖动调整浮窗大小（最小 260×180）',
-    });
-    box.append(grip);
-    bindFloatResize(id, grip, dir);
-  }
-}
-
-/** 当前最靠前的浮窗 z（新浮出的排到最后面之上） */
-function nextFloatZ() {
-  const zs = floatPanels().map((id) => Number(state.panels[id].z) || 0);
-  return (zs.length ? Math.max(...zs) : 0) + 1;
-}
-
-/** 浮窗获得焦点时保持原底色与不透明度，只切换边框 / 外圈。 */
-function syncFloatFocus(id) {
-  for (const fid of floatPanels()) {
-    floatBoxOf(fid)?.classList.toggle('focused', fid === id);
-  }
-}
-
-/** 点 / 拖一个浮窗 = 把它提到最前（#floatLayer 内部自增，不动别的层） */
-function bringFloatToFront(id) {
-  const p = state.panels[id];
-  if (!p || p.dock !== 'float') return;
-  syncFloatFocus(id);
-  const top = Math.max(0, ...floatPanels().map((x) => Number(state.panels[x].z) || 0));
-  if ((Number(p.z) || 0) >= top && top > 0) return;
-  p.z = nextFloatZ();
-  const box = floatBoxOf(id);
-  if (box) box.style.zIndex = String(p.z);
-  savePanels();
-}
-
-/** 浮出：把面板从停靠区搬进 #floatLayer（同一个 DOM 节点），原停靠区留 .panel-slot */
-function floatPanel(id, { rect = null } = {}) {
-  const p = state.panels[id];
-  if (!p) return false;
-  if (p.dock === 'float') { bringFloatToFront(id); return true; }
-  cancelPanelAnims();
-  const parts = panelParts(id);
-  const before = visibleRect(parts);
-  const wasVisible = p.visible;
-  // 面板马上要离开这个容器了：先记住它当前的滚动位置（内容一变矮就会被夹小）
-  rememberAwayScroll(dockContainerFor(PANEL_DOCKS_REAL.includes(p.dock) ? p.dock : p.home));
-  p.home = PANEL_DOCKS_REAL.includes(p.dock) ? p.dock : (p.home || 'left');
-  p.dock = 'float';
-  p.visible = true;
-  p.docId = state.doc?.docId || p.docId || '';   // 论文绑定：换论文时靠它把浮窗收回停靠
-  p.z = nextFloatZ();
-  const seed = rect || (before ? { left: before.left, top: before.top } : null);
-  const size = {
-    w: Math.max(FLOAT_MIN_W, Math.round(rect?.w || before?.w || FLOAT_DEFAULT_W)),
-    h: Math.max(FLOAT_MIN_H, Math.round(rect?.h || before?.h || FLOAT_DEFAULT_H)),
-  };
-  p.rect = clampFloatRect(seed || defaultFloatRect(id), size);
-  withPanelMove(parts, () => { savePanels(); applyPanels(); });
-  const box = floatBoxOf(id);
-  const after = rectOf(box);
-  flipPanel(before, after ? { ...after, node: box } : null, 'float-out', ANIM.flip);
-  syncFloatFocus(id);
-  // 右侧 AI 面板浮出后，右侧栏只留下活动入口，不再同时占着正文宽度。
-  // 回栏时 dockPanelTo('right') 会明确展开它；浮窗停在普通位置时不会自动恢复右栏。
-  /**
-   * ⚠️ 两个约束（用户实测缺陷 2026-10-04：「译文被挡死了，啥也看不见」）：
-   *
-   *   ① **同一侧还有别的停靠可见块时，不能收起整条右栏。**
-   *      两栏模式下（译文第 1 栏、问答第 2 栏）把问答拖出成卡片，旧代码无条件
-   *      `sideIntent.noRight = true` → `body.no-right #rightCols{display:none}` 把**还停在栏里的
-   *      译文一起藏掉**：`state.panels.translate.visible === true`，但块宽 0、一个字都看不到。
-   *      探针实测：浮出后译文块宽 0（`test/artifacts/phase1/probe-baseline2.json` 的 S2）。
-   *   ② **不写存档**（原来这里还有一句 `if (isRightPanel(id)) saveUi();`）。
-   *      这是「这一次浮出」的临时布局决定，不是用户的持久意图。落盘成 `reader.ui.noRight` 之后，
-   *      下次启动 initLayout() 读到 true，而此刻面板是 float（`dockedRightVisible` 为假、
-   *      反制规则不生效）→ 右栏整条 display:none，刷新多少次都收着 = 自锁。
-   *      重启后该收谁由 initLayout() 按「有没有停靠可见的块」重算（见那里的 floatingRightVisible 分支）。
-   */
-  if (isRightPanel(id)) {
-    const stillDocked = PANEL_IDS_RIGHT.some((x) => x !== id
-      && state.panels[x]?.visible && state.panels[x].dock === 'right');
-    sideIntent.noRight = !stillDocked;    // 同侧还有停靠可见的块 → 栏留着，别把它一起藏掉
-    sideIntent.pinned.right = false;
-  }
-  // 浮出可能把某一侧栏空出来：重算一次布局（正文宽度 / 自动收起）
-  if (applyResponsiveLayout()) refitViewer(0); else refitViewer(REFIT_AFTER_MS);
-  if (!wasVisible) toast(`「${panelTitle(id)}」已浮出`, '', 1600);
-  return true;
-}
-
-/**
- * 回停靠 / 换停靠区（左 / 右 / 底部）：FLIP —— 先记起点矩形，搬完 DOM 再从起点动画到终点（≤220ms）。
- * 拖到目标区松手、管理器的「停靠到…」、Esc、✕ 收起走的都是这一条。
- */
-function dockPanelTo(id, zone) {
-  const p = state.panels[id];
-  if (!p || !PANEL_DOCKS_REAL.includes(zone) || p.dock === zone) return false;
-  // 译文 / 问答固定在右栏（用户口径）：不许停靠到左栏 / 底部。
-  // 右栏面板仍然不能停到左栏 / 底部；卡片只是阅读器内部的临时展开方式。
-  if (isRightPanel(id) && zone !== 'right') return false;
-  // R7：把停靠目标区被浮窗盖住的那部分先让开。
-  // 起因：视觉验收里「笔记」浮窗没收回就停靠底部，结果浮窗压在新停靠的面板上，
-  // 面板标题/摘要/按钮都被遮掉半截，看起来像面板被从中间切断。
-  // 只收「真的和目标区矩形相交」的浮窗 —— 不搞一刀切把全部浮窗都收了，
-  // 免得用户觉得「我只是停靠一个面板，怎么别的浮窗也没了」。
-  clearFloatsCovering(dockContainerFor(zone), id);
-  const parts = panelParts(id);
-  const wasFloat = p.dock === 'float';
-  const before = wasFloat ? floatCssRect(id) : visibleRect(parts);
-  cancelPanelAnims();
-  const box = wasFloat ? floatBoxOf(id) : null;
-  if (box) clearFloatStyle(box);
-  resetBlockHeight(id);                 // 离开右栏时把 fitBlockSizes() 写死的 inline 高度清掉
-  p.home = zone;
-  p.dock = zone;
-  p.rect = null;
-  p.visible = true;
-  if (zone === 'bottom' && !(p.w > 0)) p.w = 280;
-  // 停靠到右栏 = 用户明确要这一侧，别让它被自动收起（与 setPanelVisible 同一个口径）
-  if (zone === 'right') sideIntent.pinned.right = true;
-  withPanelMove(parts, () => { savePanels(); applyPanels(); });
-  // 回到停靠区之后：把「离开时那个容器停在哪儿」补回去（占位块收掉之后容器高度才定下来，
-  // 所以同步补一次、下一帧补一次、FLIP 走完再补一次）
-  const dest = dockContainerFor(zone);
-  const restoreAway = () => applyAwayScroll(dest);
-  restoreAway();
-  requestAnimationFrame(restoreAway);
-  setTimeout(restoreAway, ANIM.flip + 60);
-  const after = rectOf(dockedBody(id));
-  flipPanel(before, after ? { ...after, node: dockedBody(id) } : null, 'dock-flip', ANIM.flip);
-  // 目标那一侧本来是收起的话，用户这次「拖过去」就是要它显示出来
-  if ((zone === 'left' || zone === 'right') && document.body.classList.contains(`no-${zone}`)) setSideCollapsed(zone, false, true);
-  else applyResponsiveLayout();
-  if (zone === 'right') fitBlockSizes();
-  refitViewer(REFIT_AFTER_MS);
-  return true;
-}
-
-/** 把 fitBlockSizes() 写在块上的 inline 高度清掉（它只认「还停在右栏的块」） */
-function resetBlockHeight(id) {
-  const node = panelEl(id);
-  if (!node) return;
-  node.classList.remove('sized');
-  node.style.height = '';
-}
-
-/** FLIP：把 after.node 从 before 那个矩形「收缩 / 展开」到它现在的位置 */
-function flipPanel(before, after, kind, ms = ANIM.flip) {
-  if (!before || !after?.node || after.w <= 1 || after.h <= 1) return null;
-  const dx = before.left - after.left;
-  const dy = before.top - after.top;
-  const sx = before.w > 1 ? before.w / after.w : 1;
-  const sy = before.h > 1 ? before.h / after.h : 1;
-  if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && Math.abs(sx - 1) < .01 && Math.abs(sy - 1) < .01) return null;
-  return panelAnim(after.node, [
-    { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, transformOrigin: 'top left' },
-    { transform: 'none', transformOrigin: 'top left' },
-  ], { kind, ms });
-}
-
-/** 拖到无效区域松手：保持浮动，把位置平滑地钳回视口里 */
-function settleFloat(id) {
-  const p = state.panels[id];
-  const box = floatBoxOf(id);
-  if (!p || !box) return;
-  const from = floatCssRect(id);
-  const r = clampFloatRect(from || p.rect || defaultFloatRect(id), { w: from?.w, h: from?.h });
-  p.rect = r;
-  savePanels();
-  if (from && (Math.abs(from.left - r.left) > 1 || Math.abs(from.top - r.top) > 1)) {
-    panelAnim(box, [
-      { left: `${from.left}px`, top: `${from.top}px` },
-      { left: `${r.left}px`, top: `${r.top}px` },
-    ], { kind: 'settle', ms: ANIM.settle });
-  }
-  box.style.left = `${r.left}px`;
-  box.style.top = `${r.top}px`;
-  box.style.width = `${r.w}px`;
-  box.style.height = `${r.h}px`;
-}
-
-/**
- * 浮窗头上的 ✕：先朝**最近的那条屏幕边缘**平滑收起（160ms），收起动画结束后再回原停靠区。
- * 不做「突然消失」——用户能看见它「收」到边上去。
- */
-function closeFloatPanel(id) {
-  const p = state.panels[id];
-  const box = floatBoxOf(id);
-  if (!p || p.dock !== 'float' || !box) return false;
-  cancelPanelAnims();
-  const r = floatCssRect(id) || rectOf(box);
-  const target = nearestEdgeRect(r);
-  const done = () => {
-    // 收起动画期间用户又拖起来了 / 已经回停靠了：那就别再动它
-    if (floatDragId === id || state.panels[id]?.dock !== 'float') return;
-    dockPanelTo(id, state.panels[id].home || 'left');
-  };
-  const a = panelAnim(box, [
-    { left: `${r.left}px`, top: `${r.top}px`, opacity: 1 },
-    { left: `${target.left}px`, top: `${target.top}px`, opacity: 0 },
-  ], { kind: 'close', ms: ANIM.close });
-  if (a) a.finished.then(done, done); else done();
-  return true;
-}
-
-/** 离浮窗最近的那条边（左 / 右 / 上 / 下），以及「贴上去」的位置 */
-function nearestEdgeRect(r) {
-  if (!r) return { left: 0, top: 0 };
-  const box = floatSafeBox();
-  const dist = {
-    left: r.left - box.left,
-    right: box.right - (r.left + r.w),
-    top: r.top - box.top,
-    bottom: box.bottom - (r.top + r.h),
-  };
-  const edge = Object.keys(dist).reduce((a, b) => (dist[b] < dist[a] ? b : a), 'left');
-  return {
-    left: edge === 'left' ? box.left + FLOAT_GAP : (edge === 'right' ? box.right - r.w - FLOAT_GAP : r.left),
-    top: edge === 'top' ? box.top + FLOAT_GAP : (edge === 'bottom' ? box.bottom - r.h - FLOAT_GAP : r.top),
-  };
-}
-
-/** 窗口变小 / 变窄时把所有浮窗重新钳进视口（绝不出现「跑到屏幕外拿不回来」） */
-function clampAllFloats() {
-  let n = 0;
-  for (const id of floatPanels()) { applyFloatRect(id); n += 1; }
-  if (n) savePanels();
-  return n;
-}
-
-/**
- * 换论文：把所有浮窗收回它们原来的停靠区。
- * 判据是 docId —— 同一篇论文重新打开（刷新 / 重进）时浮窗保持原样，
- * 换成**另一篇**才收回，免得浮在屏幕上的面板显示的却是上一篇的内容。
- * 返回收回的个数（探针与报表用得到）。
- */
-function redockFloatsForDoc(docId) {
-  const ids = floatPanels();
-  if (!ids.length) return 0;
-  const tgt = docId || '';
-  let moved = 0;
-  for (const id of ids) {
-    const p = state.panels[id];
-    if (!p.docId) { p.docId = tgt; continue; }        // 浮出时还没开论文：认领当前这篇，别乱收
-    if (tgt && p.docId !== tgt) { dockPanelTo(id, p.home || 'left'); moved += 1; }
-  }
-  if (moved) savePanels();
-  return moved;
-}
-/** 手动「全部收回停靠」（面板管理器 / 探针用） */
-function redockFloats() {
-  let n = 0;
-  for (const id of floatPanels()) if (dockPanelTo(id, state.panels[id].home || 'left')) n += 1;
-  return n;
-}
-
-/**
- * R7：把「和容器矩形相交」的浮窗收回各自的 home 停靠区，返回收回的个数。
- * 供 dockPanelTo() 在停靠前调用：目标停靠区若被浮窗压着，先让开再停靠。
- * 目标区还没布局出来（宽高为 0）时不动手，避免误判。
- *
- * ⚠️ `exclude` 是**必须**的，不是可选优化：调用方 dockPanelTo() 此刻自己还是浮窗
- * （`p.dock` 要到函数后半段才改成 zone），而它自己的卡片常常正好压在目标停靠区上
- * （左栏面板的卡片就停在左栏旁边，必然相交）。不排除自己的话：
- *   dockPanelTo(A) → clearFloatsCovering(左栏) → 看到 A 的卡片相交 → dockPanelTo(A) → …
- * 无限互相递归，**栈溢出（Maximum call stack size exceeded）**，卡片永远收不回去。
- * 实测事故：左栏四块（文件/目录/笔记/文献关系）浮出为卡片后点 ✕ 全部收不回，
- * 控制台报 `at dockPanelTo ← at clearFloatsCovering ← at dockPanelTo …`。
- */
-function clearFloatsCovering(container, exclude = '') {
-  const target = container?.getBoundingClientRect?.();
-  if (!target || target.width < 1 || target.height < 1) return 0;
-  const overlaps = (a, b) => a.left < b.right - 1 && a.right > b.left + 1 && a.top < b.bottom - 1 && a.bottom > b.top + 1;
-  let moved = 0;
-  for (const fid of floatPanels()) {
-    if (fid === exclude) continue;                          // 正在停靠的那一块：别让它递归调用自己
-    const node = panelEl(fid) || state.blockEls[fid];
-    const rect = node?.getBoundingClientRect?.();
-    if (rect && overlaps(rect, target) && dockPanelTo(fid, state.panels[fid].home || 'left')) moved += 1;
-  }
-  return moved;
-}
-
-/* ── 原位置占位块 ── */
-
-function ensurePanelSlot(id, dock) {
-  document.querySelector(`.panel-slot[data-slot="${id}"][data-dying]`)?.remove();
-  let slot = document.querySelector(`.panel-slot[data-slot="${id}"]`);
-  if (!slot) {
-    slot = el('div', { class: 'panel-slot', dataset: { slot: id, dock }, 'aria-hidden': 'true' },
-      el('span', { text: `「${panelTitle(id)}」会回到这里` }));
-    panelAnim(slot, [{ opacity: 0, transform: 'scale(.98)' }, { opacity: .55, transform: 'none' }], { kind: 'slot-in', ms: ANIM.slot });
-  }
-  slot.dataset.dock = dock;
-  return slot;
-}
-
-function removePanelSlot(slot) {
-  if (!slot || slot.dataset.dying) return;
-  slot.dataset.dying = '1';
-  const done = () => {
-    const host = slot.parentElement;
-    slot.remove();
-    // 占位块一消失，它上面的内容就变矮了，浏览器的「滚动锚定」会把容器 scrollTop 往下带
-    //（实测左栏直接归零）。强制一次布局把账算清，再把「离开时停在哪」补回去。
-    void host?.scrollHeight;
-    applyAwayScroll(host);
-    requestAnimationFrame(() => applyAwayScroll(host));
-  };
-  const a = panelAnim(slot, [{ opacity: .55 }, { opacity: 0, transform: 'scale(.98)' }], { kind: 'slot-out', ms: ANIM.slot });
-  if (a) a.finished.then(done, done);
-  else done();
-}
-
-/** 只有「还浮着且可见」的面板才留占位块，其余统统淡出 */
-function syncPanelSlots(keepIds) {
-  for (const slot of $$('.panel-slot')) {
-    if (slot.dataset.dying) continue;
-    if (keepIds.includes(slot.dataset.slot)) continue;
-    removePanelSlot(slot);
-  }
-}
-
-/* ── 拖动时的停靠预览 ── */
-
-/** 兼容旧探针：浮窗现在只认最右边缘，不再认左栏 / 底部 / 普通右栏。 */
-function dockZoneAt(x, y) {
-  const box = floatSafeBox();
-  return y >= box.top - 2 && x >= window.innerWidth - FLOAT_REDOCK_RIGHT_PX ? 'right' : '';
-}
-
-// 只有最后这 18px 的「贴边区」会触发回栏；浮窗在左侧、底部或普通右侧都只会停留在原位。
-const FLOAT_REDOCK_RIGHT_PX = 18;
-function floatRedockTarget(id, x, y) {
-  const box = floatSafeBox();
-  if (y < box.top - 2 || x < window.innerWidth - FLOAT_REDOCK_RIGHT_PX) return '';
-  if (isRightPanel(id)) return 'right';
-  const home = state.panels[id]?.home;
-  return PANEL_DOCKS_REAL.includes(home) ? home : 'left';
-}
-
-/** 预览框该画在哪（收起的一侧画在活动栏上；底部没有停靠区时画一条底部横带） */
-function dockZoneRect(zone) {
-  if (zone === 'left' || zone === 'right') {
-    const collapsed = document.body.classList.contains(`no-${zone}`);
-    const node = collapsed ? $(zone === 'left' ? '#railLeft' : '#railRight') : $(zone === 'left' ? '#leftSide' : '#rightSide');
-    const r = node?.getBoundingClientRect();
-    return r && r.width > 2 ? { left: r.left, top: r.top, w: r.width, h: r.height } : null;
-  }
-  if (zone === 'bottom') {
-    const wrap = $('.viewer-wrap')?.getBoundingClientRect();
-    if (!wrap) return null;
-    const dock = dockBottomEl();
-    const shown = dock && !dock.classList.contains('hidden');
-    const h = shown ? dock.getBoundingClientRect().height : Math.min(240, Math.max(120, Math.round(wrap.height * .34)));
-    return { left: wrap.left, top: wrap.bottom - h, w: wrap.width, h };
-  }
-  return null;
-}
-
-function showDockPreview(zone) {
-  const box = $('#dockPreview');
-  if (!box) return;
-  const r = dockZoneRect(zone);
-  if (!zone || !r) { hideDockPreview(); return; }
-  if (box.classList.contains('hidden')) {
-    box.classList.remove('hidden');
-    panelAnim(box, [{ opacity: 0 }, { opacity: .55 }], { kind: 'preview-in', ms: ANIM.preview });
-  }
-  box.dataset.zone = zone;
-  box.style.left = `${Math.round(r.left)}px`;
-  box.style.top = `${Math.round(r.top)}px`;
-  box.style.width = `${Math.round(r.w)}px`;
-  box.style.height = `${Math.round(r.h)}px`;
-}
-
-function hideDockPreview() {
-  const box = $('#dockPreview');
-  if (!box) return;
-  box.dataset.zone = '';
-  box.classList.add('hidden');
-}
-
-/* ── 不丢状态：搬节点前后保存 / 恢复滚动位置、焦点、输入内容 ── */
+   **保留下来的**是「搬节点不丢状态」那三个与布局无关的函数（capturePanelMove /
+   restorePanelMove / withPanelMove）—— 右栏换块时仍然靠它们保住滚动位置、焦点与输入框内容。 */
 
 /**
  * 搬的是同一批 DOM 节点，所以这里可以直接用**元素引用**记住 scrollTop ——
  * 不需要任何选择器（跨容器搬家时选择器最容易失配）。
  * 记两类滚动容器：① 节点自己与后代（.ai-body / .outline / .rel-list …）；
  * ② 节点往上的祖先（左栏 #leftSide 是整栏滚动的那一层）。
- * 面板**浮出去**时容器会变矮、scrollTop 被浏览器夹小，那一路由 rememberAwayScroll()/
- * applyAwayScroll() 单独负责（只在 float → dock 这一个来回里生效，见那边的注释）。
  * 一并记下：焦点元素（搬走带焦点的节点会被浏览器 blur 掉，键盘就废了）、
  * #chatInput 的内容与光标位置、消息条数（给探针留证据）。
  */
@@ -1886,28 +586,9 @@ function capturePanelMove(nodes) {
 }
 
 /**
- * 「面板离开时那个停靠容器的滚动位置」。
- * 面板一浮出去，容器内容就变矮，浏览器会把 scrollTop 夹小（常常直接归零）；
- * 等它回停靠时再想恢复就已经没数了，所以离开前先记一笔，回来时补上。
- * 只在 float → dock 这一个来回里用，**不参与别的搬动** ——
- * 否则一个陈旧的记忆值会盖掉用户自己刚滚到的位置（踩过）。
- * 补的时候只往下推（`< away` 才动）：记忆值只可能被浏览器夹小，不会自己变小。
+ * capturePanelMove() 的快照还原：滚动位置 / 焦点元素 / #chatInput 内容与光标。
+ * 搬的还是同一批节点，所以这里能直接用元素引用，不需要任何选择器。
  */
-function dockContainerFor(dock) {
-  if (dock === 'right') return $('#aiArea');
-  if (dock === 'bottom') return dockBottomEl();
-  return $('#leftSide');
-}
-function rememberAwayScroll(container) {
-  if (!container) return;
-  state._awayScroll = state._awayScroll || new Map();
-  if (container.scrollHeight > container.clientHeight) state._awayScroll.set(container, container.scrollTop);
-}
-function applyAwayScroll(container) {
-  const away = state._awayScroll?.get(container);
-  if (container && away != null && container.scrollTop < away) container.scrollTop = away;
-}
-
 function restorePanelMove(snap) {
   if (!snap) return;
   /** 把记下来的滚动位置放回去；返回「是不是已经全部对上了」 */
@@ -1933,11 +614,10 @@ function restorePanelMove(snap) {
   };
   put();
   /**
-   * 搬完之后容器/内容的高度还会继续变（FLIP 200ms、占位块 160ms 后收掉、字体与公式渲染、
-   * 图片解码…），高度一变，刚才被夹住的滚动位置就又放得回去了；浏览器自己的
-   * 「滚动锚定」也会在随后的布局里把 scrollTop 往下带（实测 2236 → 2019）。
-   * 所以每帧补一次，最多盯 40 帧（≈0.7s）：**用户一碰页面就停**（按下 / 滚轮 / 按键），
-   * 保证不会跟用户自己之后的滚动较劲。
+   * 搬完之后容器 / 内容的高度还会继续变（字体与公式渲染、图片解码…），高度一变，
+   * 刚才被夹住的滚动位置就又放得回去了；浏览器自己的「滚动锚定」也会在随后的布局里
+   * 把 scrollTop 往下带。所以每帧补一次，最多盯 40 帧（≈0.7s）：**用户一碰页面就停**
+   * （按下 / 滚轮 / 按键），保证不会跟用户自己之后的滚动较劲。
    * 只补滚动：焦点与输入内容在第一趟就恢复了，不能被后面的帧反复覆盖。
    */
   let stopped = false;
@@ -1964,6 +644,9 @@ function restorePanelMove(snap) {
   setTimeout(putScrolls, ANIM.flip + 60);
 }
 
+/**
+ * 面板搬家的统一入口：先拍快照 → 执行搬动 → 还原位置与焦点。
+ */
 function withPanelMove(nodes, fn) {
   const snap = capturePanelMove(nodes);
   fn();
@@ -1971,280 +654,9 @@ function withPanelMove(nodes, fn) {
   return snap;
 }
 
-/* ── 浮窗的拖动 / 缩放 ── */
-
-let floatDragId = '';        // 当前正在拖的浮窗（同一时刻只会有一个）
-
-/**
- * 浮窗拖动：手感与 makeDraggable 一致 ——
- *   指针捕获、5px 阈值（没走够就当点击，面板头里的按钮照常能用）、
- *   拖动期间给个 120ms 的轻微抬升（更大阴影 + scale(1.01)）。
- * 松手：落在左 / 右 / 底部 → FLIP 回停靠；落在无效区域 → 保持浮动并钳进视口。
- */
-function bindFloatDrag(id) {
-  const head = panelHeadEl(id);
-  if (!head || head.dataset.floatDragBound) return;
-  head.dataset.floatDragBound = '1';
-  let armed = false; let dragging = false; let sx = 0; let sy = 0; let ox = 0; let oy = 0; let pid = null;
-  // 拖动结束后紧跟着的那一下 click 要吃掉（不然会误触面板头里的按钮）。
-  // 记的是**时间戳**而不是布尔位：松手时指针早就离开面板头了，那个 click 根本不会落到头上，
-  // 布尔位就会一直挂着，把之后真正的 ✕ / ⋯ 点击全吃掉（按钮看起来是坏的）。
-  let suppressClickAt = 0;
-
-  head.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    if (state.panels[id]?.dock !== 'float') return;
-    if (e.target.closest('input, textarea')) return;
-    if (e.target.closest('button, a, select, label, .no-drag')) { bringFloatToFront(id); return; }
-    armed = true;
-    sx = e.clientX; sy = e.clientY;
-    pid = e.pointerId;
-    bringFloatToFront(id);
-    const box = floatBoxOf(id);
-    const r = box?.getBoundingClientRect();
-    ox = r ? r.left : 0;
-    oy = r ? r.top : 0;
-    // .ai-head 上还挂着 HTML5 的 draggable（块换位用的），会和指针拖动抢同一次按下
-    if (head.draggable) { head.dataset.wasDraggable = '1'; head.draggable = false; }
-    // 移动事件挂到 window：鼠标一离开面板头（几乎是立刻）就收不到 head 上的 pointermove 了，
-    // 那样拖动会「粘」在原地。bindSplitter 用的也是这个写法。
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', end);
-    window.addEventListener('pointercancel', end);
-  });
-
-  const move = (e) => {
-    if (!armed) return;
-    const dx = e.clientX - sx;
-    const dy = e.clientY - sy;
-    if (!dragging) {
-      if (Math.abs(dx) + Math.abs(dy) < 5) return;   // 还在「点击」的抖动范围内
-      dragging = true;
-      suppressClickAt = performance.now();
-      floatDragId = id;
-      cancelPanelAnims();                            // 新拖动打断正在跑的过渡
-      try { head.setPointerCapture(pid); } catch { /* 忽略 */ }
-      floatBoxOf(id)?.classList.add('dragging');      // 抬升：CSS transition 120ms
-      logPanelAnim('lift', ANIM.lift);
-      document.body.classList.add('panel-dragging');
-    }
-    const p = state.panels[id];
-    const box = floatBoxOf(id);
-    if (!p || !box) return;
-    const r = clampFloatRect({ left: ox + dx, top: oy + dy }, { w: p.rect?.w, h: p.rect?.h });
-    // 拖动期间把模型里的 left/top 一起跟上（不落盘）：松手时 settleFloat / FLIP 要用它，
-    // 而且这时候量 getBoundingClientRect() 会被「抬升」的 scale(1.01) 污染（量出来偏大 1%）
-    if (p.rect) { p.rect.left = r.left; p.rect.top = r.top; }
-    box.style.left = `${r.left}px`;
-    box.style.top = `${r.top}px`;
-    showDockPreview(floatRedockTarget(id, e.clientX, e.clientY));
-  };
-
-  const end = (e) => {
-    window.removeEventListener('pointermove', move);
-    window.removeEventListener('pointerup', end);
-    window.removeEventListener('pointercancel', end);
-    if (!armed) return;
-    armed = false;
-    document.body.classList.remove('panel-drag-out');
-    try { head.releasePointerCapture?.(pid); } catch { /* 忽略 */ }
-    if (head.dataset.wasDraggable) { head.draggable = true; delete head.dataset.wasDraggable; }
-    if (!dragging) return;                            // 只是点了一下：什么都不做
-    dragging = false;
-    floatDragId = '';
-    floatBoxOf(id)?.classList.remove('dragging');
-    document.body.classList.remove('panel-dragging');
-    hideDockPreview();
-    const zone = floatRedockTarget(id, e.clientX, e.clientY);
-    if (zone) {
-      dockPanelTo(id, zone);                          // FLIP 平滑收缩回停靠区
-    } else {
-      settleFloat(id);                                // 除最右 18px 外：保持浮动 + 钳进视口
-    }
-  };
-
-  // 拖完那一下浏览器还会补一个 click，得吃掉，不然会误触面板头里的按钮。
-  // 只吃掉「拖动刚结束 400ms 内」的那一下，过期自动作废。
-  head.addEventListener('click', (e) => {
-    if (!suppressClickAt || performance.now() - suppressClickAt > 400) return;
-    suppressClickAt = 0;
-    e.preventDefault();
-    e.stopPropagation();
-  }, true);
-}
-
-/**
- * 拖动某个方向的抓手改浮窗大小。
- *
- * `dir` 是 'n' | 's' | 'e' | 'w' 或两两组合（'ne' 等）。四个角与四条边都能拉 ——
- * 用户口径：「左右上下都能直接拉伸而且也可以在角落直接拉伸」。
- *
- * 关键：往**左/上**方向拉时，左边（或上边）也跟着动 —— 也就是先算新的 left/top，
- * 再把宽高按同一个方向补回来，而不是固定左上角只缩放右下角。
- * 最小 260×180、最大不出视口，统一由 clampFloatRect 保证。
- */
-function bindFloatResize(id, grip, dir = 'se') {
-  const growE = dir.includes('e');
-  const growS = dir.includes('s');
-  const growW = dir.includes('w');
-  const growN = dir.includes('n');
-  if (!growE && !growS && !growW && !growN) return;
-
-  grip.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    const p = state.panels[id];
-    const box = floatBoxOf(id);
-    if (!p || p.dock !== 'float' || !box) return;
-    e.preventDefault();
-    e.stopPropagation();
-    bringFloatToFront(id);
-    cancelPanelAnims();
-    const r = box.getBoundingClientRect();
-    const sx = e.clientX; const sy = e.clientY;
-    const pid = e.pointerId;
-    grip.classList.add('dragging');
-    try { grip.setPointerCapture(pid); } catch { /* 忽略 */ }
-
-    const move = (ev) => {
-      const dx = ev.clientX - sx;
-      const dy = ev.clientY - sy;
-      /* 先按方向算出拟议的 left/top/宽高：往左拉 = left 减小、宽增大；往上拉同理 */
-      let left = r.left + (growW ? dx : 0);
-      let top = r.top + (growN ? dy : 0);
-      let w = r.width + (growE ? dx : 0) - (growW ? dx : 0);
-      let h = r.height + (growS ? dy : 0) - (growN ? dy : 0);
-      /* 撞到最小尺寸时，left/top 不能再跟着走（否则会出现「往外拉但框不动」的错觉） */
-      if (growW && w < FLOAT_MIN_W) { left = r.left + r.width - FLOAT_MIN_W; w = FLOAT_MIN_W; }
-      if (growN && h < FLOAT_MIN_H) { top = r.top + r.height - FLOAT_MIN_H; h = FLOAT_MIN_H; }
-      const nr = clampFloatRect({ left, top }, { w, h });
-      p.rect = nr;
-      box.style.left = `${nr.left}px`;
-      box.style.top = `${nr.top}px`;
-      box.style.width = `${nr.w}px`;
-      box.style.height = `${nr.h}px`;
-    };
-    const up = () => {
-      grip.classList.remove('dragging');
-      grip.removeEventListener('pointermove', move);
-      grip.removeEventListener('pointerup', up);
-      grip.removeEventListener('pointercancel', up);
-      savePanels();
-    };
-    grip.addEventListener('pointermove', move);
-    grip.addEventListener('pointerup', up);
-    grip.addEventListener('pointercancel', up);
-  });
-}
-
-/* ── 底部停靠区：高度把手 + 列宽把手 ── */
-
-/** 底部停靠区高度（--dock-bottom-h）：拖动 / ↑↓ 微调，写进 reader.ui.dockBottomH */
-function setDockBottomHeight(px, { save = true } = {}) {
-  const wrapH = $('.viewer-wrap')?.clientHeight || 600;
-  const h = Math.round(clamp(Number(px) || 240, DOCK_BOTTOM_MIN_H, Math.max(140, wrapH - 120)));
-  document.documentElement.style.setProperty('--dock-bottom-h', `${h}px`);
-  if (save) saveUi();
-  return h;
-}
-
-function bindDockBottomSplitter() {
-  const node = $('#dockBottomSplit');
-  if (!node || node.dataset.bound) return;
-  node.dataset.bound = '1';
-  const now = () => cssPx('--dock-bottom-h', 240);
-  node.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
-    e.preventDefault();
-    setDockBottomHeight(now() + (e.key === 'ArrowUp' ? 16 : -16));
-  });
-  let startY = 0; let startH = 0;
-  const move = (e) => setDockBottomHeight(startH + (startY - e.clientY), { save: false });
-  const up = () => {
-    node.classList.remove('dragging');
-    document.body.classList.remove('dock-dragging');
-    window.removeEventListener('pointermove', move);
-    window.removeEventListener('pointerup', up);
-    saveUi();
-    refitViewer(REFIT_AFTER_MS);
-  };
-  node.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    startY = e.clientY;
-    startH = now();
-    node.classList.add('dragging');
-    document.body.classList.add('dock-dragging');
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-  });
-}
-
-/** 底部停靠区里相邻两列之间的宽度把手（等价于 .ai-split 的拖动逻辑，方向改成左右） */
-function bindDockColumnSplit(id, nextId) {
-  const node = el('div', { class: 'dock-vsplit', role: 'separator', 'aria-orientation': 'vertical', tabIndex: 0, title: '拖动调整左右两列的宽度' });
-  const setW = (a, b) => {
-    state.panels[id].w = Math.round(a);
-    state.panels[nextId].w = Math.round(b);
-    applyPanelWidths();
-  };
-  node.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    e.preventDefault();
-    const delta = e.key === 'ArrowRight' ? 24 : -24;
-    const a = dockColumnWidth(id);
-    const b = dockColumnWidth(nextId);
-    if (a + delta < 120 || b - delta < 120) return;
-    setW(a + delta, b - delta);
-    savePanels();
-  });
-  let startX = 0; let aw = 0; let bw = 0;
-  const move = (e) => {
-    const dx = e.clientX - startX;
-    let a = aw + dx;
-    let b = bw - dx;
-    if (a < 120) { b -= 120 - a; a = 120; }
-    if (b < 120) { a -= 120 - b; b = 120; }
-    if (a < 120 || b < 120) return;
-    setW(a, b);
-  };
-  const up = () => {
-    node.classList.remove('dragging');
-    document.body.classList.remove('dragging');
-    window.removeEventListener('pointermove', move);
-    window.removeEventListener('pointerup', up);
-    savePanels();
-  };
-  node.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    startX = e.clientX;
-    aw = dockColumnWidth(id);
-    bw = dockColumnWidth(nextId);
-    node.classList.add('dragging');
-    document.body.classList.add('dragging');
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-  });
-  return node;
-}
-
-/** 底部某一列现在的宽度（没量到就用兜底值） */
-function dockColumnWidth(id) {
-  const node = document.querySelector(`.panel-col[data-col="${id}"]`);
-  return Math.round(node?.getBoundingClientRect().width || 240);
-}
-
-/** 把注册表里的列宽写到 .panel-col 上（没有存过宽度 = 各列平分） */
-function applyPanelWidths() {
-  for (const id of PANEL_IDS) {
-    const col = document.querySelector(`.panel-col[data-col="${id}"]`);
-    if (!col) continue;
-    const w = state.panels[id].w;
-    col.style.flex = w > 0 ? `0 0 ${Math.round(w)}px` : '1 1 0';
-  }
-}
-
 /* ── 键盘：焦点在哪个面板上 ── */
 
-/** 当前聚焦（或最近点过）的面板 id */
+/** 当前聚焦（或最近点过）的面板 id（现由 Esc / 快捷键路径复用） */
 function currentPanelId() {
   const active = document.activeElement;
   const inPanel = active?.closest?.('[data-panel]')?.dataset?.panel;
@@ -2253,391 +665,11 @@ function currentPanelId() {
   return '';
 }
 
-/** 焦点在浮窗里（或最近点过某个浮窗）时，Esc 把它收回停靠区 */
-function focusedFloatPanel() {
-  const id = currentPanelId();
-  return id && state.panels?.[id]?.dock === 'float' ? id : '';
-}
-
-/* ───────────────────────── 面板管理器弹出层 ───────────────────────── */
-
-let panelMenuEl = null;
-let panelMenuFor = null;   // 当前把手（点它弹出菜单的那个按钮）
-
-/** 旧函数名保留给旧测试钩子与桌面壳兼容，但现在只打开阅读器内部卡片。
- * 不再写 reader.detachedWindows，也不再调用 window.open()。卡片不会因点击外部区域消失，
- * 只能用卡片标题栏的收回按钮、面板管理器的明确操作或 Esc 收回。 */
-function detachPanelToWindow(id) {
-  const p = state.panels?.[id];
-  if (!p) return false;
-  const ok = floatPanel(id);
-  if (ok) toast(`「${panelTitle(id)}」已打开为应用内卡片`, '', 1600);
-  return ok;
-}
-
-/** 兼容旧入口名：不再创建 popup / Tao 子窗口，统一转为应用内卡片。 */
-function openPanelWindow(id) {
-  return detachPanelToWindow(id);
-}
-
-/** 独立窗口页（子窗口）专用的「关闭信号」：三层都发，任何一层到达主窗口都够 */
-function panelWindowGoodbye(via) {
-  publishPanelMessage({ type: 'panel-window-close', id: panelWindow.id, via });
-}
-
-/** 面板窗口只保留一个面板，布局变更通过 savePanels() 发回主窗口。 */
-function initPanelWindow() {
-  if (!panelWindow.enabled) return;
-  document.body.classList.add('panel-window', `panel-window-${panelWindow.id}`);
-  const target = panelWindow.id;
-  for (const id of PANEL_IDS) {
-    const p = state.panels[id];
-    p.visible = id === target;
-    if (id === target) {
-      p.dock = PANEL_IDS_RIGHT.includes(id) ? 'right' : 'left';
-      p.home = p.dock;
-      p.collapsed = false;
-    }
-  }
-  applyPanels();
-  document.title = `${panelTitle(target)} · 论文阅读器`;
-  $('#panelBtn')?.remove();
-  $('#settingsBtn')?.remove();
-}
-
-function ensurePanelMenu() {
-  if (panelMenuEl) return panelMenuEl;
-  panelMenuEl = el('div', { class: 'panel-menu hidden', id: 'panelMenu', role: 'dialog', 'aria-label': '面板管理器' });
-  // 点菜单内部（空白处 / 按钮）都不算「点外部」，别误关
-  panelMenuEl.addEventListener('mousedown', (e) => e.stopPropagation());
-  // 展开布局 / 批量操作会改变菜单高度，仍要把整张菜单夹在当前窗口内。
-  panelMenuEl.addEventListener('toggle', () => clampPanelMenuToViewport(), true);
-  /**
-   * 纯键盘也能走完管理器里的所有操作：方向键在「行」之间移动焦点，
-   * Enter / Space 是 <button> 的原生行为（summary 上的那一套由下面显式处理），
-   * Esc 由 initPanels 的 document 监听负责关闭并把焦点还给把手。
-   *
-   * 导航规则（R12 修）：用「DOM 顺序的扁平列表」上下移动是**错的** ——
-   * 一个 .pm-row 的结构是「显示按钮 → 布局设置 summary → 独立窗口 summary」，
-   * 而折叠的 details 里的按钮会被过滤掉。于是从「布局设置」按 ↓ 会落到**同一行**的
-   * 「独立窗口」，而不是下一行的显示按钮：卡片套件里那条
-   * 「收起时跳过隐藏按钮」的断言就是这么红的（真机上是键盘用户走不动管理器）。
-   * 现在的规则：↑↓ 在**行与行**之间移动（落到那一行的显示按钮）；
-   * 在某个 summary 上按↓ = 进入它自己的操作区（展开后才有按钮，否则原地不动）；
-   * 在操作区里按↑ = 回到本行 summary；←→ 仍在「当前可见按钮」的扁平列表里走。
-   */
-  panelMenuEl.addEventListener('keydown', (e) => {
-    const active = document.activeElement;
-    if ((e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') && active?.tagName === 'SUMMARY') {
-      e.preventDefault();
-      const details = active.parentElement;
-      if (details?.tagName === 'DETAILS') {
-        details.open = !details.open;
-        clampPanelMenuToViewport();
-      }
-      return;
-    }
-    const isArrow = ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(e.key);
-    if (!isArrow) return;
-    const btns = [...panelMenuEl.querySelectorAll('button:not(:disabled), summary')]
-      // Chromium can still report a rect for descendants of a closed
-      // <details>; those controls are not keyboard-visible until expanded.
-      .filter((node) => {
-        const r = node.getBoundingClientRect();
-        return (r.width > 0 || r.height > 0)
-          && (node.tagName === 'SUMMARY' || !node.closest('details:not([open])'));
-      });
-    if (!btns.length) return;    const forward = e.key === 'ArrowDown' || e.key === 'ArrowRight';
-    const vertical = e.key === 'ArrowDown' || e.key === 'ArrowUp';
-    const rows = [...panelMenuEl.querySelectorAll('.pm-row')];
-    const row = active?.closest?.('.pm-row') || null;
-    const rowIdx = rows.indexOf(row);
-    const inActs = !!active?.closest?.('.pm-layout-acts, .pm-window-acts');
-    let next = null;
-    if (vertical && rowIdx >= 0) {
-      if (inActs) {
-        // 在操作区里：↑ 回本行 summary；↓ 去下一行的显示按钮
-        next = forward
-          ? rows[rowIdx + 1]?.querySelector(':scope > .pm-btn') || null
-          : row.querySelector('.pm-layout > summary');
-      } else if (active?.tagName === 'SUMMARY' && forward) {
-        // summary 上按 ↓ = 进入它自己的操作区。
-        // 只在**已展开**时进：收起态里 Chromium 会让 details 内容不可聚焦
-        //（`.focus()` 静默失败，实测 activeElement 原地不动），所以收起时按下面的规则去下一行。
-        const det = active.parentElement;
-        next = det?.open
-          ? [...det.querySelectorAll('button:not(:disabled)')].find((b) => b.getBoundingClientRect().height > 0) || null
-          : rows[rowIdx + 1]?.querySelector(':scope > .pm-btn') || null;
-      } else {
-        next = rows[rowIdx + (forward ? 1 : -1)]?.querySelector(':scope > .pm-btn') || null;
-      }
-    }
-    if (!next) {
-      const i = btns.indexOf(active);
-      if (i < 0) { next = btns[0]; } else { next = btns[(i + (forward ? 1 : -1) + btns.length) % btns.length]; }
-    }
-    if (!next) return;
-    e.preventDefault();
-    next.focus();
-  });
-  document.body.append(panelMenuEl);
-  return panelMenuEl;
-}
-
-/**
- * 菜单里点一下之后重画菜单：按钮文案是 toggle 语义（显示中 / 已隐藏、固定有没有选上、
- * ↑↓ 有没有到边界），不重画就会和真实状态不一致。
- * **必须延到微任务再画**：直接在这一下点击里 replaceChildren 会把事件目标从 DOM 里摘掉，
- * 冒泡中断，第二次点同一个按钮就整个失效（按钮像坏的）。
- */
-// 同样要认 .closed：关闭序列里重画会把焦点元素换掉（见 refreshPanelManager 的注释）
-const refreshPanelMenuSoon = () => { queueMicrotask(() => { if (panelMenuOpen()) renderPanelMenu(); }); };
-
-const menuBtn = (label, title, onclick, { on = false, disabled = false } = {}) =>
-  el('button', {
-    type: 'button', class: `pm-btn${on ? ' on' : ''}`, text: label, title,
-    dataset: { pmAction: /^(显示中|已隐藏)$/.test(label) ? 'visibility' : label },
-    disabled, 'aria-pressed': on ? 'true' : 'false',
-    onclick: (e) => { e.stopPropagation(); onclick(); refreshPanelMenuSoon(); },
-  });
-
-function renderPanelMenu() {
-  const box = ensurePanelMenu();
-  // 只记住本次菜单内的展开状态；重新打开时 box 是 hidden，所有低频区仍默认收起。
-  const keep = !box.classList.contains('hidden');
-  const expanded = new Set(keep ? [...box.querySelectorAll('.pm-layout[open]')]
-    .map((node) => node.closest('.pm-row')?.dataset.panel) : []);
-  const batchOpen = keep && !!box.querySelector('.pm-batch[open]');
-  const active = keep && box.contains(document.activeElement) ? document.activeElement : null;
-  const focusPanel = active?.closest('.pm-row')?.dataset.panel;
-  const focusAction = active?.dataset.pmAction;
-  const scrollTop = box.scrollTop;
-  const rows = [];
-  for (const id of panelMenuIds()) {
-    const p = state.panels[id];
-    const floating = p.dock === 'float';
-    const list = p.dock === 'float' ? panelsOfDock(p.home) : panelsOfDock(p.dock);
-    const at = list.indexOf(id);
-    const head = el('div', { class: 'pm-head' },
-      el('span', { class: 'pm-name', text: panelTitle(id) }),
-      el('span', {
-        class: `pm-dock${floating ? ' pm-detached' : ''}`,
-        // 译文 / 问答标出「右栏第几栏」——它们只在这一侧，「一栏只开一个」全靠这个数分栏
-        text: floating ? '应用内卡片' : (isRightPanel(id) ? `右栏 · 第${colOf(id)}栏` : (DOCK_LABEL[p.dock] || p.dock)),
-      }),
-    );
-    // 浮动卡片不是「隐藏」：点击这里只把卡片提到最前，不会因点外部区域自动消失。
-    const visibleBtn = floating
-      ? menuBtn('卡片中', `「${panelTitle(id)}」正在阅读器内部卡片中；点击这里把卡片提到最前`, () => {
-          bringFloatToFront(id);
-        }, { on: true })
-      : menuBtn(p.visible ? '显示中' : '已隐藏', `${p.visible ? '隐藏' : '显示'}「${panelTitle(id)}」`, () => setPanelVisible(id, !p.visible), { on: p.visible });
-    const layout = el('details', {
-      class: 'pm-layout',
-      open: expanded.has(id),
-      'aria-label': `「${panelTitle(id)}」布局设置`,
-    });
-    layout.append(el('summary', {
-      text: '布局设置',
-      dataset: { pmAction: 'layout' },
-      title: `展开「${panelTitle(id)}」的浮出、停靠、固定和排序操作`,
-      'aria-label': `展开或收起「${panelTitle(id)}」布局设置`,
-    }));
-    layout.append(el('div', { class: 'pm-layout-acts' },
-      // 译文 / 问答不允许停到左栏 / 底部；卡片入口仍然保留在这里。
-      // 左栏四块沿用 2.2b 的浮出 / 停靠到左 / 右 / 底部。
-      ...(isRightPanel(id) ? [
-        menuBtn(floating ? '卡片中' : '打开应用内卡片', floating
-          ? `「${panelTitle(id)}」已经在阅读器内部卡片中；点击可提到最前`
-          : `在阅读器内部打开「${panelTitle(id)}」卡片`, () => floating ? bringFloatToFront(id) : floatPanel(id), { on: floating }),
-        menuBtn('放到第 1 栏', `把「${panelTitle(id)}」放到右栏第 1 栏`, () => setPanelColumn(id, 1), { on: colOf(id) === 1 }),
-        menuBtn('放到第 2 栏', `把「${panelTitle(id)}」放到右栏第 2 栏（会自动把第 2 栏开出来）`, () => setPanelColumn(id, 2), { on: colOf(id) === 2 }),
-        rightColsWanted() === 1
-          ? menuBtn('再开一栏', '在右栏右边再开一栏：译文和问答可以各占一栏并排看', () => openRightColumn())
-          : menuBtn('收起第 2 栏', '把右栏第 2 栏收起来（第 2 栏里的面板一并收起，栏位归属保留）', () => closeRightColumn(), { on: true }),
-      ] : [
-        menuBtn('浮出', `把「${panelTitle(id)}」浮成应用内浮窗（原位置留占位块，可拖动缩放）`, () => floatPanel(id), { on: p.dock === 'float' }),
-        menuBtn('停靠到左', `把「${panelTitle(id)}」停靠到左栏`, () => dockPanelTo(id, 'left'), { on: p.dock === 'left' }),
-        menuBtn('停靠到右', `把「${panelTitle(id)}」停靠到右栏`, () => dockPanelTo(id, 'right'), { on: p.dock === 'right' }),
-        menuBtn('停靠到底部', `把「${panelTitle(id)}」停靠到底部横条`, () => dockPanelTo(id, 'bottom'), { on: p.dock === 'bottom' }),
-      ]),
-      menuBtn('固定', `固定「${panelTitle(id)}」：窗口放不下时，优先收起没有固定面板的那一侧`, () => setPanelPinned(id, !p.pinned), { on: p.pinned }),
-      menuBtn('↑', `「${panelTitle(id)}」上移一位`, () => movePanel(id, -1), { disabled: at <= 0 }),
-      menuBtn('↓', `「${panelTitle(id)}」下移一位`, () => movePanel(id, 1), { disabled: at < 0 || at >= list.length - 1 }),
-    ));
-    const windowDetails = el('details', { class: 'pm-window', 'aria-label': `「${panelTitle(id)}」应用内卡片` });
-    windowDetails.append(el('summary', {
-      text: floating ? '应用内卡片（使用中）' : '应用内卡片',
-      dataset: { pmAction: 'window' },
-      title: floating ? `「${panelTitle(id)}」正在阅读器内部卡片中` : `在阅读器内部打开「${panelTitle(id)}」卡片`,
-      'aria-label': `展开或收起「${panelTitle(id)}」应用内卡片操作`,
-    }));
-    windowDetails.append(el('div', { class: 'pm-window-acts' },
-      floating
-        ? menuBtn('已在应用内卡片中', '卡片不会因点击其他区域自动消失；用卡片右上角按钮或明确的收回操作结束', () => bringFloatToFront(id), { on: true })
-        : menuBtn('打开应用内卡片', `在阅读器内部打开「${panelTitle(id)}」卡片，不创建独立窗口`, () => detachPanelToWindow(id)),
-    ));
-    layout.append(windowDetails);
-    rows.push(el('div', { class: 'pm-row', dataset: { panel: id } }, head, visibleBtn, layout));
-  }
-  const batch = el('details', { class: 'pm-batch', open: batchOpen, 'aria-label': '批量面板操作' });
-  batch.append(el('summary', {
-    text: '批量操作',
-    dataset: { pmAction: 'batch' },
-    title: '展开全部显示与全部收回停靠',
-    'aria-label': '展开或收起批量面板操作',
-  }));
-  batch.append(el('div', { class: 'pm-batch-acts' },
-    el('button', { type: 'button', class: 'pm-foot-btn', text: '全部显示', dataset: { pmAction: 'showAll' }, title: '把六个面板都打开', onclick: () => { showAllPanels(); refreshPanelMenuSoon(); } }),
-    el('button', {
-      type: 'button', class: 'pm-foot-btn', text: '全部收回停靠',
-      dataset: { pmAction: 'redockAll' },
-      title: '把所有浮窗收回它们原来的停靠区',
-      onclick: () => { const n = redockFloats(); toast(n ? `${n} 个浮窗已收回停靠` : '当前没有浮窗', n ? 'ok' : '', 1800); refreshPanelMenuSoon(); },
-    }),
-  ));
-  rows.push(el('div', { class: 'pm-foot' },
-    el('button', { type: 'button', class: 'pm-foot-btn', text: '恢复默认布局', dataset: { pmAction: 'reset' }, title: '六个面板、两侧栏宽度、收展意图、浮窗全部回默认', onclick: () => { hidePanelMenu(); resetLayout(); } }),
-    batch,
-  ));
-  box.replaceChildren(...rows);
-  if (focusAction) {
-    const scope = focusPanel ? [...box.querySelectorAll('.pm-row')].find((row) => row.dataset.panel === focusPanel) : box.querySelector('.pm-foot');
-    const target = [...(scope?.querySelectorAll('[data-pm-action]') || [])].find((node) => node.dataset.pmAction === focusAction);
-    // 排序到边界后 ↑/↓ 会禁用；焦点回到同一行 summary，便于继续操作与退出。
-    (target && !target.disabled ? target : scope?.querySelector('summary'))?.focus({ preventScroll: true });
-  }
-  box.scrollTop = keep ? scrollTop : 0;
-  clampPanelMenuToViewport();
-  return box;
-}
-
-function clampPanelMenuToViewport() {
-  const box = panelMenuEl;
-  if (!box || box.classList.contains('hidden')) return;
-  const r = box.getBoundingClientRect();
-  box.style.left = `${Math.round(clamp(r.left, 8, Math.max(8, innerWidth - r.width - 8)))}px`;
-  box.style.top = `${Math.round(clamp(r.top, 8, Math.max(8, innerHeight - r.height - 8)))}px`;
-}
-
-/** 打开面板管理器（anchor = 点它的那个按钮，用来定位） */
-function togglePanelMenu(anchor) {
-  if (!panelMenuEl || panelMenuEl.classList.contains('hidden')) openPanelMenu(anchor);
-  else hidePanelMenu();
-}
-
-/**
- * 记住「这一次是哪个面板行触发的管理器」。
- *
- * 为什么需要它：`menuBtn` 点一下之后会走 `refreshPanelMenuSoon()` 重画整张菜单
- * （按钮文案是 toggle 语义，不重画就与实际状态不符），**原来那个按钮节点被 replaceChildren 摘掉了**。
- * 于是 `panelMenuFor` 指向一个已经脱离文档的节点，Esc 时 `anchor.focus()` 静默失败，
- * 焦点掉回 <body> —— 用户按 Esc 关掉管理器之后，键盘焦点就丢了，Tab 得从头再走一遍。
- * 记一个**面板 id**（稳定、可重新查到），关菜单时按 id 找回同一行的显示按钮。
- */
-let panelMenuAnchorId = null;
-
-function openPanelMenu(anchor) {
-  const box = renderPanelMenu();
-  panelMenuFor = anchor || null;
-  panelMenuAnchorId = anchor?.closest?.('.pm-row')?.dataset?.panel || null;
-  /**
-   * 顺手记下「这一次是在操作哪个面板」。
-   *
-   * `state._activePanel` 平时只由 document 上的 pointerdown / focusin 维护，判据是
-   * 「事件目标在 [data-panel] 里」—— 而**管理器里的按钮不在任何 [data-panel] 里**，
-   * 所以「点管理器里的按钮」这条路径上它永远更新不了。后果就是关闭管理器找不到
-   * 「该把焦点还给谁」，只能退回默认值，键盘用户按 Esc 之后焦点跑到别的面板去了。
-   * 这里补上：从触发行反查面板 id，行为与「点过那个面板」等价。
-   */
-  const opId = panelMenuAnchorId || anchor?.closest?.('[data-panel]')?.dataset?.panel || '';
-  if (opId && state.panels?.[opId]) state._activePanel = opId;
-  box.classList.remove('hidden');
-  // 贴着把手放；放不下就翻到另一侧，最后再夹进窗口（fixed 定位，不受滚动影响）
-  const r = anchor?.getBoundingClientRect();
-  const w = box.offsetWidth || 300;
-  const h = box.offsetHeight || 320;
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  let left = r ? r.right - w : vw - w - 12;
-  let top = r ? r.bottom + 6 : 44;
-  box.style.left = `${Math.round(clamp(left, 8, Math.max(8, vw - w - 8)))}px`;
-  box.style.top = `${Math.round(clamp(top, 8, Math.max(8, vh - h - 8)))}px`;
-  (box.querySelector('.pm-btn, .pm-foot-btn') || box).focus?.();
-}
-
-function hidePanelMenu() {
-  panelMenuEl?.classList.add('hidden');
-  panelMenuFor = null;
-  // 记一下「刚关过管理器」：Esc 的收浮窗分支据此让开，免得一次 Esc 干两件事
-  state._menuClosedAt = performance.now();
-}
-
-/**
- * 关掉管理器并把键盘焦点还回去。
- *
- * ⚠️ 三件事的顺序全部是实测出来的，别凭直觉改：
- *   ① 浏览器对「父级 display:none 的元素」执行 `focus()` **一律无效**（焦点落 <body>）。
- *      独立复现：先 focus 再 display:none → 焦点保住；先 display:none 再 focus → 焦点丢。
- *   ② 但 focus() 之后**同一个任务里**就把菜单 display:none，焦点同样会丢回 body
- *      （实测：focusin 收到了，activeElement 最后还是 body）。
- *   ③ 所以必须「先 focus → 下一帧才 hide」。
- *
- * 为了让「关闭了没有」在**同一帧**就能被观察到（调用方与自动化都靠 `hidden` 类判断），
- * 这一帧先加一个 `.closed` 类立刻隐藏菜单（与 .hidden 同样 display:none），
- * 下一帧再补真正的 hidden + 清理面板把手。隐藏发生在 focus 之后，所以焦点保得住。
- */
-function closePanelMenuAndRestoreFocus(fallbackAnchor = null) {
-  const id = panelMenuAnchorId;
-  const byId = id ? panelMenuEl?.querySelector(`.pm-row[data-panel="${id}"] > .pm-btn`) : null;
-  const stillThere = fallbackAnchor && fallbackAnchor.isConnected ? fallbackAnchor : null;
-  const pid = currentPanelId();
-  const head = pid ? panelHeadEl(pid) : null;
-  const docHead = document.querySelector('#leftSide > section.sec > .sec-head') || document.querySelector('.sec-head');
-  // 候选里**绝不能有菜单内部的元素**：菜单马上要隐藏，聚焦它等于聚焦空气
-  const target = byId || docHead || stillThere || head;
-  try { target?.focus?.(); } catch { /* 忽略 */ }
-  panelMenuEl?.classList.add('closed');    // 同一帧就视觉关闭（display:none），但不动焦点
-  panelMenuAnchorId = null;
-  // 隐藏之后再**补一次** focus：实测「focus → 隐藏」在真实链路上仍会被别的重排/重画打断
-  // （焦点最终落到 <body>）。补这一刀是幂等的 —— 目标已聚焦时不产生任何可见变化，
-  // 被打断时能把焦点拉回来。两帧是因为菜单的 .hidden 要到下一帧才补上。
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      panelMenuEl?.classList.remove('closed');
-      hidePanelMenu();
-      if (document.activeElement !== target && target && target.isConnected) {
-        try { target.focus(); } catch { /* 忽略 */ }
-      }
-    });
-  });
-}
-
-/** 「全部显示」：六个面板全打开、全展开 */
-function showAllPanels() {
-  for (const id of PANEL_IDS) {
-    state.panels[id].visible = true;
-    state.panels[id].collapsed = false;
-  }
-  sideIntent.pinned.left = true;
-  sideIntent.pinned.right = true;
-  savePanels();
-  applyPanels();
-  applyResponsiveLayout();
-  toast('六个面板已全部显示', 'ok', 1800);
-}
-
-/** 面板头左侧的点开区域：Enter/Space 折叠展开、Alt+↑/↓ 同栏换位、Alt+H 隐藏、Shift+F10 / 菜单键开管理器 */
+/** 面板头左侧的点开区域：Enter/Space 折叠展开、Alt+H 隐藏 */
 function bindPanelHead(id, head) {
   head.tabIndex = 0;
   head.setAttribute('role', 'button');
   head.setAttribute('aria-expanded', String(!state.panels[id].collapsed));
-  // 右键标题栏 = 打开面板管理器（已按用户要求去掉常驻的 ⋯ 和顶栏 ▤ 按钮）
-  head.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    openPanelMenu(head);
-  });
   head.addEventListener('keydown', (e) => {
     // 这些组合由面板头自己处理：别让文档级快捷键再抢一次（比如 Alt+H 落到无修饰的 h）
     if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
@@ -2646,148 +678,18 @@ function bindPanelHead(id, head) {
       togglePanelCollapsed(id);
       return;
     }
-    if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-      e.preventDefault();
-      e.stopPropagation();
-      movePanel(id, e.key === 'ArrowUp' ? -1 : 1);
-      return;
-    }
     if (e.altKey && e.key.toLowerCase() === 'h') {
       e.preventDefault();
       e.stopPropagation();
       setPanelVisible(id, false);
       toast(`已隐藏「${panelTitle(id)}」`, '', 1600);
-      return;
-    }
-    if (e.shiftKey && e.key === 'F10') {
-      e.preventDefault();
-      e.stopPropagation();
-      openPanelMenu(head);
     }
   });
 }
 
-/* ── 拖出成应用内卡片 ──
-   停靠面板：拖离按下点超过 DRAG_OUT_MIN 松手就打开阅读器内部卡片；拖回原处（不足 DRAG_OUT_MIN）松手 = 放回原位。
-   浮窗：拖到窗口边缘也仍留在应用内，不能通过边缘手势创建系统窗口。
-   判定基准是「按下点」而不是屏幕边缘 —— 左栏本来就贴着窗口边缘，用边缘判定会一拖就误触发。 */
-const DRAG_OUT_MIN = 24;
-const DRAG_OUT_MARGIN = 44;
-const nearWindowEdge = (x, y) => x <= DRAG_OUT_MARGIN || y <= DRAG_OUT_MARGIN
-  || x >= innerWidth - DRAG_OUT_MARGIN || y >= innerHeight - DRAG_OUT_MARGIN;
-
-let dragGhostEl = null;
-function showDragGhost(x, y, text, hot) {
-  if (!dragGhostEl) {
-    dragGhostEl = el('div', { class: 'panel-drag-ghost hidden', id: 'panelDragGhost', 'aria-hidden': 'true' });
-    document.body.append(dragGhostEl);
-  }
-  dragGhostEl.textContent = text;
-  dragGhostEl.classList.toggle('hot', !!hot);
-  dragGhostEl.classList.remove('hidden');
-  dragGhostEl.style.left = `${clamp(x + 16, 6, Math.max(6, innerWidth - 40))}px`;
-  dragGhostEl.style.top = `${clamp(y + 18, 6, Math.max(6, innerHeight - 40))}px`;
-}
-function hideDragGhost() { dragGhostEl?.classList.add('hidden'); }
-
-/** 面板标题栏左侧的可见抓手：位置固定，不依赖「找到标题栏空白处」这种运气 */
-function panelDragHandle() {
-  return el('span', {
-    class: 'panel-drag-handle',
-    title: '按住拖动：拖出一点距离松手，就在阅读器内部打开卡片；拖回原处松手则放回原位',
-    'aria-hidden': 'true',
-  }, iconEl('drag', { size: 14 }));
-}
-
-// 停靠面板拖出：拖离按下点一小段距离松手就移入阅读器内部卡片；拖回原处松手则保持停靠。
-function bindDockPanelDrag(id, head) {
-  if (!head || head.dataset.dockDragBound) return;
-  head.dataset.dockDragBound = '1';
-  let armed = false; let dragging = false; let sx = 0; let sy = 0; let pid = 0;
-  let suppressClickAt = 0;
-  const distOf = (e) => Math.hypot(e.clientX - sx, e.clientY - sy);
-  const end = (e) => {
-    window.removeEventListener('pointermove', move);
-    window.removeEventListener('pointerup', end);
-    window.removeEventListener('pointercancel', end);
-    if (!armed) return;
-    armed = false;
-    if (head.dataset.wasDraggable) { head.draggable = true; delete head.dataset.wasDraggable; }
-    document.body.classList.remove('panel-drag-out');
-    hideDragGhost();
-    if (!dragging) return;
-    dragging = false;
-    head.classList.remove('dragging');
-    document.body.classList.remove('panel-dragging');
-    const canceled = e?.type === 'pointercancel';
-    const moved = canceled || !e ? 0 : distOf(e);
-    if (!canceled && moved >= DRAG_OUT_MIN && state.panels[id]?.dock !== 'float') {
-      // 拖离了原处：交给阅读器内部卡片
-      detachPanelToWindow(id);
-    } else if (!canceled && moved >= 8) {
-      // 拉回原处松手：保持停靠，明确说一声「放回去了」
-      toast('已放回原位，没有打开应用内卡片', '', 1800);
-    }
-  };
-  const move = (e) => {
-    if (!armed) return;
-    const dx = e.clientX - sx; const dy = e.clientY - sy;
-    if (!dragging) {
-      if (Math.abs(dx) + Math.abs(dy) < 4) return;   // 4px 起步，鼠标轻轻一拖就有反馈
-      dragging = true;
-      suppressClickAt = performance.now();
-      head.classList.add('dragging');
-      document.body.classList.add('panel-dragging');
-    }
-    const moved = distOf(e);
-    const willDetach = moved >= DRAG_OUT_MIN;
-    document.body.classList.toggle('panel-drag-out', willDetach);
-    showDragGhost(
-      e.clientX, e.clientY,
-      willDetach
-        ? `松手：「${panelTitle(id)}」在应用内卡片中打开`
-        : `拖出 ${DRAG_OUT_MIN}px 就会打开应用内卡片（现在松手 = 放回原位）`,
-      willDetach,
-    );
-  };
-  head.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || state.panels[id]?.dock === 'float') return;
-    if (e.target.closest('button, a, input, textarea, select, label, .no-drag')) return;
-    if (e.target.closest('.grip')) return;   // 右栏的 ⇅ 抓手归「上下换位」，不参与拖出
-    // .ai-head 自带 HTML5 draggable（块换位），会和指针拖拽抢同一次按下：按下期间先摘掉
-    if (head.draggable) { head.dataset.wasDraggable = '1'; head.draggable = false; }
-    armed = true; dragging = false; sx = e.clientX; sy = e.clientY; pid = e.pointerId;
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', end);
-    window.addEventListener('pointercancel', end);
-    try { head.setPointerCapture(pid); } catch { /* optional */ }
-  });
-  head.addEventListener('click', (e) => {
-    if (!suppressClickAt || performance.now() - suppressClickAt > 450) return;
-    suppressClickAt = 0;
-    e.preventDefault();
-    e.stopPropagation();
-  }, true);
-}
-
-/** 面板头右侧的「更多」按钮：点开同一个管理器（隐藏 / 固定 / 上移 / 下移） */
-function panelMoreButton(id, label) {
-  return el('button', {
-    type: 'button', class: 'tbtn tiny panel-more',
-    title: `「${panelTitle(id)}」面板：隐藏 / 固定 / 上移 / 下移`,
-    'aria-haspopup': 'dialog', 'aria-label': `${label}面板操作`,
-    onclick: (e) => { e.stopPropagation(); togglePanelMenu(e.currentTarget); },
-  }, iconEl('more'));
-}
-
-/**
- * 标题栏右侧的直接操作（VS Code 式）：常用动作直接摆在标题栏上，悬停显形；
- * 只有固定 / 上移 / 下移 / 换停靠区这类长尾操作才留在 ⋯ 里。
- */
 /**
  * 标题栏右侧的直接操作（VS Code 式）：常用动作直接摆在标题栏上；
- * 只有固定 / 上移 / 下移 / 换停靠区这类长尾操作才留在 ⋯ 里。
- * 参数从「字符」改成「icons.js 的 id」—— 图标本身不承担语义，title / aria-label 照旧给全。
+ * 参数是 icons.js 的 id —— 图标本身不承担语义，title / aria-label 照旧给全。
  */
 function panelIcon(iconId, title, onclick, extra) {
   return el('button', {
@@ -2796,301 +698,95 @@ function panelIcon(iconId, title, onclick, extra) {
     onclick: (e) => { e.stopPropagation(); onclick(); },
   }, iconEl(iconId));
 }
+/** 右栏两块只有「在右栏里 / 藏着」两种去向，左栏四块同理 —— 所以标题栏只留一个「隐藏」。
+ *  再打开走左栏底部的图标坞（左栏面板）或右栏底部的「译文 / 问答」切换器。 */
 function panelActions(id) {
   const title = panelTitle(id);
-  if (isRightPanel(id)) {
-    // 译文 / 问答：应用内卡片 / 换栏 / 隐藏。
-    // 卡片仍然只能在当前阅读器窗口内部，不改变它们只能归属右栏的模型。
-    return el('div', { class: 'panel-actions' },
-      panelIcon('popout', `在应用内卡片中打开「${title}」`, () => detachPanelToWindow(id)),
-      panelColumnToggle(id),
-      panelIcon('close', `隐藏「${title}」（右键标题栏可以再显示）`, () => setPanelVisible(id, false), 'panel-hide'),
-    );
-  }
   return el('div', { class: 'panel-actions' },
-    panelIcon('popout', `在应用内卡片中打开「${title}」`, () => detachPanelToWindow(id)),
-    // 浮出 / 收回在执行时按当前状态判定；图标由 syncPanelActions 在 applyPanels 里刷新
-    el('button', {
-      type: 'button', class: 'tbtn tiny panel-icon panel-float-toggle',
-      title: `把「${title}」浮出成应用内浮窗`, 'aria-label': `浮出或收回「${title}」`,
-      onclick: (e) => {
-        e.stopPropagation();
-        const p = state.panels?.[id];
-        if (p?.dock === 'float') dockPanelTo(id, p.home || 'left');
-        else floatPanel(id);
-      },
-    }, iconEl('float')),
-    panelIcon('close', `隐藏「${title}」（右键标题栏可以再显示）`, () => setPanelVisible(id, false), 'panel-hide'),
+    panelIcon('close', `隐藏「${title}」`, () => setPanelVisible(id, false), 'panel-hide'),
   );
 }
 
-/** 译文 / 问答标题栏上的换栏按钮（去第 2 栏 / 回第 1 栏），图标由 syncPanelActions 刷新 */
-function panelColumnToggle(id) {
-  return el('button', {
-    type: 'button', class: 'tbtn tiny panel-icon panel-col-toggle',
-    title: `把「${panelTitle(id)}」放到右栏第 2 栏`, 'aria-label': `切换「${panelTitle(id)}」的右栏栏位`,
-    onclick: (e) => {
-      e.stopPropagation();
-      setPanelColumn(id, colOf(id) === 2 ? 1 : 2);
-    },
-  });
-}
+/* 左栏底部的小图标坞（连同 PANEL_DOCK_ICON / dockButton）已整体删除（2026-10）。
+   用户口径：「A 只留最左边那条窄活动栏」+「那几个点不动……直接删掉就行」。
+   左栏的面板入口现在只剩常驻的 `#railLeft`（`syncRailActive()` 负责高亮）。 */
 
 /**
- * 浮窗 / 换栏状态变化后刷新标题栏那两个按钮的图标。
- * **必须是 replaceChildren(iconEl(...))，不能写 textContent** —— 图标是 SVG 元素，
- * 赋 textContent 只会把标记当文字显示出来（而且会把已有图标连根删掉）。
- */
-function syncPanelActions(id) {
-  const head = panelHeadEl(id);
-  // 译文 / 问答的换栏按钮：显示当前在第几栏，点一下换到另一栏
-  const colBtn = head?.querySelector('.panel-col-toggle');
-  if (colBtn) {
-    const inCol2 = colOf(id) === 2;
-    const title = inCol2
-      ? `把「${panelTitle(id)}」放回右栏第 1 栏`
-      : `把「${panelTitle(id)}」放到右栏第 2 栏（会自动把第 2 栏开出来）`;
-    const want = inCol2 ? 'swap-back' : 'swap';
-    if (colBtn.dataset.icon !== want) {
-      colBtn.dataset.icon = want;
-      colBtn.replaceChildren(iconEl(want));
-    }
-    if (colBtn.title !== title) { colBtn.title = title; colBtn.setAttribute('aria-label', title); }
-  }
-  const btn = head?.querySelector('.panel-float-toggle');
-  if (!btn) return;
-  const floating = state.panels?.[id]?.dock === 'float';
-  const title = floating
-    ? `收回「${panelTitle(id)}」浮窗，回到停靠区`
-    : `把「${panelTitle(id)}」浮出成应用内浮窗`;
-  const want = floating ? 'dock' : 'float';
-  if (btn.dataset.icon !== want) {
-    btn.dataset.icon = want;
-    btn.replaceChildren(iconEl(want));
-  }
-  if (btn.title !== title) { btn.title = title; btn.setAttribute('aria-label', title); }
-}
-
-/**
- * 侧栏底部的小图标坞：每个面板一个图标，点一下就显示/收起。
- * 它是「面板永远找得回来」的固定入口 —— 不需要撤销提示，也不限制你隐藏多少块。
+ * 面板入口手势。**现在只有右栏的「译文 / 问答」切换器（#aiBar）在用它**。
  *
- * 用户口径（2026-10-03）：译文 / 问答**只在右栏**，右栏改用每一栏底部的分段切换器
- * （#aiBar / #aiBar2）当唯一可见入口，所以这一排只有左栏四个面板。
+ * 左栏底部那个图标坞（`#panelDock`）已按用户要求删除 ——
+ * 原话：「我说的就是那几个侧栏下面的那几个点不动，但是你直接删掉就行」，
+ * 以及更早的「A 只留最左边那条窄活动栏」。所以左栏的面板入口**只剩最左边那条活动栏**
+ * （`#railLeft`，本来就是常驻的）。
+ *
+ * （更早的「右键＝更多菜单」「按住拖出＝应用内卡片」两套手势已随面板管理器与
+ *   应用内浮窗一起删除：右键菜单里的每一项都指向已经不存在的功能。）
  */
-const PANEL_DOCK_ICON = {
-  files: 'folder', outline: 'list', notes: 'note', relations: 'relations',
-  // 译文 / 问答不在这里露面（左栏图标坞只列左栏面板），但映射留着，
-  // 万一将来左栏也需要这两块时不会退化成「取标题第一个字」。
-  translate: 'translate', chat: 'chat',
-};
-
-/** 造一个图标按钮（左右两侧共用同一套手势：点＝开关 · 右键＝菜单 · 按住拖出＝应用内卡片） */
-function dockButton(id) {
-  // 注意：这里不能写 data-panel —— panelEl() 靠 [data-panel=id] 找面板节点，会误认这些图标
-  const btn = el('button', {
-    type: 'button', class: 'dock-btn', role: 'menuitem', dataset: { dockFor: id },
-    title: `「${panelTitle(id)}」：点一下显示/收起 · 按住拖出＝应用内卡片 · 右键＝更多`,
-    'aria-label': `显示 / 收起「${panelTitle(id)}」`,
-  }, iconEl(PANEL_DOCK_ICON[id] || 'folder'));
-  bindPanelToggleGestures(btn, id, { dragToDetach: true });
-  return btn;
-}
-
-/**
- * 把「点 / 右键 / 按住拖出」这套手势绑到一个面板入口按钮上。
- * 左栏图标坞的 `.dock-btn` 与右栏底部那**唯一一组**「译文 / 问答」切换器共用它 ——
- * 用户口径：「右键和拖拽能力附着在这一组图标上，不再额外渲染另一组相同按钮」。
- */
-function bindPanelToggleGestures(btn, id, { dragToDetach = true, onClick = null } = {}) {
-  let armed = false; let dragged = false; let sx = 0; let sy = 0;
-  if (dragToDetach) {
-    btn.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0) return;
-      armed = true; dragged = false; sx = e.clientX; sy = e.clientY;
-      try { btn.setPointerCapture(e.pointerId); } catch { /* 可选 */ }
-    });
-    btn.addEventListener('pointermove', (e) => {
-      if (!armed) return;
-      if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 18) dragged = true;
-    });
-    btn.addEventListener('pointerup', () => {
-      if (!armed) return;
-      armed = false;
-      if (!dragged) return;              // 没拖动：交给 click 去开关
-      btn.dataset.justDragged = '1';
-      detachPanelToWindow(id);           // 按住图标拖出 = 应用内卡片
-    });
-  }
+function bindPanelToggleGestures(btn, id, { onClick = null } = {}) {
   btn.addEventListener('click', (e) => {
-    if (btn.dataset.justDragged) { delete btn.dataset.justDragged; e.preventDefault(); e.stopPropagation(); return; }
     if (onClick) onClick(e);
     else toggleDockPanel(id);
   });
-  btn.addEventListener('contextmenu', (e) => {
-    e.preventDefault(); e.stopPropagation();
-    showDockMenu(btn, id);
-  });
   return btn;
 }
 
-function initPanelDock() {
-  // 左栏图标坞：只放左栏面板。右栏的译文 / 问答改用输入框下面那排分段切换器
-  //（#aiBar / #aiBar2），这里不再重复渲染它们 —— 一套功能只有一个可见入口。
-  const dock = $('#panelDock');
-  if (dock) dock.replaceChildren(...PANEL_IDS.filter((id) => !isRightPanel(id)).map(dockButton));
-  if (dock) syncPanelDock();
-}
+/** 右栏「面板切换器」容器（恒为第 1 栏；参数保留以免改动调用点） */
+const aiBarEl = (_n) => document.getElementById('aiBar');
 
-/** 右栏每一列的「面板切换器」容器：第 1 栏在文档里，第 2 栏由 applyRightColsDom 现建 */
-const aiBarEl = (n) => document.getElementById(n === 2 ? 'aiBar2' : 'aiBar');
+/* 左栏图标坞（#panelDock / syncPanelDock / dockButton / PANEL_DOCK_ICON）
+   已整体删除（2026-10 用户口径：「A 只留最左边那条窄活动栏」+「直接删掉就行」）。
+   左栏的面板入口现在只有常驻的 `#railLeft` 那一条，左右两侧不再各有一套图标。 */
 
-/** 左栏图标坞的按钮状态（译文 / 问答不在这里，它们的状态由 renderAiBar 刷） */
-function syncPanelDock() {
-  const dock = $('#panelDock');
-  if (!dock) return;
-  for (const btn of dock.querySelectorAll('.dock-btn')) {
-    const p = state.panels?.[btn.dataset.dockFor];
-    if (!p) continue;
-    const on = !!p.visible;
-    btn.classList.toggle('on', on);
-    btn.setAttribute('aria-pressed', String(on));
-  }
+/** 点图标：显示 / 收起（右栏「一栏只开一个」的互斥由 setPanelVisible 保证） */
+/**
+ * 把「左栏一次只开一块」这条不变量在 boot 时强制一遍。
+ *
+ * 为什么需要：`setPanelVisible` 里已经有互斥规则，但它只在**用户点击**时生效 ——
+ * 老存档（reader.panels）里可能存着「文件 + 目录 + 笔记」同时可见，读回来就是三块都摊开。
+ * 用户实测反馈的正是这个（「现在一打开有四个」）。所以启动时收敛一次：
+ * 只留 order 最靠前的那一块可见，其余收起（**不动 collapsed**，那是另一回事）。
+ */
+function normalizeLeftPanels() {
+  const vis = PANEL_IDS
+    .filter((id) => !isRightPanel(id) && state.panels?.[id]?.dock === 'left' && state.panels[id].visible)
+    .sort((a, b) => (state.panels[a].order - state.panels[b].order) || (PANEL_IDS.indexOf(a) - PANEL_IDS.indexOf(b)));
+  if (vis.length <= 1) return false;
+  for (const id of vis.slice(1)) state.panels[id].visible = false;
+  return true;
 }
 
 /**
- * 点图标：显示 / 收起。
- * 右栏那两块**一栏只能开一个**：点第 2 栏的图标就把这块放进第 2 栏（必要时现开第 2 栏），
- * 同栏里原来显示的那一个自动收起。左栏四块不受影响。
+ * 点左栏图标坞里的图标（2026-10 用户口径）：
+ *   「点击已开的图标也不会关闭侧栏，而是不做反应」。
+ *
+ * 所以这里**不再 toggle**：已经开着的那一块再点一次是 no-op，只有点**没开**的
+ * 才切换过去（左侧本来就只有一块可见，见 setPanelVisible 的互斥规则）。
+ * 收起侧栏是**另一个**明确动作 —— 顶栏的「收起左栏」或拖动分隔条，不混在面板切换里。
  */
-function toggleDockPanel(id, col = 0) {
+function toggleDockPanel(id) {
   const p = state.panels[id];
   if (!p) return;
-  if (isRightPanel(id)) {
-    const want = col === 2 ? 2 : (col === 1 ? 1 : colOf(id));
-    if (p.visible && colOf(id) === want) { setPanelVisible(id, false); return; }
-    setPanelColumn(id, want);
-    return;
-  }
-  setPanelVisible(id, !p.visible);
-}
-
-/** 「再开一栏」只能对右栏面板用（左栏面板有自己的浮出 / 停靠能力） */
-function dockFloatColumn(id) {
-  if (!isRightPanel(id)) return floatPanel(id);
-  return setPanelColumn(id, 2);
-}
-
-/**
- * 图标坞右键小菜单。
- *   左栏图标：显示/收起 · 浮出成应用内卡片
- *   右栏图标（译文 / 问答）：显示/收起 · 放到第 1 / 2 栏 · 再开一栏 / 收起这一栏 · 应用内卡片
- * 这就是用户说的「右键图标选择再开一栏」——第 2 栏原本没有任何入口。
- */
-let dockMenuEl = null;
-let dockMenuDown = null;
-function hideDockMenu() {
-  if (!dockMenuEl && !dockMenuDown) return;
-  dockMenuEl?.remove();
-  dockMenuEl = null;
-  if (dockMenuDown) { document.removeEventListener('pointerdown', dockMenuDown, true); dockMenuDown = null; }
-}
-function showDockMenu(anchor, id) {
-  hideDockMenu();
-  const menu = el('div', { class: 'dock-menu', id: 'dockMenu', role: 'menu' });
-  const item = (text, fn, { on = false } = {}) => el('button', {
-    type: 'button', class: `dock-menu-btn${on ? ' on' : ''}`, text, role: 'menuitem',
-    'aria-pressed': String(on),
-    onclick: () => { hideDockMenu(); fn(); },
-  });
-  if (isRightPanel(id)) {
-    const here = Number(anchor.dataset.dockCol) === 2 ? 2 : 1;
-    const col = colOf(id);
-    const p = state.panels[id];
-    // 点第 2 栏的图标但那一栏还没开：先给「再开一栏」，顺序按当前状态排
-    menu.append(
-      item(p?.visible ? `收起「${panelTitle(id)}」` : `打开「${panelTitle(id)}」`, () => toggleDockPanel(id, here), { on: !!p?.visible && col === here }),
-      item('放到第 1 栏', () => setPanelColumn(id, 1), { on: col === 1 }),
-      item('放到第 2 栏', () => setPanelColumn(id, 2), { on: col === 2 }),
-    );
-    if (rightColsWanted() === 1) menu.append(item('再开一栏（并排显示）', () => openRightColumn()));
-    else menu.append(item('收起第 2 栏', () => closeRightColumn()));
-    menu.append(item('在应用内卡片中打开', () => detachPanelToWindow(id)));
-  } else {
-    menu.append(
-      item(state.panels[id]?.visible ? `收起「${panelTitle(id)}」` : `显示「${panelTitle(id)}」`, () => toggleDockPanel(id)),
-      item('浮出成应用内浮窗', () => floatPanel(id)),
-      item('在应用内卡片中打开', () => detachPanelToWindow(id)),
-    );
-  }
-  menu.classList.remove('hidden');
-  document.body.append(menu);
-  const r = anchor.getBoundingClientRect();
-  const mr = menu.getBoundingClientRect();
-  menu.style.left = `${Math.round(Math.max(8, Math.min(r.left, innerWidth - mr.width - 8)))}px`;
-  menu.style.top = `${Math.round(Math.max(8, r.top - mr.height - 6))}px`;
-  dockMenuEl = menu;
-  dockMenuDown = (e) => { if (!menu.contains(e.target)) hideDockMenu(); };
-  document.addEventListener('pointerdown', dockMenuDown, true);
-}
-
-/**
- * 浮窗头上的 ✕：先朝最近的屏幕边缘平滑收起（160ms），再回原来的停靠区。
- * 停靠状态下这个按钮是 display:none（CSS），所以默认外观与 2.2a 一致。
- */
-function panelFloatCloseButton(id) {
-  return el('button', {
-    type: 'button', class: 'tbtn tiny panel-float-x',
-    title: `收起「${panelTitle(id)}」浮窗，回到原来的停靠区（Esc 同效）`,
-    'aria-label': `收起「${panelTitle(id)}」浮窗`,
-    onclick: (e) => { e.stopPropagation(); closeFloatPanel(id); },
-  }, iconEl('close'));
+  if (p.visible) return;              // 已开 → 不做反应（不再关掉它）
+  setPanelVisible(id, true);
+  // 打开左栏图标坞里的「参考文献」= 按需整理的触发点
+  if (id === 'relations') ensureRelationsBuilt();
 }
 
 /**
  * 六个面板统一走这一条渲染路径。
  * 左栏四块**不重写内部结构**：文件块用 .side-head 当标题栏，其余三块沿用 section.sec + .sec-head，
- * 只补 data-panel 与标题栏上的折叠 / ⋯ 控件（内部所有 id 一个都没动）。
+ * 只补 data-panel 与标题栏上的折叠 / 隐藏控件（内部所有 id 一个都没动）。
  */
 function initPanels() {
-  ensurePanelMenu();
-  initPanelDock();
-  // 点外部 / Esc 关闭（顶栏 ▤ 与各面板的 ⋯ 都在菜单外面，所以点它们会先关掉再开回来，
-  // 由 togglePanelMenu 里的 hidden 判断兜住，不会出现「点了没反应」）
-  document.addEventListener('mousedown', (e) => {
-    if (!panelMenuEl || panelMenuEl.classList.contains('hidden')) return;
-    if (panelMenuEl.contains(e.target) || panelMenuFor?.contains(e.target)) return;
-    hidePanelMenu();
-  });
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || !panelMenuEl || panelMenuEl.classList.contains('hidden')) return;
-    // 先把把手记下来再关：hidePanelMenu() 会把 panelMenuFor 清成 null，反过来写焦点就永远回不去。
-    // 而且行里的按钮会被重画替换，所以 closePanelMenuAndRestoreFocus 是按「面板 id」重查的。
-    closePanelMenuAndRestoreFocus(panelMenuFor);
-  });
-  /**
-   * 「全部显示」这个底部按钮不走 menuBtn（它会自己重画），这里补一次；
-   * 同样要延到微任务 —— 否则点它时会被自己重建掉的 DOM 掐断。
-   */
-  document.addEventListener('click', (e) => {
-    if (!panelMenuEl || panelMenuEl.classList.contains('hidden')) return;
-    if (!panelMenuEl.contains(e.target) || !e.target.closest?.('.pm-foot-btn')) return;
-    refreshPanelMenuSoon();
-  }, true);
   // 六个面板统一入模：先补上标题栏控件与折叠开关，再按注册表排一遍
   for (const d of PANEL_DEFS) ensurePanel(d.id, d);
-  // 阶段 2.2b：每个面板头都能拖（只在它是浮窗时生效），并记住「最近碰过哪个面板」供快捷键用
-  for (const d of PANEL_DEFS) bindFloatDrag(d.id);
+  // 「最近碰过哪个面板」供快捷键用
   const rememberPanel = (e) => {
     const id = e.target?.closest?.('[data-panel]')?.dataset?.panel;
-    if (id) {
-      state._activePanel = id;
-      if (state.panels?.[id]?.dock === 'float') bringFloatToFront(id);
-    }
+    if (id) state._activePanel = id;
   };
   document.addEventListener('pointerdown', rememberPanel, true);
   document.addEventListener('focusin', rememberPanel);
-  bindDockBottomSplitter();
   applyPanels();
 }
 
@@ -3103,6 +799,14 @@ const DEFAULT_UI_STYLE = Object.freeze({
   // 这两个和上面的 fontSize（阅读/结果字号 --ai-fs）是互相独立的三套刻度。
   uiFontSize: 13.5, controlSize: 100,
   showPage: true, showQuote: true, showSources: false,
+  /**
+   * 发送范围（2026-10 用户口径）：「第一个应该是默认全文加联网，在设置里面调节」。
+   *
+   * 这两个**不再是**输入框旁边「这次发送」的一次性开关（那一排连同「范围」菜单、「清空会话」
+   * 一起撤掉了），而是和主题 / 字号一样的**全局偏好**：默认都开着，改一次就一直算数，
+   * 跨论文、跨会话都不用再点。开关在设置页（#cfgUseFullText / #cfgUseWeb）。
+   */
+  useFullText: true, useWeb: true,
 });
 let uiStyle = { ...DEFAULT_UI_STYLE };
 
@@ -3146,25 +850,24 @@ const state = {
   blockMeta: {},
   splitEls: {},
   dragBlock: null,
-  // 「整篇」是一次明确的扩大范围操作，默认只带选中文字和当前页上下文。
-  // 「联网」默认关着 —— 每问一句都先去搜一遍会平白慢一两秒，需要时点一下就行。
-  // 不写 localStorage：它只对当前一次待发送的问题生效，成功 / 失败 / 停止后都会复位。
-  useFullText: false,
-  useWeb: readFlag('reader.web', false),
+  /**
+   * 发送范围。**默认全文 + 联网**，真值存在 uiStyle 里（见 DEFAULT_UI_STYLE）。
+   * 这里的初值只是「uiStyle 还没装进来」之前的安全默认；boot() 里 initLayout() 之后
+   * 由 syncScopePrefs() 用存档值覆盖。它不再有输入框旁边的按钮，改它只走设置页。
+   */
+  useFullText: DEFAULT_UI_STYLE.useFullText,
+  useWeb: DEFAULT_UI_STYLE.useWeb,
   docText: null,
   docTextDoc: null,
   docDigest: null,
   lastSources: [],
-  // 文献关系：本文的参考文献列表 + 库内引用扫描结果
+  // 参考文献：本文的参考文献列表（按需解析，见 ensureRelationsBuilt）
   refs: [],
   refsDoc: null,
-  citedBy: [],
-  citedByDoc: null,
-  relBusy: false,
-  relScanned: null,
+  refsParsing: null,
   /**
-   * 阶段 3：关系代际令牌。**只在换论文时 +1**（relBumpGen）。
-   * 所有异步收尾（解析参考文献 / 扫描库内引用 / 单条查 PDF / 批量查）都要先校验
+   * 阶段 3：代际令牌。**只在换论文时 +1**（relBumpGen）。
+   * 所有异步收尾（解析参考文献 / 单条查 PDF）都要先校验
    * `gen === state.relGen && docId === state.doc?.docId`，对不上就整批丢弃 ——
    * 这是 R1/R2/R3/R5 的统一解法：切换论文后，旧论文的在途结果一个字都写不进来。
    *
@@ -3191,10 +894,6 @@ const state = {
   opsCache: new Map(),
   opsDone: {},
   opsDoc: null,
-  coach: false,
-  // 划词翻译的就地浮层只做生成中的临时反馈；完成后短暂保留方便用户看到收尾，
-  // 随后自动收起，正式结果只留在右侧「译文」块里。
-  popoverTimer: null,
 };
 
 let viewer = null;
@@ -3210,30 +909,24 @@ let serverState = {};
   // 第一件事：装面板注册表（必要时把老的 reader.ai 迁过来）。必须在 initLayout / initPanels 之前，
   // 因为两边栏的自动收展规则（dockHasPinned）与面板渲染都要读它。
   state.panels = loadPanels();
-  // 右栏列数与第 2 栏宽度（同一份 reader.panels 里的 rightCols）
-  loadRightCols();
-  // 上一次运行残留的「暂离」标记：子窗口不会跨进程存活，主窗口统一恢复，避免面板永久失踪。
-  // **恢复完必须立刻落盘**：只改内存的话，第二次启动又会从旧存档读回 visible=false
-  //（这个坑 20:42 那轮踩过一次，这里保留同一条纪律）。
-  if (!panelWindow.enabled && reconcileDetachedPanels()) {
+  // 老存档可能把左栏多块都存成可见（用户实测「一打开有四个」），启动时收敛成一块。
+  // 必须在 initLayout / initPanels 之前，否则会先按多块渲染一帧再跳。
+  if (normalizeLeftPanels()) {
     try { savePanels(); } catch { /* 忽略 */ }
   }
-  // 历史存档归一化：右栏两块只认「第 1 / 第 2 栏」，老版本的浮窗 / 同栏两块都归位。
-  // **顺序不能换**：adoptLegacyBothBlocks() 可能把列数开成 2，normalizeRightPanelModel()
-  // 的分栏兜底只在「已经是 2 栏」时才生效（反过来先跑就会把两块都留在第 1 栏）。
-  if (!panelWindow.enabled) {
-    const adopted = adoptLegacyBothBlocks();
-    const norm = normalizeRightPanelModel();
-    if (norm || adopted) { try { savePanels(); } catch { /* 忽略 */ } }
-  }
+  // 「系统级独立窗口」已经删除：老版本可能把这个键留在存档里，启动时直接清掉，
+  // 免得它躺在 localStorage 里被误读成「某个面板暂离中」。之后主窗口一律按
+  // reader.panels 里的 visible / dock 渲染，不需要任何恢复逻辑。
+  try { localStorage.removeItem('reader.detachedWindows'); } catch { /* 忽略 */ }
   initLayout();
+  syncScopePrefs();
   initPanels();
   initTopbar();
+  initWindowChrome();     // 应用内标题栏：窗口按钮 / 拖动 / 八向缩放（无 IPC 时整块隐藏）
   initPanelSync();
   initViewer();
   initFiles();
   initSelection();
-  initPopover();
   initNoteBox();
   initCiteBox();
   initAiArea();
@@ -3254,7 +947,6 @@ let serverState = {};
   if (migrated) { applyPanels(); applyResponsiveLayout(); }
   await refreshPaperList();
   await maybeReopenLast();
-  initPanelWindow();
   checkConfigWarning();
 })();
 
@@ -3308,6 +1000,70 @@ function refitViewer(delay = 0) {
   if (delay > 0) setTimeout(run, delay); else run();
 }
 
+/* ══════════════ 文中书签：横向夹进阅读区可见范围 ══════════════
+
+   缺陷（2026-10 实测，不是推断）：右栏展开后阅读区只剩 920px，而纸面仍是**右栏没开时**
+   按适应宽度算出来的 1213px —— 纸面居中溢出，右边缘落到 x=1282，阅读区可见右边界只有 1135。
+   `.hl-pin` 是绝对定位在纸面右边缘的小书签（`right: 3px`，见 style.css / pdfview.js），
+   于是它的中心 x=1275 落在阅读区之外：`elementFromPoint(1275, 216)` 命中的是右栏里的
+   `DIV.msg`，**真实鼠标点不到**（只有 `document.querySelector('.hl-pin').click()` 这种
+   直接派发的事件还能打开笔记框，所以现象是「文中那条笔记点不开」而节点是活的）。
+
+   为什么用「夹取」而不是「重新适应宽度」：纸面比阅读区宽本身是合法的（用户放大到 250%
+   时必然横向溢出，e2e 还断言了「返回原位置后缩放仍是 198%」），在跨过右栏开关时偷偷改
+   缩放会同时改掉用户的缩放意图。书签是**导航入口**，它只需要保证「永远落在阅读区可见
+   范围内、点得到」：不溢出时就是原来的 `right: 3px`，溢出时贴在阅读区可见右边缘，
+   横向滚动时差值连续地跟着回来（over → 0 时正好等于 right: 3px，不会跳）。
+
+   实现只在页元素上写一个 CSS 变量 `--pin-clamp`，定位仍然全在 CSS 里：
+       .hl-pin { right: calc(3px + var(--pin-clamp, 0px)) }
+   好处：pdfview.js 重画书签（setHighlights / 虚拟化重渲染 / 缩放）时会**删掉重建**
+   `.hl-pin` 节点，但它从不碰这个变量 —— 变量挂在 .page 上，重建出来的书签自动带着
+   同样的夹取量，两边不需要互相通知。 */
+const PIN_INSET = 3;   // 与 style.css 里 .hl-pin 的 `right` 基准值必须一致
+
+/**
+ * 阅读区**真正可见**的右边界。
+ * 不能用 `rect.right`：滚动容器的 rect 含竖向滚动条占的那一条，
+ * 按 rect.right 夹取会把书签塞到滚动条底下，还是点不到。
+ */
+function viewerVisibleRight(el) {
+  const vr = el.getBoundingClientRect();
+  return vr.left + el.clientLeft + el.clientWidth;
+}
+
+let pinClampRaf = 0;
+
+/** 把每一页的书签向左夹到阅读区可见右边界内侧（rAF 合并，一次只跑一遍） */
+function clampPins() {
+  pinClampRaf = 0;
+  const el = document.getElementById('viewer');
+  // 没有书签就立刻返回：这个函数挂在滚动 + MutationObserver 上，会被叫得很频繁
+  if (!el || !el.querySelector('.hl-pin')) return;
+  const visibleRight = viewerVisibleRight(el);
+  // 先读后写：把每一页的右边缘读成一批，再统一写变量，避免读写交替触发多次重排
+  const targets = [];
+  for (const page of el.querySelectorAll('.page')) {
+    if (!page.querySelector('.hl-pin')) continue;   // 只有带书签的页需要夹取
+    targets.push([page, page.getBoundingClientRect().right]);
+  }
+  for (const [page, pageRight] of targets) {
+    // 纸面右边缘（再加上书签自己的 3px 内缩）超出可见右边界多少，就把它往左推多少
+    const over = pageRight + PIN_INSET - visibleRight;
+    const want = over > 0 ? `${Math.ceil(over)}px` : '';
+    /* 同值不回写：下面的 MutationObserver 也在看 style 变化，
+       不回写这一条就会变成「写变量 → 观察者回调 → 再写变量」的自激循环。 */
+    if ((page.style.getPropertyValue('--pin-clamp') || '') === want) continue;
+    if (want) page.style.setProperty('--pin-clamp', want);
+    else page.style.removeProperty('--pin-clamp');
+  }
+}
+
+function schedulePinClamp() {
+  if (pinClampRaf) return;
+  pinClampRaf = requestAnimationFrame(clampPins);
+}
+
 /**
  * 两侧是否还有「被用户固定（pinned）」的面板。
  * 注意与 sideIntent.pinned 区分：那个是 2.1 的**临时**豁免（用户刚明确展开过这一侧，
@@ -3324,19 +1080,9 @@ const dockHasPinned = (dock) => PANEL_IDS.some((id) => state.panels?.[id]?.dock 
  * 返回：body 上的收起状态是否变了（调用方据此决定要不要立刻重排正文）。
  */
 function applyResponsiveLayout() {
-  // 面板窗口没有 PDF 正文，侧栏必须始终占满窗口，不能按阅读器的正文最小宽度自动收起。
-  if (panelWindow.enabled) {
-    state.autoCollapse = { left: false, right: false };
-    const wasNoLeft = document.body.classList.contains('no-left');
-    const wasNoRight = document.body.classList.contains('no-right');
-    document.body.classList.remove('no-left', 'no-right');
-    syncSideToggleButtons();
-    return wasNoLeft || wasNoRight;
-  }
   const innerW = window.innerWidth;
   const baseLeftW = sideBaseW.left;
   const baseRightW = sideBaseW.right;
-  const rightW2 = cssPx('--right-w2', 360);
   const railW = cssPx('--rail-w', RAIL_W);
   const viewerMin = cssPx('--viewer-min', VIEWER_MIN);
   // 侧栏先「让宽」再「整条消失」（见下方 sideWanted 的注释）
@@ -3360,26 +1106,9 @@ function applyResponsiveLayout() {
    *  真正的规则是「先让宽、再收起」：让宽的下限是 SIDE_MIN，让到最小还不够就整条收起。 */
   const VIEWER_HARD_MIN = viewerMin;
 
-  // 右栏第 2 栏是可选的奢侈项：先让「两栏」用正文宽度买单，
-  // 真的放不下再把它临时藏掉（只加 body.right-col2-off，**不动模型** ——
-  // 窗口一变宽 2 栏自己回来，用户不用重新右键开一次），最后才轮到整条右栏收起。
-  const col2Wants = rightColsWanted() === 2;
-  const col2On = col2Wants && !document.body.classList.contains('right-col2-off');
-  const chromeOf = (noLeft, noRight, withCol2, lw = baseLeftW, rw = baseRightW) =>
-    (noLeft ? railW : lw + SPLIT_W) + (noRight ? railW : rw + SPLIT_W + (withCol2 ? rightW2 + SPLIT_W : 0));
-  if (col2On) {
-    // 第 2 栏只要「把两侧压到最小之后正文还剩得下」就不藏 —— 先把 --left-w / --right-w
-    // 压到最小，实在不够才临时藏掉第 2 栏。这样开两栏时不会动不动就剩一栏。
-    const squeezed = innerW - chromeOf(sideIntent.noLeft, false, true, SIDE_MIN, SIDE_MIN);
-    if (squeezed < VIEWER_HARD_MIN) {
-      document.body.classList.add('right-col2-off');
-      renderCols();
-    }
-  } else if (!col2On && col2Wants) {
-    const squeezed = innerW - chromeOf(sideIntent.noLeft, false, true, SIDE_MIN, SIDE_MIN);
-    if (squeezed >= VIEWER_HARD_MIN) document.body.classList.remove('right-col2-off');
-  }
-  const col2Shown = col2Wants && !document.body.classList.contains('right-col2-off');
+  // 两侧栏占掉的横向空间（右栏恒为一栏，不再有第 2 栏那份账）
+  const chromeOf = (noLeft, noRight, lw = baseLeftW, rw = baseRightW) =>
+    (noLeft ? railW : lw + SPLIT_W) + (noRight ? railW : rw + SPLIT_W);
 
   /**
    * 侧栏的「让宽」：用户这次的诉求是
@@ -3393,10 +1122,11 @@ function applyResponsiveLayout() {
    */
   let leftApplied = baseLeftW;
   let rightApplied = baseRightW;
-  const chrome = (noLeft, noRight, lw, rw) => chromeOf(noLeft, noRight, col2Shown && !noRight, lw, rw);
-  if (!sideIntent.noRight && col2Shown) {
+  const chrome = (noLeft, noRight, lw, rw) => chromeOf(noLeft, noRight, lw, rw);
+  {
+    // 宽度刚好卡在「正文最小宽度」附近时，两侧栏各让一半，尽量谁都别消失。
     const need = innerW - chrome(sideIntent.noLeft, false, baseLeftW, baseRightW);
-    if (need < viewerMin) {
+    if (!sideIntent.noRight && need < viewerMin) {
       const deficit = viewerMin - need;
       leftApplied = Math.max(SIDE_MIN, baseLeftW - deficit / 2);
       rightApplied = Math.max(SIDE_MIN, baseRightW - deficit / 2);
@@ -3496,10 +1226,7 @@ function applyResponsiveLayout() {
   // 正文允许横向滚动，而不是把侧栏藏起来
   document.body.classList.toggle('side-squeezed', squeezed);
   // right-empty 只看「有没有内容」，不看栏宽 —— 否则窄窗下活动栏会一直显示、栏永远回不来
-  document.body.classList.toggle(
-    'right-empty',
-    !panelWindow.enabled && visiblePanelsOfDock('right').length === 0,
-  );
+  document.body.classList.toggle('right-empty', visiblePanelsOfDock('right').length === 0);
 
   state.autoCollapse = { left: noLeft && !sideIntent.noLeft, right: noRight && !sideIntent.noRight };
   const wasNoLeft = document.body.classList.contains('no-left');
@@ -3507,8 +1234,8 @@ function applyResponsiveLayout() {
   document.body.classList.toggle('no-left', noLeft);
   document.body.classList.toggle('no-right', noRight);
   syncSideToggleButtons();
-  // 右栏被收起 / 放开、第 2 栏被临时藏掉 / 放开，都会改「哪些块真的有地方放」：
-  // 节点的停放与结果区的重排必须跟着走，否则会出现「栏收起来了，块还赖在 DOM 里」。
+  // 右栏被收起 / 放开都会改「哪些块真的有地方放」：节点的停放与结果区的重排必须跟着走，
+  // 否则会出现「栏收起来了，块还赖在 DOM 里」。
   renderCols();
   // 右栏是 display:none 的时候量不到高度，窗口 resize 里的 fitBlockSizes() 会把结果块
   // 压成 60px 保底值。这里（右栏刚好重新显示、布局已经能量了）补一次，恢复成记忆高度。
@@ -3547,12 +1274,43 @@ function syncSideToggleButtons() {
   }
 }
 
+/**
+ * 把一个右栏面板显示出来，并把右栏展开（顶栏那个右栏开关用）。
+ *
+ * **必须是模块级函数**：`openRightPanelFromRail` 定义在 initLayout() 内部
+ * （那里才有 sideIntent 等闭包），`bindSideToggleButton` 调不到它 ——
+ * 写成裸函数名会抛 `openRightPanelFromRail is not defined`（实测踩过，
+ * 症状是「点顶栏右栏开关毫无反应」）。这里把它抬到模块作用域，
+ * 内部需要的东西（state / sideIntent / 下面几个函数）本来就都是模块级的。
+ */
+function revealRightPanelFromToggle() {
+  const last = readRightChoice() || 'chat';
+  const id = PANEL_IDS_RIGHT.includes(last) ? last : 'chat';
+  if (!state.panels?.[id]) return;
+  sideIntent.noRight = false;          // 用户明确要这一边
+  sideIntent.pinned.right = true;
+  setPanelVisible(id, true);
+  applyPanels();                        // 清掉 right-empty（它只在「没有可见面板」时为真）
+  applyResponsiveLayout();
+}
+
 function bindSideToggleButton(side, btn) {
   if (!btn) return;
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     const collapsed = document.body.classList.contains(`no-${side}`);
     setSideCollapsed(side, !collapsed, !collapsed);
+    /**
+     * ⚠️ 展开右栏时**必须同时保证里面有一块面板开着**（2026-10 实测踩到）：
+     * 右栏两块默认都不显示，于是 `body.right-empty` 为真、`#rightCols` 是 `display:none`。
+     * 这时 `sideIntent.noRight` 本来就是 false，`setSideCollapsed('right', false)` 就是
+     * **彻底 no-op** —— 用户点顶栏右栏开关没有任何反应（而右侧小活动栏已按用户要求删掉，
+     * 页面上再没有第二个右栏入口，等于这个问题没有别的出口）。
+     * 所以这里补一句：栏是空的就先开一块（默认问答，能打字，是最常用的入口）。
+     */
+    if (side === 'right' && !collapsed && rightPanelInCol(1) === '') {
+      revealRightPanelFromToggle();
+    }
   });
 }
 
@@ -3562,39 +1320,23 @@ function initLayout() {
   applyUiStyle();
   if (saved.leftW) { sideBaseW.left = saved.leftW; document.documentElement.style.setProperty('--left-w', `${saved.leftW}px`); }
   if (saved.rightW) { sideBaseW.right = saved.rightW; document.documentElement.style.setProperty('--right-w', `${saved.rightW}px`); }
-  // 阶段 2.2b：底部停靠区高度也恢复（拖动过才写；老存档没有这个字段 → 用 CSS 里的默认 240）
-  if (saved.dockBottomH) setDockBottomHeight(saved.dockBottomH, { save: false });
   // 只恢复「用户意图」；自动收起由 applyResponsiveLayout() 按当前窗口宽度当场算
   sideIntent.noLeft = !!saved.noLeft;
   sideIntent.noRight = !!saved.noRight;
   /**
-   * ⚠️ 这里**不能**因为「右栏有浮窗」就收起右栏（用户实测缺陷 2026-10-04：
-   *   「译文被挡死了，啥也看不见，就最上面一点点露出来」）。
+   * **有面板明确停靠在右栏且可见时，存档里的 noRight 不许把它藏起来。**
    *
-   * 旧写法是无条件 `if (floatPanels('right').some(visible)) sideIntent.noRight = true`，
-   * 而 `floatPanels()` 返回的是所有 `dock === 'float'` 的面板 —— 只要用户**曾经**把译文/问答
-   * 拖出成卡片，这个标记就一直在，重启后右栏 100% 被 `display:none`，
-   * 而且 `sideIntent` 会被写回 `reader.ui.noRight` → **自锁：刷新多少次都是收起的**。
-   * 实测：`#rightCols w=0 display:none`、译文块 `0×0`、`.ai-body clientH=0`、命中测试可见比例 0%。
+   * 这是「右栏自锁」那一类缺陷的对策 —— 用户实测「译文被挡死了啥也看不见」的路径之一
+   * 就是存档 `reader.ui.noRight=true`（可能来自更早的窄窗自动收起或旧版本）。内容在、
+   * 栏不在，是最让人困惑的一种坏法，所以这里让「有内容要显示」优先。
    *
-   * 正确口径：只有「右栏里确实还有停靠在右栏的可见面板」时才需要为浮窗让位；
-   * 面板是 `dock === 'right'` 就说明它要显示在栏里，那就必须展开右栏。
+   * ⚠️ 反向那条（「右栏只有浮窗时把右栏收起来给浮窗让位」）已随应用内浮窗一起删除：
+   *   dock 再也不会是 'float'，浮窗不可能挡住右栏，也就没有「让位」这回事。
    */
-  const floatingRightVisible = floatPanels('right').filter((id) => state.panels[id]?.visible);
   const dockedRightVisible = PANEL_IDS_RIGHT.some((id) => state.panels[id]?.visible && state.panels[id].dock === 'right');
-  /**
-   * 反向也有一条：**有面板明确停靠在右栏且可见时，存档里的 noRight 不许把它藏起来**。
-   * 这是同一类自锁的另一半 —— 用户实测「译文被挡死了啥也看不见」的路径之一就是
-   * 存档 `reader.ui.noRight=true`（可能来自更早的窄窗自动收起或旧版本）。
-   * 内容在、栏不在，是最让人困惑的一种坏法，所以这里让「有内容要显示」优先。
-   */
-  if (!panelWindow.enabled && dockedRightVisible) {
+  if (dockedRightVisible) {
     sideIntent.noRight = false;
     sideIntent.pinned.right = true;
-  }
-  if (!panelWindow.enabled && floatingRightVisible.length && !dockedRightVisible) {
-    sideIntent.noRight = true;
-    sideIntent.pinned.right = false;
   }
   applyResponsiveLayout();
 
@@ -3606,18 +1348,11 @@ function initLayout() {
   bindSplitter($('#splitRight'), '--right-w', 240, 720, COLLAPSE_BELOW.right);
   initRails();
 
-  // 旧的面板管理器按钮已经移除；面板管理器仍可从标题栏 / 右键入口打开。
-  $('#panelBtn')?.addEventListener('click', (e) => {    e.stopPropagation();
-    togglePanelMenu($('#panelBtn'));
-  });
-
   // 窗口尺寸变化：先让「明确展开」的豁免作废（自动规则重新生效），再重算
   window.addEventListener('resize', debounce(() => {
     sideIntent.pinned.left = false;
     sideIntent.pinned.right = false;
     if (applyResponsiveLayout()) refitViewer(0);
-    // 阶段 2.2b：窗口变小 / 变窄时把浮窗重新钳进视口 —— 绝不出现「跑到屏幕外拿不回来」
-    clampAllFloats();
   }, 120));
 }
 
@@ -3639,11 +1374,19 @@ function initRails() {
       if (!id) return;
       const expanded = !document.body.classList.contains('no-left');
       const wasVisible = !!state.panels?.[id]?.visible;
-      // 「再次点击选中的」= 这一块正显示着、左栏也开着 → 收成活动栏（不隐藏块本身）
-      if (expanded && wasVisible) { setSideCollapsed('left', true); return; }
+      /**
+       * 2026-10 用户口径：「点击已开的图标也不会关闭侧栏，**而是不做反应**」。
+       *
+       * 所以这里从原来的「再点一次收成活动栏」改成 **no-op**：
+       * 这一块已经开着、左栏也开着的时候，再点它是**什么都不做**（既不改面板，也不收栏）。
+       * 收起左栏是另一个明确动作 —— 顶栏的「收起左栏」或拖动分隔条。
+       * （实测踩过：改成 no-op 之前，用户点已开图标会把整条左栏收掉，看着像"图标坏了"。）
+       */
+      if (expanded && wasVisible) return;
       rememberLeftChoice(id);            // 点活动栏出来的就是点的这一个，并且记住它
       setSideCollapsed('left', false, true);
       setPanelVisible(id, true);         // 内部会把左栏其余三块收起（一次只开一个）
+      if (id === 'relations') ensureRelationsBuilt();   // 打开「参考文献」= 按需整理的触发点
       syncRailActive();
       // 展开是 display 切换，同步量一次布局就能滚（roll 的是 .side.left 这个滚动容器）。
       // 面板正浮着的时候别去滚它 —— 浮窗是 fixed 的，滚它只会把外层容器带偏。
@@ -3654,7 +1397,9 @@ function initRails() {
     };
   });
   /**
-   * 右侧活动栏那个按钮（`#railRightBtn`）。
+   * 右侧活动栏那个按钮（`#railRightBtn`）**已删除**（2026-10 用户口径：
+   * 「最右边那个小的侧边栏不要」）。右栏的开关只剩顶栏的 `#topbarRightToggle`。
+   * 下面这个 onclick 只在元素还存在时才挂（`if (rightBtn)`），所以不会抛。
    *
    * ⚠️ 不能只写 `setSideCollapsed('right', false, true)`：当右栏**两块都关掉**时，
    * `body.right-empty` 把整条右栏 `display:none` 了，而此刻 `sideIntent.noRight` 本来就是 false，
@@ -3672,10 +1417,8 @@ function initRails() {
     const id = PANEL_IDS_RIGHT.includes(last) ? last : 'chat';
     const p = state.panels?.[id];
     if (!p) return;
-    if (p.dock !== 'right') dockPanelTo(id, 'right');
     sideIntent.noRight = false;          // 用户明确要这一边
     sideIntent.pinned.right = true;
-    setPanelColumn(id, 1);
     setPanelVisible(id, true);
     applyPanels();                        // 清掉 right-empty（它只在「没有可见面板」时为真）
     applyResponsiveLayout();
@@ -3693,156 +1436,135 @@ function initRails() {
 }
 
 /**
- * 顶栏自动隐藏（用户口径 2026-10-03）：
- *   「在阅读的时候，最上面那一栏应该是鼠标悬停在上面才出现，鼠标移走就收起。」
- *   「控件需要下移的可以跟着下移，文章不动。」
+ * 顶栏自动隐藏 —— **已整体退役**（2026-10-04 用户改口径：「不做那个浮动栏了，就一直显示」）。
  *
- * 为什么**以指针位置为准**，而不是给热区和顶栏各挂 mouseenter：
- *   顶栏收起时是 translateY(-100%)，整个在屏幕外。凡「按坐标点击」的路径
- *   （自动化脚本、辅助工具、以及任何先算坐标再点的实现）都会因为目标是屏幕外元素而失败 ——
- *   实测这直接把既有套件打红（page.click('#opsBtn') 抛 "Node is either not clickable"）。
- *   改成「指针落在屏幕顶部这一条带里就展开」之后：真实用户「移上去就出现」的手感不变，
- *   按坐标点击也会先把指针移进去 → 顶栏展开 → 自然点得到。
+ * 这里原来留着一整套「热区 8px + 指针位置状态机 + 焦点续命」的实现，以及
+ * `topbarAutoEnabled()` / `TOPBAR_TRIGGER_H` 这一对已经恒为「关」的开关。
+ * 热区元素已从 index.html 删除，常驻状态改由 initTopbar() 钉死，所以整段一并删除。
  *
- * 四条纪律（每条对应一个会咬人的场景）：
- *   ① 触发带只有屏幕顶部 8px。顶栏滑下来后由顶栏本体接管 hover，
- *      不会中途判定为离开 —— 不需要再单独维护一个 hover 组。
- *   ② **焦点优先**：焦点在顶栏里（Tab 走进去、或点完按钮焦点留在按钮上）就保持展开。
- *   ③ 焦点在输入控件（页码框）上时不自动收 —— 打字打到一半顶栏滑走最烦人。
- *   ④ 手上有活时不收：拖分隔条 / 拖面板出窗 / 正在跑操作（state.busy）都强制展开，
- *      免得顶栏在拖动过程中一开一合把布局量歪。
+ * 顺带留下一条仍然成立的结论：自动隐藏的静息态把整条顶栏 translateY(-100%) 移到屏幕外，
+ * **任何按坐标点击顶栏控件的路径都会失败**（`page.click('#opsBtn')` 会抛
+ * "Node is either not clickable"）。常驻之后这条路自然通了。
  */
-const TOPBAR_TRIGGER_H = 8;     // 收起时只留 8px 触发带，避免正文稍微靠上就误触
-/**
- * 顶栏自动隐藏的开关（默认开；用户口径 2026-10-03 要求「悬停才出现、移走就收起」）。
- *
- * 为什么必须留一个关掉它的办法：
- *   自动隐藏 = 顶栏在静息态整个移到屏幕外，于是**任何按坐标点击顶栏控件的路径都会失败**
- *   （自动化脚本、辅助技术、以及「先算坐标再点」的实现都会报 "node is not clickable"）。
- *   这不是可以忽略的边角：无障碍工具与既有自动化都走这条路。所以：
- *     · `?topbar=static`（或 localStorage reader.topbarAuto='0'）→ 常驻，一切可点击；
- *     · 设置里的「更多样式」是否暴露这个开关由后续决定，但入口先留好。
- *   这也是本仓库既有的做法：面板的「自动收起」等行为都有类似的显式开关或回退。
- */
-function topbarAutoEnabled() {
-  try {
-    // ① URL 开关优先级最高：自动化与「我这次就想常驻」都用它
-    const q = new URL(location.href).searchParams;
-    const v = q.get('topbar');
-    if (v === 'static' || v === '0') return false;
-    if (v === 'auto' || v === '1') return true;
-    // ② 设置里的「顶栏：悬停才出现 / 常驻」（localStorage reader.topbarAuto）
-    if (localStorage.getItem('reader.topbarAuto') === '0') return false;
-    if (localStorage.getItem('reader.topbarAuto') === '1') return true;
-  } catch { /* 拿不到就用默认 */ }
-  return true;   // ③ 默认：悬停才出现（用户口径）
+
+/* ══════════════════════════════════════════════════════════════════════════
+   应用内标题栏：窗口动作通道（无边框桌面壳）
+   ══════════════════════════════════════════════════════════════════════════
+
+   桌面壳（desktop/src/window.rs）现在把窗口做成**无边框**，标题栏由页面自己画：
+     · 三个按钮（最小化 / 最大化·还原 / 关闭）→ IPC
+     · 标题区按住拖动、双击切最大化 → IPC
+     · 八向缩放热区 → IPC
+   浏览器里（`node server.js`、手机版）没有 `window.ipc` → 给 body 打 `no-window-chrome`，
+   窗口控件与缩放热区整块不显示，其余功能完全不受影响。
+
+   ⚠️ wry 0.55 **没有** drag-region 特性（`data-wry-drag-region` 是个无效标记，翻过
+   wry-0.55.1/src/lib.rs，只有 `with_drag_drop_handler`，那是拖文件的），所以拖动只能走
+   这条 IPC；Rust 侧收到后调 tao 的 `drag_window()` / `drag_resize_window()`。
+   几何与悬停反馈照 VS Code 1:1，见 style.css 的「应用内标题栏」一节。 */
+
+const WINDOW_IPC = typeof window !== 'undefined'
+  && !!window.ipc && typeof window.ipc.postMessage === 'function';
+
+function windowAction(type, extra) {
+  if (!WINDOW_IPC) return;
+  try { window.ipc.postMessage(JSON.stringify({ type, ...(extra || {}) })); } catch { /* 壳没接住就算了 */ }
 }
 
-/** 用户改了「顶栏」设置：写偏好 + 立刻切换 body 类（不必刷新） */
-function applyTopbarPref(mode) {
-  const auto = mode !== 'static';
-  try { localStorage.setItem('reader.topbarAuto', auto ? '1' : '0'); } catch { /* 忽略 */ }
-  const wasAuto = document.body.classList.contains('topbar-auto');
-  if (auto === wasAuto) return;
-  if (auto) {
-    document.body.classList.remove('topbar-static');
-    initTopbar();
-  } else {
-    document.body.classList.remove('topbar-auto', 'topbar-near');
-    document.body.classList.add('topbar-static');
-    const hot = $('#topbarHot');
-    if (hot) hot.style.height = '';
+/** Rust 侧窗口状态变化时用 evaluate_script 调它（当前用于「最大化 ↔ 还原」切图标） */
+window.__prtWindowState = (state) => {
+  document.body.classList.toggle('window-maximized', !!(state && state.maximized));
+};
+
+function initWindowChrome() {
+  // 没有壳：不显示窗口控件，也不装拖动热区（浏览器里这些动作没有意义）
+  if (!WINDOW_IPC) { document.body.classList.add('no-window-chrome'); return; }
+
+  for (const btn of document.querySelectorAll('[data-window-control]')) {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      windowAction(btn.dataset.windowControl);
+    });
   }
-}
 
-function topbarZoneHeight() {
-  const h = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--topbar-h')) || 0;
-  return h > 0 ? TOPBAR_TRIGGER_H : 0;   // 面板窗口 --topbar-h 是 0 → 不提供触发带
-}
-
-function initTopbar() {
+  /* 标题区 = 顶栏上没有控件的那些地方（VS Code 的 drag-region 也是这个口径：
+     按钮/输入框/链接自己在上面，其余整条可拖）。 */
   const bar = $('#topbar');
-  const hot = $('#topbarHot');
-  if (!bar) return;
-  // 没有热区（老 DOM / 面板窗口）或用户关掉了自动隐藏 → 常驻，不做半套自动隐藏
-  if (!hot || !topbarAutoEnabled()) { document.body.classList.add('topbar-static'); return; }
-  const zone = topbarZoneHeight();
-  if (!zone) { document.body.classList.add('topbar-static'); return; }
-  document.body.classList.add('topbar-auto');
-  hot.style.height = `${zone}px`;
+  const isChromeBlank = (t) => !(t instanceof Element)
+    || !t.closest('button, input, select, textarea, a, label, [contenteditable], [data-no-drag]');
+  if (bar) {
+    bar.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || !isChromeBlank(e.target)) return;
+      e.preventDefault();
+      windowAction('drag');
+    });
+    bar.addEventListener('dblclick', (e) => {
+      if (!isChromeBlank(e.target)) return;
+      e.preventDefault();
+      windowAction('maximize');
+    });
+  }
 
-  let pointerActive = false;
-  let inZone = false;
-  let pinUntil = 0;        // 操作期间的强制展开截止时刻
-  let hideTimer = 0;
+  for (const dir of ['n', 's', 'w', 'e', 'nw', 'ne', 'sw', 'se']) {
+    const strip = el('div', { class: 'win-resize', dataset: { dir }, 'aria-hidden': 'true' });
+    strip.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      windowAction('resize', { dir });
+    });
+    document.body.append(strip);
+  }
 
-  const busyNow = () => {
-    if (performance.now() < pinUntil) return true;
-    if (state.busy) return true;
-    return ['panel-dragging', 'row-dragging', 'dragging', 'panel-drag-out']
-      .some((c) => document.body.classList.contains(c));
-  };
-  const focusInForm = () => {
-    const a = document.activeElement;
-    return !!(a && bar.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
-  };
-  /** 焦点在顶栏里（含按钮）也算「用户正在用顶栏」—— 键盘用户与点完按钮之后都靠这条 */
-  const focusInBar = () => !!(document.activeElement && bar.contains(document.activeElement));
+  // 窗口失焦 → 标题栏整体变淡（VS Code 的 `.titlebar.inactive > * { opacity:.6 }`）
+  const syncFocus = () => document.body.classList.toggle('window-blurred', !document.hasFocus());
+  window.addEventListener('focus', syncFocus);
+  window.addEventListener('blur', syncFocus);
+  syncFocus();
+}
 
-  const want = () => inZone || pointerActive || bar.matches(':hover') || busyNow() || focusInForm() || focusInBar();
+/**
+ * 顶栏：**常驻**。
+ *
+ * 早期版本是「阅读时自动隐藏、鼠标移到屏幕顶边才滑下来」，靠一个 `<div class="topbar-hot">`
+ * 热区元素 + 一整套指针位置状态机实现。两个原因让它整体下架：
+ *   · 用户口径改成「顶栏常驻，不要再悬停才出现」；
+ *   · 自动隐藏时顶栏在静息态整个移出屏幕，**任何按坐标点击**的路径都会失败
+ *     （`page.click('#opsBtn')` 会抛 "Node is either not clickable"）。
+ * 所以热区元素从 index.html 删除，这里把 body 钉在 `topbar-static`（CSS 里顶栏是普通流布局、
+ * 不做 transform）。历史开关（`?topbar=auto` / `?topbar=static`、`reader.topbarAuto`）的解析
+ * 已经全部删除 —— 现在**没有任何代码读 URL 上的 topbar 参数**，测试里继续带 `?topbar=static`
+ * 只是被当成未知查询参数忽略掉，顶栏照样是常驻的。
+ *
+ * ⚠️ 命名铁律（这里踩过一次真实事故）：**body 上的状态类不能和任何元素的类名同名**。
+ * 状态类曾叫 `topbar-hot`，与热区 div 的类名撞车，于是 `classList.add('topbar-hot')`
+ * 让 `<body>` 自己命中 `position:fixed; height:56px` 的元素样式，正文整片消失。
+ * 现在只保留 `topbar-static` 这一个状态类，与任何元素类都不同名。
+ */
+function initTopbar() {
+  if (!$('#topbar')) return;
+  document.body.classList.remove('topbar-auto', 'topbar-near');
+  document.body.classList.add('topbar-static');
   /**
-   * ⚠️ 状态类叫 `topbar-near`，**不能**叫 `topbar-hot`。
+   * 回首页（2026-10）。阅读态下才需要它，但按钮一直在 —— 首页上点它等于刷新首页，
+   * 无害且比「按钮忽隐忽现」更可预期。
    *
-   * 真实事故：状态类原来叫 `topbar-hot`，而热区元素 `<div class="topbar-hot" id="topbarHot">`
-   * 的类名也是 `.topbar-hot`，CSS 里 `.topbar-hot { position:fixed; height:var(--topbar-hot);
-   * z-index:45; background:transparent }`。于是 `classList.add('topbar-hot')` 一执行，
-   * **`<body>` 自己**就命中了那套样式 → body 变成屏幕顶部 56px 高的透明固定条，
-   * `#main` 与整个 PDF 阅读区随之消失。用户实测原话：
-   * 「鼠标移上去就会出现一个大色块把整个屏幕除了上面一条遮住，移走就消失」。
-   * 排查手段：CDP 的 `CSS.getMatchedStylesForNode(body)` 直接报出 body 命中了 `.topbar-hot`。
-   * 结论：**body 上的状态类必须与任何元素类名不同名**，这里用 `topbar-near` 彻底隔开。
+   * 注意：**不卸载当前论文**。只切视图，`viewer` 与 `state.doc` 都留着，
+   * 所以再点「继续阅读」是瞬间回去，不重走加载与会话清理。
    */
-  const sync = () => { document.body.classList.toggle('topbar-near', want()); };
-  const scheduleHide = () => { clearTimeout(hideTimer); hideTimer = setTimeout(sync, 80); };
-
-  // 指针位置是唯一真相：落进顶部触发带 → 立刻展开，离开后就允许收起。
-  const onMove = (y) => {
-    inZone = y <= zone;
-    /*
-     * 顶栏是「移到顶部才出现」，不是「鼠标在窗口任意位置活动就出现」。
-     * 旧逻辑把每一次 pointermove 都设成 pointerActive=true，导致阅读区里
-     * 只要移动鼠标，顶栏就会滑下来并压住两侧栏。这里让活动状态只代表
-     * 指针仍在顶部触发带内；离开触发带后由 CSS :hover / busy / focus 负责
-     * 保留必要的交互状态。
-     */
-    pointerActive = inZone;
-    clearTimeout(hideTimer);
-    sync();
-  };
-  document.addEventListener('pointermove', (e) => onMove(e.clientY), { passive: true });
-  document.addEventListener('pointerdown', (e) => onMove(e.clientY), { passive: true });
-  // 指针离开窗口（移到别的应用 / 屏幕外）：立刻按 want() 收
-  document.addEventListener('pointerleave', () => { pointerActive = false; scheduleHide(); });
-  window.addEventListener('blur', () => { pointerActive = false; scheduleHide(); });
-  // 触摸屏没有 hover：点一下触发带 = 把顶栏叫出来 4 秒
-  hot.addEventListener('click', () => {
-    pinUntil = performance.now() + 4000;
-    sync();
-    setTimeout(sync, 4100);
-  });
-  // 键盘：焦点进 / 出顶栏都要重算
-  bar.addEventListener('focusin', sync);
-  bar.addEventListener('focusout', () => setTimeout(sync, 0));
-  // 点顶栏里的任何按钮都续命一会儿（操作菜单 / 设置弹窗这类会立刻用顶栏做锚点）
-  bar.addEventListener('click', () => {
-    pinUntil = performance.now() + 1500;
-    sync();
-    setTimeout(sync, 1600);
-  }, true);
-  // 页面加载时先亮一下再收：让用户知道「原来顶栏在这儿」
-  document.body.classList.add('topbar-near');
-  pinUntil = performance.now() + 1200;
-  setTimeout(sync, 1300);
+  const home = $('#homeBtn');
+  if (home) home.onclick = () => setView('home');
+  // 会话菜单（多会话）：点按钮开合，点外部/Esc 关掉
+  const sessBtn = $('#sessBtn');
+  if (sessBtn) {
+    sessBtn.onclick = (e) => { e.stopPropagation(); toggleSessionMenu(); };
+    document.addEventListener('click', (e) => {
+      if (!sessionStore.open) return;
+      if (e.target.closest?.('#sessBar')) return;
+      closeSessionMenu();
+    });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sessionStore.open) closeSessionMenu(); });
+  }
 }
 
 /** 左栏当前该高亮哪个图标：优先「此刻真正显示着的那一块」，都没有就退回上次的选择 */
@@ -3881,7 +1603,7 @@ function ensurePanel(id, def) {
       node.classList.add('panel');
     } else {
       // 左栏三块的节点按**结构位置**认领（第 1 个 section.sec = 目录、第 2 个 = 笔记、
-      // 第 3 个 = 文献关系）。这里不能只靠 [data-panel] 查：那段属性是本函数第一次跑时才写上去的，
+      // 第 3 个 = 参考文献）。这里不能只靠 [data-panel] 查：那段属性是本函数第一次跑时才写上去的，
       // 第一次进来时 DOM 里根本还没有这个标记，查不到就会把三个面板全漏掉、顺序也排不动。
       const idx = PANEL_DEFS.filter((d) => d.dock === 'left').findIndex((d) => d.id === id) - 1;
       if (idx >= 0) node = $$('#leftSide > section.sec')[idx] || null;
@@ -3896,22 +1618,20 @@ function ensurePanel(id, def) {
   if (head && !head.dataset.panelBound) {
     head.dataset.panelBound = '1';
     bindPanelHead(id, head);
-    bindDockPanelDrag(id, head);
-    // 可见抓手：位置固定、每块面板都有，不必赌「标题栏哪里是空白」
-    if (!head.querySelector(':scope > .panel-drag-handle')) head.prepend(panelDragHandle());
-    // VS Code 式操作行：⧉ 应用内卡片 / ⇱⇲ 浮窗 / ✕ 隐藏 / ⋯ 长尾操作
+    // VS Code 式操作行：✕ 隐藏
     if (!head.querySelector(':scope > .panel-actions')) head.append(panelActions(id));
-    // 浮窗时的 ✕（收回到停靠区）；停靠状态下 CSS 让它 display:none，不占布局
-    if (!head.querySelector(':scope > .panel-float-x')) head.append(panelFloatCloseButton(id));
   }
-  // 文献关系默认只露出标题栏；标题本身就是明确入口，点击即可展开。
+  // 参考文献默认只露出标题栏；标题本身就是明确入口，点击即可展开。
+  // 展开这一下是「按需整理」的触发点之一（另一处是左栏活动栏的图标）：用户真的打开了
+  // 这一块才去解析全文引用，打开论文本身不再后台跑一遍。
   // 其它面板保留原来的标题栏行为，避免误触改变文件/目录/笔记的布局。
   if (id === 'relations' && head && !head.dataset.relationClickBound) {
     head.dataset.relationClickBound = '1';
-    head.title = '点击展开或收起文献关系';
+    head.title = '点击展开或收起参考文献';
     head.addEventListener('click', (e) => {
-      if (e.target?.closest?.('button, input, select, a, .panel-drag-handle')) return;
+      if (e.target?.closest?.('button, input, select, a')) return;
       togglePanelCollapsed(id);
+      if (!state.panels[id].collapsed) ensureRelationsBuilt();
     });
   }
   node.classList.toggle('hidden', !p.visible);
@@ -4069,8 +1789,6 @@ function saveUi() {
     // 窄窗下侧栏会让宽，把让宽后的值存下来等于把用户拖好的宽度改掉（同 autoCollapse 的纪律）。
     leftW: Math.round(sideBaseW.left) || 210,
     rightW: Math.round(sideBaseW.right) || 360,
-    // 阶段 2.2b：底部停靠区高度（没有面板停靠到底部时它不显示，但高度记着）
-    dockBottomH: parseInt(getComputedStyle(document.documentElement).getPropertyValue('--dock-bottom-h'), 10) || 240,
     // 只存「用户意图」：窗口太窄导致的自动收起（state.autoCollapse）不能写进来，
     // 否则窄窗用过一次之后，下次开宽窗也还是收起的
     noLeft: !!sideIntent.noLeft,
@@ -4143,11 +1861,23 @@ function initViewer() {
     onPageChange: (cur, total) => {
       $('#pageInput').value = String(cur);
       $('#pageCount').textContent = String(total || 0);
+      syncFootPage(cur, total);
       saveProgress();
       checkScannedPage(cur);
     },
-    onStatus: (s) => { $('#statusText').textContent = s; },
-    onProgress: (done, total) => { $('#progressText').textContent = done < total ? `解析中 ${done}/${total}` : ''; },
+    /**
+     * 状态栏已删除（2026-10，PDF 下面那条只有「就绪」三个字的空条）。
+     * 但**解析进度不能一起丢**：几百页的 PDF 解析要几秒，没有反馈用户会以为卡住了。
+     * 所以把它压进页码那一格（#pageInput.title + .page-input.busy），
+     * 只占顶栏已有的位置，不再单独占一条 22px 高的横条。
+     */
+    onStatus: (s) => { $('#docName')?.setAttribute('data-status', s || ''); },
+    onProgress: (done, total) => {
+      const busy = done < total;
+      $('#pageInput')?.classList.toggle('busy', busy);
+      const box = $('#pageInput');
+      if (box) box.title = busy ? `正在解析 ${done}/${total} 页…` : '';
+    },
     onScale: (scale) => syncZoom(scale),
     onNoteClick: (id) => openNoteEditorById(id),
     onCiteClick: (info) => handleCite(info),
@@ -4155,53 +1885,73 @@ function initViewer() {
   window.__viewer = viewer;
   window.__settings = Settings;   // 方便调试 / 自动化测试
   window.__state = state;
+
+  /* 书签夹取（见 clampPins 的注释）：三类时机各算一次 ——
+       · 横向滚动：纸面与阅读区的差值在变；
+       · 阅读区尺寸变化：右栏开/关、拖分隔条、改窗口宽度都会让纸面从「放得下」变成「溢出」；
+       · 书签被重画：虚拟化换页、缩放重渲染、保存笔记都会删掉重建 `.hl-pin` 节点，
+         新节点同样要夹（变量在 .page 上，重建后 CSS 自动生效，这里只是补算新几何）。 */
+  const viewerEl = $('#viewer');
+  viewerEl.addEventListener('scroll', schedulePinClamp, { passive: true });
+  window.addEventListener('resize', schedulePinClamp);
+  if (window.ResizeObserver) new ResizeObserver(schedulePinClamp).observe(viewerEl);
+  if (window.MutationObserver) {
+    new MutationObserver(schedulePinClamp).observe(viewerEl, {
+      childList: true, subtree: true, attributes: true, attributeFilter: ['style'],
+    });
+  }
   // 供自动化测试直接验证「全文上下文」和「相关段落检索」这两块纯逻辑
   window.__ctx = {
-    buildDocContext, pickRelevantPages, webSearch, syncOptChips, PICK_K, openExternal,
+    buildDocContext, pickRelevantPages, webSearch, renderScopeMenu, PICK_K, openExternal,
     alignProbe: selectionAlignProbe, clearSelectionState,
-    OPS, opById, opGroups, runOperation, doTranslate, doExplain, send, restoreSession, COACH, saveSessionNow,
+    OPS, opById, runOperation, doTranslate, doExplain, send, restoreSession, saveSessionNow,
     get FULL_LIMIT() { return FULL_LIMIT; },
     jumpToPageWithHistory, jumpToDestWithHistory, returnToPreviousPosition,
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
     renderAttachments, refreshReturnButton,
     get uiStyle() { return uiStyle; },
-    applyUiSettingsFromControls, resetLayout, resetStyle,
-    // 阶段 2.2a：面板管理器的开关（自动化测试也用这一条，不用去点那个只在 hover 时可见的 ⋯）
-    togglePanelMenu, resetPanels, setPanelsVisible, setPanelVisible,
-    // 右栏列：译文 / 问答的归属与第 2 栏开关（自动化测试直接调这几个，省得模拟右键与拖拽）
-    openRightColumn, closeRightColumn, setPanelColumn, rightColsWanted, colOf, rightPanelInCol,
-    openPanelWindow,
-    // 阶段 2.2b：停靠 / 浮出 / 收回（探针按这些跑，省得去模拟鼠标轨迹）
-    floatPanel, dockPanelTo, redockFloats, clampAllFloats, closeFloatPanel,
-    // 拖出应用内卡片 / 强制重排：验证「按住图标拖出去」这一条时必须能直接调（不必模拟指针轨迹）
-    detachPanelToWindow, applyPanels,
-    // 独立窗口状态闭环：探针直接调这一组，省得去凑关闭消息或真等 75 秒心跳超时
-    releaseDetachedWindow, clearDetachedState, restoreDockState, detachWatchdogTick,
-    detachedRuntime, panelDetached, readDetachedWindows,
-    get panelAnimLog() { return state._panelAnimLog.slice(); },
-    clearPanelAnimLog() { state._panelAnimLog.length = 0; },
+    applyUiSettingsFromControls, resetSettings, fillUiSettings,
+    // 面板：显隐与重启布局（自动化测试直接用这两条，不必去点界面）
+    resetPanels, setPanelVisible,
+    // 右栏恒为一栏：译文 / 问答的归属与「这一栏现在开着谁」
+    rightColsWanted, colOf, rightPanelInCol,
+    // 强制重排
+    applyPanels,
     // 测试用：把「多长算太长」调小，才能在没有超长 PDF 的情况下验证索引分支
     setFullLimit(n) { FULL_LIMIT = n; },
   };
 
-  $('#returnPosition').onclick = () => returnToPreviousPosition();
+  // #returnPosition 已从顶栏删除（2026-10）：「返回原位置」不再占顶栏一格。
+  // 逐步回退阅读位置这个能力仍然保留（引用跳转、目录跳转都还在用 jumpToPageWithHistory），
+  // 只是不再有那个显式按钮 —— 所以这里用可选链，元素不在也不会抛。
+  const retBtn = $('#returnPosition');
+  if (retBtn) retBtn.onclick = () => returnToPreviousPosition();
 
-  $('#prevPage').onclick = () => viewer.goToPage(viewer.current - 1);
-  $('#nextPage').onclick = () => viewer.goToPage(viewer.current + 1);
-  $('#pageInput').addEventListener('change', (e) => {
+  /**
+   * 底栏（2026-10）：翻页 + 缩放整组**只有这一处**了 ——
+   * 用户两次收敛后的口径是「底栏有的功能上面的一栏就不要了」，
+   * 所以顶栏那套 #prevPage / #nextPage / #zoomIn / #zoomOut / #fitWidth 已经删掉，
+   * `#pageInput` / `#zoomRange` / `#zoomLabel` / `#pageCount` 这几个 **id 保留、搬到底栏**
+   * （app.js 与测试都按 id 取，搬位置不用改取值逻辑）。
+   */
+  $('#footPrevPage').onclick = () => viewer.goToPage(viewer.current - 1);
+  $('#footNextPage').onclick = () => viewer.goToPage(viewer.current + 1);
+  $('#footZoomIn').onclick = () => viewer.setScale(viewer.scale * 1.15);
+  $('#footZoomOut').onclick = () => viewer.setScale(viewer.scale / 1.15);
+  $('#footFitWidth').onclick = () => viewer.fitWidth();
+
+  $('#pageInput')?.addEventListener('change', (e) => {
     const n = parseInt(e.target.value, 10);
     if (!Number.isNaN(n)) viewer.goToPage(n);
     else e.target.value = String(viewer.current);
   });
-  $('#pageInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } });
+  $('#pageInput')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } });
 
-  // PDF 大小调节
-  $('#zoomIn').onclick = () => viewer.setScale(viewer.scale * 1.15);
-  $('#zoomOut').onclick = () => viewer.setScale(viewer.scale / 1.15);
-  $('#fitWidth').onclick = () => viewer.fitWidth();
   const range = $('#zoomRange');
-  range.addEventListener('input', () => viewer.setScale(Number(range.value) / 100));
-  range.addEventListener('dblclick', () => viewer.fitWidth());
+  if (range) {
+    range.addEventListener('input', () => viewer.setScale(Number(range.value) / 100));
+    range.addEventListener('dblclick', () => viewer.fitWidth());
+  }
 
   $('#viewer').addEventListener('wheel', (e) => {
     if (!e.ctrlKey && !e.metaKey) return;
@@ -4211,6 +1961,9 @@ function initViewer() {
 }
 
 function refreshReturnButton() {
+  // 顶栏那个「返回原位置」按钮已删除（2026-10），所以这里没有按钮可刷 —— 直接返回。
+  // 保留函数本身：__ctx 仍导出它、跳转历史（state.jumpHistory）仍由 recordReaderJump 维护，
+  // 测试与将来的入口都还能用。
   const button = $('#returnPosition');
   if (!button) return;
   const stack = state.doc ? state.jumpHistory.get(state.doc.docId) || [] : [];
@@ -4259,11 +2012,24 @@ async function returnToPreviousPosition() {
   refreshReturnButton();
 }
 
+/**
+ * 页码显示（2026-10：页码输入框已从顶栏搬到底栏）。
+ * 抽成函数是因为它有**两个**触发点：onPageChange（翻页时）和 openDoc（打开论文时）——
+ * 只挂 onPageChange 会让首次打开时底栏停在占位符「–」（实测踩过）。
+ */
+function syncFootPage(cur, total) {
+  const box = $('#pageInput');
+  const tot = $('#pageCount');
+  if (box && cur != null) box.value = String(cur);
+  if (tot && total != null) tot.textContent = String(total || 0);
+}
+
 function syncZoom(scale) {
   const pct = Math.round(scale * 100);
-  $('#zoomLabel').textContent = `${pct}%`;
+  const lbl = $('#zoomLabel');
+  if (lbl) lbl.textContent = `${pct}%`;
   const r = $('#zoomRange');
-  if (document.activeElement !== r) r.value = String(clamp(pct, Number(r.min), Number(r.max)));
+  if (r && document.activeElement !== r) r.value = String(clamp(pct, Number(r.min), Number(r.max)));
 }
 
 function checkScannedPage(page) {
@@ -4315,6 +2081,155 @@ async function saveProgressNow() {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   serverState = payload;
   toast('阅读进度已保存', 'ok');
+}
+
+/**
+ * ══════════════════════════ 首页 / 书架页（2026-10） ══════════════════════════
+ *
+ * 首页只解决两件事：**选一篇论文**、**继续上次阅读**。它不是仪表盘。
+ * 刻意不做：AI 操作、推荐、统计、阅读时长、学习计划、关系图、装饰性空卡片。
+ *
+ * 三个顶层视图：
+ *   home    首页（#home 显示，#viewer 隐藏）
+ *   reading 阅读态（#viewer 显示）
+ *   search  全文搜索（#searchBar 由 initSearch 自己管，不属于本函数）
+ *
+ * **为什么要把 home / reading 做成互斥的两个兄弟节点**：
+ * 改造前 `#welcome` 是挂在 `#viewer` 里面的「空状态」，于是
+ * 「还没有论文」「读完了退回来」「打开失败」三种语义共用同一个模糊容器 ——
+ * 打开失败时它显示的还是那句「拖入 PDF」的欢迎语，用户看不出发生了什么。
+ * 现在 #home 与 #viewer 是兄弟，三种状态各有归属。
+ */
+function setView(view) {
+  const home = view === 'home';
+  document.body.classList.toggle('reading', !home);
+  $('#home')?.classList.toggle('hidden', !home);
+  syncFootEnabled(!home);
+  if (!home) return;
+  state.homeReady = true;
+  renderHome();
+}
+
+/**
+ * 底栏常驻，但**没有文档时里面的控件要置灰**（2026-10 用户口径：「底栏应该是一直都有，
+ * 主页也要有」）。所以不是把整条藏起来，而是把翻页 / 页码 / 缩放这些
+ * 「必须有一篇论文才有意义」的控件禁用掉 —— 布局不跳，意图也清楚。
+ */
+function syncFootEnabled(on) {
+  const usable = !!on && !!viewer?.pdf && state.viewerDocId === state.doc?.docId;
+  for (const id of ['footPrevPage', 'footNextPage', 'footZoomIn', 'footZoomOut', 'footFitWidth', 'pageInput', 'zoomRange']) {
+    const node = document.getElementById(id);
+    if (node) node.disabled = !usable;
+  }
+}
+
+/** 相对时间：首页每行只给「刚看过 / N 分钟前 / N 小时前 / N 天前」 */
+function relTime(ts) {
+  const ms = Date.now() - (Number(ts) || 0);
+  if (!Number.isFinite(ms) || ms < 0) return '刚看过';
+  const min = Math.floor(ms / 60000);
+  if (min < 1) return '刚看过';
+  if (min < 60) return `${min} 分钟前`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour} 小时前`;
+  return `${Math.floor(hour / 24)} 天前`;
+}
+
+/**
+ * 阅读记录（state.json 的 docs）→ 首页要用的行。
+ * 按 ts 倒序；**只保留 papers/ 里还在的文件** —— 被移走 / 删掉的记录不出现在首页，
+ * 也不留死链接（对应设计里的状态 5）。
+ */
+function recentDocs() {
+  const docs = serverState.docs || {};
+  const byId = new Map((state.papers || []).map((p) => [p.docId, p]));
+  const rows = [];
+  for (const [docId, rec] of Object.entries(docs)) {
+    const paper = byId.get(docId);
+    if (!paper) continue;
+    rows.push({
+      docId,
+      rec,
+      name: paper.name,
+      url: paper.url,
+      page: Math.max(1, Number(rec?.page) || 1),
+      ts: Number(rec?.ts) || 0,
+    });
+  }
+  rows.sort((a, b) => b.ts - a.ts);
+  return rows;
+}
+
+/** 移除一条阅读记录（只删记录，**不删 papers/ 里的文件**） */
+async function removeRecent(docId) {
+  const file = (serverState.docs || {})[docId]?.name || '这条记录';
+  try {
+    const r = await fetch(`/api/state?doc=${encodeURIComponent(docId)}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const nextDocs = { ...(serverState.docs || {}) };
+    delete nextDocs[docId];
+    serverState = { ...serverState, docs: nextDocs };
+    if (serverState.lastDoc === docId) {
+      serverState = { ...serverState, lastDoc: null, lastUrl: null, lastName: null };
+    }
+    renderHome();
+    toast(`已移除「${file}」的最近记录（文件还在 papers/）`, 'ok', 2600);
+  } catch (e) {
+    toast(`移除失败：${e.message}`, 'err', 4000);
+  }
+}
+
+/**
+ * 渲染首页。数据源是 `serverState.docs`（阅读记录），**不是** `state.papers` ——
+ * 左栏 `renderPaperList()` 管的是「磁盘上有什么」，首页管的是「我读到哪了」。
+ * 两者共用同一个 `openDoc()` 出口。
+ */
+function renderHome() {
+  const list = $('#homeList');
+  const contWrap = $('#homeContinueWrap');
+  if (!list || !contWrap) return;
+  const rows = recentDocs();
+  const title = $('#homeRecentTitle');
+
+  // ── 继续阅读卡片：只在「确实有一篇可以接着读」时出现 ──
+  contWrap.replaceChildren();
+  const last = rows.find((r) => r.docId === serverState.lastDoc) || rows[0];
+  if (last) {
+    const go = el('button', { type: 'button', class: 'home-continue', 'aria-label': `继续阅读「${last.name}」，从第 ${last.page} 页开始` },
+      el('span', { class: 'hc-main' },
+        el('span', { class: 'hc-label', text: '继续阅读' }),
+        el('span', { class: 'hc-name', text: last.name.replace(/\.pdf$/i, ''), title: last.name }),
+        el('span', { class: 'hc-meta', text: `第 ${last.page} 页 · ${relTime(last.ts)}` })),
+      el('span', { class: 'hc-go' }, '继续 →'));
+    go.onclick = () => openDoc({ name: last.name, url: last.url, docId: last.docId });
+    contWrap.append(go);
+  }
+
+  // ── 最近列表 ──
+  list.replaceChildren();
+  if (title) title.textContent = rows.length ? `最近打开（${rows.length}）` : '最近打开';
+  if (!rows.length) {
+    list.append(el('li', { class: 'home-empty' },
+      el('div', { text: state.papers.length ? '还没有阅读记录' : '还没有论文' }),
+      el('div', { class: 'home-empty-sub', text: state.papers.length
+        ? '点上面「打开 PDF」，或从左边文件列表里挑一篇'
+        : '点「打开 PDF」选一个，或直接把 PDF 拖进来' })));
+    return;
+  }
+  for (const row of rows) {
+    const item = el('li', { class: 'home-item', dataset: { id: row.docId } },
+      el('button', { type: 'button', class: 'home-item-go', title: row.name },
+        el('span', { class: 'hi-name', text: row.name.replace(/\.pdf$/i, '') }),
+        el('span', { class: 'hi-meta', text: `第 ${row.page} 页 · ${relTime(row.ts)}` })),
+      el('button', {
+        type: 'button', class: 'home-item-x', text: '×',
+        title: `移除「${row.name}」的最近记录（不删除文件）`,
+        'aria-label': `移除「${row.name}」的最近记录`,
+        onclick: (e) => { e.stopPropagation(); removeRecent(row.docId); },
+      }));
+    item.querySelector('.home-item-go').onclick = () => openDoc({ name: row.name, url: row.url, docId: row.docId });
+    list.append(item);
+  }
 }
 
 async function refreshPaperList() {
@@ -4372,6 +2287,20 @@ function initFiles() {
     const f = e.dataTransfer?.files?.[0];
     if (f && /\.pdf$/i.test(f.name)) openLocalFile(f);
   });
+
+  /* ── 首页上的两个入口（2026-10）──
+     「打开 PDF」直接借用左栏那个 #fileInput —— 一套选文件的逻辑只有一个实现。
+     「拖入」区只是**视觉提示**：真正的全页拖放由上面的 window 监听负责，
+     所以拖到首页任何地方都算数，不用精确对准那个框。 */
+  $('#homeOpen')?.addEventListener('click', () => $('#fileInput')?.click());
+  const drop = $('#homeDrop');
+  if (drop) {
+    for (const ev of ['dragenter', 'dragover']) {
+      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); });
+    }
+    for (const ev of ['dragleave', 'drop']) drop.addEventListener(ev, () => drop.classList.remove('over'));
+    drop.addEventListener('click', () => $('#fileInput')?.click());
+  }
 }
 
 let localObjectUrl = null;
@@ -4436,17 +2365,12 @@ async function openDoc({ name, url, docId }) {
   state.doc = { name, url, docId };
   // 面板布局不再按论文分叉（阶段 2.2a）：换论文不重载 state.panels
   state.viewerDocId = null;
-  /**
-   * 阶段 2.2b：换论文时把所有浮窗自动收回停靠。
-   * 浮在屏幕上的面板若显示的还是上一篇的内容，比「布局被重置」糟糕得多；
-   * 同一篇论文重新打开（刷新 / 重进）时 docId 相同，浮窗保持原样（位置 / 大小都还在）。
-   */
-  redockFloatsForDoc(docId);
   refreshReturnButton();
   document.title = `${name} · 论文阅读器`;
   $('#docName').textContent = name;
   $('#docName').title = name;
-  $('#welcome').classList.add('hidden');
+  // 注意：这里**不切视图**。真正切到阅读态是在 viewer.load() 成功之后 ——
+  // 加载失败要能退回首页，中间过程也不该先露出一个空白正文区。
   clearAllBlocks();
   state.attachments = [];
   renderAttachments();
@@ -4460,19 +2384,16 @@ async function openDoc({ name, url, docId }) {
   state.docTextDoc = null;
   state.docDigest = null;
   state.useFullText = false;
-  // 换论文了：文献关系重新整理（异步，不挡打开）。
-  // 阶段 3：先把代际令牌抬一格，再清状态 —— 旧论文在途的解析 / 扫描 / 查询回来时
+  // 换论文了：参考文献列表作废，等用户再打开这一块时才重新解析（按需，不在这里跑）。
+  // 阶段 3：先把代际令牌抬一格，再清状态 —— 旧论文在途的解析 / 查询回来时
   // 会发现自己是上一代，整批丢弃，一个字都不写进新论文（R1/R2/R3/R5）。
   relBumpGen();
   state.refs = [];
   state.refsDoc = null;
-  state.citedBy = [];
-  state.citedByDoc = null;
-  state.relScanned = null;
-  state.relBusy = false;        // R5：不重置的话，扫描在途时切论文会让新论文的按钮永久灰着
+  state.refsParsing = null;
   state.relHint = '';
   state.relItemState.clear();   // 条目状态跟着论文走（key 只保证在同一篇论文内稳定）
-  resetRelView();               // 搜索 / 筛选 / 排序 / 折叠只活在内存里，换论文即重置
+  resetRelView();               // 搜索 / 分组折叠只活在内存里，换论文即重置
   // 正文引用卡片也是上一篇的：不清的话「找这篇的 PDF」会拿上一篇的文献去查
   state.cite = null;
   $('#citeBox')?.classList.add('hidden');
@@ -4482,9 +2403,7 @@ async function openDoc({ name, url, docId }) {
   hideOpsMenu();
   renderRelations();
   setHint('');
-  syncOptChips();
-  hidePopover();
-  $('#statusText').textContent = '正在打开…';
+  renderScopeMenu();
   for (const li of $$('#fileList li')) li.classList.toggle('active', li.dataset.id === docId);
 
   try {
@@ -4500,18 +2419,19 @@ async function openDoc({ name, url, docId }) {
     document.title = '论文阅读器';
     $('#docName').textContent = '未打开文档';
     $('#docName').title = '';
-    $('#welcome').classList.remove('hidden');
-    $('#statusText').textContent = '打开失败';
+    // 打开失败退回首页（不再是一个既不像欢迎页、又不像错误页的模糊容器）
+    setView('home');
     $('#pageInput').value = '–';
     $('#pageCount').textContent = '–';
-    $('#progressText').textContent = '';
     for (const li of $$('#fileList li')) li.classList.remove('active');
     refreshReturnButton();
-    syncOptChips();
+    renderScopeMenu();
     checkConfigWarning();
     return;
   }
   if (superseded()) return;
+  // PDF 真的加载出来了才切到阅读态（见上面「不切视图」的说明）
+  setView('reading');
   const saved = serverState.docs?.[docId];
   /**
    * 打开论文时优先「自动匹配到最合适的大小」：
@@ -4528,21 +2448,34 @@ async function openDoc({ name, url, docId }) {
   }
   if (superseded()) return;
   syncZoom(viewer.scale);
+  // 底栏的页码也要在打开时立刻有值：`onPageChange` 不保证在这个时点已经触发过
+  //（实测首次打开时底栏还停在占位符「–」，而顶栏已经是 1/16）。直接同步一次。
+  syncFootPage(viewer.current, viewer.numPages);
   await renderOutline();
   await renderNotes();
   if (superseded()) return;
   await restoreSession(docId);
   if (superseded()) return;
+  // 换论文了：会话条要跟着换成这一篇的当前会话名
+  await loadSessionList();
+  renderSessionBar();
   if (saved?.page && saved.page > 1) await viewer.goToPage(saved.page);
   if (superseded()) return;
   state.viewerDocId = docId;
+  // 底栏控件到这一刻才真的可用（`syncFootEnabled` 要求 viewerDocId === doc.docId）
+  syncFootEnabled(true);
   refreshReturnButton();
   saveProgress();
-  $('#statusText').textContent = '就绪';
-  syncOptChips();
-  // 默认不提前提取整篇；用户点「整篇」后才读取，避免打开每篇论文都做无用工作。
-  // 文献关系：后台整理本文引用了谁、谁引用了本文（不挡阅读）
-  buildRelations();
+  renderScopeMenu();
+  /**
+   * 2026-10 用户口径：发送范围**默认就是全文 + 联网**，开关在设置里，不在输入框旁边。
+   * 所以打开论文后如果「读整篇论文」是开着的，就照旧提前把全文抽出来 —— 不这么做的话
+   * 用户第一次提问时全文还没就绪，会退化成「只带选中内容和当前页」，等于偏好没生效。
+   * 抽文本在后台跑，不挡打开流程；失败也只是不带全文（warmDocText 自己有兜底提示）。
+   * 参考文献仍然相反：**不在打开论文时后台抽取**，等用户真的打开这一块时再由
+   * ensureRelationsBuilt() 解析（见 renderRelations / initRelations 的注释）。
+   */
+  if (state.useFullText) warmDocText();
 }
 
 /** pdf.js 在加载任务被销毁时会抛这类异常，属于「这次加载作废了」，不是真失败 */
@@ -4957,7 +2890,7 @@ function initSelection() {
    * 第二次才是选中的词，所以这里只在「没有活选区」时才真的去清。
    */
   document.addEventListener('mouseup', (e) => {
-    if (e.target?.closest?.('#bubble, #popover, #citeBox, #noteBox, #settingsModal')) return;
+    if (e.target?.closest?.('#bubble, #citeBox, #noteBox, #settingsModal')) return;
     const moved = state._downAt
       ? Math.hypot(e.clientX - state._downAt.x, e.clientY - state._downAt.y)
       : 999;
@@ -4980,7 +2913,7 @@ function initSelection() {
 
   document.addEventListener('mousedown', (e) => {
     const t = e.target;
-    if (t?.closest?.('#bubble, #popover, #citeBox, #noteBox, #settingsModal')) return;
+    if (t?.closest?.('#bubble, #citeBox, #noteBox, #settingsModal')) return;
     state._downAt = { x: e.clientX, y: e.clientY };
     // 在正文里按下 = 准备开始新的选择，标记一下防止漏掉「窗口外松手」
     if (t?.closest?.('#viewer')) state._dragSelecting = true;
@@ -5106,68 +3039,37 @@ function clearAllBlocks() {
   refreshCounts();
 }
 
-/** 建一个块。只建一次，之后复用同一个 DOM —— 增删/换位都不会丢消息 */
+/**
+ * 只清**问答**那一块（会话是问答的东西，翻译不属于任何会话）。
+ *
+ * 2026-10 用户口径：「会话到底是翻译的还是问答，我认为应该是只有问答才有会话」。
+ * 所以换会话 / 新建会话只清问答区：译文是按论文累积的结果，不该被会话切走；
+ * 换**论文**时仍然走 clearAllBlocks()（两块都该清，那是另一回事）。
+ */
+function clearChatBlock() {
+  const meta = state.blockMeta.chat;
+  if (meta) meta.body.innerHTML = '';
+  refreshCounts();
+}
+
+/**
+ * 建一个块。只建一次，之后复用同一个 DOM —— 增删/换位都不会丢消息。
+ *
+ * 2026-10（用户口径）：「译文和问答的现在的上面的那一栏可以直接去掉，
+ * 然后两种状态的选择图标可以放在最上面」。
+ * 所以这里**不再建 `.ai-head` 标题栏**：
+ *   · 标题（译文 / 问答）改由右栏最上面的 #aiBar 选中态表达；
+ *   · 条数不再单独显示（切换器上本来就只有两块，数字是噪声）；
+ *   · 拖动换位 / 键盘换位 / 折叠按钮整套随之删除 —— 它们全都只挂在那条标题栏上，
+ *     而两块的顺序现在固定为「译文、问答」，由 #aiBar 的顺序决定。
+ */
 function ensureBlock(id) {
   if (state.blockEls[id]) return state.blockEls[id];
   const count = el('span', { class: 'ai-count' });
   const meta0 = AI_BLOCKS.find((b) => b.id === id) || {};
   const hint = el('div', { class: 'ai-hint', text: meta0.hint || '' });
   const body = el('div', { class: 'ai-body' }, hint);
-  const head = el('header', { class: 'ai-head', draggable: 'true', tabIndex: 0, role: 'button', 'aria-label': `移动${blockTitle(id)}结果块` },
-    el('span', { class: 'grip', title: '按住上下拖动：调整这块和其他块的顺序' }, iconEl('drag-vertical', { size: 14 })),
-    el('span', { class: 'ai-title', text: blockTitle(id) }),
-    count,
-    el('span', { class: 'spacer' }),
-  );
-  const root = el('section', { class: 'ai-block', dataset: { block: id, panel: id } }, head, body);
-
-  // 右栏两块是这里现建的，不会走左栏 ensurePanel 的绑定分支 —— 标题栏的键盘操作、
-  // 拖出成应用内卡片和左侧抓手都必须在这里补上，否则「问答 / 译文」永远拖不动。
-  if (!head.dataset.panelBound) {
-    head.dataset.panelBound = '1';
-    bindPanelHead(id, head);
-    bindDockPanelDrag(id, head);
-    if (!head.querySelector(':scope > .panel-drag-handle')) head.prepend(panelDragHandle());
-    if (!head.querySelector(':scope > .panel-actions')) head.append(panelActions(id));
-    if (!head.querySelector(':scope > .panel-float-x')) head.append(panelFloatCloseButton(id));
-  }
-
-  head.addEventListener('dragstart', (e) => {
-    state.dragBlock = id;
-    root.classList.add('dragging');
-    try {
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', id);
-    } catch { /* 忽略 */ }
-  });
-  head.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
-    e.preventDefault();
-    const vis = visibleBlocks();
-    const i = vis.indexOf(id);
-    const target = e.key === 'ArrowUp' ? vis[i - 1] : vis[i + 1];
-    if (target) moveBlock(id, target, e.key === 'ArrowDown');
-  });
-  head.addEventListener('dragend', () => {
-    state.dragBlock = null;
-    root.classList.remove('dragging');
-    clearDropMarks();
-  });
-  root.addEventListener('dragover', (e) => {
-    if (!state.dragBlock || state.dragBlock === id) return;
-    e.preventDefault();
-    const r = root.getBoundingClientRect();
-    const after = e.clientY > r.top + r.height / 2;
-    clearDropMarks();
-    root.classList.add(after ? 'drop-after' : 'drop-before');
-  });
-  root.addEventListener('dragleave', () => root.classList.remove('drop-before', 'drop-after'));
-  root.addEventListener('drop', (e) => {
-    if (!state.dragBlock || state.dragBlock === id) return;
-    e.preventDefault();
-    const r = root.getBoundingClientRect();
-    moveBlock(state.dragBlock, id, e.clientY > r.top + r.height / 2);
-  });
+  const root = el('section', { class: 'ai-block', dataset: { block: id, panel: id } }, body);
 
   // R7：滚动时刷新底部渐隐（滚到底就摘掉标记）
   body.addEventListener('scroll', updateScrollFades, { passive: true });
@@ -5289,49 +3191,22 @@ function setBlockVisible(id, on) {
 }
 
 /**
- * 结果块的**最小可用高度**（px）。
+ * 让每一栏当前显示的结果块填满这一栏。
  *
- * 60px 是已经作废的「上下分屏拖动」时代留下的保底值：那个逻辑（`ensureSplit` / `.ai-split`）
- * 负责写 `state.panels[id].size`，但**现在没有任何调用点**（一栏只开一个之后不存在上下两块），
- * 所以今天存档里的 `size` 全是历史遗留。可 `fitBlockSizes()` 照旧把它当"用户拖好的高度"套成
- * 内联 `height`：块头 40px + 正文只剩 19px —— 用户看到的就是「译文的怎么只露最上面一点点」。
- *
- * 最小值按「块头(40) + 三行正文(14×1.72×3≈72) + 底部渐隐(22) + 内边距」取 180。
- * 注意这**不是**把用户的高度记忆作废：> 180 的高度照旧原样使用（`cards.mjs` 的 300/320 迁移断言
- * 仍然成立），只是不允许小到没法读。
- */
-const MIN_USABLE_BLOCK_H = 180;
-
-/**
- * 把保存的块高度套上去，**并且保证总高不超过容器**。
- *
- * 用户拖出来的高度只是「偏好」：窗口变小、或者输入区变高（比如多了「全文/联网」那一行）之后，
- * 原来的高度加起来就装不下了。`.ai` 是 overflow:hidden，装不下的部分会被**直接裁掉**，
- * 表现出来就是「右侧输出最下面的内容被下面的输入框挡住」——其实是被裁了，滚也滚不到。
- * 所以这里按比例压缩，每个块至少留 `MIN_USABLE_BLOCK_H`（受这一栏可用高度夹取）。
+ * `state.panels[id].size` 是上下分屏时代留下的兼容字段；当前右栏一栏只显示一个块，
+ * 没有可见的上下拖拽分隔条。继续把这个旧值写成内联 `height` 会让历史 `60/180px`
+ * 把译文压成几行，剩余整栏变成空白，所以这里只清掉旧的尺寸样式，让 `.ai-block`
+ * 的 flex 规则自然吃满结果区。字段仍然保留，老存档和面板迁移不丢数据。
  */
 function fitBlockSizes() {
-  // 现在右栏可能有并列的两栏，每一栏的「可用高度」是它自己的结果区；
-  // 各栏各算各的，绝不用另一栏的高度去夹这一栏的块（否则并排时右边那块会被压成 60px 保底）。
+  // 每一栏各自有一个结果块；高度由 .ai / .ai-block 的 flex 链接管，
+  // 不再把旧存档 size 写回 DOM。
   for (const n of [1, 2]) {
-    const area = rightAreaEl(n);
-    if (!area) continue;
     const id = rightPanelInCol(n);
     const node = id ? state.blockEls[id] : null;
     if (!node) continue;
-    // 第 2 栏可能是 display:none（窄窗临时隐藏）—— 这时量到的高度是 0，别把用户拖好的高度写坏
-    const avail = Math.max(160, area.clientHeight - 5);
-    const px = state.panels[id].size;
-    if (px > 0) {
-      node.classList.add('sized');
-      /* 见 MIN_USABLE_BLOCK_H 的注释：下限不再是 60，但上界仍然是这一栏的可用高度，
-         所以任何窗口尺寸下都不会溢出（`.ai` 是 overflow:hidden，溢出就等于被裁掉）。 */
-      const minH = Math.min(MIN_USABLE_BLOCK_H, avail);
-      node.style.height = `${Math.max(minH, Math.min(Math.round(px), avail))}px`;
-    } else {
-      node.classList.remove('sized');
-      node.style.height = '';
-    }
+    node.classList.remove('sized');
+    node.style.height = '';
   }
   // R7：块高变了 → 是否还能滚动也会变，下一帧刷新底部渐隐
   requestAnimationFrame(updateScrollFades);
@@ -5437,14 +3312,12 @@ function renderCol(n) {
 }
 
 /**
- * 右栏所有列一起重排（applyPanels 的 ④b 与 openRightColumn / closeRightColumn 都走这一条）。
- * 第 2 栏只在「列数 = 2」时存在，所以渲染前先把列 DOM 对好。
+ * 右栏结果区重排（applyPanels 的第 ③ 步走这一条）：先按「谁该在结果区」把两块面板
+ * 各自停到该在的容器里，再渲染第 1 栏。右栏恒为一栏，不再有第 2 栏。
  */
 function renderCols() {
-  applyRightColsDom();
   for (const id of PANEL_IDS_RIGHT) parkRightPanel(id, dockedAreaFor(id));
   renderCol(1);
-  if (rightColsWanted() === 2) renderCol(2);
   fitBlockSizes();
   refreshCounts();
   renderAiBar();
@@ -5455,63 +3328,50 @@ function renderAiArea() {
 }
 
 /**
- * 右栏每一栏底部的「译文 / 问答」分段切换器 —— **右栏唯一的一组可见面板入口**。
+ * 右栏底部的「译文 / 问答」分段切换器 —— **右栏唯一的一组可见面板入口**。
  *
  * 用户口径（2026-10-03）：
  *   「右栏顶部：只放当前面板的标题和面板操作；右栏底部：只保留一组『译文 / 问答』切换器；
- *     右键和拖拽能力附着在这一组图标上；不再额外渲染另一组相同按钮。」
- *   「开启第二栏时…第二栏也不应该再重复渲染完整的两套按钮。每一栏只显示当前栏的面板状态，
- *     切换入口统一放在该栏底部。」
+ *     不再额外渲染另一组相同按钮。」
  *
  * 语义（必须与「一栏只开一个」一致）：
- *   · 每一栏的切换器只反映**这一栏**的状态：这一栏现在开着谁，谁就是选中态。
- *   · 点本栏没开的那个 → 在本栏打开它（同栏原来那个自动收起）。
- *   · 点本栏正开着的那个 → 收起它（这一栏变空，另一栏不受影响）。
- *   · 右键 → 换栏 / 再开一栏 / 应用内卡片；按住拖出 → 应用内卡片。
+ *   · 切换器只反映这一栏的状态：现在开着谁，谁就是选中态。
+ *   · 点没开的那个 → 打开它（原来那个自动收起）。
+ *   · 点正开着的那个 → 收起它（右栏变空）。
  */
 function renderAiBar() {
-  for (const col of [1, 2]) {
-    const host = aiBarEl(col);
-    if (!host) continue;
-    // 顺序 = 右栏面板的 order（用户可以把译文拖到问答前面）
-    const ids = PANEL_IDS_RIGHT
-      .slice()
-      .sort((a, b) => (state.panels[a].order - state.panels[b].order) || (PANEL_IDS.indexOf(a) - PANEL_IDS.indexOf(b)));
-    const here = rightPanelInCol(col);
-    host.replaceChildren(...ids.map((id) => {
-      const meta = AI_BLOCKS.find((b) => b.id === id) || {};
-      const floating = state.panels[id]?.dock === 'float';
-      const on = !floating && here === id;
-      const label = blockTitle(id);
-      const title = floating
-        ? `「${label}」正在阅读器内部卡片中；点击此按钮把卡片提到最前`
-        : `${on ? '关闭' : '打开'}「${label}」${col === 2 ? '（右栏第 2 栏）' : ''} —— ${meta.hint || ''}`;
-      const btn = el('button', {
-        type: 'button',
-        class: `aibar-btn${on ? ' on' : ''}${floating ? ' detached' : ''}`,
-        role: 'tab',
-        'aria-selected': on ? 'true' : 'false',
-        'aria-pressed': on ? 'true' : 'false',
-        dataset: { block: id, col: String(col) },
-        text: label,
-        title,
-      });
-      bindPanelToggleGestures(btn, id, {
-        // 卡片状态下仍允许点击（提到最前），但不重复创建第二张卡片
-        dragToDetach: !floating,
-        onClick: () => {
-          if (floating) {
-            bringFloatToFront(id);
-            return;
-          }
-          if (on) { setPanelVisible(id, false); return; }
-          if (colOf(id) !== col) setPanelColumn(id, col);   // 不在本栏 → 挪到本栏再开
-          else setPanelVisible(id, true);
-        },
-      });
-      return btn;
-    }));
-  }
+  const host = aiBarEl(1);
+  if (!host) return;
+  // 顺序 = 右栏面板的 order
+  const ids = PANEL_IDS_RIGHT
+    .slice()
+    .sort((a, b) => (state.panels[a].order - state.panels[b].order) || (PANEL_IDS.indexOf(a) - PANEL_IDS.indexOf(b)));
+  const here = rightPanelInCol(1);
+  host.replaceChildren(...ids.map((id) => {
+    const meta = AI_BLOCKS.find((b) => b.id === id) || {};
+    const on = here === id;
+    const label = blockTitle(id);
+    const btn = el('button', {
+      type: 'button',
+      class: `aibar-btn${on ? ' on' : ''}`,
+      role: 'tab',
+      'aria-selected': on ? 'true' : 'false',
+      'aria-pressed': on ? 'true' : 'false',
+      dataset: { block: id, col: '1' },
+      text: label,
+      title: on ? `「${label}」（当前）` : `打开「${label}」 —— ${meta.hint || ''}`,
+    });
+    /**
+     * 点切换器（2026-10 用户口径）：
+     *   「右侧的两个选择也是这样点击已开的图标也不会关闭侧栏，而是不做反应」。
+     * 所以已开的那一个再点是 no-op（不关右栏、不清内容），只有点另一个才切过去。
+     * 收起右栏由顶栏的「收起右栏」负责 —— 那是另一个明确动作。
+     */
+    bindPanelToggleGestures(btn, id, {
+      onClick: () => { if (!on) setPanelVisible(id, true); },
+    });
+    return btn;
+  }));
 }
 
 /* ══════════════════════════════ 消息 ══════════════════════════════ */
@@ -5527,8 +3387,12 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   const bodyEl = state.blockMeta[block].body;
   const isUser = kind === 'user';
 
+  /**
+   * 2026-10 用户口径：「问答里面不需要专门表一个『你』，直接删掉，就用现在的那种框就行了」。
+   * 所以用户消息**不再有那个「你」的头像徽标** —— 用户消息本来就是那个灰底框，
+   * 一眼能分清谁说的。role 行留给「页码 / 标签 / 回原文」这些真正有信息量的东西。
+   */
   const role = el('div', { class: `role${!isUser && !page ? ' hidden' : ''}` },
-    isUser ? el('span', { class: 'ava', text: '你', 'aria-label': '你的问题' }) : null,
     tag ? el('span', { class: 'tag', text: tag, 'aria-hidden': 'true' }) : null,
     page && uiStyle.showPage ? el('span', { class: 'pg', text: `第${page}页` }) : null,
     !isUser && page && uiStyle.showPage ? el('button', {
@@ -5581,9 +3445,20 @@ function finishEntry(entry, fullText, { page, onAsk, onRetry, sources, meta, sta
   entry.acts.replaceChildren();
   entry.acts.classList.remove('hidden');
   // 必须用 appendAll：Element.append(null) 会把 null 变成文本节点 "null" 显示出来
+  /**
+   * 消息动作按钮（2026-10 用户口径）：「复制 / 回到第8页用图标表示不要用文字」。
+   * 所以这两个改图标 + title，不再占一行文字宽度；「接着问 / 重试」保留文字
+   * （它们是**语义动作**，图标说不清是"接着问"还是"重新生成"）。
+   */
   appendAll(entry.acts,
-    el('button', { text: '复制', onclick: () => copyText(fullText) }),
-    page ? el('button', { text: `回到第${page}页`, onclick: () => jumpToPageWithHistory(page, { smooth: true }) }) : null,
+    el('button', {
+      class: 'act-icon', title: '复制这段回答', 'aria-label': '复制这段回答',
+      onclick: () => copyText(fullText),
+    }, iconEl('copy')),
+    page ? el('button', {
+      class: 'act-icon', title: `回到第 ${page} 页原文`, 'aria-label': `回到第 ${page} 页原文`,
+      onclick: () => jumpToPageWithHistory(page, { smooth: true }),
+    }, iconEl('jump-back')) : null,
     onAsk ? el('button', { text: '接着问', onclick: onAsk }) : null,
     onRetry ? el('button', { text: status === 'stopped' ? '重新生成' : '重试', onclick: onRetry }) : null,
   );
@@ -5593,7 +3468,6 @@ function finishEntry(entry, fullText, { page, onAsk, onRetry, sources, meta, sta
   // 只有在「被停止」或有实质元信息（已带全文 N 字 / 联网 N 条）时才渲染这一行，两者都空就整行不渲染。
   const stateParts = [];
   if (status === 'stopped') stateParts.push('已停止 · 已保留当前回答');
-  if (meta) stateParts.push(meta);
   if (stateParts.length) extra.push(el('div', { class: `entry-meta${status === 'stopped' ? ' stopped' : ''}`, text: stateParts.join(' · ') }));
   if (extra.length) entry.root.append(...extra);
   scheduleSessionSave();
@@ -5649,6 +3523,42 @@ const persistSession = debounce(() => {
 }, 800);
 function scheduleSessionSave() { if (state.doc) persistSession(); }
 
+/**
+ * ══════════════════════════ 多会话（2026-10 用户口径） ══════════════════════════
+ * 用户原话：「问答是不是要做多对话分对话」→ 会话列表 + 新建 + 切换。
+ *
+ * 存储（服务端，向后兼容）：
+ *   老：`session-<docId>.json`            —— 单会话时代，仍然照读照写
+ *   新：`session-<docId>-<sid>.json`      —— 每个会话一个文件
+ * 前端只负责记住「这一篇当前在用哪个 sid」：
+ *   `reader.activeSession = { <docId>: <sid> }`（localStorage）
+ * sid 为空串 ''（或没有记录）时就用**老文件** —— 这样老用户第一次升级过来
+ * 打开的仍是原来那套对话，不会突然变空。
+ */
+const SESSION_KEY = 'reader.activeSession';
+
+function readActiveSessions() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY) || '{}') || {}; } catch { return {}; }
+}
+function activeSidFor(docId) {
+  const map = readActiveSessions();
+  return typeof map[docId] === 'string' ? map[docId] : '';
+}
+function setActiveSidFor(docId, sid) {
+  const map = readActiveSessions();
+  if (sid) map[docId] = sid; else delete map[docId];
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(map)); } catch { /* 忽略 */ }
+}
+/** 新会话的 sid：时间戳 + 随机后缀，够用且不会撞 */
+function newSid() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+/** 当前论文的会话查询串（带 sid；老会话就是不带 sid） */
+function sessionQuery(docId, sid) {
+  const base = `doc=${encodeURIComponent(docId)}`;
+  return sid ? `${base}&sid=${encodeURIComponent(sid)}` : base;
+}
+
 function sessionPayload() {
   if (!state.doc) return null;
   const entries = state.sessionEntries.slice(-90).map((x) => ({
@@ -5660,13 +3570,29 @@ function sessionPayload() {
     meta: String(x.meta || '').slice(0, 500),
     retry: serialiseRetryPayload(x.retry),
   }));
+  /**
+   * **非问答**的条目（也就是译文）必须保留在文件里。
+   *
+   * 2026-10 用户口径：「只有问答才有会话」。于是换会话时我们只清问答区，
+   * 译文还在页面上、也还在 state.sessionEntries 里；但**新建会话**时我们清掉了内存里的
+   * 条目，如果不把它们并回来，这次保存就会把这一篇的译文历史从文件里抹掉。
+   * 所以：把「文件里已有的、但不是问答的」条目按原顺序并入。
+   * 用 tag+text 去重，避免和内存里还在的条目重复。
+   */
+  const inMemory = new Set(entries.map((e) => `${e.tag}\u0000${e.text}`));
+  const kept = (Array.isArray(state._fileEntries) ? state._fileEntries : [])
+    .filter((e) => e && e.block !== 'chat')
+    .filter((e) => !inMemory.has(`${String(e.tag || '').slice(0, 120)}\u0000${String(e.text || '').slice(0, 12000)}`))
+    .slice(-40)
+    .map((e) => ({ ...e, block: String(e.block || 'translate') }));
+  const allEntries = [...kept, ...entries];
   const prefix = `${state.doc.docId}:`;
   const ops = [...state.opsCache.entries()].filter(([key]) => key.startsWith(prefix)).slice(-20)
     .map(([key, value]) => ({ id: key.slice(prefix.length), text: String(value.text || '').slice(0, 12000), at: value.at || Date.now(), page: value.page || null }));
-  const payload = { entries, history: state.history.slice(-80).map((m) => ({ role: m.role, content: String(m.content).slice(0, 12000) })), ops };
+  const payload = { entries: allEntries, history: state.history.slice(-80).map((m) => ({ role: m.role, content: String(m.content).slice(0, 12000) })), ops, updatedAt: Date.now() };
   let encoded = JSON.stringify(payload);
   const encodedBytes = () => new TextEncoder().encode(encoded).byteLength;
-  while (encodedBytes() > 350000 && entries.length > 1) { entries.shift(); payload.entries = entries; encoded = JSON.stringify(payload); }
+  while (encodedBytes() > 350000 && payload.entries.length > 1) { payload.entries.shift(); encoded = JSON.stringify(payload); }
   while (encodedBytes() > 350000 && payload.ops.length) { payload.ops.shift(); encoded = JSON.stringify(payload); }
   while (encodedBytes() > 350000 && payload.history.length) { payload.history.shift(); encoded = JSON.stringify(payload); }
   return encoded;
@@ -5675,7 +3601,8 @@ function sessionPayload() {
 async function saveSessionNow() {
   if (!state.doc) return;
   const encoded = sessionPayload();
-  const r = await fetch(`/api/session?doc=${encodeURIComponent(state.doc.docId)}`, {
+  const sid = activeSidFor(state.doc.docId);
+  const r = await fetch(`/api/session?${sessionQuery(state.doc.docId, sid)}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: encoded,
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -5696,7 +3623,7 @@ function restoreComposerFallback(question, payload = null) {
       .map((a) => ({ id: uid(), kind: 'text', page: a.page || null, text: String(a.text).slice(0, 3000) }));
     state.attachments = textAttachments;
     renderAttachments();
-    syncOptChips();
+    renderScopeMenu();
   }
   updateSendScope();
   ta.focus();
@@ -5760,11 +3687,25 @@ function restoreRetryCallback(row, entry, priorUser) {
   };
 }
 
-async function restoreSession(docId) {
+/**
+ * 恢复一篇论文的会话。
+ *
+ * `only` 决定重放范围：
+ *   · 不传 / `'all'` —— 换论文时用，两块都清过，全部重放
+ *   · `'chat'`      —— 换会话（含新建）时用，只重放问答；译文那一块没被清，不重放
+ */
+async function restoreSession(docId, { only = 'all' } = {}) {
   try {
-    const r = await fetch(`/api/session?doc=${encodeURIComponent(docId)}`);
+    const sid = activeSidFor(docId);
+    const r = await fetch(`/api/session?${sessionQuery(docId, sid)}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const saved = await r.json();
+    /**
+     * 文件里**所有**条目留一份底账（`state._fileEntries`）。
+     * 用途：会话只覆盖问答区，译文不属于任何会话 —— 保存时要靠这份底账把
+     * 译文条目并回文件，否则新建会话那一次保存会把译文历史抹掉。
+     */
+    state._fileEntries = Array.isArray(saved.entries) ? saved.entries : [];
     state.sessionEntries = Array.isArray(saved.entries) ? saved.entries.slice(-90) : [];
     state.history = Array.isArray(saved.history) ? saved.history.slice(-80) : [];
     state.opsDone = {};
@@ -5777,6 +3718,11 @@ async function restoreSession(docId) {
     for (let rowIndex = 0; rowIndex < state.sessionEntries.length; rowIndex += 1) {
       let row = state.sessionEntries[rowIndex];
       if (!row || typeof row !== 'object') continue;
+      /**
+       * 换会话时（`only: 'chat'`）**只重放问答**：译文那一块的 DOM 没被清，
+       * 再插一遍就会重复。换论文时（默认）两块都清过，所以全部重放。
+       */
+      if (only === 'chat' && row.block !== 'chat') continue;
       const safeBlock = AI_BLOCKS.some((b) => b.id === row.block) ? row.block : 'chat';
       // 右栏按需创建：恢复历史不能因为默认 hidden 就访问不存在的 blockMeta。
       ensureBlock(safeBlock);
@@ -5812,6 +3758,7 @@ async function restoreSession(docId) {
 
 async function clearCurrentSession() {
   if (!state.doc || !confirm(`清空「${state.doc.name}」的对话和 AI 结果？`)) return;
+  closeSessionMenu();
   persistSession.cancel?.();
   state.sessionEntries = [];
   state.history = [];
@@ -5820,10 +3767,167 @@ async function clearCurrentSession() {
   state.opsDone = {};
   clearAllBlocks();
   try {
-    const r = await fetch(`/api/session?doc=${encodeURIComponent(state.doc.docId)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries: [], history: [], ops: [] }) });
+    const r = await fetch(`/api/session?${sessionQuery(state.doc.docId, activeSidFor(state.doc.docId))}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries: [], history: [], ops: [], updatedAt: Date.now() }) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     toast('当前论文会话已清空', 'ok');
   } catch (e) { toastAction(`清空失败：${e.message}`, '重试', clearCurrentSession, 'err', 10000); }
+}
+
+/* ── 多会话：列表 / 新建 / 切换 / 删除 ───────────────────────────────── */
+
+/** 正在显示的会话（只在 store 里活；关掉就没了） */
+const sessionStore = { open: false, list: [], busySid: null };
+
+function closeSessionMenu() {
+  sessionStore.open = false;
+  const menu = $('#sessionMenu');
+  if (menu) { menu.classList.add('hidden'); menu.replaceChildren(); }
+}
+
+/** 拉这篇论文的会话列表（只取元信息，不取正文） */
+async function loadSessionList() {
+  if (!state.doc) return [];
+  try {
+    const r = await fetch(`/api/sessions?doc=${encodeURIComponent(state.doc.docId)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    sessionStore.list = (await r.json()).sessions || [];
+  } catch { sessionStore.list = []; }
+  return sessionStore.list;
+}
+
+/** 画会话菜单：一行一个会话（标题 + 条数 + 时间），底部是「新建会话」 */
+function renderSessionMenu() {
+  const menu = $('#sessionMenu');
+  if (!menu) return;
+  const cur = activeSidFor(state.doc?.docId || '');
+  const rel = (ts) => {
+    const min = Math.floor((Date.now() - (Number(ts) || 0)) / 60000);
+    if (!Number.isFinite(min) || min < 1) return '刚看过';
+    if (min < 60) return `${min} 分钟前`;
+    const h = Math.floor(min / 60);
+    return h < 24 ? `${h} 小时前` : `${Math.floor(h / 24)} 天前`;
+  };
+  const rows = sessionStore.list.map((s) => {
+    const on = (s.sid || '') === cur;
+    const label = s.title || (s.count ? '（无标题会话）' : '新会话');
+    const row = el('div', { class: `sess-row${on ? ' on' : ''}` },
+      el('button', {
+        type: 'button', class: 'sess-go', title: label,
+        onclick: () => switchSession(s.sid || ''),
+      },
+      el('span', { class: 'sess-title', text: label })),
+      el('button', {
+        type: 'button', class: 'sess-del', text: '×',
+        title: '删除这个会话（不影响论文和笔记）',
+        'aria-label': `删除会话「${label}」`,
+        onclick: (e) => { e.stopPropagation(); deleteSession(s.sid || ''); },
+      }));
+    return row;
+  });
+  if (!rows.length) rows.push(el('div', { class: 'sess-empty', text: '还没有会话' }));
+  menu.replaceChildren(
+    el('div', { class: 'sess-head', text: `「${(state.doc?.name || '').replace(/\.pdf$/i, '')}」的会话` }),
+    ...rows,
+    el('button', {
+      type: 'button', class: 'sess-clear', text: '清空当前会话',
+      onclick: () => clearCurrentSession(),
+    }),
+    el('button', {
+      type: 'button', class: 'sess-new', text: '＋ 新建会话',
+      onclick: () => newSession(),
+    }),
+  );
+}
+
+async function toggleSessionMenu() {
+  const menu = $('#sessionMenu');
+  if (!menu) return;
+  if (sessionStore.open) { closeSessionMenu(); return; }
+  sessionStore.open = true;
+  menu.classList.remove('hidden');
+  menu.replaceChildren(el('div', { class: 'sess-empty', text: '读取中…' }));
+  await loadSessionList();
+  if (sessionStore.open) renderSessionMenu();
+}
+
+/** 把当前会话存盘后，切到另一个 sid（空串 = 老的单会话文件） */
+async function switchSession(sid) {
+  if (!state.doc) return;
+  const docId = state.doc.docId;
+  if (activeSidFor(docId) === (sid || '')) { closeSessionMenu(); return; }
+  persistSession.cancel?.();
+  try { if (sessionSaveInFlight) await sessionSaveInFlight; await saveSessionNow(); } catch { /* 存不下也允许切 */ }
+  setActiveSidFor(docId, sid || '');
+  clearChatBlock();                 // 会话只管问答，译文留着
+  state.sessionEntries = [];
+  state.history = [];
+  state.opsDone = {};
+  state.opsDoc = null;
+  await restoreSession(docId, { only: 'chat' });
+  closeSessionMenu();
+  renderSessionBar();
+  updateSendScope();
+  toast('已切换会话', 'ok', 1600);
+}
+
+/** 新建一个空会话并切过去 */
+async function newSession() {
+  if (!state.doc) return;
+  const docId = state.doc.docId;
+  // 先把当前会话存盘，再换 sid（顺序不能反，否则那几轮对话就存到新会话名下了）
+  persistSession.cancel?.();
+  try { if (sessionSaveInFlight) await sessionSaveInFlight; await saveSessionNow(); } catch { /* 存不下也允许新建 */ }
+  setActiveSidFor(docId, newSid());
+  clearChatBlock();                 // 新建会话 = 清空问答区；译文不动（它不属于任何会话）
+  state.sessionEntries = [];
+  state.history = [];
+  state.opsDone = {};
+  state.opsDoc = null;
+  // 立刻落盘一次：不存的话新会话在服务端**没有文件**，会话列表里就看不到它，
+  // 用户会以为「新建了但列表里没有」（实测踩过）。空会话也是一次有效的保存。
+  try { await saveSessionNow(); } catch { /* 存不下也不阻塞新建 */ }
+  await loadSessionList();
+  closeSessionMenu();
+  renderSessionBar();
+  updateSendScope();
+  toast('已新建会话', 'ok', 1600);
+}
+
+/** 删掉一个会话文件（不碰论文 / 笔记）；删的是当前会话就退回老会话或新建 */
+async function deleteSession(sid) {
+  if (!state.doc) return;
+  const docId = state.doc.docId;
+  if (!confirm('删除这个会话？论文和笔记不受影响。')) return;
+  try {
+    const r = await fetch(`/api/session?${sessionQuery(docId, sid)}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  } catch (e) { toast(`删除失败：${e.message}`, 'err', 4000); return; }
+  if (activeSidFor(docId) === (sid || '')) {
+    setActiveSidFor(docId, '');
+    clearChatBlock();
+    state.sessionEntries = [];
+    state.history = [];
+    await restoreSession(docId, { only: 'chat' });
+  }
+  await loadSessionList();
+  renderSessionMenu();
+  renderSessionBar();
+  toast('会话已删除', 'ok', 1600);
+}
+
+/** 右栏顶栏那一小块：显示当前会话标题 + 打开会话菜单 */
+function renderSessionBar() {
+  const btn = $('#sessBtn');
+  if (!btn) return;
+  if (!state.doc) { btn.classList.add('hidden'); $('#sessBar')?.classList.add('hidden'); return; }
+  btn.classList.remove('hidden');
+  $('#sessBar')?.classList.remove('hidden');
+  const cur = activeSidFor(state.doc.docId);
+  const row = sessionStore.list.find((s) => (s.sid || '') === cur);
+  const name = row?.title || (cur ? '新会话' : '默认会话');
+  btn.title = `会话：${name}（点击切换 / 新建）`;
+  const label = $('#sessLabel');
+  if (label) label.textContent = name;
 }
 
 /** 回答下面的来源列表：编号 + 标题（只提供外链） */
@@ -6002,7 +4106,6 @@ function makeDraggable(el, handleSel, { fromAnywhere = false, remember = true } 
 function initDraggableCards() {
   // 气泡整条都是按钮，所以用「按下后移动才算拖」的模式；它不记位置，每次贴新的选区
   makeDraggable($('#bubble'), null, { fromAnywhere: true, remember: false });
-  makeDraggable($('#popover'), '.pop-head');
   makeDraggable($('#citeBox'), '.pop-head');
   makeDraggable($('#noteBox'), '.pop-head');
   makeDraggable($('.modal-box'), '.modal-head');
@@ -6024,22 +4127,19 @@ function applyCardPos(el, left, top) {
 
 /**
  * 一排「对这篇论文能做的事」，用户自己挑；结果流进问答块，可缓存、可重新生成。
- * coach 模式（苏格拉底式多轮）是独立的、按需开启的模式，不在这里。
+ * 只有 4 个文档级操作，全部平铺：没有分组菜单、没有「更多操作」折叠区，
+ * 也没有 Coach（苏格拉底式多轮）入口 —— 那个模式和它的状态字段都已删除。
  */
 function initOps() {
   const btn = $('#opsBtn');
   const menu = $('#opsMenu');
   if (!btn || !menu) return;
 
-  // 首屏只放读者最常用的四个入口；其余操作仍完整保留在「更多操作」里。
-  // 用 id 集合而不是按数组下标分组，后续给目录加操作时不会误把它挤进首屏。
-  const FEATURED_OPS = new Set(['tldr', 'route', 'method', 'terms']);
-
   const build = () => {
     menu.replaceChildren();
     const head = el('div', { class: 'ops-head' },
-      el('div', { class: 'ops-head-title', text: `对这篇论文能做的事${state.doc ? '' : '（先打开一篇）'}` }),
-      el('div', { class: 'ops-head-note', text: '常用入口直接可选；低频操作在「更多操作」里展开' }));
+      el('div', { class: 'ops-head-title', text: `论文摘要${state.doc ? '' : '（先打开一篇）'}` }),
+      el('div', { class: 'ops-head-note', text: '结果会进右侧问答栏；想追问直接在输入框里问' }));
     menu.append(head);
 
     const opButton = (op) => {
@@ -6056,46 +4156,11 @@ function initOps() {
         el('span', { class: 'ops-title', text: op.title + (cached ? ' · 已生成' : '') }),
         el('span', { class: 'ops-hint', text: op.hint })));
     };
-    const appendGroups = (root, predicate) => {
-      for (const g of opGroups()) {
-        const ops = g.ops.filter(predicate);
-        if (!ops.length) continue;
-        root.append(el('div', { class: 'ops-group', text: g.title }));
-        for (const op of ops) root.append(opButton(op));
-      }
-    };
 
-    const featured = el('div', { class: 'ops-featured', 'aria-label': '常用论文操作' });
-    featured.append(el('div', { class: 'ops-group', text: '常用入口' }));
-    for (const op of OPS.filter((x) => FEATURED_OPS.has(x.id))) featured.append(opButton(op));
-    menu.append(featured);
-
-    const more = el('details', {
-      class: 'ops-more', id: 'moreOps',
-      'aria-label': '更多论文操作',
-    });
-    more.append(el('summary', {
-      text: `更多操作（${OPS.length - FEATURED_OPS.size}）`,
-      title: '展开全部低频论文操作',
-      'aria-label': '展开或收起更多论文操作',
-    }));
-    const moreBody = el('div', { class: 'ops-more-body' });
-    appendGroups(moreBody, (op) => !FEATURED_OPS.has(op.id));
-    more.append(moreBody);
-    menu.append(more);
-
-    // coach 模式：按需开启，不是默认入口
-    menu.append(el('div', { class: 'ops-group', text: '低频模式' }));
-    menu.append(el('button', {
-      class: 'ops-item coach',
-      type: 'button',
-      title: COACH.hint,
-      onclick: () => { hideOpsMenu(); startCoach(); },
-    },
-    el('span', { class: 'ops-icon' }, iconEl('graduation')),
-    el('span', { class: 'ops-text' },
-      el('span', { class: 'ops-title', text: COACH.title + '（按需开启）' }),
-      el('span', { class: 'ops-hint', text: COACH.hint }))));
+    // 删减（批次一）：只有 4 个文档级操作，全部平铺 —— 不再有分组菜单、
+    // 不再有「更多操作」折叠区，也不再有 Coach 模式入口。
+    // 「自由提问」不占格子：它就是右栏下面的输入框本身。
+    for (const op of OPS) menu.append(opButton(op));
   };
 
   btn.onclick = (e) => {
@@ -6204,36 +4269,13 @@ async function runOperation(opId, { force = false, block = 'chat', retryEntry = 
   }
 }
 
-/**
- * coach 模式：按需开启。
- * 这里只是入口 + 状态标记；多轮问答循环按 docs/paper-explainer-plan.md 的 T1/T2 实现。
- */
-function startCoach() {
-  if (!state.doc) { toast('先打开一篇论文', 'err', 3000); return; }
-  state.coach = true;
-  const entry = addEntry({ block: 'chat', tag: 'Coach' });
-  entry.body.innerHTML = renderMarkdown([
-    '**Coach 模式**（按需开启）',
-    '',
-    '这个模式里我不会一口气讲完 —— 我会先问你一个问题，**等你回答之后再往下走**；',
-    '答错了先给提示而不是直接给答案。',
-    '',
-    `流程：${COACH.steps.join(' → ')}`,
-    '',
-    '> 还在搭（见 `docs/paper-explainer-plan.md` 的 T1/T2）。现在先可以直接用上面那排**论文操作**，',
-    '> 或者用「＋对话」把某一段加进来问我。',
-  ].join('\n'));
-  state.coach = false;
-  toast('Coach 模式还在搭，先用「论文操作」', 'err', 4000);
-}
-
 /** 从检索结果里挑一个能打开的 http(s) 链接（优先 PDF 直链） */
 function searchResultUrl(r) {
   const cand = r?.pdfUrl || r?.url || '';
   return /^https?:\/\//i.test(cand) ? cand : '';
 }
 
-/* ══════════════════════════ 文献关系整理 ══════════════════════════ */
+/* ══════════════════════════ 参考文献 ══════════════════════════ */
 
 /** 归一化标题：只留字母数字和汉字，用来判断「这条文献是不是书架里的某篇」 */
 function titleKey(s) {
@@ -6255,31 +4297,6 @@ function findInLibrary(text, idx) {
   if (t.length < 8) return null;
   for (const { key, paper } of idx) if (t.includes(key)) return paper;
   return null;
-}
-
-/**
- * 抽出过的书架论文正文：docId -> { sig, text }（只在内存里，重启即弃）。
- * R4：只按 docId 作键不够 —— 同名 PDF 被换掉（重新导入 / 覆盖）后 docId 不变，
- * 旧文本会一直被当成新文本用，库内引用扫描就会给出错误结论。
- * 所以每条缓存都带一个「内容指纹」（书架列表里的 size + mtime），指纹变了就重抽。
- */
-const relTextCache = new Map();
-
-/** 书架列表里那篇论文的内容指纹；拿不到 mtime（老后端）时退化成 size，仍比 docId 强 */
-function paperSig(docId) {
-  const p = state.papers.find((x) => x.docId === docId);
-  if (!p) return '';
-  return `${p.size || 0}:${Math.round(Number(p.mtime) || 0)}`;
-}
-
-/** 取某篇书架论文的正文（带内容指纹的缓存）；内容变了就重新抽 */
-async function paperText(docId, url, opts) {
-  const sig = paperSig(docId);
-  const hit = relTextCache.get(docId);
-  if (hit && hit.sig === sig && hit.text) return hit.text;
-  const text = await extractPdfText(url, opts);
-  relTextCache.set(docId, { sig, text });
-  return text;
 }
 
 /**
@@ -6306,18 +4323,17 @@ const REL_STATUS = {
   none:    { tag: '未找到',   cls: '',    group: 'todo' },
   error:   { tag: '查询失败', cls: 'err', group: 'todo' },
 };
-/** 「按状态」排序时的先后：越靠前越有用 */
-const REL_STATUS_ORDER = ['local', 'pdf', 'landing', 'loading', 'idle', 'none', 'error'];
 
+/* 删减（2026-10 批次二）：「找未入库的 PDF」「扫描库内引用」两个批量按钮、
+   状态筛选 / 排序两个下拉、「被引用」（反向引用）这一个状态与它的整条扫描链
+   （scanLibraryRelations / paperText / paperSig / relTextCache）全部删除。
+   参考文献这一块现在就是「本文引用了哪些文献」的普通列表：
+   点一行看详情、单条查开放 PDF（#citeSearch / 「查 PDF」按钮）、跳回正文、复制引用。 */
 const REL_GROUPS = [
   { id: 'lib', title: '书架已有' },
   { id: 'pdf', title: '已找到开放版本' },
   { id: 'todo', title: '待查 / 未找到' },
-  { id: 'cited', title: '被引用' },
 ];
-
-/** 关系面板底部那排按钮里「还有几条要查」的口径：没入库、且还没出结果（含上次失败）的 */
-const relNeedsQuery = (status) => status === 'idle' || status === 'error';
 
 /**
  * 稳定 key：编号 + 文本前 60 字。
@@ -6392,32 +4408,39 @@ function relStale(docId, gen) {
   return gen !== state.relGen || !docId || docId !== state.doc?.docId;
 }
 
-/** 视图状态（搜索 / 筛选 / 排序 / 折叠）：只活在内存里，切论文重置 */
+/** 视图状态（搜索词 / 分组折叠）：只活在内存里，切论文重置 */
 function relView() {
   if (!state.relView) resetRelView();
   return state.relView;
 }
 
 function resetRelView() {
-  state.relView = { q: '', filter: 'all', sort: 'num', fold: { lib: false, pdf: false, todo: false, cited: false } };
+  state.relView = { q: '', fold: { lib: false, pdf: false, todo: false } };
 }
 
-/** 条目里的年份（搜索与「按年份」排序都用它）：取最后一个 4 位年份 */
+/** 条目里的年份（搜索用）：取最后一个 4 位年份 */
 function relYear(text) {
   const m = String(text || '').match(/(?:19|20)\d{2}/g);
   return m ? Number(m[m.length - 1]) : 0;
 }
 
-/** 解析当前论文的参考文献，并和书架做匹配 */
+/**
+ * 解析当前论文的参考文献，并和书架做匹配。
+ *
+ * **按需**：不在打开论文时后台跑（那会在每次打开论文时都对整篇 PDF 做一遍引用抽取），
+ * 而是等用户真的打开「参考文献」这一块时由 ensureRelationsBuilt() 触发。
+ */
 async function buildRelations({ force = false } = {}) {
   if (!state.doc || !viewer?.pdf) { renderRelations(); return; }
   const docId = state.doc.docId;
   if (!force && state.refsDoc === docId) { renderRelations(); return; }
+  if (state.refsParsing === docId) return;      // 同一篇已经有一趟在解析，别重复起
   const myGen = state.relGen;
   // 「解析 vs 解析」的先后：连点两次 ↻ 时，只有最后发起的这次算数
   const mySeq = (state.refsSeq = (state.refsSeq || 0) + 1);
   const parseStale = () => relStale(docId, myGen) || mySeq !== state.refsSeq;
   relHint('正在解析本文的参考文献…');
+  state.refsParsing = docId;
   try {
     const refs = await viewer.findAllReferences((p, total, n) => {
       if (parseStale()) return;
@@ -6434,21 +4457,33 @@ async function buildRelations({ force = false } = {}) {
     state.refs = refs;
     state.refsDoc = docId;
     viewer.setReferencePages(refs);
-    if (state.citedByDoc !== docId) { state.citedBy = []; state.citedByDoc = null; state.relScanned = null; }
   } catch {
     if (parseStale()) return;
     state.refs = [];
     state.refsDoc = docId;
     viewer.setReferencePages([]);
+  } finally {
+    if (state.refsParsing === docId) state.refsParsing = null;
   }
   relHint('');
   renderRelations();
 }
 
 /**
+ * 「参考文献」是按需整理的唯一入口：只有用户真的打开这一块（点标题栏展开、点左栏的
+ * 参考文献图标、点左栏图标坞）时才解析，打开论文本身不再在后台跑全文引用抽取。
+ * 已经在解析 / 已经解析过这一篇时什么都不做。
+ */
+function ensureRelationsBuilt({ force = false } = {}) {
+  if (!state.doc || !viewer?.pdf) return;
+  if (!force && (state.refsDoc === state.doc.docId || state.refsParsing === state.doc.docId)) return;
+  buildRelations({ force });
+}
+
+/**
  * 查一条文献的开放 PDF（复用 /api/ref-search：arXiv → OpenAlex → Crossref）。
- * ctx.docId / ctx.gen 由批量调用方传进来，保证整批用的是同一个代际；
- * 单条点按钮时不给，就用当前代际。
+ * 这是**用户逐条触发**的查找（详情卡片里的「找这篇的 PDF」、列表行上的「查 PDF / 重查」），
+ * 没有整批版：批量「找未入库的 PDF」「扫描库内引用」已按产品口径删除。
  */
 async function lookupRefPdf(ref, ctx = {}) {
   const myDoc = ctx.docId || state.doc?.docId || null;
@@ -6477,81 +4512,10 @@ async function lookupRefPdf(ref, ctx = {}) {
   return slot;
 }
 
-/**
- * 批量找还没入库、还没查过的 PDF（一次最多 15 条）。
- * §3.5：单条失败只标这一条 error 并继续下一条，最后汇总「N 条成功 / M 条失败」，
- * 绝不因为一条报错就把整批中断。
- */
-async function findMissingPdfs() {
-  const docId = state.doc?.docId || null;
-  if (!docId) return;
-  const myGen = state.relGen;
-  const refs = state.refsDoc === docId ? state.refs : [];
-  const todo = refs.filter((r) => relNeedsQuery(relStatusOf(docId, r))).slice(0, 15);
-  if (!todo.length) { toast('没有待查找的条目了', 'ok', 2500); return; }
-  let ok = 0;
-  let bad = 0;
-  for (let i = 0; i < todo.length; i++) {
-    if (relStale(docId, myGen)) return;         // R3：切论文了，整批停手，一条统计都不写
-    relHint(`正在查 PDF ${i + 1}/${todo.length}…`);
-    const slot = await lookupRefPdf(todo[i], { docId, gen: myGen });
-    if (!slot || relStale(docId, myGen)) return;
-    if (slot.status === 'error') bad++; else ok++;
-  }
-  relHint('');
-  renderRelations();
-  const withPdf = todo.filter((r) => relStatusOf(docId, r) === 'pdf').length;
-  toast(`查完 ${todo.length} 条：${ok} 条成功（其中 ${withPdf} 条有 PDF 直链）· ${bad} 条失败（失败的可以单条重试）`,
-    bad ? 'err' : 'ok', 4000);
-}
-
-/**
- * 扫描书架里其他论文有没有引用本文。
- *
- * R1/R2/R5：`others` 是开头捕获的，所以收尾写回的也必须是**开头那篇**的 docId 与名字；
- * 循环每一轮都先过一遍代际检查，切了论文就立刻收手（连 hint 都不再写）。
- */
-async function scanLibraryRelations() {
-  const docId = state.doc?.docId || null;
-  if (!docId || state.relBusy) return;
-  const myGen = state.relGen;
-  const myName = state.doc.name;                    // R2：名字在这里定死
-  const others = state.papers.filter((p) => p.docId !== docId);
-  if (!others.length) { toast('书架里只有这一篇，暂时没有可比较的对象', 'err', 4000); return; }
-  state.relBusy = true;
-  renderRelations();
-  const myKey = titleKey(myName.replace(/\.pdf$/i, ''));
-  const citedBy = [];
-  try {
-    for (let i = 0; i < others.length; i++) {
-      if (relStale(docId, myGen)) return;           // R1：切论文了，什么都不写
-      const p = others[i];
-      relHint(`扫描 ${i + 1}/${others.length}：${p.name.slice(0, 26)}`);
-      try {
-        const text = await paperText(p.docId, p.url, { maxPages: 40 });   // R4：带内容指纹的缓存
-        if (relStale(docId, myGen)) return;
-        if (myKey.length >= 8 && titleKey(text).includes(myKey)) citedBy.push(p);
-      } catch { /* 单篇失败跳过 */ }
-    }
-    if (relStale(docId, myGen)) return;
-    state.citedBy = citedBy;
-    state.citedByDoc = docId;                       // R1：记在**我这次扫的那篇**头上
-    state.relScanned = { docId, docName: myName, at: Date.now() };   // R2：用开头捕获的名字
-  } finally {
-    // 过期就别动新论文的 relBusy（它已经被 openDoc 重置过了），否则会把新论文的按钮又灰住
-    if (!relStale(docId, myGen)) { state.relBusy = false; relHint(''); }
-    renderRelations();
-  }
-}
-
 /** 把工具条控件对齐到内存里的视图状态（值相同就不写，免得把光标顶到末尾） */
 function syncRelTools(view) {
   const q = $('#relSearch');
   if (q && q.value !== view.q) q.value = view.q;
-  const f = $('#relFilter');
-  if (f && f.value !== view.filter) f.value = view.filter;
-  const s = $('#relSort');
-  if (s && s.value !== view.sort) s.value = view.sort;
 }
 
 /** 按搜索词过滤：编号 / 条目文本 / 年份 */
@@ -6563,19 +4527,9 @@ function relMatch(ref, q) {
   return y > 0 && String(y).includes(q);
 }
 
-/** 排序：编号（升）/ 年份（新 → 旧）/ 状态（有用的在前，同档按编号） */
-function relSortRows(rows, sort) {
-  const arr = [...rows];
-  if (sort === 'year') arr.sort((a, b) => (relYear(b.ref.text) - relYear(a.ref.text)) || (a.ref.num - b.ref.num));
-  else if (sort === 'status') {
-    arr.sort((a, b) => (REL_STATUS_ORDER.indexOf(a.status) - REL_STATUS_ORDER.indexOf(b.status)) || (a.ref.num - b.ref.num));
-  } else arr.sort((a, b) => a.ref.num - b.ref.num);
-  return arr;
-}
-
 /**
- * 点关系列表里的一行 → 打开详情。
- * 复用正文 [n] 用的同一个 `#citeBox`（可拖动、e2e / relations 都在用），不新建第二套 UI。
+ * 点列表里的一行 → 打开详情。
+ * 复用正文 [n] 用的同一个 `#citeBox`（可拖动、e2e 都在用），不新建第二套 UI。
  * 从列表进来的没有「原来在正文哪一页」这个语义，所以不给「返回原位置」，
  * 改用「跳回正文」（去 PDF 里这条文献所在的页）。
  */
@@ -6651,27 +4605,21 @@ function renderRelations() {
   const list = $('#relList');
   const cnt = $('#relCount');
   if (!sum || !list) return;
-  const findBtn = $('#relFindPdf');
-  const scanBtn = $('#relScanLib');
   const view = relView();
   syncRelTools(view);
 
   if (!state.doc) {
-    sum.textContent = '打开一篇论文后自动整理';
+    sum.textContent = '打开一篇论文后，打开这一块时整理';
     list.replaceChildren();
     if (cnt) cnt.textContent = '';
-    if (findBtn) findBtn.disabled = true;
-    if (scanBtn) scanBtn.disabled = true;
     return;
   }
   const docId = state.doc.docId;
   const refs = state.refsDoc === docId ? state.refs : null;
   if (!refs) {
-    sum.textContent = state.relHint || (state.relBusy ? '正在整理…' : '还没整理，点右上角 ↻');
+    sum.textContent = state.relHint || '还没整理，点右上角 ↻';
     list.replaceChildren();
     if (cnt) cnt.textContent = '';
-    if (findBtn) findBtn.disabled = true;
-    if (scanBtn) scanBtn.disabled = !!state.relBusy;
     return;
   }
 
@@ -6679,8 +4627,6 @@ function renderRelations() {
   const rows = refs.map((ref) => ({ ref, status: relStatusOf(docId, ref) }));
   const byGroup = { lib: [], pdf: [], todo: [] };
   for (const row of rows) (byGroup[REL_STATUS[row.status]?.group || 'todo']).push(row);
-  const cited = state.citedByDoc === docId ? state.citedBy : [];
-  const scanned = state.relScanned?.docId === docId;
 
   const bits = [
     `本文引用 <b>${refs.length}</b> 篇`,
@@ -6688,90 +4634,46 @@ function renderRelations() {
     `查到开放版本 <b>${byGroup.pdf.length}</b> 条`,
     `待查 <b>${byGroup.todo.length}</b> 条`,
   ];
-  if (scanned) bits.push(`库内 <b>${cited.length}</b> 篇引用了本文`);
-  else if (state.papers.length > 1) bits.push('未扫描库内引用');
   // 进度里可能带文件名，一律走 textContent，不进 innerHTML
   if (state.relHint) sum.textContent = state.relHint;
   else sum.innerHTML = bits.join(' · ');
   if (cnt) cnt.textContent = refs.length ? `(${refs.length})` : '';
 
   const out = [];
-  // 结论行：`.rel-cited` 这个类与文案都保持不变（relations.mjs 依赖它）
+  // 结论行：`.rel-cited` 这个类与文案都保持不变
   if (refs.length) {
     const h = el('li', { class: 'rel-cited' });
     h.innerHTML = byGroup.lib.length
       ? `本文引用了书架里的：${byGroup.lib.map((x) => `<b>${esc(x.ref.lib.name.replace(/\.pdf$/i, ''))}</b>`).join('、')}`
       : '本文没有引用书架里已有的论文';
-    if (cited.length) {
-      h.innerHTML += `<br>书架里引用了本文的：${cited.map((p) => `<b>${esc(p.name.replace(/\.pdf$/i, ''))}</b>`).join('、')}`;
-    }
     out.push(h);
   }
 
-  // 被引用组：只在真的有库内引用（或用户明确筛它）时出现
-  const showCited = cited.length > 0 || view.filter === 'cited';
-
   for (const group of (refs.length ? REL_GROUPS : [])) {
-    // 状态筛选：不是「全部」时只渲染被选中的那一组（「被引用」组也走这条）
-    if (view.filter !== 'all' && view.filter !== group.id) continue;
-    if (group.id === 'cited') {
-      if (!showCited) continue;
-      const rowsC = cited.filter((p) => relMatch({ num: '', text: p.name }, view.q));
-      // 只有「全部 + 有搜索词」才把空组藏起来；显式筛某一组时 0 条也要画出来（否则点了没反馈）
-      if (!rowsC.length && view.q && view.filter === 'all') continue;
-      const head = el('button', {
-        class: 'rel-group-head', type: 'button', dataset: { group: 'cited' },
-        'aria-expanded': view.fold.cited ? 'false' : 'true',
-      },
-        el('span', { class: 'rg-caret' }, iconEl('caret-down', { size: 14 })),
-        el('span', { class: 'rg-title', text: '被引用' }),
-        el('span', { class: 'rg-count', text: `(${rowsC.length})` }));
-      const ul = el('ul', { class: 'rel-group-list' });
-      for (const p of rowsC) {
-        ul.append(el('li', { class: 'rel-cited-row' },
-          el('span', { class: 'rc-name', text: p.name.replace(/\.pdf$/i, '') })));
-      }
-      out.push(el('li', {
-        class: `rel-group${view.fold.cited ? ' collapsed' : ''}`,
-        dataset: { group: 'cited' },
-      }, head, ul));
-      continue;
-    }
-    let rowsG = byGroup[group.id].filter((x) => relMatch(x.ref, view.q));
-    rowsG = relSortRows(rowsG, view.sort);
-    // 默认（没有搜索/筛选）时三组都出现，哪怕是 0 —— 用户要看得到「一条都没有」这个结论
-    if (!rowsG.length && view.q && view.filter === 'all') continue;
+    const rowsG = byGroup[group.id].filter((x) => relMatch(x.ref, view.q));
+    // 有搜索词时空组不画（0 条没有信息量）；没有搜索词时三组都出现，
+    // 哪怕是 0 —— 用户要看得到「一条都没有」这个结论
+    if (!rowsG.length && view.q) continue;
     out.push(relGroupEl(group, rowsG, view));
   }
 
   list.replaceChildren(...out);
 
   if (!refs.length) {
-    list.append(el('li', { class: 'empty', text: '没在文末找到编号式参考文献（[1] [2] …）。扫描版 PDF 抽不出文字，这类关系整理不了。' }));
-  }
-
-  if (findBtn) {
-    const left = rows.filter((x) => relNeedsQuery(x.status)).length;
-    findBtn.textContent = left ? `找未入库的 PDF（${left}）` : '都查过了';
-    findBtn.disabled = !left || state.relBusy;
-  }
-  if (scanBtn) {
-    scanBtn.textContent = state.relBusy ? '扫描中…' : '扫描库内引用';
-    scanBtn.disabled = state.relBusy;
+    list.append(el('li', { class: 'empty', text: '没在文末找到编号式参考文献（[1] [2] …）。扫描版 PDF 抽不出文字，这类文献抽不出来。' }));
   }
 }
 
 function initRelations() {
-  $('#relRescan').onclick = () => { state.refsDoc = null; buildRelations({ force: true }); };
-  $('#relFindPdf').onclick = () => findMissingPdfs();
-  $('#relScanLib').onclick = () => scanLibraryRelations();
-  // 搜索 / 筛选 / 排序：只改内存里的视图状态再重绘，不写 localStorage
+  // ↻ = 用户明确要重解析（唯一会 force 的入口）
+  $('#relRescan').onclick = () => {
+    state.refsDoc = null;
+    state.refsParsing = null;
+    ensureRelationsBuilt({ force: true });
+  };
+  // 搜索：只改内存里的视图状态再重绘，不写 localStorage
   const q = $('#relSearch');
   if (q) q.addEventListener('input', () => { relView().q = q.value.trim().toLowerCase(); renderRelations(); });
-  const f = $('#relFilter');
-  if (f) f.addEventListener('change', () => { relView().filter = f.value; renderRelations(); });
-  const s = $('#relSort');
-  if (s) s.addEventListener('change', () => { relView().sort = s.value; renderRelations(); });
   // 分组折叠用事件委托 —— 列表每次重绘都会 replaceChildren，逐组绑监听会全丢
   $('#relList').addEventListener('click', (e) => {
     const head = e.target.closest('.rel-group-head');
@@ -6797,8 +4699,8 @@ function initRelations() {
 function openExternal(target) {
   const u = String(target || '').trim();
   if (!/^https?:\/\//i.test(u)) return false;
-  // 本地应用 URL（包括 ?window=panel）必须留在 WebView 内，不能被当成外链
-  // 交给 /api/open-url；否则打开独立面板会退化成系统浏览器标签页。
+  // 本地应用自身的 URL 必须留在 WebView 内，不能被当成外链交给 /api/open-url ——
+  // 否则点应用内的链接会莫名其妙跳到系统浏览器里。
   try {
     if (new URL(u, location.href).origin === location.origin) return false;
   } catch { return false; }
@@ -7009,19 +4911,35 @@ function abortStream(reason = 'user') {
 function setBusy(on, hint = '') {
   state.busy = on;
   if (!on) state.activeSendScope = '';
-  $('#stopBtn').classList.toggle('hidden', !on || !state.abort);
-  $('#popStop').classList.toggle('hidden', !on || !state.abort);
+  $('#stopBtn')?.classList.toggle('hidden', !on || !state.abort);
   $('#sendBtn').disabled = on;
   $('#composerHint').textContent = on ? hint : '';
   $('#clipBtn').disabled = on;
-  $('#regionBtn').disabled = on;
+  /**
+   * ⚠️ `#regionBtn` 已从顶栏删除（2026-10），这里必须用可选链：
+   * 少了这个 `?.` 的时候，setBusy() 会在这一行抛
+   * 「Cannot set properties of null (setting 'disabled')」——
+   * 而它是在**流式响应结束时**被调用的，于是后半段（sendBtn/clearSession 复位、
+   * updateSendScope）全部不执行 → 界面永远停在「生成中」，译文也进不了右栏。
+   * 这是实测抓到的真回归（stream.mjs 0/10 块），不是测试脚手架问题。
+   */
+  const regionTop = $('#regionBtn');
+  if (regionTop) regionTop.disabled = on;
   $$('#attachRow .at-x').forEach((button) => { button.disabled = on; });
-  $('#optFull').disabled = on || !state.doc || state.viewerDocId !== state.doc?.docId;
-  $('#optWeb').disabled = on;
-  $('#clearSession').disabled = on;
+  // 范围菜单：忙的时候整个收起并禁用（菜单项的禁用态由 renderScopeMenu 按 doc/busy 各自算）
+  // ⚠️ 2026-10 起「范围」菜单与「清空会话」都已从输入框那一排撤掉（改到设置页 / 会话菜单），
+  // 这两个 id 现在**不在 DOM 里**，必须用可选链 —— 否则 setBusy() 会在这里抛
+  // 「Cannot set properties of null」，那是在流式响应结束时调用的，界面会永远停在「生成中」。
+  const scopeBtn = $('#optScope');
+  if (scopeBtn) scopeBtn.disabled = on;
+  if (on) closeScopeMenu();
+  else renderScopeMenu();
+  const clearBtn = $('#clearSession');
+  if (clearBtn) clearBtn.disabled = on;
   updateSendScope();
 }
 
+/** 输入框旁边那句范围提示（`#sendScope`）：只讲这次会发什么，不再讲带了几轮历史。 */
 function sendScopeText({ attachments, history, useFullText, useWeb, query, docId, fullMode, contextIncluded } = {}) {
   const rows = attachments || [];
   const quotes = rows.filter((a) => a.kind === 'text');
@@ -7043,8 +4961,11 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
     else if (mode === 'unavailable') parts.push('整篇论文暂不可提取');
     else parts.push('整篇论文（将增加读取 / 请求量）');
   }
-  const prior = Math.min(6, (history || []).length);
-  if (prior) parts.push(`最近 ${prior} 条对话`);
+  /**
+   * ⚠️ 不再显示「最近 N 条对话」（2026-10 用户口径：「最近 6 条对话这种东西不需要，删掉」）。
+   * 历史仍然会随请求发出去（那是模型记住上下文所必需的），只是**不在范围提示里念给用户听**——
+   * 用户要关心的是「这次会读多少论文内容、会不会联网」，不是内部带了几轮历史。
+   */
   if (useWeb && String(query || '').trim()) parts.push('联网搜索');
   if (!parts.length && String(query || '').trim()) parts.push('仅当前问题');
   return parts.join(' · ');
@@ -7053,38 +4974,49 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
 function updateSendScope() {
   const node = $('#sendScope');
   if (!node) return;
-  const content = state.busy && state.activeSendScope
-    ? `本次发送：${state.activeSendScope}`
-    : sendScopeText({
-      attachments: state.attachments,
-      history: state.history,
-      useFullText: state.useFullText,
-      useWeb: state.useWeb,
-      query: $('#chatInput')?.value,
-      docId: state.doc?.docId,
-    });
-  node.textContent = content;
-  node.classList.toggle('hidden', !content);
+  // 范围与联网是设置里的偏好，右栏不重复播报内部上下文统计。
+  node.textContent = '';
+  node.classList.add('hidden');
 }
 
 /**
- * 译文**直接进侧栏**，不弹浮层（用户口径 2026-10-04：
- *   「划词翻译不要弄成弹窗了，应该是直接就在侧边栏显示」。
+ * 把「发送范围」两个偏好从 uiStyle 灌进 state —— 全产品唯一入口（2026-10 用户口径：
+ * 「默认全文加联网，在设置里面调节」）。
  *
- * 三件事：
- *   ① 译文块必须是「显示中」（否则用户看不到东西）；
- *   ② 右栏若被收起了，展开它 —— 结果总得有个地方显示；
- *   ③ 若译文块被拖成了应用内卡片，把它收回右栏（卡片会浮在正文上，正是"被挡住"的来源）。
+ * 调用点两处，缺一不可：
+ *   · boot() 里 initLayout() 之后 —— 存档读进来才算数；
+ *   · 设置页保存 / 回填时 —— 用户在设置里一改就立刻生效。
+ * 顺带刷新输入框上方那句「本次发送」提示：默认全文 + 联网也要让用户看得见。
  */
-function revealTranslatePanel() {
-  const p = state.panels.translate;
+function syncScopePrefs() {
+  state.useFullText = uiStyle.useFullText !== false;
+  state.useWeb = uiStyle.useWeb !== false;
+  updateSendScope();
+}
+
+/**
+ * 把右栏某个面板**显示出来并设为当前标签** —— 全产品唯一入口。
+ *
+ * 用户口径（2026-10 删减后的右栏模型）：右栏恒为 1 列，「译文 / 问答」两个标签切换，
+ * **结果出现在哪个标签就自动切到哪个标签**：翻译 → 译文；解释 / 自由提问 / 加入对话 → 问答。
+ *
+ * 为什么必须收成一个入口（2026-10-05 实测缺陷）：以前每条路径各写一半 ——
+ * 有的只 `showAiBlock`（只改 visible）、有的只改 `data-active-panel`、有的什么都不做。
+ * 结果点气泡「对话」时附件确实加进去了、`#chatInput.focus()` 也调了，
+ * 但当前标签还是「译文」→ 输入框 `display:none`，focus 落回 body，
+ * **屏幕上一个像素都没变**（`test/e2e.mjs:1097` 就是卡在这里超时的）。
+ */
+function revealPanel(id) {
+  const p = state.panels[id];
   if (!p) return;
-  if (p.dock === 'float') dockPanelTo('translate', 'right');
-  showAiBlock('translate');                       // visible = true
+  showAiBlock(id);                                 // visible = true；同栏互斥由 setPanelVisible 保证
   if (document.body.classList.contains('no-right')) setSideCollapsed('right', false, true);
-  document.querySelector('#rightSide')?.setAttribute('data-active-panel', 'translate');
+  if (isRightPanel(id)) document.querySelector('#rightSide')?.setAttribute('data-active-panel', id);
   applyPanels();
 }
+
+/** 兼容旧名字：译文结果走的就是 revealPanel('translate') */
+function revealTranslatePanel() { revealPanel('translate'); }
 
 async function doTranslate(sel) {
   if (state.busy) return;
@@ -7193,6 +5125,7 @@ function addToChat(sel) {
   if (!text) return;
   state.attachments.push({ id: uid(), kind: 'text', page: sel.page || viewer?.current, text });
   renderAttachments();
+  revealPanel('chat');            // 必须把「问答」切到当前标签，否则输入框是 display:none，focus 白调
   $('#chatInput').focus();
   flashHint(`已加入对话（共 ${state.attachments.length} 项，可以继续加）`);
 }
@@ -7205,6 +5138,7 @@ function addImageToChat(shot, page, label, { allowBusy = false } = {}) {
     w: shot.width, h: shot.height, pages: shot.pages || 1, label,
   });
   renderAttachments();
+  revealPanel('chat');            // 同上：截图进来时也要让用户看得见它加到了哪里
   $('#chatInput').focus();
   flashHint(`已加入截图${shot.pages > 1 ? `（跨 ${shot.pages} 页）` : ''}，共 ${state.attachments.length} 项`);
 }
@@ -7260,26 +5194,19 @@ function initComposer() {
   $('#composer').addEventListener('submit', (e) => { e.preventDefault(); send(); });
   $('#stopBtn').onclick = () => { abortStream('user'); $('#composerHint').textContent = '正在停止…'; };
   $('#clipBtn').onclick = () => state.startRegion?.();
-  $('#clearSession').onclick = clearCurrentSession;
+  // 「清空会话」不再常驻在输入框下面（2026-10 用户口径），改挂在会话菜单里。
+  // 这里的绑定用可选链，元素不在也不抛。
+  const clearBtn = $('#clearSession');
+  if (clearBtn) clearBtn.onclick = clearCurrentSession;
   renderAttachments();
 
-  $('#optFull').onclick = () => {
-    if (state.busy) return;
-    state.useFullText = !state.useFullText;
-    syncOptChips();
-    setHint(state.useFullText ? '本次发送将带整篇论文，读取和请求量会增加' : '默认：选中文字和当前页上下文');
-    if (state.useFullText) warmDocText();          // 只在本次明确选择后读取
-    updateSendScope();
-  };
-  $('#optWeb').onclick = () => {
-    if (state.busy) return;
-    state.useWeb = !state.useWeb;
-    writeFlag('reader.web', state.useWeb);
-    syncOptChips();
-    setHint(state.useWeb ? '开：回答前先联网搜一遍，并在回答里标出来源' : '');
-    updateSendScope();
-  };
-  syncOptChips();
+  /**
+   * 发送范围 / 联网现在是**默认开着、在设置里调**（用户口径：
+   * 「第一个应该是默认全文加联网，在设置里面调节」），所以输入框下面不再有
+   * `#optScope` 这个常驻菜单入口，`#scopeMenu` 这个菜单本体也一起删掉了。
+   * 这一段不再装任何点击 / 关闭绑定 —— 没有入口，就没有可关的菜单。
+   */
+  renderScopeMenu();
 
   const ta = $('#chatInput');
   ta.addEventListener('keydown', (e) => {
@@ -7292,27 +5219,30 @@ function initComposer() {
   });
 }
 
-function syncOptChips() {
-  const f = $('#optFull');
-  const w = $('#optWeb');
-  if (f) {
-    f.classList.toggle('on', state.useFullText);
-    f.setAttribute('aria-pressed', state.useFullText ? 'true' : 'false');
-    f.title = state.useFullText
-      ? '本次发送：带整篇论文（会增加读取 / 请求量；发送后自动关闭）'
-      : '只发送选中文字和当前页上下文；点“整篇”可临时扩大范围';
-    f.disabled = state.busy || !state.doc || !viewer?.pdf || state.viewerDocId !== state.doc?.docId;
-  }
-  if (w) {
-    w.classList.toggle('on', state.useWeb);
-    w.setAttribute('aria-pressed', state.useWeb ? 'true' : 'false');
-    w.title = state.useWeb
-      ? '已开：回答前先联网搜索，回答里会标出来源编号'
-      : '关：只用论文内容和模型自身的知识回答';
-    w.disabled = state.busy;
-  }
-  updateSendScope();
-}
+/* ══════════════════ 发送范围（整篇论文 / 联网查资料） ══════════════════
+   2026-10 用户口径：「范围 / 选中文本 + 当前页 / 清空会话这些……第一个应该是默认全文加联网，
+   在设置里面调节」。
+   两个开关都是**低频、高影响**的（整篇明显增加请求量与等待时间，还牵涉隐私；联网会改变
+   答案来源），所以现在既不做常驻芯片、也不做输入框旁的菜单，而是收进设置页当全局偏好：
+     · 默认都开着（用户口径）；
+     · 一个勾选框 = 一个偏好，保存后跨论文 / 跨会话 / 跨启动都算数；
+     · 「整篇」不再需要二次确认 —— 它不再是「这一次发送」的高代价动作，而是用户自己
+       在设置里明确表达的长期意图。
+   本文件里引用到的 `#scopeMenu` / `#optScope` / `#scopeState` 三个节点都已经从
+   index.html 删除，相关的菜单实现（开/关/二次确认）也一并删了，只留一个空的
+   `renderScopeMenu()` 兼容壳（历史上 7 处调用点 + `window.__ctx` 导出仍在调它）。
+   改这两个偏好的**唯一入口**是设置页的 `#cfgUseFullText` / `#cfgUseWeb`，
+   落地点是 `applyUiSettingsFromControls()` → `syncScopePrefs()`。 */
+
+/** 整篇论文此刻能不能开：要有一篇真的装好的论文 */
+const fullScopeAvailable = () => !!state.doc && !!viewer?.pdf && state.viewerDocId === state.doc?.docId;
+
+/**
+ * 兼容壳：范围菜单已经整个删掉（发送范围搬进设置页），但历史上很多地方（含 `window.__ctx`
+ * 的导出与 `initComposer`）都会调它。保留一个空的同名函数最省事也最稳：没有菜单可渲染，
+ * 也不会有任何节点被创建 —— 比把 7 处调用点全改一遍安全得多。
+ */
+function renderScopeMenu() {}
 
 /** 输入框下面那行小字，用于显示进度；传空字符串清掉 */
 function setHint(t) {
@@ -7602,12 +5532,8 @@ async function send(retryPending = null) {
       for (const im of images) parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
       last.content = parts;
     }
-    if (docCtx) {
-      meta = docCtx.mode === 'full'
-        ? `已带整篇论文 ${docCtx.chars.toLocaleString()} 字`
-        : `整篇论文 ${docCtx.chars.toLocaleString()} 字 → 索引 + ${PICK_K} 段相关原文`;
-    }
-    if (sources.length) meta = meta ? `${meta} · 联网 ${sources.length} 条` : `联网 ${sources.length} 条`;
+    // 右栏只呈现回答正文与来源，不显示全文字数、联网条数等内部统计。
+    meta = '';
 
     setHint('');
     const full = await chat({
@@ -7644,73 +5570,13 @@ async function send(retryPending = null) {
   } finally {
     setHint('');
     if (state.abort === ctl) { state.abort = null; state.abortReason = ''; setBusy(false); }
-    // 「整篇」是单次发送范围：无论成功、失败还是用户停止，本次结束后按钮复位。
+    // 「整篇」是单次发送范围：无论成功、失败还是用户停止，本次结束后复位。
     // 失败 / 停止的重试闭包仍持有 pending.useFullText，因此不会丢掉原范围。
     if (pending.useFullText) {
       state.useFullText = false;
-      syncOptChips();
+      renderScopeMenu();
     }
   }
-}
-
-/* ══════════════════════════════ 浮层 ══════════════════════════════ */
-
-function initPopover() {
-  $('#popClose').onclick = () => hidePopover();
-  $('#popStop').onclick = () => abortStream();
-  $('#popCopy').onclick = () => copyText($('#popBody')?.innerText || '');
-  $('#popStop').classList.add('hidden');
-}
-
-/** 译文完成后浮层只留一小段时间作生成反馈，正式结果以右栏块为准。 */
-function dismissPopoverSoon(ms = 1500) {
-  if (state.popoverTimer) clearTimeout(state.popoverTimer);
-  state.popoverTimer = setTimeout(() => {
-    state.popoverTimer = null;
-    $('#popover')?.classList.add('hidden');
-  }, ms);
-}
-
-function showPopover(title, anchorBox, html) {
-  if (state.popoverTimer) { clearTimeout(state.popoverTimer); state.popoverTimer = null; }
-  const p = $('#popover');
-  p.classList.remove('hidden');
-  $('#popTitle').textContent = title;
-
-  // 每次用全新的内容容器，杜绝上一个流的 rAF 写进同一个节点
-  const body = document.createElement('div');
-  body.className = 'pop-body';
-  body.id = 'popBody';
-  p.replaceChildren($('.pop-head', p), body);
-  if (html !== undefined) body.innerHTML = renderMarkdown(html);
-
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const w = Math.min(430, vw - 24);
-  const left = clamp(anchorBox ? anchorBox.left : vw - w - 30, 10, Math.max(10, vw - w - 10));
-  let top = anchorBox ? anchorBox.bottom + 10 : 80;
-  if (top > vh - 160 && anchorBox) top = anchorBox.top - 260;
-  top = clamp(top, 52, Math.max(52, vh - 160));
-  p.style.width = `${w}px`;
-  const dragged = rememberedCardPos(p);
-  const pos = applyCardPos(p, left, top);
-  p.style.left = `${pos.left}px`;
-  p.style.top = `${pos.top}px`;
-  // 高度要等布局完成才知道，测量后再收一次（被拖过的卡片就别再自动挪了）
-  if (!dragged) {
-    requestAnimationFrame(() => {
-      const t = clamp(parseFloat(p.style.top) || 80, 52, Math.max(52, vh - p.offsetHeight - 10));
-      p.style.top = `${Math.round(t)}px`;
-    });
-  }
-  return { root: p, body };
-}
-
-function hidePopover() {
-  if (state.popoverTimer) { clearTimeout(state.popoverTimer); state.popoverTimer = null; }
-  $('#popover').classList.add('hidden');
-  // 关掉浮层也要停掉正在往里写的那个流
-  abortStream();
 }
 
 /* ══════════════════════════════ 截图 / 长截图 ══════════════════════════════ */
@@ -7732,7 +5598,9 @@ function initRegion() {
     overlay.classList.add('hidden');
     hint.classList.add('hidden');
     rect.style.display = 'none';
-    $('#regionBtn').classList.remove('on');
+    // `#regionBtn` 已从顶栏删除（2026-10），所以这里两处都要可选链：
+    // 少了它，startRegion() 会在 classList.add 上抛错 → 框选遮罩根本不会出现。
+    $('#regionBtn')?.classList.remove('on');
     $('#clipBtn')?.classList.remove('on');
     if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
     document.body.classList.remove('row-dragging');
@@ -7748,7 +5616,7 @@ function initRegion() {
     if (!viewer?.pdf) { toast('先打开一篇 PDF', 'err'); return; }
     overlay.classList.remove('hidden');
     hint.classList.remove('hidden');
-    $('#regionBtn').classList.add('on');
+    $('#regionBtn')?.classList.add('on');
     $('#clipBtn')?.classList.add('on');
     hint.innerHTML = '拖动框住要加进对话的区域 · 拖到上下边缘会自动滚动（长截图）· <kbd>Esc</kbd> 取消';
   };
@@ -7790,7 +5658,10 @@ function initRegion() {
     }, 16);
   };
 
-  $('#regionBtn').onclick = () => startRegion();
+  // #regionBtn 已从顶栏删除（2026-10）：截图入口改到问答栏的「＋」（#clipBtn）。
+  // 框选能力本身保留（快捷键 R 与 #clipBtn 都走 startRegion），所以这里用可选链。
+  const regionBtn = $('#regionBtn');
+  if (regionBtn) regionBtn.onclick = () => startRegion();
 
   overlay.addEventListener('mousedown', (e) => {
     startX = e.clientX;
@@ -8027,37 +5898,31 @@ function fillSettings() {
   fillUiSettings();
 }
 
+/**
+ * 把设置页的控件对齐到当前 uiStyle。
+ *
+ * 设置页只保留六项（API Key / 模型名 / 接口地址 / 主题 / 阅读字号 / 恢复默认设置）：
+ * 结果密度、顶栏行为、「更多样式」里那批调试刻度都已经从界面上撤掉 ——
+ * 这里**只回填还存在的控件**，缺哪个就跳过（都用 `?.` 取值），
+ * 这样以后再删控件也不会把设置页弄崩。
+ * DEFAULT_UI_STYLE 里的字段仍然全部保留：老存档读回来照旧生效，用户的外观不会被偷偷改掉。
+ */
 function fillUiSettings() {
-  const ids = ['uiTheme', 'uiDensity', 'uiUiFontSize', 'uiControlSize', 'uiFontSize', 'uiLineHeight', 'uiCodeSize', 'uiMaxWidth', 'uiOpacity', 'uiPaper', 'uiShowPage', 'uiShowQuote', 'uiShowSources'];
-  if (!ids.every((id) => document.getElementById(id))) return;
-  $('#uiTheme').value = uiStyle.theme;
-  $('#uiDensity').value = uiStyle.density;
-  $('#uiPaper').value = uiStyle.paper === 'white' ? 'white' : 'tint';
-  $('#uiUiFontSize').value = uiFontSizePx(uiStyle.uiFontSize);
-  $('#uiControlSize').value = Math.round(ctlScaleOf(uiStyle.controlSize) * 100);
-  $('#uiFontSize').value = uiStyle.fontSize;
-  $('#uiLineHeight').value = uiStyle.lineHeight;
-  $('#uiCodeSize').value = uiStyle.codeSize;
-  $('#uiMaxWidth').value = uiStyle.maxWidth;
-  $('#uiOpacity').value = uiStyle.opacity;
-  $('#uiShowPage').checked = !!uiStyle.showPage;
-  $('#uiShowQuote').checked = !!uiStyle.showQuote;
-  $('#uiShowSources').checked = !!uiStyle.showSources;
-  // 顶栏：这是**偏好**不是 uiStyle（不走 applyUiStyle），单独回填
-  if ($('#uiTopbar')) $('#uiTopbar').value = topbarAutoEnabled() ? 'auto' : 'static';
+  const theme = $('#uiTheme');
+  if (theme) theme.value = uiStyle.theme;
+  const size = $('#uiFontSize');
+  if (size) size.value = uiStyle.fontSize;
+  // 发送范围两个开关：默认开着，存档里显式关掉才关（`!== false`，缺字段按默认 true）
+  const full = $('#cfgUseFullText');
+  if (full) full.checked = uiStyle.useFullText !== false;
+  const web = $('#cfgUseWeb');
+  if (web) web.checked = uiStyle.useWeb !== false;
   updateUiRangeLabels();
 }
 
 function updateUiRangeLabels() {
-  const uiFs = $('#uiUiFontSize');
-  if (uiFs && $('#uiUiFontSizeValue')) $('#uiUiFontSizeValue').textContent = `${uiFontSizePx(uiFs.value)}px`;
-  const ctl = $('#uiControlSize');
-  if (ctl && $('#uiControlSizeValue')) $('#uiControlSizeValue').textContent = `${Math.round(ctlScaleOf(ctl.value) * 100)}%`;
-  if ($('#uiFontSizeValue')) $('#uiFontSizeValue').textContent = `${$('#uiFontSize').value}px`;
-  if ($('#uiLineHeightValue')) $('#uiLineHeightValue').textContent = Number($('#uiLineHeight').value).toFixed(2);
-  if ($('#uiCodeSizeValue')) $('#uiCodeSizeValue').textContent = `${$('#uiCodeSize').value}px`;
-  if ($('#uiMaxWidthValue')) $('#uiMaxWidthValue').textContent = `${$('#uiMaxWidth').value}px`;
-  if ($('#uiOpacityValue')) $('#uiOpacityValue').textContent = `${Math.round(Number($('#uiOpacity').value) * 100)}%`;
+  const size = $('#uiFontSize');
+  if (size && $('#uiFontSizeValue')) $('#uiFontSizeValue').textContent = `${size.value}px`;
 }
 
 /**
@@ -8075,24 +5940,22 @@ function setReadingFontSize(px) {
   toast(`阅读字号 ${next}px`, '', 1600);
 }
 
+/** 设置页里还剩两个「即时生效」的控件：主题、阅读字号。其余字段（密度 / 纸张 / 行高…）
+ *  没有界面入口了，值一律沿用 uiStyle 里原有的，绝不因为控件消失就被重置成默认值。 */
 function applyUiSettingsFromControls() {
   const oldPaper = uiStyle.paper === 'white' ? 'white' : 'tint';
   const oldTheme = uiStyle.theme;
+  const theme = $('#uiTheme');
+  const size = $('#uiFontSize');
+  const full = $('#cfgUseFullText');
+  const web = $('#cfgUseWeb');
+  const wasFullText = state.useFullText;
   uiStyle = {
     ...uiStyle,
-    theme: $('#uiTheme').value,
-    density: $('#uiDensity').value,
-    paper: $('#uiPaper').value === 'white' ? 'white' : 'tint',
-    uiFontSize: uiFontSizePx($('#uiUiFontSize').value),
-    controlSize: clamp(Number($('#uiControlSize').value) || DEFAULT_UI_STYLE.controlSize, 80, 130),
-    fontSize: clamp(Number($('#uiFontSize').value), 12, 19),
-    lineHeight: clamp(Number($('#uiLineHeight').value), 1.45, 2.05),
-    codeSize: clamp(Number($('#uiCodeSize').value), 10, 15),
-    maxWidth: clamp(Number($('#uiMaxWidth').value), 480, 920),
-    opacity: clamp(Number($('#uiOpacity').value), .82, 1),
-    showPage: $('#uiShowPage').checked,
-    showQuote: $('#uiShowQuote').checked,
-    showSources: $('#uiShowSources').checked,
+    ...(theme ? { theme: theme.value } : {}),
+    ...(size ? { fontSize: clamp(Number(size.value), 12, 19) } : {}),
+    ...(full ? { useFullText: !!full.checked } : {}),
+    ...(web ? { useWeb: !!web.checked } : {}),
   };
   applyUiStyle();
   /**
@@ -8107,6 +5970,13 @@ function applyUiSettingsFromControls() {
    */
   if (oldPaper !== uiStyle.paper || oldTheme !== uiStyle.theme) viewer?.refreshPaper?.();
   saveUi();
+  // 发送范围偏好一改就当场生效（输入框上方那句「本次发送」同步刷新）
+  syncScopePrefs();
+  /**
+   * 用户刚把「读整篇论文」打开，而论文已经开着：直接把全文读进来，
+   * 免得第一次提问时才发现还在抽文本。（读失败不影响提问，只是不带全文。）
+   */
+  if (!wasFullText && state.useFullText && state.doc) warmDocText();
   renderAiArea();
   updateUiRangeLabels();
 }
@@ -8127,43 +5997,30 @@ function resetPanels() {
   sideBaseW.right = 360;
   document.documentElement.style.setProperty('--left-w', '210px');
   document.documentElement.style.setProperty('--right-w', '360px');
-  document.documentElement.style.setProperty('--right-w2', '360px');
-  document.body.classList.remove('right-col2-off');
-  setDockBottomHeight(240, { save: false });
-  // 右栏列数回 1（面板本身由下面的 defaultPanels() 复位）
-  if (state.panels) state.panels.rightCols = { count: 1, w2: 360 };
   // 「恢复默认布局」= 两边都展开：清掉用户意图和临时豁免，再按窗口宽度重算
   sideIntent.noLeft = false;
   sideIntent.noRight = false;
   sideIntent.pinned.left = false;
   sideIntent.pinned.right = false;
-  cancelPanelAnims();
-  hideDockPreview();
-  const floatingIds = floatPanels();
-  state._floatZ = 0;
   state.panels = defaultPanels();
-  const parts = floatingIds.flatMap((id) => panelParts(id));
-  withPanelMove(parts, () => {
-    savePanels();
-    applyResponsiveLayout();
-    applyPanels();
-  });
+  savePanels();
+  applyResponsiveLayout();
+  applyPanels();
   saveUi();
   renderAiArea();
   refitViewer(REFIT_AFTER_MS);
-  renderPanelMenu();
 }
 
-function resetLayout() {
-  resetPanels();
-  toast('已恢复默认布局，论文和会话未受影响', 'ok');
-}
-
-function resetStyle() {
+/** 「恢复默认设置」：一次把样式与布局都复位（原来分成「恢复默认布局」+「恢复默认样式」两个按钮）。
+    只动「壳」：论文、会话、消息一条都不碰，API Key / 模型名 / 接口地址也不碰。 */
+function resetSettings() {
   uiStyle = { ...DEFAULT_UI_STYLE };
-  // 只复位样式：右栏块的显示/顺序/高度属于布局，归 resetLayout 管，这里不碰
-  applyUiStyle(); viewer?.refreshPaper?.(); saveUi(); fillUiSettings();
-  toast('已恢复默认样式，论文和会话未受影响', 'ok');
+  applyUiStyle();
+  viewer?.refreshPaper?.();
+  fillUiSettings();
+  resetPanels();          // 面板显隐 / 顺序 / 两侧栏宽度 / 收起意图
+  saveUi();
+  toast('已恢复默认设置，论文和会话未受影响', 'ok');
 }
 
 function updateEndpointNote() {
@@ -8193,12 +6050,10 @@ function initSettings() {
     updateEndpointNote();
   };
   $('#cfgBaseURL').addEventListener('input', updateEndpointNote);
-  ['uiTheme', 'uiDensity', 'uiUiFontSize', 'uiControlSize', 'uiFontSize', 'uiLineHeight', 'uiCodeSize', 'uiMaxWidth', 'uiOpacity', 'uiPaper', 'uiShowPage', 'uiShowQuote', 'uiShowSources']
+  // 设置页只剩两个即时生效的控件：主题、阅读字号
+  ['uiTheme', 'uiFontSize']
     .forEach((id) => document.getElementById(id)?.addEventListener('input', applyUiSettingsFromControls));
-  // 顶栏行为单独接（它不是 uiStyle 的一部分，见 applyTopbarPref 的注释）
-  $('#uiTopbar')?.addEventListener('input', (e) => applyTopbarPref(e.currentTarget.value));
-  $('#resetLayout').onclick = resetLayout;
-  $('#resetStyle').onclick = resetStyle;
+  $('#resetSettings').onclick = () => resetSettings();
 
   $('#saveSettings').onclick = async () => {
     const out = $('#testResult');
@@ -8245,34 +6100,10 @@ function initShortcuts() {
       if (!$('#settingsModal').classList.contains('hidden')) { closeSettings(); return; }
       if (!$('#searchBar').classList.contains('hidden')) { $('#searchClose').click(); return; }
       if (!$('#noteBox').classList.contains('hidden')) { saveNoteBox(); return; }
-      if (!$('#popover').classList.contains('hidden')) { hidePopover(); return; }
-      // 面板管理器开着（或刚刚被这次 Esc 关掉）的时候，Esc 只负责关菜单，
-      // 别再顺手把浮窗也收回去 —— 一次 Esc 干两件事最让人意外
-      if (panelMenuEl && !panelMenuEl.classList.contains('hidden')) return;
-      if (performance.now() - (state._menuClosedAt || -1e9) < 200) return;
-      // 阶段 2.2b：焦点在浮窗里（或刚碰过某个浮窗）时，Esc = 把它收回原来的停靠区
-      const fid = focusedFloatPanel();
-      if (fid) {
-        e.preventDefault();
-        dockPanelTo(fid, state.panels[fid].home || 'left');
-        toast(`「${panelTitle(fid)}」已收回停靠`, '', 1500);
-        return;
-      }
       if (state.abort) { abortStream('user'); $('#composerHint').textContent = '正在停止…'; return; }
       // Esc 是明确的「不要这个选区了」：连方块和记住的选区一起清掉
       if (state.selection) { clearSelectionState(); viewer?.clearSelection(); return; }
       hideBubble();
-      return;
-    }
-    // Ctrl/⌘ + Alt + ←/→：当前面板在左栏 / 右栏之间停靠（浮窗也适用）。
-    // 和 Ctrl+=/-/0 一样放在 `if (typing) return` 之前：Ctrl 组合不受输入框保护。
-    if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-      const id = currentPanelId();
-      if (id) {
-        e.preventDefault();
-        dockPanelTo(id, e.key === 'ArrowLeft' ? 'left' : 'right');
-        toast(`「${panelTitle(id)}」已停靠到${e.key === 'ArrowLeft' ? '左' : '右'}栏`, '', 1400);
-      }
       return;
     }
     // Ctrl/⌘ + =（也就是 Ctrl++）/ - / 0：调「阅读字号」（结果正文），只动 --ai-fs。
@@ -8295,7 +6126,11 @@ function initShortcuts() {
     if (e.key === 't' || e.key === 'T') { if (hasSel) { e.preventDefault(); doTranslate(state.selection); } return; }
     if (e.key === 'e' || e.key === 'E') { if (hasSel) { e.preventDefault(); doExplain(state.selection); } return; }
     if (e.key === 'q' || e.key === 'Q') { if (hasSel) { e.preventDefault(); addToChat(state.selection); } return; }
-    if (e.key === 'r' || e.key === 'R') { e.preventDefault(); $('#regionBtn').click(); return; }
+    // 框选截图（R）。`startRegion` 定义在 initRegion() 内部（那里才拿得到遮罩节点），
+    // 对外只有 `state.startRegion` 这一个通道 —— 和输入框那个 ✂ 按钮走的是同一条。
+    // 之前这里写的是 `$('#regionBtn').click()`：顶栏按钮删掉之后它会抛 null，
+    // 改成裸 `startRegion()` 又会抛 ReferenceError（不在作用域里）。
+    if (e.key === 'r' || e.key === 'R') { e.preventDefault(); state.startRegion?.(); return; }
     if (e.key === '+' || e.key === '=') { viewer?.setScale(viewer.scale * 1.15); return; }
     if (e.key === '-' || e.key === '_') { viewer?.setScale(viewer.scale / 1.15); return; }
     if (e.key === '0') { viewer?.fitWidth(); return; }
@@ -8349,41 +6184,78 @@ async function copyText(text) {
   }
 }
 
+/**
+ * 启动决策（2026-10 首页改造的核心改动）。
+ *
+ *   有 `?open=`      → 直接进阅读页（明确的打开意图：双击文件、快捷方式、外部调用）
+ *   其他一切情况     → **停在首页**，不自动打开上次论文
+ *
+ * 改造前这里是「否则自动打开上次论文」，于是用户每次启动都被直接丢进一篇 PDF，
+ * 想换一篇得先按返回。现在改成：启动 = 首页，想继续读由用户点「继续阅读」。
+ *
+ * 产品负责人明确要求**不增加**「启动时继续上次论文」设置项，所以这里没有开关。
+ */
 async function maybeReopenLast() {
   const url = new URL(location.href);
   const openName = url.searchParams.get('open');
   if (openName) {
     const found = state.papers.find((p) => p.name === openName || p.name.replace(/\.pdf$/i, '') === openName);
-    if (found) return openDoc({ name: found.name, url: found.url, docId: found.docId });
-    toast(`papers/ 里没有找到 ${openName}`, 'err', 4000);
-  }
-  if (serverState.lastDoc && serverState.lastName && serverState.lastUrl && !/^blob:/.test(serverState.lastUrl)) {
-    // 用户手比自动恢复快：已经点开一篇了就别再插一脚，否则两次并发加载会打架
-    if (state.doc) return;
-    // 上次看的文件可能已经被删掉/移走了。先对一下列表，别去发一个注定 404 的请求，
-    // 否则启动时用户只会看到一个莫名其妙的「打开失败」。
-    const gone = !state.papers.some((p) => p.docId === serverState.lastDoc || p.name === serverState.lastName);
-    if (gone) {
-      serverState = { ...serverState, lastDoc: null, lastUrl: null, lastName: null };
-      fetch('/api/state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(serverState),
-      }).catch(() => {});
+    if (found) {
+      await openDoc({ name: found.name, url: found.url, docId: found.docId });
       return;
     }
-    return openDoc({ name: serverState.lastName, url: serverState.lastUrl, docId: serverState.lastDoc }).catch(() => {});
+    toast(`papers/ 里没有找到 ${openName}`, 'err', 4000);
   }
+
+  // 停在首页。顺手清掉「上次那篇已经被删掉/移走」的陈旧标记，
+  // 免得它一直挂在 state.json 里、下次又被当成有效记录（对应设计里的状态 5）。
+  const stale = serverState.lastDoc
+    && !state.papers.some((p) => p.docId === serverState.lastDoc || p.name === serverState.lastName);
+  if (stale) {
+    // 被删掉的那篇在 docs 里的阅读记录也要一起清：留着一个指向不存在文件的记录没有意义
+    const docs = { ...(serverState.docs || {}) };
+    delete docs[serverState.lastDoc];
+    serverState = { ...serverState, docs, lastDoc: null, lastUrl: null, lastName: null };
+    fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(serverState),
+    }).catch(() => { /* 清不掉也不影响首页显示：recentDocs() 本来就会过滤掉它 */ });
+  }
+  setView('home');
+}
+
+/**
+ * 关页前的最后一笔保存。
+ *
+ * ⚠️ 这里**不能用 navigator.sendBeacon**（2026-10 安全加固后踩到的真回归）：
+ * 本地 API 现在要求所有 `/api/*` 都带自定义头 `X-PRT-Token`，而 sendBeacon
+ * **无法设置请求头**，于是「关页 / 刷新」这一笔保存会静默变成 401 ——
+ * 用户看得到的是「刚才翻到的那一页又回去了」。
+ *
+ * 改用注入页面的 fetch 补丁 + `keepalive: true`：
+ *   · 走的是同一个 fetch，令牌自动带上，服务端认得；
+ *   · keepalive 让请求在文档卸载后继续送达，正是 sendBeacon 原本的作用；
+ *   · 体积上限同样是 64KB —— 超了会 reject，被 catch 兜住，不会把页面搞挂。
+ */
+function saveOnUnload(url, text) {
+  try {
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: text,
+      keepalive: true,
+    }).catch(() => { /* 关页途中失败只能放弃 */ });
+  } catch { /* 尽力而为 */ }
 }
 
 window.addEventListener('beforeunload', () => {
-  // 不能只是 cancel：那样刚翻的那页进度就丢了。用 sendBeacon 保证送达。
+  // 不能只是 cancel：那样刚翻的那页进度就丢了。用 keepalive fetch 保证送达。
   saveProgress.cancel?.();
   persistSession.flush?.();
   if (state.doc) {
     try {
-      const session = sessionPayload();
-      navigator.sendBeacon(`/api/session?doc=${encodeURIComponent(state.doc.docId)}`, new Blob([session], { type: 'application/json' }));
+      saveOnUnload(`/api/session?doc=${encodeURIComponent(state.doc.docId)}`, sessionPayload());
     } catch { /* unload fallback */ }
   }
   if (!state.doc || !viewer) return;
@@ -8391,6 +6263,6 @@ window.addEventListener('beforeunload', () => {
     const docs = { ...(serverState.docs || {}) };
     docs[state.doc.docId] = { page: viewer.current, scale: Number(viewer.scale.toFixed(3)), fit: !!viewer._fitMode, ts: Date.now(), name: state.doc.name };
     const payload = { ...serverState, docs, lastDoc: state.doc.docId, lastUrl: state.doc.url, lastName: state.doc.name };
-    navigator.sendBeacon('/api/state', new Blob([JSON.stringify(payload)], { type: 'application/json' }));
+    saveOnUnload('/api/state', JSON.stringify(payload));
   } catch { /* 尽力而为 */ }
 });

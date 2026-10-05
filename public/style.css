@@ -45,7 +45,7 @@
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
   --font-reading: "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
   --mono: "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
-  --topbar-h: 46px;
+  --topbar-h: 35px;   /* 用户口径（2026-10-04）：常驻顶栏 = 应用内标题栏，高度对齐 VS Code 的 35px */
   /* 底部状态栏高度。**必须有这个名字**：顶栏改成浮层之后，主区高度要按
      「顶栏高度 − 状态栏高度」补回来（见文件末尾那一段），写死 22 在改密度时会失配。 */
   --statusbar-h: 22px;
@@ -244,60 +244,34 @@ kbd { font-family: var(--mono); font-size: var(--ui-fs-xs); background: var(--bg
 
 /* ───────────────────────────── 布局 ───────────────────────────── */
 
-#main { height: calc(100vh - var(--topbar-h)); display: flex; overflow: hidden; }
-
-/* 阶段 5：系统级面板窗口。窗口内容仍来自同一页面，因此主题、字体和结果渲染保持一致；
-   只留下被打开的那一个面板，正文区与另一侧栏不参与布局。 */
-body.panel-window .topbar { display: none; }
-body.panel-window #main { height: 100vh; }
-body.panel-window .viewer-wrap,
-body.panel-window #splitLeft,
-body.panel-window #splitRight,
-body.panel-window #railLeft,
-body.panel-window #railRight,
-body.panel-window .side.right,
-body.panel-window .side.left { display: none; }
-body.panel-window.panel-window-files .side.left,
-body.panel-window.panel-window-outline .side.left,
-body.panel-window.panel-window-notes .side.left,
-body.panel-window.panel-window-relations .side.left,
-body.panel-window.panel-window-translate .side.right,
-body.panel-window.panel-window-chat .side.right { display: flex; width: 100%; border: 0; }
-body.panel-window .side.left { overflow-y: auto; }
-body.panel-window .side.right { min-width: 0; }
-/* 2026-10-03 口径统一：译文窗口不再特殊化。
-   旧规则是「译文面板窗口隐藏输入框、问答面板窗口保留输入框」，那是两块面板还没统一成
-   「一栏一个面板 + 底部切换器」之前的产物。现在两个窗口都是同一个工作台：
-   标题栏 / 内容区 / 切换器 / 输入框四段齐全，在独立窗口里也能直接追问或接着翻。
-   （下面那条保留的是 index.html 里 #aiBar 的旧引用位置说明，规则本身已撤掉。） */
-body.panel-window .ai { flex: 1 1 auto; min-height: 0; }
-body.panel-window .ai-block { flex: 1 1 auto !important; min-height: 0; }
-body.panel-window .ai-body { max-height: none; }
-body.panel-drag-out::after {
-  content: '松开以在独立窗口中打开此面板';
-  position: fixed; inset: auto 16px 16px 16px; z-index: 9999;
-  padding: 10px 14px; border-radius: 10px; text-align: center;
-  color: var(--text, #FBFDF4); background: var(--accent, #556B2F);
-  pointer-events: none; font-size: 13px;
+/**
+ * `#main` 用 **grid** 排成两行（2026-10）：
+ *   第一行 = 左栏 + 分隔条 + 正文区 + 右栏（原来的全部内容，横向 flex）
+ *   第二行 = 底栏，横着铺满整窗
+ *
+ * 为什么不用 `flex-wrap`：试过，第一行只吃到「内容高度」（实测 #main 高 915px，
+ * 但第一行只占 568px，底栏于是停在 y=647 而不是贴到 950），flex 行的交叉轴
+ * stretch 在换行容器里不按预期把行撑满。grid 的 `1fr auto` 是确定性的：
+ * 第一行吃掉「总高 − 44px」，第二行固定 44px。
+ *
+ * 左栏 / 分隔条 / 正文 / 右栏放进第一行那个 flex 容器里（见下面的 `#main > .main-row`）。
+ */
+#main {
+  height: calc(100vh - var(--topbar-h));
+  display: grid;
+  grid-template-rows: 1fr auto;
+  grid-template-columns: 100%;
+  overflow: hidden;
+}
+#main > .main-row {
+  display: flex; align-items: stretch;
+  min-height: 0; min-width: 0;
+  overflow: hidden;
+}
+#main > .rail, #main > .side, #main > .splitter, #main > .right-cols, #main > .viewer-wrap, #main > .main-row {
+  min-height: 0;
 }
 
-/* 拖出成独立窗口：标题栏左侧的可见抓手 + 跟随指针的即时提示。
-   按下就出现提示，避免「拖了半天没反应」；接近边缘时提示变高亮底色。 */
-.panel-drag-handle {
-  flex: 0 0 auto; align-self: center; padding: 0 4px; margin-right: 1px;
-  color: var(--fg-faint); font-size: var(--ui-fs-sm); line-height: 1;
-  cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none;
-}
-.panel-drag-handle:hover { color: var(--fg); }
-.panel-drag-handle:active, .dragging .panel-drag-handle { cursor: grabbing; }
-.panel-drag-ghost {
-  position: fixed; z-index: 99999; pointer-events: none; max-width: 360px;
-  padding: 7px 11px; border-radius: 9px; font-size: 12px; line-height: 1.5;
-  color: var(--fg); background: var(--bg-elev);
-  border: 1px solid var(--border-strong); box-shadow: 0 10px 26px rgba(74, 64, 38, .22);
-}
-.panel-drag-ghost.hot { color: var(--accent-fg); background: var(--accent); border-color: transparent; }
-.panel-drag-ghost.hidden { display: none; }
 
 .side {
   background: var(--bg-elev); display: flex; flex-direction: column;
@@ -308,22 +282,16 @@ body.panel-drag-out::after {
 body.no-left .side.left, body.no-left #splitLeft { display: none; }
 body.no-right .right-cols, body.no-right #rightCols { display: none; }
 
-/* 右栏列容器：正文 ↔ 第 1 栏 ↔ 第 2 栏。译文 / 问答只在右栏，
-   默认 1 栏（一栏只开一个面板）；右键图标「再开一栏」或把面板放到第 2 栏时，
-   app.js 现建 #rightColSplit + #rightCol2，这里按 data-open / body.right-col2-off 决定它们的显示。
+/* 右栏列容器：正文 ↔ 右栏。译文 / 问答只在右栏，而且**恒为一栏**（一栏只开一个面板）。
    min-width:0 是关键：不加的话 flex 子项的最小内容宽度会把正文挤没，窄窗直接出横向滚动条。 */
 .right-cols { display: flex; align-items: stretch; flex: 0 0 auto; min-width: 0; }
 #rightCols > .side.right { flex: 0 0 auto; }
-#rightCols > .side.right.col-2 { width: var(--right-w2, 360px); }
-#rightColSplit { flex: 0 0 5px; }
-#rightCol2[hidden], body.right-col2-off #rightCol2, body.right-col2-off #rightColSplit { display: none; }
 
 /* 收起 = display:none（body.no-* 是唯一开关，不引入第二套 class）。
    宽度过渡只服务于「键盘微调 / 拖动松手夹取」这类宽度真的在变的情况：
    收起本身是 display 切换，没有中间宽度可插值，靠 JS 在切换后立刻重排正文来避免空白。
    拖动过程中必须关掉过渡，否则面板会甩在光标后面。 */
-.side { transition: width .14s ease-out; }
-body.dragging .side { transition: none; }
+.side { transition: width .14s ease-out; }body.dragging .side { transition: none; }
 @media (prefers-reduced-motion: reduce) {
   .side, .rail, .rail-btn { transition: none; }
 }
@@ -331,15 +299,27 @@ body.dragging .side { transition: none; }
 /* ─────────────────────── 活动栏（侧栏收起时的竖条） ───────────────────────
    位置在 #main 的最左 / 最右（#leftSide 左边、#rightSide 右边），不放在侧栏内部 ——
    放进去就会跟着侧栏一起被 display:none 掉。宽度 = --rail-w，不可拖动。 */
+/**
+ * 活动栏（2026-10 用户口径）：
+ *   「左侧栏应该一直都是几个选项在最左边的一个小侧栏，一直都不消失，
+ *     然后在这个小侧栏右边可以开启大的侧栏」。
+ * 所以它从「只在对应侧收起时才出现」改成**两侧常驻**：
+ *   · 左边一条竖条永远在，点图标在它右边展开大侧栏；
+ *   · 右边同理。
+ * 收起大侧栏不再收起这条竖条 —— 竖条本身就是恢复入口，永远找得回来。
+ */
 .rail {
-  display: none;                    /* 默认不存在；对应侧收起时才出现 */
+  display: flex;                    /* 常驻（以前是 display:none，只在收起时才出现） */
   flex: 0 0 var(--rail-w);
   width: var(--rail-w);
   flex-direction: column; align-items: center; gap: 4px;
   padding: 6px 0; background: var(--bg-elev); overflow: hidden;
 }
-body.no-left #railLeft { display: flex; border-right: 1px solid var(--border); }
-body.no-right #railRight { display: flex; border-left: 1px solid var(--border); }
+#railLeft { border-right: 1px solid var(--border); }
+#railRight { border-left: 1px solid var(--border); }
+/* 大侧栏展开时竖条仍然在（这是与旧行为最大的区别），只是不再重复画分隔线 */
+body:not(.no-left) #railLeft { border-right-color: transparent; }
+body:not(.no-right) #railRight { border-left-color: transparent; }
 .rail-btn {
   border: 0; background: transparent; border-radius: 6px;
   width: calc(var(--rail-w) - 10px); height: calc(var(--rail-w) - 10px);
@@ -391,14 +371,21 @@ body.dragging .viewer { pointer-events: none; }
 .filelist { list-style: none; margin: 0; padding: 0 calc(var(--list-pad-x) - 2px); overflow: auto; flex: 0 0 auto; max-height: 30vh; min-height: 48px; }
 
 /**
- * 左栏「当前显示的那一块」要吃满剩余高度（用户实测 2026-10-04）：
- *   「左边的也还是会被挡住」。
- * 实测真相：显示「文件」时那一块总高只有 138px（50 头部 + 88 列表），
- * 左栏从 y=234 到 y=903 是**一大片空白**；其余三块同理（它们都是 `flex: 0 0 auto`）。
- * 看起来就像内容被"卡"在上面、下面什么都没有。
- * 所以把可见的那一块改成 `flex: 1 1 auto`，让它撑满（`hidden` 的块不参与，
- * 自然不受影响）；列表自身再吃满块内剩余空间并可滚动。
- * 折叠态（panel-collapsed）已经由上面的规则把内容藏掉，不受影响。
+ * 左栏「当前显示的那一块」要**按内容自然展开**，滚动的必须是整条左栏。
+ *
+ * ⚠️ 2026-10 实测缺陷（e2e「目录不再被限制在小区域里」现场）：
+ *   `#outlineList` client=421 / scroll=478 —— 目录自己成了一个小滚动框，
+ *   20 项里有 3 项滚不到，用户要看目录得先在那个小框里滚一遍。
+ *   根因就在下面两条规则：`.sec` 与它里面的列表都写了 `flex: 1 1 auto` + `min-height: 0`，
+ *   于是左栏里同时可见的三块（文件 / 目录 / 笔记）**按比例瓜分**左栏高度：
+ *   文件 105 · 目录 469 · 笔记 159，而目录内容需要 526 —— 差出来的 57px
+ *   因为没有 `flex-shrink: 0`，被压进了列表自己的 `overflow: auto` 里。
+ *   祖先链量得很清楚：`ul#outlineList`(421) ← `section.sec`(469) ← `aside#leftSide`(915, overflow-y:auto)。
+ *
+ * 修法：**长出来的部分由左栏整体滚**（`#leftSide` 本来就是 overflow-y:auto，是唯一的滚动容器）——
+ *   把 `.sec` 与列表的 `flex-grow` 保留（内容少时照样撑满，不会在下面留一大片空白）、
+ *   把 `flex-shrink` 设成 0（内容多时不再被压扁，也就没有第二个滚动容器）。
+ *   `overflow: auto` 保留：放得下时不会出现滚动条，放不下时由左栏兜住。
  */
 /* 只让**容器本身**伸缩；里面的头部 / 列表 / 搜索框各自保持内容高度，
    否则会出现「头部被拉伸成一大块、列表被挤到下面」的新毛病（实测踩到）。 */
@@ -409,11 +396,11 @@ body.dragging .viewer { pointer-events: none; }
 #leftSide > .sec:not(.hidden) > .rel-sum,
 #leftSide > .sec:not(.hidden) > .rel-search,
 #leftSide > .sec:not(.hidden) > .filter { flex: 0 0 auto; }
-#leftSide > .sec:not(.hidden) { flex: 1 1 auto; min-height: 0; }
+#leftSide > .sec:not(.hidden) { flex: 1 0 auto; min-height: 0; }
 #leftSide > .sec:not(.hidden) > .filelist,
 #leftSide > .sec:not(.hidden) > .outline,
 #leftSide > .sec:not(.hidden) > .notes,
-#leftSide > .sec:not(.hidden) > .rel-list { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; }
+#leftSide > .sec:not(.hidden) > .rel-list { flex: 1 0 auto; min-height: 0; max-height: none; overflow: auto; }
 
 /**
  * 「文件」块的结构与另外三块**不一样**：它的标题栏 `.side-head` 是左栏的**直接子元素**，
@@ -428,10 +415,11 @@ body.dragging .viewer { pointer-events: none; }
 #leftSide > .side-head:not(.hidden) { flex: 0 0 auto; }
 #leftSide > .side-head:not(.hidden) ~ .dropzone { flex: 0 0 auto; }
 #leftSide > .side-head:not(.hidden) ~ .filelist { flex: 1 1 auto; min-height: 48px; max-height: none; overflow: auto; }
+/* 与上面那一组同义（历史重复，后写的这条会赢）：同样不许收缩，长出来的高度交给左栏整体滚 */
 #leftSide > .sec:not(.hidden) > .filelist,
 #leftSide > .sec:not(.hidden) > .outline,
 #leftSide > .sec:not(.hidden) > .notes,
-#leftSide > .sec:not(.hidden) > .rel-list { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; }
+#leftSide > .sec:not(.hidden) > .rel-list { flex: 1 0 auto; min-height: 0; max-height: none; overflow: auto; }
 .filelist li {
   padding: var(--list-pad-y) var(--list-pad-x); border-radius: 6px; cursor: pointer; font-size: var(--ui-fs-md);
   line-height: var(--list-lh);
@@ -479,19 +467,11 @@ body.dragging .viewer { pointer-events: none; }
 .notes .nact button:hover { background: var(--bg-elev); color: var(--accent); }
 .notes .nact button.del:hover { color: var(--err-text); }
 
-/* ───────────────────────── 文献关系（左栏） ───────────────────────── */
+/* ───────────────────────── 参考文献（左栏） ───────────────────────── */
 
 .tbtn.tiny { min-width: calc(20px * var(--ctl-scale)); height: calc(20px * var(--ctl-scale)); font-size: calc(11px * var(--ctl-scale)); padding: 0 calc(4px * var(--ctl-scale)); }
 .rel-sum { font-size: var(--ui-fs-2xs); color: var(--fg-faint); line-height: 1.6; padding: 0 calc(var(--panel-pad) + 2px) calc(var(--panel-pad) - 2px); }
 .rel-sum b { color: var(--accent); font-weight: 600; }
-.rel-actions { display: flex; gap: calc(var(--ctl-gap) + 1px); padding: 0 var(--panel-pad) calc(var(--panel-pad) - 2px); flex-wrap: wrap; }
-.rel-btn {
-  font: inherit; font-size: calc(10.5px * var(--ctl-scale)); padding: calc(3px * var(--ctl-scale)) calc(9px * var(--ctl-scale)); cursor: pointer;
-  border: 1px solid var(--border-strong); border-radius: 999px;
-  background: transparent; color: var(--fg-dim);
-}
-.rel-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-.rel-btn:disabled { opacity: .45; cursor: default; }
 .rel-list { list-style: none; margin: 0; padding: 0 6px 10px; max-height: 42vh; overflow: auto; }
 .rel-list li.empty { color: var(--fg-faint); font-size: var(--ui-fs-sm); padding: calc(var(--list-pad-y) - 2px) var(--list-pad-x); cursor: default; }
 .rel-item { padding: calc(var(--list-pad-y) - 1px) var(--list-pad-x); border-radius: 6px; font-size: var(--ui-fs-xs); line-height: var(--list-lh); }
@@ -520,7 +500,7 @@ body.dragging .viewer { pointer-events: none; }
 .rel-cited { font-size: var(--ui-fs-2xs); color: var(--fg-dim); padding: 2px 10px 6px; line-height: 1.6; }
 .rel-cited b { color: var(--accent); font-weight: 600; }
 
-/* 阶段 3：搜索 / 筛选 / 排序工具条（只在内存里，切论文重置） */
+/* 搜索工具条（只在内存里，切论文重置） */
 .rel-tools { display: flex; gap: calc(var(--ctl-gap) + 1px); padding: 0 var(--panel-pad) calc(var(--panel-pad) - 3px); flex-wrap: wrap; }
 .rel-search {
   flex: 1 1 100%; min-width: 0; font: inherit; font-size: calc(11px * var(--ctl-scale));
@@ -530,15 +510,8 @@ body.dragging .viewer { pointer-events: none; }
 }
 .rel-search::placeholder { color: var(--fg-faint); }
 .rel-search:focus { outline: none; border-color: var(--accent); }
-.rel-select {
-  flex: 1 1 auto; min-width: 0; font: inherit; font-size: calc(10.5px * var(--ctl-scale));
-  padding: calc(2px * var(--ctl-scale)) calc(6px * var(--ctl-scale));
-  border: 1px solid var(--border-strong); border-radius: 999px;
-  background: var(--bg-elev); color: var(--fg-dim); cursor: pointer;
-}
-.rel-select:focus { outline: none; border-color: var(--accent); }
 
-/* 阶段 3：分组列表 —— 每组一个可折叠的标题（带计数），组内还是原来的 .rel-item 结构 */
+/* 分组列表 —— 每组一个可折叠的标题（带计数），组内还是原来的 .rel-item 结构 */
 .rel-group { list-style: none; margin: 0 0 2px; }
 .rel-group-head {
   display: flex; align-items: center; gap: 5px; width: 100%; box-sizing: border-box;
@@ -550,14 +523,9 @@ body.dragging .viewer { pointer-events: none; }
 .rel-group .rg-caret { color: var(--fg-faint); font-size: 9px; width: 9px; display: inline-block; transition: transform .12s; }
 .rel-group.collapsed .rg-caret { transform: rotate(-90deg); }
 .rel-group .rg-count { color: var(--fg-faint); font-weight: 500; font-variant-numeric: tabular-nums; }
-.rel-group .rg-filtered { color: var(--accent); font-weight: 500; font-variant-numeric: tabular-nums; }
 .rel-group-list { list-style: none; margin: 0; padding: 0; }
 .rel-group.collapsed .rel-group-list { display: none; }
 .rel-group[hidden] { display: none; }
-/* 被引用组的条目不是「本文的参考文献」，所以不占用 .rel-item（那个类是引用条目的计数口径） */
-.rel-cited-row { padding: calc(var(--list-pad-y) - 1px) var(--list-pad-x); border-radius: 6px; font-size: var(--ui-fs-xs); line-height: var(--list-lh); }
-.rel-cited-row:hover { background: var(--bg-sunken); }
-.rel-cited-row .rc-name { color: var(--fg-dim); word-break: break-word; }
 .rel-tag.err { border-color: var(--err); color: var(--err-text); }
 .rel-item .rt { cursor: pointer; }
 
@@ -570,7 +538,7 @@ body.dragging .viewer { pointer-events: none; }
 }
 .katex-display > .katex { white-space: normal; }
 /* 公式里的字号别被正文行高挤坏 */
-.pop-body .katex, .text .katex { line-height: 1.2; }
+.text .katex { line-height: 1.2; }
 .katex-error { color: var(--err-text); font-size: .92em; }
 
 /* ───────────────────────── 论文操作菜单 ───────────────────────── */
@@ -584,16 +552,9 @@ body.dragging .viewer { pointer-events: none; }
 .ops-head { font-size: var(--ui-fs-sm); color: var(--fg-faint); padding: 6px 8px 4px; }
 .ops-head-title { color: var(--fg-dim); font-weight: 600; }
 .ops-head-note { margin-top: 3px; font-size: var(--ui-fs-2xs); line-height: 1.45; color: var(--fg-faint); }
-.ops-group {
-  font-size: var(--ui-fs-2xs); color: var(--fg-faint); letter-spacing: .06em;
-  padding: 8px 8px 3px; text-transform: uppercase;
-}
-.ops-more { margin: 4px 2px 2px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-/* R7 D4：原生 marker 实测画不出来（见文件上方 ::before 段注释），改为自绘 ▸ 后关掉原生 list-item 标记 */
-.ops-more > summary { cursor: pointer; padding: 9px 8px 8px; color: var(--fg-dim); font-size: var(--ui-fs-sm); font-weight: 600; list-style: none; }
-.ops-more > summary:hover { color: var(--accent); background: var(--accent-soft); }
-.ops-more > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 5px; }
-.ops-more-body { padding-bottom: 4px; }
+/* 删减（批次三）：`.ops-group`（分组标题）/ `.ops-more*`（「更多操作」折叠区）/
+   `.ops-item.coach`（Coach 模式入口）三套规则一起删除 —— 操作菜单现在就是 4 个平铺条目，
+   ops.js 不再产出任何分组或折叠结构，留着只会让人以为菜单还能分组。 */
 .ops-item {
   display: flex; align-items: flex-start; gap: 9px; width: 100%;
   border: 0; background: transparent; text-align: left; cursor: pointer;
@@ -606,11 +567,9 @@ body.dragging .viewer { pointer-events: none; }
 .ops-title { font-size: var(--ui-fs-md); font-weight: 600; color: var(--fg); }
 .ops-item.cached .ops-title { color: var(--accent); }
 .ops-hint { font-size: var(--ui-fs-2xs); color: var(--fg-faint); line-height: 1.45; }
-.ops-item.coach { border-top: 1px dashed var(--border); border-radius: 0 0 8px 8px; margin-top: 2px; }
-.ops-item.coach .ops-title { color: var(--accent); }
 
 /* ───────────────── 面板注册表（阶段 2.2a：六个面板的标题栏 / 折叠 / 管理器） ─────────────────
-   左栏文件是 .side-head，目录 / 笔记 / 文献关系是 section.sec，右栏两块是 section.ai-block ——
+   左栏文件是 .side-head，目录 / 笔记 / 参考文献是 section.sec，右栏两块是 section.ai-block ——
    DOM 结构一个都没改，这里只给它们补「同一套折叠外观 + 标题栏上的 ⋯ 按钮」。
    面板根部在 JS 里补 data-panel=<id> / data-dock=<left|right|hidden>；文件列表与拖入区是
    .side-head 的**兄弟**节点，收起时靠相邻兄弟规则一起收（不给它们套 .sec 是为了不动既有布局）。 */
@@ -631,71 +590,13 @@ body.dragging .viewer { pointer-events: none; }
 .panel-icon:hover { background: var(--bg-sunken); color: var(--fg); }
 .panel-icon.panel-hide:hover { color: var(--err-text); }
 
-/* 侧栏底部的小图标坞：每个面板一个图标，点一下显示/收起。
-   固定在左栏底部 —— 面板被隐藏后图标仍在，所以永远找得回来。 */
-.panel-dock {
-  margin-top: auto; flex: 0 0 auto;
-  position: sticky; bottom: 0; z-index: 3;
-  display: flex; align-items: center; justify-content: center; gap: 2px;
-  padding: calc(var(--panel-pad) - 2px) 4px; border-top: 1px solid var(--border);
-  background: var(--bg-elev);
-}
-.dock-btn {
-  width: calc(28px * var(--ctl-scale)); height: calc(24px * var(--ctl-scale));
-  border: 0; border-radius: 5px; background: transparent; cursor: pointer;
-  color: var(--fg-faint); font-size: var(--ui-fs-sm); line-height: 1;
-}
-.dock-btn:hover { background: var(--bg-sunken); color: var(--fg); }
-.dock-btn.on { background: var(--accent-soft); color: var(--accent); }
-/* 右栏图标坞：同一个 .dock-btn，只是挂在右栏每一列的底部（第 1 栏在输入框下面）。
-   译文 / 问答两块只从这一排进入 —— 左栏的图标坞不再出现它们。 */
-.dock-right { border-top: 1px solid var(--border); border-bottom: 0; }
-.dock-right .dock-btn { position: relative; }
-/* 第 2 栏的图标坞在更深一层：加一条短竖线把两栏的图标分开 */
-#rightCol2 .dock-right { border-left: 0; }
-#rightCol2 .dock-right::before {
-  content: ''; align-self: stretch; width: 1px; margin: 2px 4px 2px 0;
-  background: var(--border);
-}
-/* 底部图标右键菜单（点一下显示/收起 · 并排开一栏 · 应用内卡片） */
-.dock-menu {
-  position: fixed; z-index: 90; min-width: 176px;
-  padding: 4px; border-radius: 8px; background: var(--bg-elev);
-  border: 1px solid var(--border-strong); box-shadow: 0 10px 26px rgba(74, 64, 38, .22);
-}
-.dock-menu-btn {
-  display: block; width: 100%; text-align: left; border: 0; background: transparent;
-  color: var(--fg); font: inherit; font-size: var(--ui-fs-sm);
-  padding: 6px 10px; border-radius: 5px; cursor: pointer;
-}
-.dock-menu-btn:hover { background: var(--bg-sunken); }
+/* 侧栏底部的小图标坞（.panel-dock / .dock-btn）已整体删除（2026-10 用户口径：
+   「A 只留最左边那条窄活动栏」+「那几个点不动……直接删掉就行」）。
+   左栏的面板入口现在只有常驻的 #railLeft，样式见上面 `.rail` / `.rail-btn` 一节。 */
+/* 保留了下面那条兜底：万一旧缓存页面里还残留 .dock-btn，也不会显示成裸按钮 */
+.panel-dock, .dock-btn { display: none !important; }
 
-/* 自绘展开指示（R7 视觉修复 D4）。
-   原生 ::marker 在本机 Chromium 上**根本没画出来**：实测同一个 <summary>，
-   list-style-type 取 none 与 disclosure-closed 时，「元素左边界之外」那条 marker 带
-   截出来逐字节相同（Chromium 把 outside marker 放在 padding box 之外，这里画不出）。
-   于是 <details> 完全看不出可展开 —— 受影响的有「更多操作（11）」「布局设置」「批量操作」
-   「更多样式」四处，其中「更多操作」藏着 11 / 15 个操作，可发现性直接受损。
-   改为显式画一个 ▸，展开时旋转 90°，不再依赖浏览器默认字形。 */
-.pm-layout > summary::before,
-.pm-batch > summary::before,
-.settings-advanced > summary::before,
-.ops-more > summary::before {
-  content: '▸';
-  display: inline-block;
-  width: 1em; margin-right: 5px; text-align: center;
-  transition: transform .12s;
-}
-.pm-layout[open] > summary::before,
-.pm-batch[open] > summary::before,
-.settings-advanced[open] > summary::before,
-.ops-more[open] > summary::before { transform: rotate(90deg); }
-@media (prefers-reduced-motion: reduce) {
-  .pm-layout > summary::before, .pm-batch > summary::before,
-  .settings-advanced > summary::before, .ops-more > summary::before { transition: none; }
-}
-
-/* 可折叠的面板头：Enter/Space 折叠展开、Alt+↑/↓ 换位、Alt+H 隐藏 */
+/* 可折叠的面板头：Enter/Space 折叠展开、Alt+H 隐藏 */
 .sec-head[role="button"], .side-head[role="button"] { cursor: grab; user-select: none; touch-action: none; }
 .sec-head[role="button"].dragging, .side-head[role="button"].dragging { cursor: grabbing; }
 .sec-head[role="button"]:focus-visible, .side-head[role="button"]:focus-visible {
@@ -715,71 +616,7 @@ body.dragging .viewer { pointer-events: none; }
 .side-head.panel[data-collapsed] ~ .dropzone,
 .side-head.panel[data-collapsed] ~ .filelist { display: none; }
 
-/* 面板管理器：与 #opsMenu 同一套外观（fixed 定位，不受侧栏滚动影响） */
-/* 面板管理器「关闭中」的瞬时类：只在这一帧把菜单藏起来，用来让 focus() 先落地。
-   ⚠️ 不能把它和 .hidden 合成一个：浏览器对「父级 display:none 的元素」focus() 一律无效，
-   而 focus() 之后同一任务里 display:none 也会把焦点丢回 <body>（两条都实测过）。
-   所以关闭序列是「focus → 加 .closed（隐藏）→ 下一帧补 .hidden」，
-   .closed 在这一帧承担隐藏职责，.hidden 仍是「已关闭」的正式标记（调用方与自动化都读它）。 */
-.panel-menu.closed { display: none; }
 
-.panel-menu {
-  position: fixed; z-index: 92; left: 0; top: 0;
-  width: min(322px, 94vw); max-height: 76vh; overflow: auto;
-  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px;
-  box-shadow: var(--shadow); padding: 6px; animation: pop .12s ease-out;
-  font-size: var(--ui-fs-sm); color: var(--fg);
-}
-.pm-row { padding: 5px 6px 7px; border-radius: 8px; }
-.pm-row + .pm-row { border-top: 1px solid var(--border); }
-.pm-head { display: flex; align-items: center; gap: calc(var(--ctl-gap) + 1px); padding: 3px 2px 6px; }
-.pm-name { font-weight: 600; color: var(--fg-dim); }
-.pm-dock {
-  margin-left: auto; font-size: var(--ui-fs-2xs); color: var(--fg-faint);
-  border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; line-height: 1.6;
-}
-/* 应用内卡片状态：和「已隐藏」区分开 */
-.pm-dock.pm-detached { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-.pm-layout { margin-top: 5px; }
-/* R7 D4：同上，改为自绘 ▸ */
-.pm-layout > summary, .pm-batch > summary {
-  cursor: pointer; color: var(--fg-faint); font-size: var(--ui-fs-2xs); padding: 3px 2px;
-  list-style: none;
-}
-.pm-layout > summary:hover, .pm-batch > summary:hover { color: var(--accent); }
-.pm-layout > summary:focus-visible, .pm-batch > summary:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: -1px; border-radius: 4px;
-}
-.pm-layout-acts { display: flex; flex-wrap: wrap; gap: calc(var(--ctl-gap) + 1px); padding-top: 4px; }
-.pm-btn {
-  font: inherit; font-size: calc(10.5px * var(--ctl-scale)); line-height: 1.5; cursor: pointer;
-  min-width: calc(26px * var(--ctl-scale)); padding: calc(2px * var(--ctl-scale)) calc(9px * var(--ctl-scale));
-  border: 1px solid var(--border-strong); border-radius: 999px;
-  background: transparent; color: var(--fg-dim);
-}
-.pm-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-.pm-btn:disabled { opacity: .38; cursor: default; }
-.pm-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
-.pm-btn.on::before { content: '✓ '; }
-.pm-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.pm-foot { display: flex; align-items: flex-start; gap: calc(var(--ctl-gap) + 1px); padding: 8px 6px 4px; border-top: 1px solid var(--border); }
-.pm-batch { flex: 1 1 0; min-width: 0; }
-.pm-batch-acts { display: flex; gap: calc(var(--ctl-gap) + 1px); padding-top: 5px; }
-.pm-batch-acts .pm-foot-btn { flex: 1 1 0; }
-.pm-foot-btn {
-  flex: 1 1 0; font: inherit; font-size: calc(11px * var(--ctl-scale)); cursor: pointer;
-  padding: calc(5px * var(--ctl-scale)) calc(8px * var(--ctl-scale));
-  border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg); color: var(--fg-dim);
-}
-.pm-foot-btn:hover { border-color: var(--accent); color: var(--accent); }
-.pm-foot-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-
-/* 有面板被隐藏时给顶栏 ▤ 挂个点：不然用户看不出「还有东西藏着」 */
-#panelBtn { position: relative; }
-#panelBtn.has-hidden::after {
-  content: ''; position: absolute; top: 3px; right: 3px;
-  width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
-}
 
 /* ───────────────────────── Markdown 表格 ───────────────────────── */
 /* 侧栏很窄，宽表格必须能横向滚动，不能把面板撑破 */
@@ -869,18 +706,222 @@ body.dragging .viewer { pointer-events: none; }
 .search-result .sr-snippet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-result mark { background: var(--hit); color: inherit; border-radius: 2px; padding: 0 1px; }
 
-.statusbar { height: var(--statusbar-h); display: flex; align-items: center; gap: 10px; padding: 0 10px; font-size: var(--ui-fs-sm); color: var(--fg-faint); background: var(--bg-elev); border-top: 1px solid var(--border); }
+/* 状态栏已删除（2026-10）：PDF 下面原来常驻一条 22px 高的横条，只写着「就绪」，
+   纯占地方。解析进度改由页码那一格的 .busy 提示（见下面 .page-input.busy），
+   不再单独占一条横条。
 
-.welcome { max-width: 470px; margin: 9vh auto; text-align: center; padding: 20px; user-select: none; }
-.welcome h1 { font-size: 30px; margin: 0 0 4px; }
-.tagline { color: var(--fg-dim); margin: 0 0 22px; font-size: var(--ui-fs-lg); letter-spacing: .4px; }
-.steps { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
-.step {
-  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
-  padding: 12px 12px; font-size: var(--ui-fs-sm); color: var(--fg-dim); flex: 1 1 130px;
-  display: flex; flex-direction: column; align-items: center; gap: 6px; line-height: 1.5;
+   取而代之的是**底栏**（用户口径）：「可以加一个整体的底栏分担一下最上面一栏的压力，
+   比如调节大小和翻页可以放在下面」。它放的是与阅读位置直接相关的两组控件（翻页 + 缩放），
+   与顶栏同一组动作的按钮并存，共用同一批函数，所以状态永远一致。 */
+/* 消息动作里的图标按钮（2026-10 用户口径：「复制 / 回到第8页用图标表示不要用文字」）。
+   尺寸与其他 .acts button 对齐，但不占文字宽度。 */
+.msg .acts button.act-icon { padding: 0; width: 26px; height: 24px; display: inline-flex; align-items: center; justify-content: center; }
+.msg .acts button.act-icon > svg { width: 14px; height: 14px; }
+
+/* ═══════════ 多会话条（2026-10） ═══════════
+   用户口径：「问答是不是要做多对话分对话」→ 会话列表 + 新建 + 切换。
+   位置：右栏顶栏（#aiBar）下面一条，显示当前会话名；点开是列表。
+   全部用现有主题令牌，不新增颜色。 */
+.sessbar { position: relative; flex: 0 0 auto; padding: 4px 10px 6px; background: var(--bg-elev); }
+.sessbar.hidden { display: none; }
+.sess-btn {
+  width: 100%; display: flex; align-items: center; gap: 7px;
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--fg); cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-sm); text-align: left;
 }
-.step b { display: inline-flex; align-items: center; justify-content: center; width: 19px; height: 19px; border-radius: 50%; background: var(--btn); color: var(--btn-fg); font-size: var(--ui-fs-xs); }
+.sess-btn:hover { border-color: var(--accent); color: var(--accent); }
+.sess-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sess-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.sess-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-caret { flex: 0 0 auto; color: var(--fg-faint); font-size: 10px; }
+
+.sess-menu {
+  position: absolute; left: 10px; right: 10px; top: calc(100% - 2px); z-index: 30;
+  max-height: 320px; overflow-y: auto;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 9px;
+  box-shadow: var(--shadow); padding: 5px;
+}
+.sess-menu.hidden { display: none; }
+.sess-head { padding: 5px 7px 7px; font-size: var(--ui-fs-xs); color: var(--fg-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-row { display: flex; align-items: stretch; gap: 3px; border-radius: 7px; }
+.sess-row:hover { background: var(--bg-sunken); }
+.sess-row.on { background: var(--accent-soft); }
+.sess-go {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 7px; border: 0; background: none; cursor: pointer; text-align: left;
+  color: var(--fg); font: inherit; font-size: var(--ui-fs-sm);
+}
+.sess-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-row.on .sess-title { color: var(--accent); font-weight: 600; }
+.sess-meta { font-size: var(--ui-fs-xs); color: var(--fg-faint); }
+.sess-del {
+  flex: 0 0 auto; width: 28px; border: 0; background: none; cursor: pointer;
+  color: var(--fg-faint); font-size: 15px; line-height: 1; border-radius: 7px; font-family: inherit;
+}
+.sess-del:hover { color: var(--err-text, var(--fg)); background: var(--bg); }
+.sess-new {
+  width: 100%; margin-top: 4px; padding: 7px; border: 1px dashed var(--border); border-radius: 7px;
+  background: none; color: var(--accent); cursor: pointer; font: inherit; font-size: var(--ui-fs-sm);
+}
+.sess-new:hover { border-color: var(--accent); background: var(--accent-soft); }
+.sess-clear {
+  width: 100%; margin-top: 4px; padding: 7px; border: 1px solid var(--border); border-radius: 7px;
+  background: none; color: var(--fg-dim); cursor: pointer; font: inherit; font-size: var(--ui-fs-sm);
+}
+.sess-clear:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.sess-empty { padding: 10px 7px; color: var(--fg-faint); font-size: var(--ui-fs-sm); text-align: center; }
+
+/* ═══════════ 底栏（2026-10） ═══════════
+   用户口径：「底栏应该是横着一整栏，而且现在的太扁了」。
+   所以它是 `#main` 的直接子项（铺满整个窗口底部，横跨左栏 + 正文 + 右栏），
+   高度从原来 22px 的细条加高到 44px。
+   `#main` 是 flex row，靠 flex-basis:100% + order 把它挤到下一行（见 #main 的规则）。 */
+.viewer-foot {
+  flex: 0 0 100%;
+  order: 99;
+  display: flex; align-items: center; gap: 12px;
+  height: 44px;
+  padding: 0 14px;
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  font-size: var(--ui-fs); color: var(--fg-dim);
+}
+.viewer-foot .foot-grp { display: flex; align-items: center; gap: 3px; }
+.viewer-foot .tbtn { width: 30px; height: 30px; }
+/* 页码输入框搬进底栏后给大一点，和 44px 的栏高匹配 */
+.viewer-foot .page-input { height: 26px; width: 52px; font-size: var(--ui-fs); text-align: center; }
+.viewer-foot .of { color: var(--fg-faint); }
+.viewer-foot .zoom-word { color: var(--fg-faint); margin-right: 4px; }
+.viewer-foot .zoom-range { width: 150px; }
+.viewer-foot .zoom-pct { min-width: 46px; text-align: right; font-variant-numeric: tabular-nums; }
+/**
+ * 底栏**常驻**（2026-10 用户口径：「底栏应该是一直都有，主页也要有」）。
+ *
+ * 之前有一条 `body:not(.reading) .viewer-foot { display: none }` —— 首页时整条消失，
+ * 布局少一截、看起来像坏了。现在它一直在；首页时里面**与文档相关**的控件由 JS 置
+ * `disabled`（翻页 / 页码 / 缩放都点不动，但看得见），这样布局稳定、意图也清楚。
+ */
+.viewer-foot .tbtn:disabled,
+.viewer-foot .page-input:disabled,
+.viewer-foot #zoomRange:disabled,
+.viewer-foot .zoom-pct[data-off] { opacity: .38; }
+.viewer-foot .tbtn:disabled { cursor: default; }
+.viewer-foot .page-input:disabled { background: transparent; }
+/* 窄窗：把「大小」字样与百分比收掉，先保翻页与滑杆 */
+@media (max-width: 720px) {
+  .viewer-foot { gap: 8px; padding: 0 8px; }
+  .viewer-foot .zoom-word { display: none; }
+  .viewer-foot .zoom-range { width: 92px; }
+  .viewer-foot .zoom-pct { display: none; }
+}
+
+.page-input.busy { color: var(--accent); animation: pin-pulse 1.1s ease-in-out infinite; }
+@keyframes pin-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .page-input.busy { animation: none; } }
+
+/* ═══════════ 首页 / 书架页（2026-10） ═══════════
+   只解决两件事：选一篇论文、继续上次阅读。刻意不做仪表盘。
+   全部复用现有主题令牌（--bg-elev / --border / --fg / --fg-dim / --fg-faint /
+   --btn / --accent），**不新增颜色常量** —— 深浅色两套主题都靠令牌自动跟随，
+   这里不需要（也不该）出现第二个 @media (prefers-color-scheme) 分支。 */
+
+.home {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  /* 默认（≥900px）：单列居中，正文阅读宽度不被拉散 */
+  padding: 7vh 20px 32px;
+}
+.home.hidden { display: none; }
+/* 与首页互斥（2026-10）：非阅读态时正文整个不显示。
+   之前只给 #home 加了显示/隐藏，**忘了让 #viewer 让位** —— 于是从 PDF 回首页时，
+   已经渲染出来的页面还留在那里（用户实测：「会有一部分 pdf 残留，还可以滚动」）。 */
+body:not(.reading) #viewer { display: none; }
+/* 阅读态下首页整个让位（与 #viewer 互斥） */
+body.reading .home { display: none; }
+
+.home-head { max-width: 720px; margin: 0 auto 26px; text-align: center; user-select: none; }
+.home-head .logo { width: 56px; height: 56px; display: block; margin: 0 auto 10px; }
+.home-head h1 { font-size: 26px; margin: 0 0 4px; }
+.home-head .tagline { color: var(--fg-dim); margin: 0 0 6px; font-size: var(--ui-fs-lg); letter-spacing: .4px; }
+.home-head .warn { margin-top: 16px; text-align: left; }
+
+.home-actions { max-width: 720px; margin: 0 auto 30px; display: flex; gap: 10px; align-items: stretch; }
+.home-open {
+  display: inline-flex; align-items: center; gap: 8px; justify-content: center;
+  padding: 0 18px; min-height: 44px; border-radius: 10px; cursor: pointer;
+  background: var(--btn); color: var(--btn-fg); border: 1px solid var(--border);
+  font-size: var(--ui-fs); font-family: inherit;
+}
+.home-open:hover { filter: brightness(1.06); }
+.home-drop {
+  flex: 1 1 auto; min-height: 44px; border-radius: 10px; cursor: pointer;
+  border: 1px dashed var(--border); background: var(--bg-elev); color: var(--fg-dim);
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  font-size: var(--ui-fs-sm); transition: border-color .12s, color .12s;
+}
+/* 两个入口都要能 Tab 到，焦点环统一走这里（鼠标点也一样看得见） */
+.home-open:focus-visible, .home-drop:focus-visible, .home-continue:focus-visible,
+.home-item-go:focus-visible, .home-item-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.home-drop.over, .home-drop:hover { border-color: var(--accent); color: var(--fg); }
+
+.home-recent { max-width: 720px; margin: 0 auto; }
+.home-sec-title { font-size: var(--ui-fs-sm); color: var(--fg-faint); margin: 0 0 10px; }
+.home-continue-wrap:empty { display: none; }
+
+.home-continue {
+  width: 100%; display: flex; align-items: center; gap: 14px; text-align: left;
+  padding: 14px 16px; margin: 0 0 14px; border-radius: 12px; cursor: pointer;
+  background: var(--bg-elev); border: 1px solid var(--border); color: var(--fg);
+  font-family: inherit; font-size: var(--ui-fs);
+}
+.home-continue:hover { border-color: var(--accent); }
+.hc-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.hc-label { font-size: var(--ui-fs-xs); color: var(--accent); letter-spacing: .5px; }
+.hc-name { font-size: var(--ui-fs-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hc-meta { font-size: var(--ui-fs-sm); color: var(--fg-dim); }
+.hc-go { flex: 0 0 auto; color: var(--accent); font-size: var(--ui-fs); white-space: nowrap; }
+
+.home-list { list-style: none; margin: 0; padding: 0; }
+.home-item { display: flex; align-items: stretch; gap: 4px; border-radius: 9px; }
+.home-item + .home-item { margin-top: 2px; }
+.home-item:hover { background: var(--bg-elev); }
+.home-item-go {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 10px;
+  padding: 10px 8px; border: 0; background: none; cursor: pointer; text-align: left;
+  color: var(--fg); font-family: inherit; font-size: var(--ui-fs);
+}
+.hi-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hi-meta { flex: 0 0 auto; margin-left: auto; font-size: var(--ui-fs-sm); color: var(--fg-faint); white-space: nowrap; }
+.home-item-x {
+  flex: 0 0 auto; width: 34px; border: 0; background: none; cursor: pointer;
+  color: var(--fg-faint); font-size: 17px; line-height: 1; border-radius: 8px; font-family: inherit;
+}
+.home-item-x:hover { color: var(--fg); background: var(--bg); }
+/* 触屏 / 窄窗下「×」要有足够热区 */
+@media (pointer: coarse) { .home-item-x { width: 44px; } }
+
+.home-empty { padding: 20px 8px; color: var(--fg-faint); font-size: var(--ui-fs); text-align: center; }
+.home-empty-sub { margin-top: 6px; font-size: var(--ui-fs-sm); color: var(--fg-faint); }
+
+/* ── 窄窗口：600–900px 内容吃满、继续阅读卡片改纵向 ── */
+@media (max-width: 900px) {
+  .home { padding: 4vh 16px 26px; }
+  .home-head h1 { font-size: 23px; }
+  .home-continue { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .hc-go { align-self: flex-end; }
+}
+/* ── 窄窗口 <600px：入口整行等宽、热区 ≥40px、首页自己滚动 ──
+   侧栏的自动收起交给既有的 applyResponsiveLayout()，首页**不干预**（不改 sideIntent）。 */
+@media (max-width: 600px) {
+  .home { padding: 22px 12px 22px; }
+  .home-actions { flex-direction: column; }
+  .home-open, .home-drop { width: 100%; min-height: 46px; }
+  .home-item-go { padding: 12px 8px; }
+  .hi-name { white-space: normal; }
+  .hi-meta { margin-left: 0; }
+  .home-item-go { flex-wrap: wrap; }
+}
 .warn { margin-top: 18px; padding: 9px 11px; border-radius: 8px; background: #FBF0D6; color: #8A5A24; font-size: var(--ui-fs-sm); line-height: 1.6; text-align: left; border: 1px solid #E6C88F; }
 @media (prefers-color-scheme: dark) { .warn { background: #2E2416; color: #E8C271; border-color: #4A3A1E; } }
 
@@ -906,17 +947,10 @@ body.dragging .viewer { pointer-events: none; }
 .ai-block.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .ai-block.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 
-.ai-head {
-  flex: 0 0 auto; display: flex; align-items: center; gap: var(--ctl-gap);
-  padding: calc(var(--panel-pad) - 3px) var(--panel-pad) calc(var(--panel-pad) - 3px) calc(var(--panel-pad) - 2px);
-  background: var(--bg-elev);
-  font-size: var(--ui-fs-sm); color: var(--fg-faint); user-select: none;
-}
-.ai-head .grip { cursor: grab; color: var(--fg-faint); font-size: var(--ui-fs-xs); padding: 0 2px; letter-spacing: -1px; }
-.ai-head .grip:active { cursor: grabbing; }
-.ai-head .ai-title { font-weight: 600; color: var(--fg-dim); }
-.ai-head:hover .ai-title { color: var(--fg); }
-.ai-head .ai-count { color: var(--fg-faint); }
+/* .ai-head 已删除（2026-10）：译文 / 问答的结果块不再自带标题栏，
+   标题由右栏顶部的 #aiBar 选中态表达。下面这条是兜底，防止历史 DOM
+   （或缓存里的旧页面）残留标题栏时又冒出来。 */
+.ai-head { display: none !important; }
 .ai-split { flex: 0 0 5px; cursor: row-resize; background: transparent; transition: background .15s; }
 .ai-split:hover, .ai-split.dragging { background: var(--accent-soft); }
 .ai-split:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; background: var(--accent-soft); }
@@ -1154,21 +1188,10 @@ body.row-dragging { cursor: row-resize; user-select: none; }
 .settings-section-title { color: var(--fg); font-size: var(--ui-fs-md); font-weight: 650; margin-bottom: 9px; }
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: calc(var(--ctl-gap) + 4px) calc(var(--ctl-gap) + 7px); }
 .settings-core-grid { margin-bottom: 8px; }
-.settings-advanced { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; }
-/* R7 D3/D4：它是**可折叠控件**，不是与「阅读助手样式」同级的分区标题。
-   靠自绘 ▸ 表明可展开之后，层级歧义自然消解，所以不改它的字色字号
-   （避免动到既有视觉层级，也省得和 R3 的首屏收敛取舍打架）。 */
-.settings-advanced summary { cursor: pointer; color: var(--fg-dim); font-size: var(--ui-fs-sm); font-weight: 600; list-style: none; }
-.settings-advanced summary:hover { color: var(--accent); }
-.settings-advanced-note { color: var(--fg-faint); font-size: var(--ui-fs-2xs); margin: 7px 0 9px 17px; }
-.settings-advanced[open] { padding-bottom: 1px; }
 .settings-grid .field { margin-bottom: 0; }
 .field input[type="range"] { width: 100%; accent-color: var(--accent); }
 .field select { border: 1px solid var(--border-strong); background: var(--bg); color: var(--fg); border-radius: 7px; padding: calc(7px * var(--ctl-scale)) calc(8px * var(--ctl-scale)); font: inherit; font-size: calc(12px * var(--ctl-scale)); }
 .field .range-value { font-size: var(--ui-fs-2xs); color: var(--fg-faint); float: right; }
-.settings-checks { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 11px; }
-.settings-checks label { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-dim); font-size: var(--ui-fs-sm); }
-.settings-checks input { accent-color: var(--accent); }
 .settings-reset { display: flex; gap: 8px; margin-top: 13px; }
 .settings-reset button { border: 1px solid var(--border-strong); background: var(--bg); color: var(--fg-dim); border-radius: 7px; padding: calc(6px * var(--ctl-scale)) calc(10px * var(--ctl-scale)); font-size: calc(11px * var(--ctl-scale)); }
 .settings-reset button:hover { border-color: var(--accent); color: var(--accent); }
@@ -1180,6 +1203,10 @@ body.row-dragging { cursor: row-resize; user-select: none; }
   border-radius: 7px; padding: 8px 10px; font: inherit; font-size: var(--ui-fs-lg); width: 100%;
 }
 .field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+/* 设置里的开关行（发送范围：读整篇论文 / 联网查资料）。勾选框不能吃 .field input 的 100% 宽度 */
+.field.field-switch { flex-direction: row; align-items: center; gap: 8px; cursor: pointer; }
+.field-switch input[type="checkbox"] { width: auto; margin: 0; padding: 0; flex: none; accent-color: var(--accent); }
+.field-switch > span { color: var(--fg); font-size: var(--ui-fs-sm); }
 .modal-note { font-size: var(--ui-fs-xs); color: var(--fg-faint); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .modal-actions { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
 .modal-actions .primary { background: var(--btn); color: var(--btn-fg); border: 1px solid var(--btn); border-radius: 7px; padding: calc(8px * var(--ctl-scale)) calc(20px * var(--ctl-scale)); font-size: calc(12.5px * var(--ctl-scale)); font-weight: 600; }
@@ -1204,19 +1231,10 @@ body.row-dragging { cursor: row-resize; user-select: none; }
 }
 .bubble button:hover { background: var(--accent-soft); color: var(--accent); }
 
-.popover {
-  position: fixed; z-index: 61; width: min(430px, 88vw); display: flex; flex-direction: column;
-  max-height: calc(100vh - 72px);
-  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px;
-  box-shadow: var(--shadow); overflow: hidden; animation: pop .13s ease-out;
-}
-.popover, .bubble, .notebox { opacity: var(--surface-opacity); }
+.bubble, .notebox { opacity: var(--surface-opacity); }
+/* .pop-head / .pop-title 仍被 #citeBox（参考文献）与 #noteBox（笔记）共用，别删 */
 .pop-head { display: flex; align-items: center; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--bg-sunken); flex: 0 0 auto; }
 .pop-title { font-size: var(--ui-fs-sm); color: var(--fg-dim); font-weight: 600; padding-left: 3px; }
-.pop-body { flex: 1 1 auto; min-height: 0; padding: 10px 12px; max-height: 44vh; overflow: auto; font-size: var(--reading-fs); line-height: var(--reading-lh); word-break: break-word; }
-.pop-body p { margin: 0 0 7px; }
-.pop-body ul, .pop-body ol { margin: 4px 0 7px; padding-left: 20px; }
-.pop-body pre { background: var(--bg-sunken); padding: 7px 9px; border-radius: 6px; overflow: auto; font-size: var(--ui-fs-sm); }
 
 /* ═══════════ 正文里的引用标记 [n] + 文献检索面板 ═══════════ */
 
@@ -1268,8 +1286,13 @@ body.row-dragging { cursor: row-resize; user-select: none; }
 
 /* 页右边缘的小书签：每条高亮/笔记都能在文中看到，点了就能读/写 */
 .hl-pin-layer { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+/* `right` 的基准 3px 与 app.js 的 PIN_INSET 必须一致。
+   `--pin-clamp` 由 app.js 的 clampPins() 写在 .page 上，值 = 纸面右边缘超出阅读区
+   可见右边界多少：纸面放得下时是空的（等价于原来的 right: 3px），
+   纸面比阅读区宽（右栏展开、或放大到横向溢出）时把书签向左推回可见范围内 ——
+   不夹取的话书签会落在阅读区之外，真实鼠标点不到（只有 DOM 的 .click() 还能打开笔记框）。 */
 .hl-pin {
-  position: absolute; right: 3px; width: 7px; height: 18px;
+  position: absolute; right: calc(3px + var(--pin-clamp, 0px)); width: 7px; height: 18px;
   border-radius: 3px 0 0 3px; background: var(--hl);
   border: 1px solid rgba(74, 64, 38, .14); border-right: 0;
   pointer-events: auto; cursor: pointer; transition: width .12s, background .12s;
@@ -1355,170 +1378,13 @@ body[data-density="comfortable"] {
   .settings-grid { grid-template-columns: 1fr; }
 }
 
-@media print { .topbar, .side, .rail, .statusbar, .bubble, .popover, .searchbar, .splitter { display: none !important; } }
+@media print { .topbar, .side, .rail, .statusbar, .bubble, .searchbar, .splitter { display: none !important; } }
 
-/* ═══════════ 阶段 2.2b：底部停靠区 / 应用内浮动面板 / 停靠预览 ═══════════
-   三块新东西，一条铁律：**默认状态零占用**。
-     #dockBottom  停靠在底部的面板横向排在这里；默认 .hidden（display:none），
-                  没有任何面板停靠到底部时它不占一个像素 → #main 仍是 flex row，
-                  .viewer-wrap 仍是「正文 + 状态栏」，默认外观与 2.2a 逐像素相同。
-     #floatLayer  body 下的全屏浮层：position:fixed; inset:0; pointer-events:none，
-                  空着时不吃任何点击；浮窗自己恢复 pointer-events:auto。
-                  浮窗 = 面板节点自身（.panel-float）用 left/top/width/height 定位。
-     .panel-slot  浮出后留在原停靠区的占位（虚线框 + 半透明），表示「它会回到这里」。
-   所有动效都是 100–260ms 的短 ease-out（cubic-bezier(.2,.7,.3,1)），
-   prefers-reduced-motion: reduce 时一律关掉。 */
-
-:root {
-  /* 底部停靠区高度（#dockBottomSplit 拖动 / 键盘 ↑↓ 改这个值，持久化在 reader.ui.dockBottomH） */
-  --dock-bottom-h: 240px;
-}
-
-/* ── 底部停靠区 ── */
-.dock-bottom {
-  flex: 0 0 auto; height: var(--dock-bottom-h); min-height: 90px;
-  display: flex; flex-direction: row; align-items: stretch; overflow: hidden;
-  background: var(--bg-elev); border-top: 1px solid var(--border);
-}
-.dock-bottom > .panel-col {
-  flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden;
-  border-left: 1px solid var(--border);
-}
-.dock-bottom > .panel-col:first-child { border-left: 0; }
-.dock-bottom > .panel-col > [data-panel] { flex: 1 1 0; min-height: 0; min-width: 0; }
-/* 左栏那三块（section.sec）在左栏里是「自然高度 + 整栏滚动」，到底部停靠区要改成
-   「按列宽平分 + 自己滚」，否则内容会把容器撑开 */
-.dock-bottom > .panel-col > .sec { flex: 1 1 0; min-height: 0; min-width: 0; overflow: auto; border-top: 0; }
-.dock-bottom > .panel-col > .sec.panel-collapsed > :not(.sec-head) { display: none; }
-/* 文件面板在底部：文件列表吃掉剩下的高度并自己滚（左栏里那条 30vh 上限在窄条里会漏出去） */
-.dock-bottom > .panel-col > .filelist { max-height: none; flex: 1 1 auto; min-height: 0; }
-.dock-bottom .outline, .dock-bottom .notes, .dock-bottom .rel-list { overflow: auto; }
-/* 底部相邻两列之间的宽度把手（复用 .ai-split 的拖动逻辑，方向改成左右） */
-.dock-vsplit {
-  flex: 0 0 5px; cursor: col-resize; background: transparent; transition: background .15s; position: relative;
-}
-.dock-vsplit:hover, .dock-vsplit.dragging { background: var(--accent-soft); }
-.dock-vsplit:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; background: var(--accent-soft); }
-
-/* 底部停靠区上沿的高度把手（等价于 .ai-split 的横向逻辑，方向改成上下） */
-.dock-hsplit { flex: 0 0 5px; cursor: row-resize; background: transparent; transition: background .15s; }
-.dock-hsplit:hover, .dock-hsplit.dragging { background: var(--accent-soft); }
-.dock-hsplit:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; background: var(--accent-soft); }
-body.dock-dragging { cursor: row-resize; user-select: none; }
-body.panel-dragging { user-select: none; }
-
-/* ── 应用内浮动层 ── */
-.float-layer { position: fixed; inset: 0; pointer-events: none; z-index: 60; }
-.float-layer > * { pointer-events: auto; }
-
-/* 浮窗本体：单节点面板（目录 / 笔记 / 文献关系 / 译文 / 问答）就是面板节点自己，
-   文件面板是包住「标题栏 + 拖入区 + 文件列表」三兄弟的 .panel-shell。
-   用 #floatLayer > 提升一下优先级，免得被 .ai-block + .ai-block 之类既有规则盖掉边框。 */
-#floatLayer > .panel-float {
-  position: fixed; left: 0; top: 0; width: 340px; height: 300px; z-index: 1;
-  display: flex; flex-direction: column; overflow: hidden;
-  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: 10px;
-  box-shadow: 0 6px 22px rgba(74, 64, 38, .20);
-  transition: box-shadow .12s cubic-bezier(.2,.7,.3,1), transform .12s cubic-bezier(.2,.7,.3,1);
-}
-/* 拖动时轻微抬升：更大阴影 + scale(1.01)，120ms，松手立刻回落（可被下一次拖动打断） */
-#floatLayer > .panel-float.dragging {
-  transform: scale(1.01);
-  box-shadow: 0 16px 42px rgba(74, 64, 38, .30), 0 2px 8px rgba(74, 64, 38, .18);
-}
-#floatLayer > .panel-float.focused {
-  /* 选中浮窗不改透明度或底色，只用边框和外圈表达当前层级。 */
-  border-color: var(--accent);
-  box-shadow: 0 8px 26px rgba(74, 64, 38, .22), 0 0 0 1px color-mix(in srgb, var(--accent) 52%, transparent);
-}
-#floatLayer > .panel-float.dragging.focused {
-  box-shadow: 0 16px 42px rgba(74, 64, 38, .30), 0 2px 8px rgba(74, 64, 38, .18), 0 0 0 1px color-mix(in srgb, var(--accent) 58%, transparent);
-}
-#floatLayer > .panel-float > .sec,
-#floatLayer > .panel-float > .ai-block { flex: 1 1 auto; min-height: 0; min-width: 0; }
-#floatLayer > .panel-float > .sec { overflow: auto; border-top: 0; }
-#floatLayer > .panel-float .outline,
-#floatLayer > .panel-float .notes,
-#floatLayer > .panel-float .rel-list { overflow: auto; }
-#floatLayer > .panel-float.panel-collapsed > :not(.sec-head):not(.panel-grip) { display: none; }
-/* 文件面板的浮窗：三兄弟在 shell 里按列排，文件列表自己滚 */
-#floatLayer > .panel-shell.panel-float { padding-bottom: 2px; }
-#floatLayer > .panel-shell.panel-float > .filelist { overflow: auto; }
-
-/* ── 浮窗缩放抓手：四条边 + 四个角共 8 个（只在浮窗里出现，停靠时 display:none）──
-   用户口径 2026-10-04：「窗口要做成左右上下都能直接拉伸而且也可以在角落直接拉伸的样子」。
-   四角 14×14、四边细长条；全部 touch-action:none，指针事件自己处理。 */
-.panel-grip {
-  display: none; position: absolute; touch-action: none; z-index: 3;
-}
-.panel-float > .panel-grip { display: block; }
-/* 四角 */
-.panel-grip-ne, .panel-grip-nw, .panel-grip-se, .panel-grip-sw { width: 14px; height: 14px; }
-.panel-grip-nw { left: 0; top: 0; cursor: nwse-resize; }
-.panel-grip-ne { right: 0; top: 0; cursor: nesw-resize; }
-.panel-grip-sw { left: 0; bottom: 0; cursor: nesw-resize; }
-.panel-grip-se { right: 0; bottom: 0; cursor: nwse-resize; }
-/* 四边（细长条，避开四角各 14px） */
-.panel-grip-n, .panel-grip-s { left: 14px; right: 14px; height: 5px; cursor: ns-resize; }
-.panel-grip-w, .panel-grip-e { top: 14px; bottom: 14px; width: 5px; cursor: ew-resize; }
-.panel-grip-n { top: 0; }
-.panel-grip-s { bottom: 0; }
-.panel-grip-w { left: 0; }
-.panel-grip-e { right: 0; }
-/* 右下角保留可见的斜纹提示（原来 .panel-resize 的样式），其余抓手不可见 */
-.panel-grip-se::after {
-  content: ''; position: absolute; right: 3px; bottom: 3px; width: 9px; height: 9px;
-  border-right: 2px solid var(--border-strong); border-bottom: 2px solid var(--border-strong);
-  border-radius: 0 0 3px 0;
-}
-.panel-float:hover > .panel-grip-se::after, .panel-grip-se:hover::after, .panel-grip-se.dragging::after { border-color: var(--accent); }
-/* 悬停时把四条边也淡淡显出来，让用户知道"这里能拉" */
-.panel-float:hover > .panel-grip-n, .panel-float:hover > .panel-grip-s,
-.panel-float:hover > .panel-grip-w, .panel-float:hover > .panel-grip-e {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-/* 浮窗头上的 ✕（收起浮窗、回原停靠区）：停靠状态下藏起来 */
-.panel-float-x { display: none !important; }
-.panel-float .panel-float-x { display: inline-flex !important; align-items: center; justify-content: center; }
-
-/* ── 原位置占位块 ── */
-.panel-slot {
-  flex: 0 0 auto; margin: 6px; min-height: 56px;
-  border: 1px dashed var(--accent); border-radius: 8px;
-  background: var(--accent-soft); opacity: .55;
-  display: flex; align-items: center; justify-content: center; gap: 6px;
-  color: var(--fg-faint); font-size: var(--ui-fs-2xs); line-height: 1.5;
-  text-align: center; padding: 8px; pointer-events: none; overflow: hidden;
-}
-.dock-bottom > .panel-slot { flex: 0 0 150px; margin: 8px; min-height: 0; }
-#aiArea > .panel-slot, #aiArea2 > .panel-slot { flex: 0 0 auto; }
-
-/* ── 隐藏面板的停放区（右栏专用，**脱离文档**的容器，见 app.js 的 panelPark()） ──
-   译文 / 问答的节点永不重建（消息与滚动位置都挂在节点上），所以「没显示」不是删掉，
-   而是搬进这个不挂在文档里的容器待着：`.ai-block` / `#aiArea .msg` 这类查询查不到它，
-   和 2.2b 之前「关掉就没有这一块」的对外行为逐条一致。 */
-
-/* ── 停靠预览（拖到左栏 / 右栏 / 底部时高亮目标区域 + 半透明占位块） ── */
-.dock-preview {
-  position: fixed; z-index: 58; pointer-events: none;
-  background: var(--accent-soft); border: 2px dashed var(--accent); border-radius: 8px;
-  box-shadow: inset 0 0 0 1px rgba(85, 107, 47, .20);
-  opacity: .55;
-  transition: left .12s cubic-bezier(.2,.7,.3,1), top .12s cubic-bezier(.2,.7,.3,1),
-              width .12s cubic-bezier(.2,.7,.3,1), height .12s cubic-bezier(.2,.7,.3,1);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  /* 用户要求减少动态效果时：所有浮窗 / 停靠 / 占位 / 预览的过渡一律关掉 */
-  #floatLayer > .panel-float, .dock-preview, .panel-slot, .dock-hsplit, .dock-vsplit { transition: none !important; }
-  #floatLayer > .panel-float.dragging { transform: none; }
-}
 
 /* 关掉浏览器自己的「滚动锚定」：搬面板时 app.js 会显式把 scrollTop 放回去，
    浏览器再插一脚（内容一变矮就按锚点把位置往下带）反而会把位置带偏 ——
-   实测浮窗来回一趟，右栏 .ai-body 会从 2676 掉到 2411、左栏直接归零。 */
-.side.left, .ai-body, .dock-bottom > .panel-col { overflow-anchor: none; }
+   实测右栏 .ai-body 换块一趟会从 2676 掉到 2411、左栏直接归零。 */
+.side.left, .ai-body { overflow-anchor: none; }
 
 /* ─────────────────────── UI refresh / phase 1 ───────────────────────
    只调整视觉层，不改变面板 ID、停靠规则或拖拽行为。阅读区保持安静，
@@ -1535,8 +1401,8 @@ body.panel-dragging { user-select: none; }
   --btn-fg: #3F5140;
   --shadow-sm: 0 1px 2px rgba(74, 64, 38, .14);
   --shadow: 0 10px 30px rgba(74, 64, 38, .14);
-  /* 保持正文布局契约的 46px 高度；视觉升级通过留白、边界和状态层级完成。 */
-  --topbar-h: 46px;
+  /* 与 :root 的 35px 保持一致（用户口径：应用内标题栏 = VS Code 的 35px）。 */
+  --topbar-h: 35px;
   --panel-pad: 10px;
   --ctl-gap: 6px;
 }
@@ -1575,7 +1441,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 .side-head { padding: 12px 12px 9px; }
 .sec-head { padding: 9px 12px; min-height: 38px; }
-.sec-head:hover, .side-head:hover, .ai-head:hover { background: color-mix(in srgb, var(--bg-elev) 86%, var(--bg-sunken)); }
+.sec-head:hover, .side-head:hover { background: color-mix(in srgb, var(--bg-elev) 86%, var(--bg-sunken)); }
 .panel-actions { opacity: .78; gap: 2px; }
 .panel-icon { min-width: 28px; min-height: 28px; padding: 0 6px; border-radius: 6px; color: var(--fg-dim); }
 .panel-icon:hover { background: var(--bg-sunken); color: var(--fg); }
@@ -1584,19 +1450,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .dock-btn { width: 34px; height: 30px; border: 1px solid transparent; border-radius: 7px; font-weight: 600; transition: background .14s, color .14s, border-color .14s; }
 .dock-btn:hover { background: var(--bg-sunken); color: var(--fg); border-color: var(--border); }
 .dock-btn.on { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 28%, var(--border)); box-shadow: inset 0 -2px 0 var(--accent); }
-.dock-right { background: var(--bg-elev); }
-.dock-menu { border-radius: 10px; padding: 5px; box-shadow: var(--shadow); }
-.dock-menu-btn { min-height: 32px; padding: 7px 10px; border-radius: 6px; }
-.dock-menu-btn:hover { background: var(--accent-soft); color: var(--accent); }
 .ai-empty { align-items: flex-start; justify-content: center; text-align: left; padding: 28px 22px; color: var(--fg-dim); line-height: 1.7; }
 .ai-empty .ai-add-btns { justify-content: flex-start; }
-.ai-head { min-height: 40px; padding: 6px 10px; color: var(--fg-dim); }
-.ai-head .ai-title { color: var(--fg); font-weight: 650; }
-.ai-head .grip { color: var(--fg-faint); opacity: .75; }
+/* .ai-head 的整组样式随标题栏一起删除（见 812 行附近的说明与兜底规则） */
 .ai-split { flex-basis: 6px; }
-.aibar { gap: 7px; padding: 8px 10px; background: var(--bg-elev); border-top-color: var(--border); }
+/* 切换器在顶部：下边框由主规则给，这里只覆盖间距与尺寸 */
+.aibar { gap: 7px; padding: 8px 10px; }
 .aibar-btn { min-height: 28px; border-radius: 7px; padding: 4px 10px; background: transparent; }
-.aibar-btn.on { background: var(--accent-soft); box-shadow: inset 0 -2px 0 var(--accent); }
+/* 选中态在顶部用「下沿高亮」会像贴了个底板；改成上沿 + 底色，与顶栏位置匹配 */
+.aibar-btn.on { background: var(--accent-soft); box-shadow: inset 0 2px 0 var(--accent); }
 .composer { padding: 10px; background: var(--bg-elev); border-top-color: var(--border); }
 .composer-row { min-height: 44px; border-radius: 9px; background: var(--bg-elev); box-shadow: 0 1px 1px rgba(74, 64, 38, .05); }
 .composer-row:focus-within { box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -1604,10 +1466,43 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer .send { box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 30%, transparent); }
 .composer .clip { background: transparent; }
 .composer-opts { padding-top: 4px; }
+
+/* ── 发送范围（「范围」菜单）：整篇论文 / 联网查资料 ──
+   两个低频高影响的开关收进一个菜单，不再常驻成两个芯片。
+   「范围」是菜单入口、不是复选框，所以去掉 .opt-chip 前面那个方框。 */
+#optScope { padding: calc(3px * var(--ctl-scale)) calc(6px * var(--ctl-scale)); color: var(--fg-dim); }
+#optScope::before { display: none; }
+#optScope[aria-expanded="true"] { color: var(--accent); background: var(--accent-soft); }
+.scope-state {
+  flex: 0 1 auto; min-width: 0;
+  font-size: calc(10.5px * var(--ctl-scale)); color: var(--fg-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.scope-state.on { color: var(--accent); }
+/* 菜单从输入区上沿向上弹出（贴在右栏内部，不会被 .side 的 overflow:hidden 裁掉） */
+.composer { position: relative; }
+.scope-menu {
+  position: absolute; left: 8px; bottom: calc(100% + 4px); z-index: 70;
+  min-width: 214px; max-width: min(330px, 88vw);
+  padding: 5px; border-radius: 10px; background: var(--bg-elev);
+  border: 1px solid var(--border-strong); box-shadow: var(--shadow);
+}
+.scope-menu.hidden { display: none; }
+.scope-menu-btn {
+  display: block; width: 100%; text-align: left; border: 0; background: transparent;
+  color: var(--fg); font: inherit; font-size: var(--ui-fs-sm);
+  padding: 7px 10px; border-radius: 6px; cursor: pointer;
+}
+.scope-menu-btn:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
+.scope-menu-btn.on { color: var(--accent); font-weight: 600; }
+.scope-menu-btn.on::before { content: '✓ '; }
+.scope-menu-btn:disabled { opacity: .45; cursor: default; }
+.scope-menu-note { padding: 6px 8px 4px; color: var(--fg-dim); font-size: var(--ui-fs-sm); line-height: 1.65; }
+.scope-menu-acts { display: flex; gap: 6px; padding: 4px 6px 2px; }
+.scope-menu-acts .scope-menu-btn { text-align: center; border: 1px solid var(--border-strong); border-radius: 8px; }
 .toast-wrap { left: auto; right: 18px; transform: none; bottom: 18px; align-items: flex-end; }
 .toast { border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); }
 
-@media print { .float-layer, .dock-preview, .dock-bottom, .dock-hsplit { display: none !important; } }
 
 /* ══════════════════════════════════════════════════════════════════════════
    骨架收口 + 卡片容器自适应（2026-10-03 晚，Lead）
@@ -1635,39 +1530,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
       旧的 #panelDockRight 图标坞已删除，所以这里不再有它的任何样式。
    ══════════════════════════════════════════════════════════════════════════ */
 
-/* ── 独立面板窗口：右栏撑满窗口，内部按「固定标题 / 弹性内容 / 固定底部」分配 ── */
-body.panel-window #main { display: flex; align-items: stretch; }
-body.panel-window #rightCols {
-  width: 100%;
-  min-width: 0;
-  flex: 1 1 auto;
-  align-items: stretch;
-}
-body.panel-window #rightCols > .side.right,
-body.panel-window .side.right {
-  width: 100%;
-  min-width: 0;
-  flex: 1 1 auto;
-  height: 100%;
-  border: 0;                    /* 面板窗口就是这一栏本身，不需要左分隔线 */
-}
-body.panel-window .side.right > .ai {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: hidden;
-}
-/* 面板窗口里那一栏的 .ai-block 必须吃满内容区高度（!important 是为了压过内联 height） */
-body.panel-window .ai-block {
-  flex: 1 1 auto !important;
-  min-height: 0;
-}
-body.panel-window .ai-block > .ai-head { flex: 0 0 auto; }
-body.panel-window .ai-block > .ai-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  max-height: none;
-  overflow: auto;
-}
 
 /* 单行提示不能反过来撑宽整栏：允许它换行，并且允许自己被压缩。
    （这一条是上面那个 411px 缺陷的另一半保险 —— 就算将来 .ai-hint 文案变长，
@@ -1699,20 +1561,30 @@ body.panel-window .ai-block > .ai-body {
   height: clamp(30px, 3vw, 40px);
   flex: 0 0 auto;
 }
-/* 面板窗口里输入区不再有多余的固定高度假设 */
-body.panel-window .composer { padding: clamp(8px, 1.6vh, 14px) clamp(9px, 1.4vw, 16px); }
-body.panel-window .composer textarea { min-height: clamp(36px, 8vh, 120px); }
 
 /* ── 每一栏底部的面板切换器：右栏唯一的可见入口 ──
    形态是「分段切换器」而不是一排独立按钮：同一栏里当前开着的那个是选中态。
    普通态 = 透明底 + 次要文字色；悬停 = 浅底 + 主文字色；选中 = 选中底 + 主色文字。
    颜色全部走主题 token（不写死蓝色），换肤时这里不用动。 */
+/**
+ * 右栏顶部的「译文 / 问答」切换器（2026-10）。
+ *
+ * 用户口径：「译文和问答的现在的上面的那一栏可以直接去掉，然后两种状态的选择图标
+ * 可以放在最上面」。所以它从右栏**底部**搬到了**顶部**，每个结果块自己的
+ * `.ai-head` 标题栏则整个去掉（标题与条数都由这里的选中态表达）。
+ *
+ * 样式按「顶栏」写：下边框分隔，而不是以前的上边框。
+ */
 .aibar {
   flex: 0 0 auto;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  order: -1;                      /* 兜底：即使 DOM 顺序被改也仍然在右栏最上面 */
 }
 .aibar-btn {
   flex: 0 1 auto;
@@ -1754,7 +1626,6 @@ body.panel-window .composer textarea { min-height: clamp(36px, 8vh, 120px); }
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   color: var(--fg-faint);
 }
-body.panel-window .aibar { padding: clamp(6px, 1.2vh, 10px) clamp(9px, 1.4vw, 16px); }
 
 /* ── 统一图标口径的配套：图标按钮是一行 flex，图标不会把按钮撑高 ──
    （尺寸/描边只在 public/js/icons.js 里定义，这里**只**管对齐与颜色，不覆盖 stroke-width） */
@@ -1763,7 +1634,6 @@ body.panel-window .aibar { padding: clamp(6px, 1.2vh, 10px) clamp(9px, 1.4vw, 16
 .dock-btn > svg,
 .aibar-btn > svg,
 .rail-btn > svg,
-.pm-btn > svg,
 .opt-chip > svg,
 .msg .acts button > svg {
   display: block;
@@ -1789,7 +1659,6 @@ body.panel-window .aibar { padding: clamp(6px, 1.2vh, 10px) clamp(9px, 1.4vw, 16
 
 /* ── 区域之间的分隔线统一为一条 1px 暖灰线，不用卡片阴影 ──
    只写 border-top-color：宽度与样式由各区域自己的既有规则决定，这里不越权。 */
-#rightCol2 { border-left: 1px solid var(--border); }
 .composer { border-top-color: var(--border); }
 .aibar { border-top-color: var(--border); }
 
@@ -1842,8 +1711,7 @@ body.topbar-auto .pages { margin-top: 0; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 标题栏是「点一下展开 / 收起」的入口：光标用 pointer；
-   拖拽的可见抓手是左边那个 .panel-drag-handle，两者别用同一个光标混淆。 */
+/* 标题栏是「点一下展开 / 收起」的入口：光标用 pointer。 */
 .sec-head[role="button"] .sec-title { cursor: pointer; }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1879,22 +1747,11 @@ body.topbar-auto .pages { margin-top: 0; }
    **只在顶栏收起时接收指针** —— 顶栏滑出后这条带子正好压在顶栏的第一行按钮上，
    如果不关掉 pointer-events，它会把按钮的点击吃掉（实测：elementFromPoint 命中到带子、
    顶栏里的按钮点不动）。 */
-/* ⚠️⚠️ 类名/选择器命名铁律：**body 上的状态类不能和任何元素的类名同名**。
-   真实事故（用户实测「鼠标移到顶边就出现一大块把整个屏幕遮住，只剩上面一条」）：
-   状态类叫 `topbar-hot`，而热区 div 的类名也是 `.topbar-hot` —— 于是
-   `body.classList.add('topbar-hot')` 一执行，`<body>` **自己**就命中了下面这条
-   `position:fixed; height:56px; z-index:45; background:transparent`，
-   整个 body 缩成屏幕顶部一条透明带，正文（#main 及 PDF）整片消失。
-   CDP 的 CSS.getMatchedStylesForNode 直接坐实：body 命中了 `.topbar-hot { position:fixed }`。
-   修法：状态类改名 `topbar-near`（语义：指针在顶栏附近），与元素类彻底不同名；
-   元素类仍叫 `.topbar-hot`（同时把变量 --topbar-hot 一起改名为 --topbar-near，
-   免得以后有人再把 element 类写回成状态类同名）。 */
-.topbar-hot {
-  position: fixed; top: 0; left: 0; right: 0; height: var(--topbar-near);
-  z-index: 45; background: transparent;
-  pointer-events: auto;
-}
-body.topbar-near .topbar-hot { pointer-events: none; }
+/* ⚠️ 命名铁律：**body 上的状态类不能和任何元素的类名同名**。
+   历史事故：状态类曾叫 `topbar-hot`，与顶栏热区元素 `<div class="topbar-hot">` 同名 ——
+   `body.classList.add('topbar-hot')` 一执行，<body> 自己就命中了那条 position:fixed 的
+   元素样式，整个 body 缩成屏幕顶部一条，正文整片消失。
+   现在顶栏热区元素已经删除（顶栏常驻，不再自动隐藏），状态类叫 `topbar-near`，两者不会再撞。 */
 /* 展开条件：鼠标在触发区里 / 鼠标在顶栏上 / 顶栏内有键盘焦点 / JS 强制展开 */
 body.topbar-near .topbar,
 .topbar:hover,
@@ -1907,11 +1764,8 @@ body.topbar-forced .topbar {
 body.topbar-auto #main { height: calc(100vh - var(--topbar-h)); overflow: visible; }
 /* 设置里关掉自动隐藏：顶栏回到常驻，高度交还给布局 */
 body.topbar-static .topbar { position: relative; transform: none; transition: none; box-shadow: none; }
-body.topbar-static .topbar-hot { display: none; }
 body.topbar-static #main { height: calc(100vh - var(--topbar-h)); overflow: hidden; }
 body.topbar-static .viewer-wrap { margin-top: 0; margin-bottom: 0; }
-body.panel-window .topbar-hot { display: none; }
-body.panel-window { --topbar-h: 0px; }
 
 /* 顶上这一条永远给顶栏留位（见 style.css 顶部 .topbar 的注释）：
    body.topbar-auto 时是「浮层滑入滑出」，body.topbar-static 时是常驻。 */
@@ -1942,7 +1796,7 @@ body.topbar-auto.topbar-near:not(.panel-window) #railRight {
 }
 
 /* 所有左栏面板都收起时，左侧不应留下一个只有背景色的空栏；活动栏仍保留，
-   用户可以从图标重新打开文件、目录、笔记或文献关系。 */
+   用户可以从图标重新打开文件、目录、笔记或参考文献。 */
 body.left-empty #leftSide,
 body.left-empty #splitLeft { display: none; }
 body.left-empty #railLeft { display: flex; border-right: 1px solid var(--border); }
@@ -1985,3 +1839,80 @@ body.side-squeezed.no-left #leftSide { display: flex; width: var(--left-w, 60px)
     --paper: #2A2721;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   应用内标题栏（无边框桌面壳）
+   ══════════════════════════════════════════════════════════════════════════
+
+   用户口径（2026-10-04）：「不做那个浮动栏了，就一直显示；把最上面那一栏（最小化 / 关闭
+   按钮那一行）做进应用内部，**完全模仿 VS Code**」。
+
+   所以这里不是"再设计一套"，而是照 VS Code 的 Windows 自定义标题栏 1:1（数值取自
+   src/vs/workbench/browser/parts/titlebar/media/titlebarpart.css 与
+   src/vs/platform/window/common/window.ts）：
+     · 标题栏高度 35px（DEFAULT_CUSTOM_TITLEBAR_HEIGHT）
+     · 窗口控件容器 138px = 3 × 46px；每个按钮 width:46px / height:100%，图标盒 16px
+     · 悬停：普通键 10% 覆盖（浅色标题栏用黑 10%）；关闭键 rgba(232,17,35,.9) + 图标变白
+     · 窗口失焦：整条标题栏 opacity .6
+   配色不照抄 VS Code 的灰（本项目是暖灰 + 米白 + 橄榄绿，AGENTS.md 明确「不要蓝色」），
+   只有关闭键那一下红悬停按 VS Code 原值保留——那是肌肉记忆，改了反而怪。
+
+   ⚠️ wry 0.55 **没有** `data-wry-drag-region` 这个特性（翻过 wry-0.55.1/src/lib.rs，
+   只有 with_drag_drop_handler，那是拖文件的）。拖动 / 缩放 / 三个按钮全部由 app.js
+   走 IPC（window.ipc.postMessage）→ Rust tao 执行，见 initWindowChrome()。 */
+
+.app-title-region {
+  display: flex; align-items: center; gap: 8px;
+  min-width: 0; flex: 0 1 auto;
+  /* 将来 wry/WebView2 支持 app-region 时可直接生效；当前由 JS 的 mousedown → IPC 负责 */
+  app-region: drag; -webkit-app-region: drag;
+  user-select: none; -webkit-user-select: none;
+}
+
+/* ── 窗口控件：138px = 3 × 46px，1:1 VS Code ──
+   两个「贴边/满高」细节：VS Code 的窗口按钮是这条标题栏的最外沿元素 ——
+   右边不留 padding、高度撑满整条（包括盖住那 1px 分隔线），否则量出来是 46×34 + 右侧 10px 空隙。 */
+body:not(.no-window-chrome) .topbar { padding-right: 0; }
+.window-controls {
+  display: flex; flex: 0 0 auto;
+  width: 138px; height: calc(100% + 1px); margin-bottom: -1px;
+  margin-left: 6px;
+  --win-ctl-hover: rgba(0, 0, 0, .1);          /* 浅色标题栏：VS Code 用黑 10% */
+}
+:root[data-theme="dark"] .window-controls { --win-ctl-hover: rgba(255, 255, 255, .1); }
+@media (prefers-color-scheme: dark) {
+  :root:root .window-controls { --win-ctl-hover: rgba(255, 255, 255, .1); }
+}
+.window-control {
+  width: 46px; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; margin: 0; border: 0; border-radius: 0;
+  background: transparent; color: var(--fg);
+  cursor: default;
+  app-region: no-drag; -webkit-app-region: no-drag;
+}
+.window-control svg { width: 16px; height: 16px; display: block; }
+.window-control:hover { background-color: var(--win-ctl-hover); }
+.window-control.close:hover { background-color: rgba(232, 17, 35, .9); color: #fff; }
+/* 最大化 ↔ 还原：两个图标都在 DOM 里，按窗口状态切换（Rust 用 evaluate_script 回推状态） */
+.window-control.window-max .ico-restore { display: none; }
+body.window-maximized .window-control.window-max .ico-max { display: none; }
+body.window-maximized .window-control.window-max .ico-restore { display: block; }
+/* 没有窗口动作通道（浏览器里跑 server.js、手机版）→ 干脆不显示窗口控件 */
+body.no-window-chrome .window-controls { display: none; }
+
+/* 窗口失焦：VS Code 是 `.titlebar.inactive > * { opacity: .6 }` */
+body.window-blurred .topbar > * { opacity: .6; }
+
+/* ── 无边框窗口的八向缩放热区（JS mousedown → IPC → tao drag_resize_window）── */
+.win-resize { position: fixed; z-index: 200; }
+.win-resize[data-dir="n"]  { top: 0; left: 6px; right: 6px; height: 5px; cursor: ns-resize; }
+.win-resize[data-dir="s"]  { bottom: 0; left: 6px; right: 6px; height: 5px; cursor: ns-resize; }
+.win-resize[data-dir="w"]  { left: 0; top: 6px; bottom: 6px; width: 5px; cursor: ew-resize; }
+.win-resize[data-dir="e"]  { right: 0; top: 6px; bottom: 6px; width: 5px; cursor: ew-resize; }
+.win-resize[data-dir="nw"] { top: 0; left: 0; width: 6px; height: 6px; cursor: nwse-resize; }
+.win-resize[data-dir="ne"] { top: 0; right: 0; width: 6px; height: 6px; cursor: nesw-resize; }
+.win-resize[data-dir="sw"] { bottom: 0; left: 0; width: 6px; height: 6px; cursor: nesw-resize; }
+.win-resize[data-dir="se"] { bottom: 0; right: 0; width: 6px; height: 6px; cursor: nwse-resize; }
+body.no-window-chrome .win-resize,
+body.window-maximized .win-resize { display: none; }

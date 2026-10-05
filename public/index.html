@@ -11,54 +11,66 @@
 </head>
 <body>
 
-<!-- 顶栏自动隐藏的触发区：屏幕最上沿一条 6px 的透明带子。
-     顶栏本身已经滑出屏幕（transform: translateY(-100%)），拿它当悬停目标会出现
-     「刚移上去就收起、收起来又出现」的抖动，所以必须由这条带子来触发。
-     它和顶栏一起构成悬停组（见 style.css 的「顶栏：阅读时自动隐藏」一节）。 -->
-<div class="topbar-hot" id="topbarHot" aria-hidden="true"></div>
-
+<!-- 顶栏**常驻**（body.topbar-static 由 app.js 的 initTopbar() 钉死）：
+     早期那套「鼠标移到屏幕顶边才滑下来」的自动隐藏连同 #topbarHot 热区一起删除了。 -->
 <header class="topbar" id="topbar">
-  <span class="brand" title="论文阅读器"><img src="/icon.svg" alt="P" /></span>
-  <span class="doc-name" id="docName">未打开文档</span>
+  <div class="app-title-region" data-wry-drag-region title="拖动窗口；双击切换最大化">
+    <span class="brand" title="论文阅读器"><img src="/icon.svg" alt="P" /></span>
+    <span class="doc-name" id="docName">未打开文档</span>
+  </div>
   <span class="spacer"></span>
 
-  <div class="grp" title="翻页">
-    <button class="tbtn" id="prevPage" aria-label="上一页"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 4.8 7.8 12 15 19.2"/></svg></button>
-    <input class="page-input" id="pageInput" value="–" inputmode="numeric" aria-label="页码" />
-    <span class="of">/ <b id="pageCount">–</b></span>
-    <button class="tbtn" id="nextPage" aria-label="下一页"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 4.8 16.2 12 9 19.2"/></svg></button>
-  </div>
-  <button class="tbtn return-position hidden" id="returnPosition" title="逐步返回之前的阅读位置"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 9.6h11.2a4.8 4.8 0 0 1 0 9.6H9.6"/><path d="m8.2 5.4-4.2 4.2 4.2 4.2"/></svg><span>返回原位置</span></button>
-
-  <!-- PDF 大小调节 -->
-  <div class="grp zoom" title="PDF 大小">
-    <span class="zoom-word">大小</span>
-    <button class="tbtn" id="zoomOut" aria-label="缩小"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.8" cy="10.8" r="6.4"/><path d="M15.6 15.6 20.8 20.8"/><path d="M7.9 10.8h5.8"/></svg></button>
-    <input type="range" class="zoom-range" id="zoomRange" min="25" max="500" step="5" value="100" aria-label="缩放" />
-    <button class="tbtn" id="zoomIn" aria-label="放大"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.8" cy="10.8" r="6.4"/><path d="M15.6 15.6 20.8 20.8"/><path d="M10.8 7.9v5.8"/><path d="M7.9 10.8h5.8"/></svg></button>
-    <button class="tbtn" id="fitWidth" title="适应宽度"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 5.2v13.6"/><path d="M21 5.2v13.6"/><path d="M6.6 12h10.8"/><path d="m9.6 8.8-3.2 3.2 3.2 3.2"/><path d="m14.4 8.8 3.2 3.2-3.2 3.2"/></svg></button>
-    <span class="zoom-pct" id="zoomLabel">100%</span>
-  </div>
-
-  <button class="tbtn" id="opsBtn" title="论文操作：速览 / 阅读路线 / 方法拆解 / 术语表 / 评估…　按需调用"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m9.6 3.4 1.6 4.2 4.2 1.6-4.2 1.6-1.6 4.2-1.6-4.2L3.8 9.2l4.2-1.6z"/><path d="m17.4 13.4.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9z"/></svg></button>
-  <button class="tbtn" id="regionBtn" title="框选区域（图/表/公式）交给 AI 识别　快捷键 R"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.6 8.8V6a2.4 2.4 0 0 1 2.4-2.4h2.8"/><path d="M15.2 3.6H18a2.4 2.4 0 0 1 2.4 2.4v2.8"/><path d="M20.4 15.2V18a2.4 2.4 0 0 1-2.4 2.4h-2.8"/><path d="M8.8 20.4H6a2.4 2.4 0 0 1-2.4-2.4v-2.8"/></svg></button>
+  <!--
+    顶栏（2026-10 用户口径两次收敛后的最终形态）：
+      「最上面一栏只保留调大小，两个侧栏的开关，设置和翻页，全文搜索，还有 ai 功能，
+        其他的都删掉」→ 删掉了 `#returnPosition`（返回原位置）与 `#regionBtn`（框选截图）。
+      「底栏有的功能上面的一栏就不要了」→ **翻页与缩放整组移到底栏**，顶栏不再重复，
+        所以这里只剩：左右栏开关、首页、论文摘要、全文搜索、设置。
+    窗口控制（最小化/最大化/关闭）在最右边，属于标题栏，不算功能入口。
+  -->
+  <button class="tbtn" id="homeBtn" title="回到首页（书架）"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.6 10.4 12 3.6l8.4 6.8"/><path d="M5.6 9.6v9.2a1.6 1.6 0 0 0 1.6 1.6h9.6a1.6 1.6 0 0 0 1.6-1.6V9.6"/><path d="M10.2 20.4v-5.2h3.6v5.2"/></svg></button>
+  <button class="tbtn" id="opsBtn" title="论文摘要：一句话速览 / 方法拆解 / 实验是否支撑结论 / 局限与可疑之处"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m9.6 3.4 1.6 4.2 4.2 1.6-4.2 1.6-1.6 4.2-1.6-4.2L3.8 9.2l4.2-1.6z"/><path d="m17.4 13.4.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9z"/></svg></button>
   <button class="tbtn" id="searchBtn" title="全文搜索　Ctrl+F"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.8" cy="10.8" r="6.4"/><path d="M15.6 15.6 20.8 20.8"/></svg></button>
   <div class="topbar-side-controls" role="group" aria-label="侧栏控制">
     <button class="tbtn topbar-side-toggle" id="topbarLeftToggle" type="button" aria-label="收起左栏" aria-pressed="true"></button>
     <button class="tbtn topbar-side-toggle" id="topbarRightToggle" type="button" aria-label="收起右栏" aria-pressed="true"></button>
   </div>
   <button class="tbtn" id="settingsBtn" title="设置"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="6.4"/><path d="M12 2.2v3.4"/><path d="M12 18.4v3.4"/><path d="M2.2 12h3.4"/><path d="M18.4 12h3.4"/><path d="m5.1 5.1 2.4 2.4"/><path d="m16.5 16.5 2.4 2.4"/><path d="m18.9 5.1-2.4 2.4"/><path d="m7.5 16.5-2.4 2.4"/></svg></button>
+
+  <!-- 无边框桌面的窗口按钮：动作走 IPC（wry window.ipc）→ Rust tao 执行系统窗口动作。
+       几何 1:1 照 VS Code 的 Windows 自定义标题栏（codicon 的 chrome-minimize / chrome-maximize /
+       chrome-restore / chrome-close）：24 视图盒里画 15 单位，显示 16px 时字形正好 10px。
+       位置/尺寸/悬停反馈见 style.css 的「窗口控件」一节。 -->
+  <div class="window-controls" role="group" aria-label="窗口控制" data-no-drag>
+    <button class="window-control" id="windowMinimize" data-window-control="minimize" type="button" title="最小化" aria-label="最小化">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><path d="M4.5 12h15"/></svg>
+    </button>
+    <button class="window-control window-max" id="windowMaximize" data-window-control="maximize" type="button" title="最大化" aria-label="最大化或还原">
+      <svg class="ico-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><rect x="4.5" y="4.5" width="15" height="15"/></svg>
+      <svg class="ico-restore" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><rect x="7.5" y="4.5" width="12" height="12"/><path d="M4.5 7.5v12h12"/></svg>
+    </button>
+    <button class="window-control close" id="windowClose" data-window-control="close" type="button" title="关闭" aria-label="关闭">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><path d="m4.5 4.5 15 15M19.5 4.5l-15 15"/></svg>
+    </button>
+  </div>
 </header>
 
 <main id="main">
   <!-- 左活动栏：只在左栏收起时出现（CSS 由 body.no-left 控制）。
        位置在 #leftSide 的**左边**，不能放进左栏内部 —— 否则收起时它会跟着一起消失。
-       图标沿用顶栏那套字符（▤ ≡ ✎ ✦），不用图标字体。 -->
-  <nav class="rail" id="railLeft" aria-label="左栏已收起">
+       每个按钮一个 data-rail（files / outline / notes / rel），点它展开对应的那一块；
+       图标是内联 SVG（icons.js 里同名 id 的那一套），不用图标字体。 -->
+  <!--
+    主行（2026-10）：`#main` 现在是 grid（1fr auto）——
+    这一行是第 1 行（左栏 + 分隔条 + 正文 + 右栏），底栏是第 2 行。
+    包一层是为了让 grid 的第一行有个确定的 flex 容器，行高由 `1fr` 决定。
+  -->
+  <div class="main-row" id="mainRow">
+  <nav class="rail" id="railLeft" aria-label="左栏图标">
     <button class="rail-btn" data-rail="files" title="展开左栏：文件" aria-label="展开左栏：文件列表"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.4 7.4a2 2 0 0 1 2-2h3.3l2 2.4h7.9a2 2 0 0 1 2 2v8.4a2 2 0 0 1-2 2H5.4a2 2 0 0 1-2-2z"/></svg></button>
     <button class="rail-btn" data-rail="outline" title="展开左栏：目录" aria-label="展开左栏：目录"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 6.4h11"/><path d="M9 12h11"/><path d="M9 17.6h11"/><circle cx="4.7" cy="6.4" r="0.95"/><circle cx="4.7" cy="12" r="0.95"/><circle cx="4.7" cy="17.6" r="0.95"/></svg></button>
     <button class="rail-btn" data-rail="notes" title="展开左栏：笔记" aria-label="展开左栏：笔记"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6.2 3.8h11.6a1 1 0 0 1 1 1v15.4l-6.8-4.1-6.8 4.1V4.8a1 1 0 0 1 1-1z"/></svg></button>
-    <button class="rail-btn" data-rail="rel" title="展开左栏：文献关系" aria-label="展开左栏：文献关系"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="6" cy="6.2" r="2.4"/><circle cx="18" cy="6.2" r="2.4"/><circle cx="18" cy="17.8" r="2.4"/><path d="M8.4 6.2h7.2"/><path d="M6 8.6v4.4a2.6 2.6 0 0 0 2.6 2.6H15.6"/></svg></button>
+    <button class="rail-btn" data-rail="rel" title="展开左栏：参考文献" aria-label="展开左栏：参考文献"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="6" cy="6.2" r="2.4"/><circle cx="18" cy="6.2" r="2.4"/><circle cx="18" cy="17.8" r="2.4"/><path d="M8.4 6.2h7.2"/><path d="M6 8.6v4.4a2.6 2.6 0 0 0 2.6 2.6H15.6"/></svg></button>
   </nav>
 
   <aside class="side left" id="leftSide">
@@ -83,43 +95,29 @@
       <ul class="notes" id="notesList"></ul>
     </section>
 
-    <!-- 文献关系：本文引用了谁、谁引用了本文、哪些还没入库。
+    <!-- 参考文献：本文引用了哪些文献（点一行看详情、查开放 PDF、复制引用）。
+         列表**按需**整理：只有用户真的打开这一块（点标题栏展开 / 点左栏图标）时才解析，
+         打开论文本身不再在后台跑一遍全文引用抽取。
          标题栏（.sec-head）本身就是「展开 / 收起」的入口（bindPanelHead 给它 role=button + 键盘
-         支持），所以标题文字必须**占住剩余宽度**：否则「文献关系」会被左侧抓手和右侧操作挤成
+         支持），所以标题文字必须**占住剩余宽度**：否则「参考文献」会被右侧操作挤成
          0 宽，用户点在标题栏中间时命中的是右边的 ↻ 按钮 —— 于是「点标题展开」看起来是坏的。
          标题用 .sec-title 撑开，↻ 放进 .no-drag（抓手/操作区），点击与拖动各归各位。 -->
     <section class="sec" id="relSec">
       <div class="sec-head">
-        <span class="sec-title">文献关系</span> <span class="cnt" id="relCount"></span>
+        <span class="sec-title">参考文献</span> <span class="cnt" id="relCount"></span>
         <span class="panel-actions no-drag">
           <button class="tbtn tiny" id="relRescan" title="重新解析本文的参考文献">↻</button>
         </span>
       </div>
-      <div class="rel-sum" id="relSummary">打开一篇论文后自动整理</div>
-      <div class="rel-actions">
-        <button class="rel-btn" id="relFindPdf">找未入库的 PDF</button>
-        <button class="rel-btn" id="relScanLib">扫描库内引用</button>
-      </div>
-      <!-- 搜索 / 状态筛选 / 排序：只记在内存里，切论文重置（不写 localStorage） -->
+      <div class="rel-sum" id="relSummary">打开这一块时整理本文的参考文献</div>
+      <!-- 搜索：只记在内存里，切论文重置（不写 localStorage） -->
       <div class="rel-tools">
         <input class="rel-search" id="relSearch" type="search" placeholder="搜编号 / 条目 / 年份…" />
-        <select class="rel-select" id="relFilter" title="按状态筛选">
-          <option value="all">全部</option>
-          <option value="lib">书架已有</option>
-          <option value="pdf">已找到开放版本</option>
-          <option value="todo">待查 / 未找到</option>
-          <option value="cited">被引用</option>
-        </select>
-        <select class="rel-select" id="relSort" title="排序方式">
-          <option value="num">按编号</option>
-          <option value="year">按年份</option>
-          <option value="status">按状态</option>
-        </select>
       </div>
       <ul class="rel-list" id="relList"></ul>
     </section>
-    <!-- 底部小图标坞：每个面板一个图标，点一下显示/收起（面板永远找得回来） -->
-    <div class="panel-dock" id="panelDock" role="toolbar" aria-label="面板开关"></div>
+    <!-- 底部小图标坞（#panelDock）已删除（2026-10 用户口径：「A 只留最左边那条窄活动栏」
+         +「那几个点不动……直接删掉就行」）。左栏的面板入口现在只有常驻的 #railLeft。 -->
   </aside>
 
   <div class="splitter" id="splitLeft" title="拖动调整宽度"></div>
@@ -136,36 +134,63 @@
       <div class="search-results hidden" id="searchResults" role="listbox" aria-label="搜索结果"></div>
     </div>
 
-    <div class="viewer" id="viewer" tabindex="0">
-      <div class="welcome" id="welcome">
+    <!-- 首页 / 书架页（2026-10）：只解决两件事 —— 选一篇论文、继续上次阅读。
+         它从原来的 `#welcome`（阅读区空状态）升级而来，但**移出了 #viewer**：
+         以前它挂在 viewer 里面，于是「无论文」「读完了退回」和「打开失败」三种语义
+         共用一个模糊容器；现在 #home 与 #viewer 是兄弟，互斥显示（body.reading 有无），
+         三种状态各有明确归属（见 app.js 的 setView）。
+         刻意不放的东西：AI 操作、推荐、统计、阅读时长、学习计划、关系图、装饰性空卡片。 -->
+    <section class="home" id="home" aria-label="首页">
+      <div class="home-head">
         <img class="logo" src="/icon.svg" alt="论文阅读器" />
-        <p class="tagline">划词即译 · 选中即问 · 本地运行</p>
-        <div class="steps">
-          <div class="step"><b>1</b><span>拖入 PDF</span></div>
-          <div class="step"><b>2</b><span>划选文字 → 点「译」「释」</span></div>
-          <div class="step"><b>3</b><span>按 ✦ 挑一个论文操作</span></div>
-        </div>
+        <h1>论文阅读器</h1>
+        <p class="tagline">本地 PDF · 划词即译 · 选中即问</p>
+        <!-- #welcomeWarn 的 id 与 checkConfigWarning() 的驱动逻辑都不动，只是搬了个位置 -->
         <div class="warn hidden" id="welcomeWarn"></div>
       </div>
-    </div>
 
-    <!-- 底部停靠区（阶段 2.2b）：停靠在底部的面板横向排在这里。
-         默认带 .hidden —— 没有面板停靠到底部时它一个像素都不占，所以
-         #main 仍然是 flex row、.viewer-wrap 仍然是「正文 + 状态栏」两段，默认布局没变。
-         高度由 #dockBottomSplit 拖动（写 --dock-bottom-h）。 -->
-    <div class="dock-hsplit hidden" id="dockBottomSplit" role="separator" aria-orientation="horizontal" tabindex="0" title="拖动调整底部停靠区高度（↑↓ 键微调）"></div>
-    <div class="dock-bottom hidden" id="dockBottom" aria-label="底部停靠区"></div>
+      <div class="home-actions">
+        <button type="button" class="home-open" id="homeOpen">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.4 7.4a2 2 0 0 1 2-2h3.3l2 2.4h7.9a2 2 0 0 1 2 2v8.4a2 2 0 0 1-2 2H5.4a2 2 0 0 1-2-2z"/></svg>
+          <span>打开 PDF</span>
+        </button>
+        <div class="home-drop" id="homeDrop">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 16.4V4.6"/><path d="m7.6 9 4.4-4.4L16.4 9"/><path d="M4.6 16.4v2a1.6 1.6 0 0 0 1.6 1.6h11.6a1.6 1.6 0 0 0 1.6-1.6v-2"/></svg>
+          <span>把 PDF 拖到这里</span>
+        </div>
+      </div>
 
-    <div class="statusbar"><span id="statusText">就绪</span><span class="spacer"></span><span id="progressText"></span></div>
+      <div class="home-recent" id="homeRecent">
+        <div class="home-sec-title" id="homeRecentTitle">最近打开</div>
+        <div class="home-continue-wrap" id="homeContinueWrap"></div>
+        <ul class="home-list" id="homeList"></ul>
+      </div>
+    </section>
+
+    <div class="viewer" id="viewer" tabindex="0"></div>
   </section>
 
-  <!-- 右栏列容器：译文 / 问答只在这一侧，**一栏只开一个面板**（见 app.js 的「右栏列」一节）。
-       #splitRight 仍是「正文 ↔ 第 1 栏」的宽度把手；#rightColSplit 是第 1 栏 ↔ 第 2 栏的把手。
-       第 2 栏（#rightCol2 / #aiArea2）默认不存在，由 app.js 现建；body.right-col2-off 时它 display:none。 -->
+  <!-- 右栏：译文 / 问答只在这一侧，**一栏只开一个**（见 app.js 的「右栏」一节）。
+       #splitRight 是「正文 ↔ 右栏」的宽度把手；右栏恒为一栏。 -->
   <div class="right-cols" id="rightCols">
   <div class="splitter" id="splitRight" title="拖动调整宽度"></div>
 
-  <aside class="side right col-1" id="rightSide" data-col="1">
+  <aside class="side right" id="rightSide">
+    <!-- 右栏**唯一**的面板切换入口，放在右栏最上面（2026-10 用户口径：
+         「译文和问答的现在的上面的那一栏可以直接去掉，然后两种状态的选择图标可以放在最上面」）。
+         以前它贴在右栏底部，每个结果块自己还带一条 .ai-head 标题栏 —— 两处重复表达同一件事。
+         现在：标题栏去掉，切换器搬到顶部，当前是哪一个由这里的选中态表达。 -->
+    <div class="aibar" id="aiBar" role="tablist" aria-label="译文 / 问答切换"></div>
+    <!-- 多会话（2026-10 用户口径：「问答是不是要做多对话分对话」）：
+         显示当前会话名，点开是会话列表（切换 / 删除 / 新建）。 -->
+    <div class="sessbar hidden" id="sessBar">
+      <button type="button" class="sess-btn" id="sessBtn" title="会话" aria-haspopup="menu" aria-expanded="false">
+        <span class="sess-dot" aria-hidden="true"></span>
+        <span class="sess-label" id="sessLabel">默认会话</span>
+        <span class="sess-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="sess-menu hidden" id="sessionMenu" role="menu" aria-label="会话列表"></div>
+    </div>
     <div class="ai" id="aiArea"></div>
     <form class="composer" id="composer">
       <div class="attach-row" id="attachRow"></div>
@@ -177,49 +202,60 @@
         <button class="send" id="sendBtn" type="submit" title="发送"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.6 3.4 3.6 10.2l6.6 2.8 2.8 6.6z"/><path d="m10.2 13 10.4-9.6"/></svg></button>
       </div>
       <div class="composer-opts">
-        <button type="button" class="opt-chip" id="optFull">整篇</button>
-        <button type="button" class="opt-chip" id="optWeb">联网</button>
-        <button type="button" class="opt-chip" id="clearSession" title="清空当前论文的对话和 AI 结果">清空会话</button>
+        <!--
+          2026-10 用户口径：「范围 / 选中文本 + 当前页 / 清空会话这些……第一个应该是默认全文加联网，
+          在设置里面调节」。
+          所以这一排不再放「范围」菜单与「清空会话」：
+            · 发送范围（全文）+ 联网 → **默认就开着**，开关搬到设置页（#cfgUseFullText / #cfgUseWeb）
+            · 清空会话 → 收藏进会话菜单旁边，不常驻
+          这里只留一行状态提示，告诉用户「这一次会发什么」。
+        -->
         <span class="composer-hint" id="composerHint"></span>
       </div>
     </form>
-    <!-- 每一栏底部**唯一**的面板切换入口（译文 / 问答 分段切换器）。
-         用户口径（2026-10-03）：「右栏顶部只放当前面板的标题和面板操作；右栏底部只保留一组
-         『译文 / 问答』切换器；右键和拖拽能力附着在这一组图标上；不再额外渲染另一组相同按钮。」
-         所以这里是右栏唯一的可见入口：点＝在本栏开到这一个（同栏另一个自动收起）·
-         右键＝换栏 / 应用内卡片 · 按住拖出＝应用内卡片。第 2 栏由 app.js 现建同构的一份。 -->
-    <div class="aibar" id="aiBar" role="tablist" aria-label="右栏面板切换"></div>
   </aside>
   </div>
+  </div><!-- /main-row -->
 
-  <!-- 右活动栏：只在右栏收起时出现，贴在 #main 最右边 -->
-  <nav class="rail" id="railRight" aria-label="右栏已收起">
-    <button class="rail-btn" id="railRightBtn" title="展开右栏：AI 结果与对话" aria-label="展开右栏：AI 结果与对话"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="3.4" width="17.2" height="15.2" rx="2.2"/><path d="M14.2 3.4v15.2"/><path d="M19.6 10.4 17.8 12l1.8 1.6"/></svg></button>
-  </nav>
+  <!--
+    底栏（2026-10 用户口径）：**横着一整栏**、铺满窗口底部，不再缩在正文那一段里。
+    它是 `#main`（grid 第 2 行）的直接子项，宽度覆盖左栏 + 正文 + 右栏。
+    高度 44px（用户：「现在的太扁了」）。
+    里面放的是**阅读位置相关**的控件：翻页 + 缩放 + 适应宽度；
+    顶栏不再重复这些（用户：「底栏有的功能上面的一栏就不要了」）。
+  -->
+  <footer class="viewer-foot" id="viewerFoot">
+    <div class="grp foot-grp" title="翻页">
+      <button class="tbtn" id="footPrevPage" aria-label="上一页" title="上一页"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 4.8 7.8 12 15 19.2"/></svg></button>
+      <input class="page-input foot-page-input" id="pageInput" value="–" inputmode="numeric" aria-label="页码" />
+      <span class="of">/ <b id="pageCount">–</b></span>
+      <button class="tbtn" id="footNextPage" aria-label="下一页" title="下一页"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 4.8 16.2 12 9 19.2"/></svg></button>
+    </div>
+
+    <span class="spacer"></span>
+
+    <div class="grp foot-grp" title="PDF 大小">
+      <span class="zoom-word">大小</span>
+      <button class="tbtn" id="footZoomOut" aria-label="缩小" title="缩小"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.8" cy="10.8" r="6.4"/><path d="M15.6 15.6 20.8 20.8"/><path d="M7.9 10.8h5.8"/></svg></button>
+      <input type="range" class="zoom-range" id="zoomRange" min="25" max="500" step="5" value="100" aria-label="缩放" />
+      <button class="tbtn" id="footZoomIn" aria-label="放大" title="放大"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.8" cy="10.8" r="6.4"/><path d="M15.6 15.6 20.8 20.8"/><path d="M10.8 7.9v5.8"/><path d="M7.9 10.8h5.8"/></svg></button>
+      <button class="tbtn" id="footFitWidth" title="适应宽度"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 5.2v13.6"/><path d="M21 5.2v13.6"/><path d="M6.6 12h10.8"/><path d="m9.6 8.8-3.2 3.2 3.2 3.2"/><path d="m14.4 8.8 3.2 3.2-3.2 3.2"/></svg></button>
+      <span class="zoom-pct" id="zoomLabel">100%</span>
+    </div>
+  </footer>
 </main>
 
-<!-- 论文操作菜单（按需调用的那一排操作） -->
+<!-- 论文摘要菜单：4 个文档级操作平铺（见 ops.js 的 OPS），结果进右侧问答栏 -->
 <div class="ops-menu hidden" id="opsMenu"></div>
 
-<!-- 划词气泡 -->
+<!-- 划词气泡：只负责「选一个动作」。结果一律进右栏（译文 / 问答），不再有就地结果浮层 ——
+     同一个 AI 结果不允许同时出现在两个地方（删减清单 §二）。 -->
 <div class="bubble hidden" id="bubble">
   <button data-act="translate" title="翻译选中文字 (T)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="10.4" height="16" rx="1.7"/><path d="M5.9 8.5h4.6"/><path d="M5.9 11.7h4.6"/><path d="M15.1 20.2 18.5 10.6l3.4 9.6"/><path d="M16.4 17.1h4.2"/></svg></button>
   <button data-act="explain" title="直接在侧栏解释这段 (E)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9.2 17.6h5.6"/><path d="M10.1 20.6h3.8"/><path d="M12 3.2a6 6 0 0 0-3.42 10.93c.5.35.82.92.82 1.53v.02h5.2v-.02c0-.61.32-1.18.82-1.53A6 6 0 0 0 12 3.2z"/></svg></button>
   <button data-act="add" title="加入对话：可以连续加多段文字，也可以加图片 (Q)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 11.4c0 3.5-3.63 6.4-8.1 6.4-.99 0-1.94-.16-2.81-.44L4.4 19.4l1.27-3.24A6.15 6.15 0 0 1 3.8 11.4c0-3.5 3.63-6.4 8.1-6.4.61 0 1.2.06 1.77.18"/><path d="M19.2 2.6v4.2"/><path d="M17.1 4.7h4.2"/></svg><span>对话</span></button>
   <button data-act="note" title="写笔记（只在页边留一个小书签，不加黄色高亮）"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16.1 3.6a2.05 2.05 0 0 1 2.9 2.9L7.4 18.1l-4 1.1 1.1-4z"/><path d="M14.6 5.1 18.9 9.4"/></svg></button>
   <button data-act="copy" title="复制"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8.8" y="8.8" width="11.4" height="11.4" rx="2.2"/><path d="M15.2 6.1V5.8a2.2 2.2 0 0 0-2.2-2.2H5.8a2.2 2.2 0 0 0-2.2 2.2v7.2a2.2 2.2 0 0 0 2.2 2.2h.3"/></svg></button>
-</div>
-
-<!-- 就地结果浮层 -->
-<div class="popover hidden" id="popover">
-  <div class="pop-head">
-    <span class="pop-title" id="popTitle">译文</span>
-    <span class="spacer"></span>
-    <button class="tbtn" id="popCopy" title="复制"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8.8" y="8.8" width="11.4" height="11.4" rx="2.2"/><path d="M15.2 6.1V5.8a2.2 2.2 0 0 0-2.2-2.2H5.8a2.2 2.2 0 0 0-2.2 2.2v7.2a2.2 2.2 0 0 0 2.2 2.2h.3"/></svg></button>
-    <button class="tbtn" id="popStop" title="停止"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="6.4" y="6.4" width="11.2" height="11.2" rx="1.8"/></svg></button>
-    <button class="tbtn" id="popClose" title="关闭"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6.4 6.4 17.6 17.6"/><path d="M17.6 6.4 6.4 17.6"/></svg></button>
-  </div>
-  <div class="pop-body" id="popBody"></div>
 </div>
 
 <!-- 参考文献 -->
@@ -282,37 +318,26 @@
     <div class="settings-section-title">阅读助手样式</div>
     <div class="settings-grid settings-core-grid">
       <label class="field"><span>主题</span><select id="uiTheme"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
-      <label class="field"><span>结果密度</span><select id="uiDensity"><option value="compact">紧凑</option><option value="standard">标准</option><option value="comfortable">舒适</option></select></label>
-      <!-- 顶栏行为：默认「悬停才出现」（阅读时让出上方空间）。
-           之所以必须给一个「常驻」选项：自动隐藏时顶栏在静息态整个移出屏幕，
-           任何**按坐标点击**的路径（自动化脚本、辅助技术、以及先算坐标再点的实现）
-           都会因为目标是屏幕外元素而失败。给用户一个能关掉它的开关，同时留出
-           ?topbar=static 这个 URL 开关给自动化用。 -->
-      <label class="field"><span>顶栏</span><select id="uiTopbar"><option value="auto">悬停才出现</option><option value="static">常驻</option></select></label>
-    </div>
-    <details class="settings-advanced" id="advancedStyles">
-      <summary>更多样式</summary>
-      <div class="settings-advanced-note">字号、控件和结果细节（低频调整）</div>
-      <div class="settings-grid">
-      <!-- 界面字号 / 控件大小：分别对应 --ui-fs 与 --ctl-scale，与下面的「阅读字号」三者互相独立 -->
-      <label class="field"><span>界面字号 <output class="range-value" id="uiUiFontSizeValue"></output></span><input id="uiUiFontSize" type="range" min="12" max="17" step="0.5" /></label>
-      <label class="field"><span>控件大小 <output class="range-value" id="uiControlSizeValue"></output></span><input id="uiControlSize" type="range" min="80" max="130" step="5" /></label>
       <label class="field"><span>阅读字号 <output class="range-value" id="uiFontSizeValue"></output></span><input id="uiFontSize" type="range" min="12" max="19" step="1" /></label>
-      <label class="field"><span>行高 <output class="range-value" id="uiLineHeightValue"></output></span><input id="uiLineHeight" type="range" min="1.45" max="2.05" step="0.05" /></label>
-      <label class="field"><span>代码大小 <output class="range-value" id="uiCodeSizeValue"></output></span><input id="uiCodeSize" type="range" min="10" max="15" step="1" /></label>
-      <label class="field"><span>结果最大宽度 <output class="range-value" id="uiMaxWidthValue"></output></span><input id="uiMaxWidth" type="range" min="480" max="920" step="20" /></label>
-      <label class="field"><span>结果透明度 <output class="range-value" id="uiOpacityValue"></output></span><input id="uiOpacity" type="range" min="0.82" max="1" step="0.02" /></label>
-      <label class="field"><span>PDF 纸张背景</span><select id="uiPaper"><option value="tint">跟随界面</option><option value="white">纯白</option></select></label>
-      </div>
-      <div class="settings-checks">
-        <label><input id="uiShowPage" type="checkbox" /> 显示页码</label>
-        <label><input id="uiShowQuote" type="checkbox" /> 显示原文引用</label>
-        <label><input id="uiShowSources" type="checkbox" /> 默认展开来源</label>
-      </div>
-    </details>
+    </div>
+    <!--
+      发送范围（2026-10 用户口径）：「范围 / 选中文本 + 当前页 / 清空会话这些……第一个应该是
+      默认全文加联网，在设置里面调节」。
+      所以输入框那一排的范围菜单整个撤掉，「读整篇论文」「联网查资料」搬到这里，
+      **默认都是开的**，并且是全局偏好（保存进 localStorage reader.ui，跨论文 / 跨会话都算数）。
+    -->
+    <div class="settings-section-title">发送范围</div>
+    <div class="settings-grid settings-core-grid">
+      <label class="field field-switch"><input id="cfgUseFullText" type="checkbox" /><span>整篇论文</span></label>
+      <label class="field field-switch"><input id="cfgUseWeb" type="checkbox" /><span>联网搜索</span></label>
+    </div>
+    <!-- 样式部分只保留：主题 / 阅读字号（另有「发送范围」两个开关，见下）。
+         结果密度、顶栏行为、「更多样式」里那一堆调试刻度（界面字号 / 控件大小 / 行高 /
+         代码大小 / 结果最大宽度 / 结果透明度 / PDF 纸张 / 三个显示开关）全部下架：
+         它们是视觉实验用的旋钮，不该出现在成品里。DEFAULT_UI_STYLE 里这些字段仍然保留，
+         老存档读回来照旧生效，只是没有界面入口了（不会偷偷改用户的外观）。 -->
     <div class="settings-reset">
-      <button type="button" id="resetLayout">恢复默认布局</button>
-      <button type="button" id="resetStyle">恢复默认样式</button>
+      <button type="button" id="resetSettings">恢复默认设置</button>
     </div>
     <div class="modal-actions">
       <button class="primary" id="saveSettings">保存</button>
@@ -326,13 +351,6 @@
 <div class="region-hint hidden" id="regionHint">拖动框住要识别的区域 · <kbd>Esc</kbd> 取消</div>
 
 <div class="toast-wrap" id="toastWrap"></div>
-
-<!-- 应用内浮动层（阶段 2.2b）：从停靠区浮出来的面板整块搬进这里。
-     inset:0 + pointer-events:none —— 空着的时候一点都不吃鼠标事件；
-     浮窗自己恢复 pointer-events:auto，并用 position:fixed + left/top/width/height 定位。 -->
-<div class="float-layer" id="floatLayer" aria-label="浮动面板层"></div>
-<!-- 停靠预览：拖浮动面板经过左栏 / 右栏 / 底部时，在这上面画出目标区域的描边 + 半透明占位块 -->
-<div class="dock-preview hidden" id="dockPreview" aria-hidden="true"></div>
 
 <!-- 公式渲染引擎（UMD，挂到 window.katex）。模型回答里公式很常见，
      之前是直接显示 LaTeX 源码，等于没渲染。本地内置，不依赖 CDN。 -->
