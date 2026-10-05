@@ -1555,11 +1555,18 @@ export class PdfViewer {
 
   /**
    * span 里离 clientX 最近的**字符边界**。
+   *
    * 每个字符的 x 区间缓存进 WeakMap（文本层重建时元素一起消失，缓存自动作废），
-   * 所以一次拖选里同一段文字只量一次。
+   * 所以同一段文字只量一次。
+   *
+   * ⚠️ 缓存里存的是**相对 span 左边缘**的偏移，不是屏幕坐标：
+   * 页面会滚动，屏幕坐标每次都要重算（否则滚动之后再拖选，算出来的字符位置会整整偏一个滚动量）。
+   * 相对量在滚动、缩放（`_softRescale` 的 CSS 缩放）下都不变。
    */
   _offsetInSpan(span, node, clientX) {
     if (!this._charX) this._charX = new WeakMap();
+    const spanRect = span.getBoundingClientRect();
+    const rel = clientX - spanRect.left;
     let map = this._charX.get(span);
     if (!map) {
       map = [];
@@ -1568,7 +1575,7 @@ export class PdfViewer {
       for (let k = 0; k < text.length; k++) {
         try { r.setStart(node, k); r.setEnd(node, k + 1); } catch { map.push(null); continue; }
         const cr = r.getBoundingClientRect();
-        map.push(cr.width > 0 || cr.height > 0 ? { l: cr.left, r: cr.right } : null);
+        map.push(cr.width > 0 || cr.height > 0 ? { l: cr.left - spanRect.left, r: cr.right - spanRect.left } : null);
       }
       this._charX.set(span, map);
     }
@@ -1577,12 +1584,12 @@ export class PdfViewer {
     for (let k = 0; k < map.length; k++) {
       const m = map[k];
       if (!m) continue;
-      const d = clientX < m.l ? m.l - clientX : (clientX > m.r ? clientX - m.r : 0);
+      const d = rel < m.l ? m.l - rel : (rel > m.r ? rel - m.r : 0);
       if (d < bd) { bd = d; bi = k; }
     }
     // 落在字符右半边就取它后面那个边界 —— 和浏览器 caret 的手感一致
     const m = map[bi];
-    const offset = m && clientX > (m.l + m.r) / 2 ? bi + 1 : bi;
+    const offset = m && rel > (m.l + m.r) / 2 ? bi + 1 : bi;
     return { node, offset: Math.min(offset, (node.textContent || '').length) };
   }
 

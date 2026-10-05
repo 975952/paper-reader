@@ -1845,3 +1845,34 @@ Range 于是从锚点一路「吃到」第 k 个子节点：
 | 文件 | 大小 | 说明 |
 |---|---:|---|
 | `论文阅读器.exe`（根目录 + 桌面） | 10,212,864 B | SHA256 两处一致（build.bat 自校验通过） |
+
+---
+
+## 37. 回退方式改用 git commit（2026-10-06，与 §36 同一批）
+
+`AGENTS.md` 更新：仓库**已纳入 git**（`origin = https://github.com/975952/paper-reader.git`，
+交付物 `.exe` 在 `.gitignore` 里，改动只在源码中）。所以：
+
+- **大改动之前先 `git commit`**，改坏了 `git checkout` 回退 —— 不再需要手工复制整个 `public/`；
+- `test/pack.mjs` 的源码 zip 退成第二道保险（它自己漏 `security.js` 的问题见 §36.4）；
+- `data/`、`papers/` 永远不进 git、也不进 zip。
+
+### 37.1 本轮（§33–§35）改动的落点核对
+
+| 检查 | 结果 |
+|---|---|
+| 工作区 | 干净，改动已提交 |
+| 新增套件是否已跟踪 | `answer-note` / `send-range` / `session-bar` / `translate-order` / `translate-pure` 全部在版本控制里 |
+| 源码是否为最终形态 | `bodyEl.prepend(root)`（译文块新在上）、`isTranslateEntry`、`ref-jump`、`scrollToNewest`、`markReversedBodies` 均在位；`justify-content: flex-end` 只剩「会话条右对齐」和那条**警告注释**，没有落回译文块 |
+| exe 与源码一致性 | 提交 `79a05d7`（02:13）→ exe 编译于 02:14，内嵌确认含 `scrollToNewest` / `ref-jump` / `note-plus` / `selectionAlignProbe` |
+
+### 37.2 这个仓库有并发写入者（重要）
+
+核对的同一分钟内，工作区又出现两个**不是本节改动**的文件：
+`public/js/pdfview.js`（15 行）、`test/selection-stable.mjs`（56 行）—— 是另一个会话在做的选词稳定性修复。
+它们**没有**被编进当前 exe，需要重新 `build.bat` 才会进交付物。
+
+结论（对后续所有会话都成立）：**多会话共用同一个工作区时，谁最后构建、谁的快照进 exe。**
+构建前务必先 `git status` 确认工作区状态；
+若工作区里有别人的半成品，**不要替对方构建**（会把未完成的代码带进交付物），
+要么等对方提交，要么只按自己的改动范围验证源码。

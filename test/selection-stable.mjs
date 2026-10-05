@@ -63,11 +63,12 @@ await page.evaluate(() => {
   window.__pg = pageEl;
   window.__pgRect = (n) => { const p = pageEl(n); if (!p) return null; const r = p.getBoundingClientRect(); return { left: r.left, top: r.top, w: r.width, h: r.height, right: r.right, bottom: r.bottom }; };
 
-  /** 逐字符外接框（DOM 顺序，**视口坐标**）。缓存到文本层节点换掉为止。 */
+  /** 逐字符外接框（DOM 顺序，**视口坐标**）。缓存到文本层节点换掉、或滚动位置变化为止。 */
   window.__chars = (n) => {
     const el = pageEl(n);
     const layer = el?.querySelector('.textLayer') || null;
-    if (window.__charsCache?.el === layer && layer) return window.__charsCache.data;
+    const scrollTop = document.getElementById('viewer')?.scrollTop ?? 0;
+    if (window.__charsCache?.el === layer && layer && window.__charsCache.scrollTop === scrollTop) return window.__charsCache.data;
     if (!el) return [];
     const out = [];
     for (const span of el.querySelectorAll('.textLayer span:not(.markedContent)')) {
@@ -82,7 +83,7 @@ await page.evaluate(() => {
         out.push({ i, ch: text[i], x: r.left, y: r.top, w: r.width, h: r.height, cx: r.left + r.width / 2, cy: r.top + r.height / 2, node, off: i });
       }
     }
-    window.__charsCache = { el: layer, data: out };
+    window.__charsCache = { el: layer, scrollTop, data: out };
     return out;
   };
 
@@ -556,8 +557,55 @@ await gotoPage(1);
     `选中 ${norm(before).length} 字 → 仍是 ${norm(after.text).length} 字`);
 }
 
-/* ══════════════════════ 七、缩放后依然稳定 ══════════════════════ */
-console.log('\n-- 七、放大后重新验证');
+/* ══════════════════════ 七、滚动之后再拖选（缓存失效类缺陷） ══════════════════════ */
+console.log('\n-- 七、滚动之后再拖选');
+/**
+ * 命中的几何量是**带缓存的**（`charPosAt` 的命中表 + 逐字符 x 区间）。
+ * 如果缓存的是屏幕坐标，滚动之后就会整整偏一个滚动量 —— 表现正是用户说的
+ * 「不是按鼠标选中的区域」。这一节专门盯这类缺陷：
+ * 先在同一页上拖一次（把缓存灌满），滚动一段，再拖一次，对期望值复核。
+ */
+{
+  const p = PAGES[0];
+  await gotoPage(p);
+  const vTop = await page.evaluate(() => document.getElementById('viewer').getBoundingClientRect().top);
+  const before = await usableLines(p, 3);
+  let bad = 0;
+  let n = 0;
+  if (before.length >= 2) {
+    const L = before[1];
+    const y = L.cy;
+    const x1 = Math.round(L.left + (L.right - L.left) * 0.3);
+    // ① 先拖一次，灌满缓存
+    await drag(x1, y, L.right - 20, y);
+    // ② 滚动半行多一点
+    await page.evaluate(() => { document.getElementById('viewer').scrollBy(0, 60); });
+    await sleep(900);
+    // ③ 滚动之后再取一行（坐标全部重算）并拖选，期望值也重算
+    const after = await usableLines(p, 3);
+    for (const L2 of after.slice(0, 2)) {
+      const y2 = L2.cy;
+      const xa = Math.round(L2.left + (L2.right - L2.left) * 0.3);
+      const xb = L2.right + 50;
+      const expect = await page.evaluate((kk) => window.__expect(kk.p, kk.x1, kk.y1, kk.x2, kk.y2), { p, x1: xa, y1: y2, x2: xb, y2: y2 });
+      const got = await drag(xa, y2, xb, y2);
+      const A = squash(got.text);
+      const E = squash(expect?.text || '');
+      n++;
+      if (!(A.length > 0 && E.length > 0 && (E.includes(A) || A.includes(E)) && Math.abs(A.length - E.length) <= 8)) {
+        bad++;
+        console.log(`        滚动后偏差：实得「${A.slice(0, 44)}」 期望「${E.slice(0, 44)}」`);
+      }
+    }
+    // 滚回顶部，别影响后面的用例
+    await page.evaluate(() => { document.getElementById('viewer').scrollTop = 0; });
+    await sleep(600);
+  }
+  check('滚动之后拖选仍然选到鼠标扫过的那一段', n > 0 && bad === 0, `${n} 次，偏差 ${bad}`);
+}
+
+/* ══════════════════════ 八、缩放后依然稳定 ══════════════════════ */
+console.log('\n-- 八、放大后重新验证');
 await gotoPage(2);
 for (let i = 0; i < 3; i++) { await page.click('#footZoomIn'); await sleep(900); }
 await sleep(1200);
