@@ -31,6 +31,16 @@ await fetch(`${BASE}/api/state`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ lastDoc: null, lastName: null, lastUrl: null, docs: {} }),
 });
+/**
+ * 划词翻译那一条要用「假模型」验「送出去的就是选中的」。
+ * 不写配置的话 `ensureReady()` 直接拦下，请求根本发不出去 ——
+ * 这条断言以前恒红（不是产品问题，是套件少了一步环境准备）。
+ * baseURL 指向 127.0.0.1:1，请求会被 page 的拦截器换成假 SSE，不会真的联网。
+ */
+await fetch(`${BASE}/api/config`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ baseURL: 'http://127.0.0.1:1/v1', model: 'mock', apiKey: 'sel-test-key' }),
+});
 
 const browser = await puppeteer.launch({
   executablePath: CHROME, headless: 'shell',

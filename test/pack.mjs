@@ -18,9 +18,16 @@ const ZIP = path.join(import.meta.dirname, 'artifacts', 'paper-reader-src.zip');
 /** 要发布的顶层文件 / 目录（相对 ROOT） */
 const INCLUDE = [
   'server.js',
+  /**
+   * ⚠️ `security.js` 必须在这里：`server.js:20` 是 `require('./security')`。
+   * 2026-10-06 审查发现白名单漏了它 —— 打出来的源码包解开后 `node server.js`
+   * 直接 MODULE_NOT_FOUND，而这份 zip 正是 AGENTS.md 里说的"改坏了用来回退"的安全网。
+   */
+  'security.js',
   'start.bat',
   '启动.bat',
   'README.md',
+  'AGENTS.md',
   '.gitignore',
   'public',
   'desktop/src',
@@ -30,31 +37,13 @@ const INCLUDE = [
   'desktop/build.rs',
   'desktop/tools',
   'docs',
-  'test/cjk.mjs',
-  'test/context.mjs',
-  'test/desktop.mjs',
-  'test/e2e.mjs',
-  'test/export.mjs',
-  'test/isolate.mjs',
-  'test/links.mjs',
-  'test/math.mjs',
-  'test/node-search.mjs',
-  'test/ops.mjs',
-  'test/outline.mjs',
-  'test/pack.mjs',
-  'test/proto-search.mjs',
-  'test/real.mjs',
-  'test/save-reliability.mjs',
-  'test/relations.mjs',
-  'test/selection.mjs',
-  'test/smoke.mjs',
-  'test/stream.mjs',
-  'test/ux.mjs',
-  'test/zoom.mjs',
-  'test/_env.mjs',
-  'test/fixtures',
-  'test/package.json',
-  'test/package-lock.json',
+  /**
+   * 整个 `test/` 一起进包。
+   * 以前是逐个列举 30 个文件：2026-10-06 审查发现它漏了 26 个现存套件、
+   * 还留着一个早已删除的 `test/export.mjs`（列了也不存在，只会打印一行 [skip]）。
+   * 目录 + DENY 黑名单（artifacts / node_modules / profile-* / archive / dump）比白名单好维护。
+   */
+  'test',
 ];
 
 /** 兜底：就算误入白名单，这些也绝不进包 */
@@ -80,6 +69,13 @@ const DENY = [
    */
   /(^|[\\/])internal([\\/]|$)/,
   /(^|[\\/])archive([\\/]|$)/,
+  /**
+   * `test/profile-*` 是 `test/left-rail.mjs` 起的 Chrome 用户目录（每次运行新建一个
+   * 时间戳目录，200+ 个文件）。它们不该进包，也**不该进 git**（2026-10-06 审查发现
+   * 曾经有 623 个这样的文件被 `git add -A` 提交进仓库，约 61MB）。
+   */
+  /(^|[\\/])profile-[^\\/]*([\\/]|$)/,
+  /(^|[\\/])dump([\\/]|$)/,
 ];
 
 /**
@@ -150,16 +146,30 @@ for (const f of files) {
 
 /* ── 4. 打 zip ── */
 fs.rmSync(ZIP, { force: true });
-execFileSync('powershell', [
-  '-NoProfile', '-Command',
-  `Compress-Archive -Path '${STAGE}\\*' -DestinationPath '${ZIP}' -CompressionLevel Optimal -Force`,
-], { stdio: 'inherit' });
+/**
+ * ⚠️ 不要用 PowerShell 的 `Compress-Archive`：PS 5.1（Windows 自带的那个）走 .NET
+ * Framework 的 ZipFile，条目名写的是**反斜杠**（实测 323/328 个条目），
+ * Linux / macOS 解开就是一堆带反斜杠的怪文件名。
+ * `tar -a -c -f x.zip`（Windows 10 1803+ 自带 bsdtar）产出的是标准 zip：正斜杠、可跨平台。
+ * 万一没有 tar 再退回 Compress-Archive，并且在输出里明确警告。
+ */
+let zipTool = 'tar';
+try {
+  execFileSync('tar', ['-a', '-c', '-f', ZIP, '-C', STAGE, '.'], { stdio: 'inherit' });
+} catch (e) {
+  zipTool = 'Compress-Archive（不跨平台：条目名是反斜杠）';
+  execFileSync('powershell', [
+    '-NoProfile', '-Command',
+    `Compress-Archive -Path '${STAGE}\\*' -DestinationPath '${ZIP}' -CompressionLevel Optimal -Force`,
+  ], { stdio: 'inherit' });
+}
 fs.rmSync(STAGE, { recursive: true, force: true });
 
 const zipSize = fs.statSync(ZIP).size;
 console.log(`\n文件数：${files.length}`);
 console.log(`原始大小：${(bytes / 1048576).toFixed(1)} MB`);
 console.log(`压缩后：${(zipSize / 1048576).toFixed(1)} MB`);
+console.log(`打包器：${zipTool}`);
 console.log(`输出：${ZIP}`);
 console.log('\n前 20 个文件：');
 for (const f of files.slice(0, 20)) console.log('  ' + f.rel);

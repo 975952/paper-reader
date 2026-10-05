@@ -62,6 +62,39 @@ const MAX_FULL_MP = 8;
 const SLICE_MARGIN = 600;
 
 /**
+ * 文本层命中盒**纵向**最多扩张多少像素（见 `_tileTextHitBoxes`）。
+ *
+ * 只用来补「行距之间那条 1~3px 的缝隙」—— 缝隙补上之后，
+ * 鼠标落在两行之间也不会退化成「容器 + 第几个子节点」那种没有文字含义的位置。
+ * 上限必须这么小：实测 padding 到 158px 时，整盒会被 `Range.getClientRects()`
+ * 当成选区矩形返回（画出来的方块变成一个大色块）。宁可留大空白给
+ * `repairSelectionEnds()` 兜底，也不给矩形任何被污染的机会。
+ */
+const HIT_PAD_MAX = 6;
+
+/**
+ * 命中判定里「纵向差 1px」相当于多少横向差。
+ *
+ * `charPosAt()` 用它把「先看属于哪一行、再看行内第几个字」写成一次求最小值的打分：
+ * 权重必须大到「纵向差 1px 压倒横向任意误差」，否则页面很宽时
+ * 「同一行最右边那个字」会把「下一行最左边那个字」比下去 —— 拖选终点就跳行了。
+ */
+const CHAR_HIT_ROW_WEIGHT = 10000;
+
+/**
+ * 读某个层当前的 CSS 缩放倍数。
+ *
+ * `_softRescale()`（拖动缩放时的拉伸预览）会把文本层/热点层整体 `transform: scale(k)`，
+ * 此时层里所有坐标都是**缩放前**的，指针位置要除回 k 才能和缓存下来的盒子比较。
+ * 这里只解析内联样式字符串（不触发布局），成本可忽略。
+ */
+function layerScale(el) {
+  const m = /^scale\(([\d.]+)\)$/.exec(el?.style?.transform || '');
+  const k = m ? Number(m[1]) : NaN;
+  return Number.isFinite(k) && k > 0 ? k : 1;
+}
+
+/**
  * 从一段文本里解析出参考文献条目 `[n] ...`。
  *
  * 要求方括号出现在**行首**才算条目：正文里也有 `[12]` 这种行内引用，
@@ -190,11 +223,26 @@ export class PdfViewer {
       this._renderVisible(true);
     };
     this._watchDpr();
+
+    /* 引用热点的悬停点亮（每帧最多判一次，不在 mousemove 里直接算） */
+    this._hoverRaf = 0;
+    this._onHoverMove = (e) => {
+      if (this._hoverRaf) return;
+      const x = e.clientX;
+      const y = e.clientY;
+      this._hoverRaf = requestAnimationFrame(() => {
+        this._hoverRaf = 0;
+        if (!this._destroyed) this._updateCiteHover(x, y);
+      });
+    };
+    this.container.addEventListener('mousemove', this._onHoverMove, { passive: true });
   }
 
   destroy() {
     this._destroyed = true;
     this.container.removeEventListener('scroll', this._onScroll);
+    this.container.removeEventListener('mousemove', this._onHoverMove);
+    if (this._hoverRaf) { try { cancelAnimationFrame(this._hoverRaf); } catch { /* ignore */ } }
     window.removeEventListener('resize', this._onResize);
     this._dprQuery?.removeEventListener?.('change', this._onDprChange);
     this.close();
@@ -663,6 +711,9 @@ export class PdfViewer {
         slice, ratio, cssW, cssH,
         renderScale: this.scale,   // 这张位图是按哪个比例画的（软缩放拉伸时要用）
         dirty: false,
+        // 下面两张是命中表（页面内局部坐标）：citeHits 由 _paintCites 填，hitBoxes 由 _tileTextHitBoxes 填
+        citeHits: [],
+        hitBoxes: null,
       };
       this.rendered.set(i, entry);
 
@@ -740,6 +791,10 @@ export class PdfViewer {
           if (!stale()) {
             this._normalizeTextScale(textDiv);
             this._nudgeTextLayer(textDiv, page);
+            /* 顺序在最后：命中盒铺满必须按**最终**的字形盒子算（字体、字距、垂直补偿都定了）。
+               返回值是这一页的命中表（页面内局部坐标），`charPosAt()` 直接用它做几何命中，
+               不再每次鼠标移动都逐 span 读 DOM。 */
+            entry.hitBoxes = this._tileTextHitBoxes(textDiv) || null;
             this._paintCites(i);
           }
         }
@@ -1320,6 +1375,264 @@ export class PdfViewer {
   }
 
   /**
+   * 把文本层的命中盒**在纵向补满行距缝隙**（一行一条命中带，边界取相邻行中心线的中点）。
+   *
+   * ── 为什么必须补（用户实测缺陷 2026-10-06：「有时候不是按鼠标选中的区域，
+   *    有时候一搞就选中一大块」）────────────────────────────────────────────
+   * 根因不在选区逻辑，而在文本层的布局：
+   *   `.textLayer` 的子元素**全部**是 `position:absolute`（不在行内流里），
+   *   容器因此一个行盒都没有。鼠标落在任何 span 盒子以外的地方 ——
+   *   行距之间那条缝隙、行尾右侧的空白、左右页边、同一行两个 run 之间的小空隙 ——
+   *   浏览器的「坐标 → 文字位置」没有行盒可吸附，就退化成
+   *   **「容器 + 第几个子节点」**（实测 `caretRangeFromPoint` 返回 `DIV.textLayer@43`）。
+   *   于是 Range 从锚点一路「吃到」第 k 个子节点：
+   *     · 行内横拖 120px → 1356 字 / 80 个矩形 / 框高跨 492px（跨好几行）；
+   *     · 起手/终点落在行间缝隙 → 0 字（两端都退化成容器，一个字都选不出来）；
+   *     · 起手落在 `[n]` 引用热点或页边上 → 2776 字、横跨两页。
+   *
+   * ── 这里只做「纵向补缝」，横向的空白留给 `repairSelectionEnds()` ──────────
+   *   纵向：行上/下边界取「与相邻行中心线的中点」，扩张量夹在 HIT_PAD_MAX 以内
+   *   （正常行距只差 1~3px，够用）；用 `padding-top/bottom` 扩张命中盒，`top` 反向补偿，
+   *   字形位置一个像素都不动。
+   *   ⚠️ 横向 padding **绝对不能加**、纵向也不能放大：受控实验（test/lab-leak.mjs）实测，
+   *   只要 span 有横向 padding，它在「跨 span 的选区」中就会被浏览器**整盒**返回 ——
+   *   `Range.getClientRects()` 给出 300/953（边框盒）而不是 52/434（行盒），
+   *   画出来的选中方块立刻横贯整页，正是用户说的「一搞就选中一大块」；
+   *   纵向 padding 加到 158px 时页 1 的作者栏也会被整盒返回。
+   *   所以左右页边、图区那种大空白**不铺**，由 `repairSelectionEnds()` 按几何命中兜底。
+   *
+   * 效果：正常行距的缝隙被补上之后，落点不会再退化成容器位置；
+   * 加上兜底之后，同样 120px 的拖动从 1356 字降到 50 字上下（见 test/selection-stable.mjs）。
+   */
+  _tileTextHitBoxes(container) {
+    try {
+      const layerRect = container.getBoundingClientRect();
+      const W = layerRect.width;
+      const H = layerRect.height;
+      if (!(W > 4 && H > 4)) return null;
+
+      /* ① 只读一遍几何（先读后写，避免每个 span 都触发一次重排）。
+         注意：这一份 `read` 会原样返回给 `charPosAt()` 当命中表用 ——
+         它必须包含**所有**有文字子节点的 span（含只有空格的），
+         否则「鼠标点在两个 run 之间的空格上」会找不到字符位置。 */
+      const read = [];
+      for (const span of container.querySelectorAll('span:not(.markedContent)')) {
+        // pdf.js 把图片也放成 span；它 user-select:none，不参与文字选择
+        if (span.getAttribute('role') === 'img') continue;
+        const node = span.firstChild;
+        if (!node || node.nodeType !== 3) continue;
+        /* 旋转 / 被缩放的 span 不参与铺满：padding 会跟着 transform 一起缩放，
+           按「盒子边界等分」算出来的扩张量对不上。（每页只有零星几个：页边竖排文字）
+           但它们仍然进命中表 —— `charPosAt()` 需要一个「最近的字」兜底。 */
+        const rot = Math.abs(parseFloat(span.style.getPropertyValue('--rotate') || '0') || 0);
+        const tm = getComputedStyle(span).transform;
+        const tilted = rot > 0.01 || (tm && tm !== 'none' && !/^matrix\(1,\s*0,\s*0,\s*1,\s*0,\s*0\)$/.test(tm));
+        const r = span.getBoundingClientRect();
+        if (!(r.width > 0.5 && r.height > 0.5)) continue;
+        read.push({
+          span,
+          node,
+          tilted,
+          blank: !(node.textContent || '').trim(),
+          l: r.left - layerRect.left,
+          t: r.top - layerRect.top,
+          w: r.width,
+          h: r.height,
+        });
+      }
+      if (read.length < 2) return read.length ? read : null;
+
+      /* 比正文高一截的盒子（页边竖排文字实测能到页高的 45%）会把整页的行结构拽歪：
+         它自己一条「行」，还会把相邻两行的边界一起拉过去。剔除它，保持 pdf.js 原样。
+         阈值和 `mergeRectsByLine()` 里砍怪矩形的口径一致。 */
+      const hs = read.map((x) => x.h).sort((a, b) => a - b);
+      const medH = hs[hs.length >> 1] || 0;
+      const maxH = Math.max(H * 0.08, medH * 4);
+      const items = read.filter((x) => !x.tilted && !x.blank && x.h <= maxH);
+      if (items.length < 2) return read;
+
+      /* ② 分行：按**垂直重叠**聚类。
+         不能按中心线距离：上下标、小字号引文与正文中心线差得远，会被拆成两行。 */
+      items.sort((a, b) => a.t - b.t);
+      const rows = [];
+      for (const it of items) {
+        const row = rows[rows.length - 1];
+        const overlap = row ? Math.min(row.bottom, it.t + it.h) - Math.max(row.top, it.t) : 0;
+        if (row && overlap > Math.min(row.h, it.h) * 0.5) {
+          row.items.push(it);
+          row.top = Math.min(row.top, it.t);
+          row.bottom = Math.max(row.bottom, it.t + it.h);
+          row.h = Math.min(row.h, it.h);
+        } else {
+          rows.push({ top: it.t, bottom: it.t + it.h, h: it.h, items: [it] });
+        }
+      }
+      for (const row of rows) row.cy = (row.top + row.bottom) / 2;
+
+      /* ③ 纵向边界：相邻行中心线的中点；首/末行顶到层边，层内不留「无主之地」 */
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const prev = rows[i - 1];
+        const next = rows[i + 1];
+        const midPrev = prev ? (prev.cy + row.cy) / 2 : 0;
+        const midNext = next ? (row.cy + next.cy) / 2 : H;
+        row.bandTop = Math.max(0, Math.min(midPrev, row.top));
+        row.bandBottom = Math.min(H, Math.max(midNext, row.bottom));
+      }
+
+      /* ④ 写样式（全部算完再写，只触发一次重排）：**只做纵向扩张，而且只补行距缝隙**。
+         ⚠️ 两条硬约束（都是实测出来的，别改）：
+         ① **横向 padding 绝对不能加**：受控实验 test/lab-leak.mjs 里，只要 span 有横向
+            padding，它在「跨 span 的选区」中就会被浏览器**整盒**返回 ——
+            `Range.getClientRects()` 给出 300/953（边框盒）而不是 52/434（行盒），
+            画出来的选中方块立刻横贯整页，正是用户说的「一搞就选中一大块」。
+         ② **纵向 padding 也要夹住**：同一实验里小 padding 不污染矩形，但页 1 的作者栏
+            在 pt=158px 时又被整盒返回了。所以只补「行距缝隙」这一档（实测 1~3px 就够），
+            上限 HIT_PAD_MAX；页面上下页边、图区那种大空白不铺，
+            交给 `repairSelectionEnds()` 的几何命中兜底。
+         `top` 反向补偿，保证字形位置一个像素都不动。 */
+      for (const row of rows) {
+        for (const it of row.items) {
+          const pt = Math.min(HIT_PAD_MAX, Math.max(0, it.t - row.bandTop));
+          const pb = Math.min(HIT_PAD_MAX, Math.max(0, row.bandBottom - (it.t + it.h)));
+          if (pt + pb < 0.5) continue;
+          it.span.style.paddingTop = `${pt.toFixed(2)}px`;
+          it.span.style.paddingBottom = `${pb.toFixed(2)}px`;
+          it.span.style.top = `${(it.t - pt).toFixed(2)}px`;
+          it.span.dataset.hitBox = 'tiled';
+        }
+      }
+      return read;
+    } catch { /* 铺不满就保持 pdf.js 原样：宁可有缝，也不能把文本层弄坏 */ }
+    return null;
+  }
+
+  /**
+   * 「这个屏幕坐标下面是哪个字」—— 不走浏览器的坐标→位置回退，自己按几何算。
+   *
+   * 为什么要自己算：几类鼠标落点浏览器给不出真正的文字位置（成因见 `_tileTextHitBoxes`）：
+   *   · 行距缝隙 / 左右页边 / 行尾空白 → 浏览器退化成「容器 + 第几个子节点」；
+   *   · 起手落在引用热点 `[n]` 上 → 实测锚点能差 10 个字。
+   * `repairSelectionEnds()` 用它把跑偏的选区两端拉回文字上。
+   *
+   * 几何来自 `_tileTextHitBoxes()` 返回并缓存在 `entry.hitBoxes` 上的命中表
+   * （页面内局部坐标），所以每次判定只读一次页面矩形，不逐个 span 读 DOM。
+   *
+   * @returns {{node: Text, offset: number, page: number}|null}
+   */
+  charPosAt(clientX, clientY) {
+    /* 先找最近的一页：拖到阅读区**外面**松手（右侧面板上）时，坐标要夹回页面边缘，
+       否则「拖出去松手」就没有字符位置可用，跑偏的选区没法纠正。 */
+    let pick = null;
+    for (const [i, entry] of this.rendered) {
+      const pageEl = this.pageEls[i];
+      if (!pageEl) continue;
+      const boxes = entry.hitBoxes;
+      if (!boxes || !boxes.length) continue;   // 文本层还没建好（或整页没有文字）
+      const pr = pageEl.getBoundingClientRect();
+      const dx = clientX < pr.left ? pr.left - clientX : (clientX > pr.right ? clientX - pr.right : 0);
+      const dy = clientY < pr.top ? pr.top - clientY : (clientY > pr.bottom ? clientY - pr.bottom : 0);
+      const d = dx * dx + dy * dy;
+      if (!pick || d < pick.d) pick = { d, i, entry, pr };
+    }
+    if (!pick) return null;
+    const { entry, pr, i } = pick;
+    const k = layerScale(entry.textDiv);
+    const x = (clamp(clientX, pr.left, pr.right) - pr.left) / k;
+    const y = (clamp(clientY, pr.top, pr.bottom) - pr.top) / k;
+    let best = null;
+    for (const b of entry.hitBoxes) {
+      // 先看纵向归属哪一行，再看横向差多少（缝隙被补上之后，正确的那一个两项都是 0）
+      const bdy = y < b.t ? b.t - y : (y > b.t + b.h ? y - (b.t + b.h) : 0);
+      const bdx = x < b.l ? b.l - x : (x > b.l + b.w ? x - (b.l + b.w) : 0);
+      const d = bdy * CHAR_HIT_ROW_WEIGHT + bdx;
+      if (!best || d < best.d) best = { d, b };
+    }
+    if (!best) return null;
+    // `_offsetInSpan` 里的字符区间是**视口坐标**（getBoundingClientRect 已含缩放），所以这里传原始 x
+    return { ...this._offsetInSpan(best.b.span, best.b.node, clamp(clientX, pr.left, pr.right)), page: Number(this.pageEls[i].dataset.page) };
+  }
+
+  /**
+   * span 里离 clientX 最近的**字符边界**。
+   * 每个字符的 x 区间缓存进 WeakMap（文本层重建时元素一起消失，缓存自动作废），
+   * 所以一次拖选里同一段文字只量一次。
+   */
+  _offsetInSpan(span, node, clientX) {
+    if (!this._charX) this._charX = new WeakMap();
+    let map = this._charX.get(span);
+    if (!map) {
+      map = [];
+      const text = node.textContent || '';
+      const r = document.createRange();
+      for (let k = 0; k < text.length; k++) {
+        try { r.setStart(node, k); r.setEnd(node, k + 1); } catch { map.push(null); continue; }
+        const cr = r.getBoundingClientRect();
+        map.push(cr.width > 0 || cr.height > 0 ? { l: cr.left, r: cr.right } : null);
+      }
+      this._charX.set(span, map);
+    }
+    let bi = 0;
+    let bd = Infinity;
+    for (let k = 0; k < map.length; k++) {
+      const m = map[k];
+      if (!m) continue;
+      const d = clientX < m.l ? m.l - clientX : (clientX > m.r ? clientX - m.r : 0);
+      if (d < bd) { bd = d; bi = k; }
+    }
+    // 落在字符右半边就取它后面那个边界 —— 和浏览器 caret 的手感一致
+    const m = map[bi];
+    const offset = m && clientX > (m.l + m.r) / 2 ? bi + 1 : bi;
+    return { node, offset: Math.min(offset, (node.textContent || '').length) };
+  }
+
+  /**
+   * 把「跑偏的选区」两端拉回文字上。
+   *
+   * 判据：Range 的某一端**不是文本节点**。那说明浏览器算出的是「容器 + 第几个子节点」
+   * 这类没有文字含义的位置（成因见 `_tileTextHitBoxes`），Range 会从锚点一路吃到那个
+   * 子节点 —— 界面上看就是「一搞就选中一大块」。这时用鼠标的两个真实落点
+   * （按下点 / 松手点）自己算字符位置，重建选区。
+   *
+   * 还有一类**更彻底的失败**要一起兜：拖选本该有选区，浏览器却给了一个**塌掉的**空选区
+   * （起手落在页边空白、或者落在引用热点那种非文字元素上时实测会发生）——
+   * 用户拖了半天一个字都没选出来。`allowCollapsed` 打开时，用两个落点自己建选区。
+   *
+   * ⚠️ 只有这两种情况才动手：正常拖选、双击选词、三击选段、测试里程序化构造的选区
+   * 两端本来就是文本节点，**一个字节都不碰**。
+   *
+   * @param {{anchor?:{x:number,y:number}, focus?:{x:number,y:number}, allowCollapsed?:boolean}} opts
+   */
+  repairSelectionEnds({ anchor = null, focus = null, allowCollapsed = false } = {}) {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return false;
+    const range = sel.getRangeAt(0);
+    const common = range.commonAncestorContainer;
+    const commonEl = common.nodeType === 1 ? common : common.parentElement;
+    // 只修 PDF 阅读区里的选区：笔记/问答里的输入框不走这条
+    if (!commonEl || !this.pagesEl?.contains(commonEl)) return false;
+    if (sel.isCollapsed) {
+      if (!allowCollapsed || !anchor || !focus) return false;
+      // 只处理「真的拖过」的那种：原地单击不该凭空造出选区
+      if (Math.hypot(focus.x - anchor.x, focus.y - anchor.y) < 4) return false;
+      const a0 = this.charPosAt(anchor.x, anchor.y);
+      const f0 = this.charPosAt(focus.x, focus.y);
+      if (!a0 || !f0) return false;
+      try { sel.setBaseAndExtent(a0.node, a0.offset, f0.node, f0.offset); } catch { return false; }
+      return true;
+    }
+    const isText = (n) => !!(n && n.nodeType === 3 && n.parentElement?.closest?.('.textLayer'));
+    const okA = isText(range.startContainer);
+    const okF = isText(range.endContainer);
+    if (okA && okF) return false;
+    const a = okA ? { node: range.startContainer, offset: range.startOffset } : (anchor ? this.charPosAt(anchor.x, anchor.y) : null);
+    const f = okF ? { node: range.endContainer, offset: range.endOffset } : (focus ? this.charPosAt(focus.x, focus.y) : null);
+    if (!a || !f) return false;
+    try { sel.setBaseAndExtent(a.node, a.offset, f.node, f.offset); } catch { return false; }
+    return true;
+  }
+
+  /**
    * 把 pdf.js 的 `transform: scaleX(...)` 换算成等效的 `letter-spacing`。
    *
    * 保留它是因为**换真字体后仍然需要**：嵌入字体常常是子集，缺字形会逐字回退到
@@ -1365,6 +1678,15 @@ export class PdfViewer {
     if (!entry || !entry.pinLayer) return;
     // 复用热点层时只清引用节点，保留同层的笔记书签。
     entry.pinLayer.querySelectorAll('.cite-link').forEach((node) => node.remove());
+    /**
+     * ⚠️ 热点是 `pointer-events:none` 的（见 style.css 里 `.cite-link` 的说明）：
+     * 它盖在 `[12]` 这几个字**上面**，一旦吃鼠标事件，mousedown 就落在 div 而不是文本上，
+     * 浏览器给不出真正的文字锚点 —— 起手落在 `[n]` 上的一次小拖选能选出 2776 字（跨两页）。
+     * 代价是 `e.target.closest('.cite-link')` 和 `:hover` 都不再成立，
+     * 所以这里留一份**几何表**：`citeAt()` 按坐标判命中，`_updateCiteHover()` 点亮悬停。
+     */
+    entry.citeHits = [];
+
     /**
      * 参考文献**条目**本身通常以 [n] 开头，它不是正文引用，不能点击后再跳回同一页并伪造
      * 一条"返回原位置"记录。
@@ -1423,13 +1745,12 @@ export class PdfViewer {
            */
           const pageW = pageEl.clientWidth || pr.width;
           const pageH = pageEl.clientHeight || pr.height;
-          const tm = getComputedStyle(entry.pinLayer).transform;
-          const layerScale = tm && tm !== 'none' ? (Number.parseFloat(tm.split(',')[0].replace('matrix(', '')) || 1) : 1;
+          const k = layerScale(entry.pinLayer);
           // 页面内局部坐标（热点就是挂在这一页上的，所以不需要屏幕坐标这一步）
-          const localLeft = (r.left - pr.left) / layerScale;
-          const localTop = (r.top - pr.top) / layerScale;
-          const citeW = Math.min(Math.max(r.width / layerScale, 1), pageW);
-          const citeH = Math.min(Math.max(r.height / layerScale, 1), pageH);
+          const localLeft = (r.left - pr.left) / k;
+          const localTop = (r.top - pr.top) / k;
+          const citeW = Math.min(Math.max(r.width / k, 1), pageW);
+          const citeH = Math.min(Math.max(r.height / k, 1), pageH);
           const citeLeft = clamp(localLeft, 0, Math.max(0, pageW - citeW));
           const citeTop = clamp(localTop, 0, Math.max(0, pageH - citeH));
           d.style.left = `${citeLeft}px`;
@@ -1437,24 +1758,74 @@ export class PdfViewer {
           d.style.width = `${citeW}px`;
           d.style.height = `${citeH}px`;
           d.title = `引用 [${nums.join(', ')}] —— 点击跳到参考文献`;
-          /**
-           * ⚠️ `anchor` 必须**点击时现取**，不能在画热点那一刻固化。
-           *
-           * 原来这里写的是 `const anchor = { left: r.left, ... }`（绘制时的屏幕坐标），
-           * 点击时原样交给引用卡片当定位锚点。但用户看论文一定会滚动 ——
-           * 滚动后这个坐标就过期了：实测向下滚 150px 时卡片比引用低了 175px、
-           * 滚 400px 时偏 135px，用户看到的就是「引用卡片跑到别处 / 那个框没对齐」。
-           */
-          d.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const cr = d.getBoundingClientRect();
-            const liveAnchor = { left: cr.left, top: cr.top, bottom: cr.bottom, width: cr.width, height: cr.height };
-            this.opts.onCiteClick?.({ nums, page: i, raw, anchor: liveAnchor });
-          });
           entry.pinLayer.append(d);
+          /**
+           * 命中表存**页面内局部坐标**（不是屏幕坐标）：`citeAt()` 每次鼠标移动都要用，
+           * 存屏幕坐标就得对每个热点读一次 `getBoundingClientRect()`（一页几十个 ×
+           * 每帧一次 = 几百次布局查询）；存局部坐标则只需要每页读一次页面矩形。
+           * 卡片锚点在**命中时**现取，滚动后也不会过期（见用户实测 2026-10-04）。
+           */
+          entry.citeHits.push({ el: d, nums, raw, page: i, x: citeLeft, y: citeTop, w: citeW, h: citeH });
         }
       }
     }
+  }
+
+  /**
+   * 这个屏幕坐标下面有没有正文引用热点 `[n]`。
+   *
+   * 热点自己不吃鼠标事件（见 `_paintCites` 的说明），所以点击/悬停都改成
+   * **按坐标几何命中**：只读每页一次页面矩形，其余全是命中表上的算术。
+   *
+   * @returns {{nums:number[],raw:string,page:number,anchor:object,el:Element}|null}
+   */
+  citeAt(clientX, clientY) {
+    for (const [i, entry] of this.rendered) {
+      const hits = entry.citeHits;
+      if (!hits || !hits.length) continue;
+      const pageEl = this.pageEls[i];
+      const pr = pageEl?.getBoundingClientRect();
+      if (!pr) continue;
+      const k = layerScale(entry.pinLayer);
+      const lx = (clientX - pr.left) / k;
+      const ly = (clientY - pr.top) / k;
+      if (lx < -4 || ly < -4 || lx > pr.width / k + 4 || ly > pr.height / k + 4) continue;
+      for (const h of hits) {
+        if (lx >= h.x - 1 && lx <= h.x + h.w + 1 && ly >= h.y - 1 && ly <= h.y + h.h + 1) {
+          // 只有真的命中才去读一次矩形（卡片锚点必须现取，滚动后绘制时的坐标就过期了）
+          const r = h.el.getBoundingClientRect();
+          return {
+            nums: h.nums,
+            raw: h.raw,
+            page: i,
+            el: h.el,
+            anchor: { left: r.left, top: r.top, bottom: r.bottom, width: r.width, height: r.height },
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 鼠标经过引用热点时点亮它 / 换手型光标。
+   *
+   * `.cite-link` 改成 `pointer-events:none` 之后 CSS 的 `:hover` 不再触发，
+   * 这里用同一个几何命中把「鼠标移上去才亮」的观感补回来。
+   * 光标走 `.page.cite-hot` 类（见 style.css）：热点自己不吃事件，
+   * 只能让**整页文字**在悬停热点期间变手型。
+   */
+  _updateCiteHover(clientX, clientY) {
+    const hot = this.citeAt(clientX, clientY);
+    const el = hot?.el || null;
+    if (el === this._hotCite) return;
+    this._hotCite?.classList.remove('hot');
+    this._hotCite = el;
+    if (el) el.classList.add('hot');
+    const pageEl = el ? el.closest('.page') : null;
+    if (this._hotCitePage && this._hotCitePage !== pageEl) this._hotCitePage.classList.remove('cite-hot');
+    if (pageEl) pageEl.classList.add('cite-hot');
+    this._hotCitePage = pageEl;
   }
 
   /**

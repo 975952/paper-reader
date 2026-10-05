@@ -1488,12 +1488,22 @@ body.row-dragging { cursor: row-resize; user-select: none; }
 
 /* ═══════════ 正文里的引用标记 [n] + 文献检索面板 ═══════════ */
 
-/* 平时不可见，鼠标移上去才亮 —— 点一下跳到参考文献 */
+/* 平时不可见，鼠标移上去才亮 —— 点一下跳到参考文献。
+   ⚠️ `pointer-events: none` 是**必须**的（2026-10-06 修「稳定选词」）：
+   它盖在 `[12]` 这几个字上面，一旦吃鼠标事件，mousedown 就落在 div 而不是文字上，
+   浏览器给不出真正的文字锚点 —— 起手落在 [n] 上的一次 120px 小拖选，
+   实测能选出 2776 字、横跨两页（用户说的「一搞就选中一大块」）。
+   代价是 `:hover` 不再触发，所以悬停点亮改由 pdfview.js 的 `_updateCiteHover()`
+   用几何命中加 `.hot` 类来驱动；点击也改由 `citeAt()` 按坐标判命中。 */
 .cite-link {
-  position: absolute; border-radius: 3px; cursor: pointer; pointer-events: auto;
+  position: absolute; border-radius: 3px; cursor: pointer; pointer-events: none;
   transition: background .1s, box-shadow .1s;
 }
-.cite-link:hover { background: var(--sel); box-shadow: 0 0 0 1px var(--accent); }
+.cite-link.hot { background: var(--sel); box-shadow: 0 0 0 1px var(--accent); }
+/* 悬停在 [n] 上时整页文字给手型：热点自己不吃鼠标事件，没法只让热点变光标。
+   选择器权重要比 `.textLayer :is(span, br)` 高，才盖得住那里的 `cursor: text`。 */
+.page.cite-hot .textLayer,
+.page.cite-hot .textLayer :is(span, br) { cursor: pointer; }
 
 .cite-actions { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--bg-sunken); }
 .cite-actions button {

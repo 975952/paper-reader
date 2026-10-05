@@ -1917,7 +1917,9 @@ function initViewer() {
     },
     onScale: (scale) => syncZoom(scale),
     onNoteClick: (id) => openNoteEditorById(id),
-    onCiteClick: (info) => handleCite(info),
+    /* 正文 [n] 的点击不再走 viewer 回调：热点是 pointer-events:none 的，
+       点击由 initSelection 里的 mouseup 用 viewer.citeAt(x,y) 判命中后直接 handleCite()
+       （见 2026-10-06「稳定选词」的说明）。 */
   });
   window.__viewer = viewer;
   window.__settings = Settings;   // 方便调试 / 自动化测试
@@ -2795,6 +2797,9 @@ function initCiteBox() {
   document.addEventListener('mousedown', (e) => {
     if ($('#citeBox').classList.contains('hidden')) return;
     if (e.target.closest('#citeBox') || e.target.closest('.cite-link')) return;
+    // 热点自己不吃鼠标事件，`e.target` 不再是 `.cite-link`（见 style.css），按坐标再判一次，
+    // 免得「点 [n] 时先把卡片关掉、再重新打开」闪一下
+    if (viewer?.citeAt?.(e.clientX, e.clientY)) return;
     $('#citeBox').classList.add('hidden');
   });
 }
@@ -3067,6 +3072,13 @@ function initSelection() {
   const v = $('#viewer');
   // 原生 ::selection 已设成透明，这里自己画不重叠的方块（拖动过程中也在刷新）
   document.addEventListener('selectionchange', throttle(() => {
+    /* 浏览器偶尔会把选区的一端算成「容器 + 第几个子节点」（成因与修法见
+       pdfview.js 的 `_tileTextHitBoxes`）。那种 Range 会从锚点一路吃到那个子节点，
+       界面上就是「一搞就选中一大块」。画方块之前先按鼠标两个真实落点把跑偏的一端
+       拉回文字上 —— 正常选区（两端都是文本节点）一个字节都不动。 */
+    if (state._dragSelecting && state._downAt && state._lastPt) {
+      viewer?.repairSelectionEnds?.({ anchor: state._downAt, focus: state._lastPt, allowCollapsed: true });
+    }
     const info = viewer?.getSelectionInfo();
     // 只在「确实有一个新选区」时更新方块。
     // 选区为空时**故意不动**：虚拟化把页面卸掉时浏览器也会顺手把选区清空，
@@ -3091,14 +3103,42 @@ function initSelection() {
    */
   document.addEventListener('mouseup', (e) => {
     if (e.target?.closest?.('#bubble, #citeBox, #noteBox, #settingsModal')) return;
-    const moved = state._downAt
-      ? Math.hypot(e.clientX - state._downAt.x, e.clientY - state._downAt.y)
+    const down = state._downAt;
+    const moved = down
+      ? Math.hypot(e.clientX - down.x, e.clientY - down.y)
       : 999;
     const isClick = moved < 5;
     const onControl = !!e.target?.closest?.('button, input, select, textarea, label, a');
     state._downAt = null;
-    setTimeout(() => onSelectionChanged({ deselect: isClick && !onControl }), 10);
+    state._lastPt = null;
+    /* 正文 [n] 热点：`.cite-link` 是 pointer-events:none 的（不然 mousedown 落在 div 上，
+       浏览器给不出真正的文字锚点，一次小拖选能选出跨页的 2700 多字），
+       所以点击改成在这里按坐标判命中。 */
+    if (isClick && !onControl) {
+      const cite = viewer?.citeAt?.(e.clientX, e.clientY);
+      if (cite) {
+        // 单击热点和「点空白」一样会把浏览器选区塌掉，这里照样清一遍（否则气泡没了、
+        // state.selection 还在，按 T 会翻出旧文字）
+        onSelectionChanged({ deselect: true });
+        scheduleCiteAction(cite, e.detail || 1);
+        return;
+      }
+    }
+    setTimeout(() => onSelectionChanged({
+      deselect: isClick && !onControl,
+      down,
+      up: { x: e.clientX, y: e.clientY },
+    }), 10);
   });
+
+  /* 记录拖动中的实时位置：选区跑偏时要靠它算「终点该落在哪个字上」 */
+  document.addEventListener('mousemove', (e) => {
+    if (state._downAt) state._lastPt = { x: e.clientX, y: e.clientY };
+  }, { passive: true });
+
+  /* 双击的那一下会先走一次单击路径 —— 卡片一开就会跳到文末，用户再也选不了这个 [5]。
+     所以延迟一点点再开卡片；第二下（或 dblclick）一来就取消。 */
+  document.addEventListener('dblclick', () => cancelCiteAction());
 
   /**
    * 拖着选到窗口外面松手，页面里根本收不到 mouseup。
@@ -3107,8 +3147,12 @@ function initSelection() {
   document.documentElement.addEventListener('mouseleave', () => {
     if (!state._dragSelecting) return;
     state._dragSelecting = false;
+    // 把最后两个已知落点带上：选区一端若被浏览器算成容器位置，出窗口前也要纠正一次
+    const down = state._downAt;
+    const up = state._lastPt;
     state._downAt = null;
-    setTimeout(() => onSelectionChanged({}), 10);
+    state._lastPt = null;
+    setTimeout(() => onSelectionChanged({ down, up }), 10);
   });
 
   document.addEventListener('mousedown', (e) => {
@@ -3156,11 +3200,24 @@ function initSelection() {
 /**
  * @param opts.deselect 这次松手是不是一次「取消选择」的单击（点在空白处/面板上）。
  *   是的话且浏览器已经没有活选区，就把气泡、方块、state.selection 一起清掉。
+ * @param opts.down / opts.up 这一次松手的按下点与松手点。浏览器把选区算成
+ *   「容器 + 第几个子节点」时（见 pdfview.js 的 `_tileTextHitBoxes`），靠这两个点
+ *   把跑偏的一端算回文字上。
+ * @param opts.retry 是否允许「这次没选出东西」时再试一次（见下面的说明）。
  */
-function onSelectionChanged({ deselect = false } = {}) {
+function onSelectionChanged({ deselect = false, down = null, up = null, retry = true } = {}) {
   state._dragSelecting = false;
+  if (down && up) viewer?.repairSelectionEnds?.({ anchor: down, focus: up, allowCollapsed: true });
   const info = viewer?.getSelectionInfo();
   if (!info) {
+    const dragged = !!(down && up) && Math.hypot(up.x - down.x, up.y - down.y) >= 4;
+    /* 文本层的 span 正在重建时（虚拟化重画、切片刷新）算不出字符位置，
+       这一次纠正就会落空 —— 表现是「拖了半天一个字都没选出来」。
+       这种时候给一次 90ms 后的重试（只重试一次，不会无限循环）。 */
+    if (retry && dragged && !deselect) {
+      setTimeout(() => onSelectionChanged({ deselect: false, down, up, retry: false }), 90);
+      return;
+    }
     if (deselect) clearSelectionState();
     else hideBubble();
     return;
@@ -3200,6 +3257,29 @@ function showBubble(sel) {
 }
 
 function hideBubble() { $('#bubble').classList.add('hidden'); }
+
+/**
+ * 点正文 `[n]` → 打开参考文献卡片。
+ *
+ * 为什么要延迟 300ms：`.cite-link` 改成 `pointer-events:none` 之后（理由见 style.css），
+ * 双击 `[5]` 会**先**走一次单击路径 —— 而卡片一开就会 `jumpToPageWithHistory()` 跳到文末，
+ * 用户就再也选不了这个 `[5]` 了。所以等一等：如果紧接着来的是双击的第二下
+ * （或浏览器补发的 `dblclick`），就把这次卡片取消，把这次操作留给「选词」。
+ */
+let citeActionTimer = 0;
+function scheduleCiteAction(cite, detail = 1) {
+  cancelCiteAction();
+  if (detail >= 2) return;            // 已经是双击的一部分：不抢这一次
+  citeActionTimer = setTimeout(() => {
+    citeActionTimer = 0;
+    handleCite(cite);
+  }, 300);
+}
+function cancelCiteAction() {
+  if (!citeActionTimer) return;
+  clearTimeout(citeActionTimer);
+  citeActionTimer = 0;
+}
 
 /**
  * 忘掉当前选区：气泡、页面上的方块、state.selection 三样必须一起清，

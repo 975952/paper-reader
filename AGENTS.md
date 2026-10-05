@@ -21,5 +21,8 @@
    默认按 ANSI(936) 解析再写回，会把整个文件的 UTF-8 中文变成乱码
    （踩过一次：`public/js/app.js` 全文乱码）。改文件用编辑工具；必须用脚本时显式指定编码：
    `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))`。
-7. **大改动之前先备份**：仓库没有 git。改 `public/` 之前至少要有一份可回退的整目录副本
-   （`test/pack.mjs` 打的源码 zip、或直接复制 `public/`），否则改坏了没法回退。
+7. **大改动之前先备份**：仓库**有 git**（`origin = https://github.com/975952/paper-reader.git`，
+   交付物 `.exe` 被 `.gitignore` 排除，改动只在源码里），所以正确的做法是
+   **改之前先 `git commit` 一次**，改坏了 `git checkout` 就能回退；
+   `test/pack.mjs` 打的源码 zip 是第二道保险（2026-10-06 修好了它漏掉 `security.js` 的白名单）。
+   注意 `data/`、`papers/` 永远不进 git，也不要进 zip。
