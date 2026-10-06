@@ -501,6 +501,11 @@ function setPanelVisible(id, on) {
   savePanels();
   applyPanels();
   applyResponsiveLayout();
+  // 关闭左栏最后一个面板时同步收起整栏，保留活动栏作为明确的展开入口。
+  if (!on && !isRightPanel(id) && visiblePanelsOfDock('left').length === 0
+      && !document.body.classList.contains('no-left')) {
+    setSideCollapsed('left', true);
+  }
   if (on && !wasVisible) requestAnimationFrame(() => {
     applyBodyScroll(id);
     scrollBodyToBottom(id);
