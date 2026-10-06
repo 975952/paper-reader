@@ -1331,8 +1331,12 @@ function bindSideToggleButton(side, btn) {
   if (!btn) return;
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
-    const collapsed = document.body.classList.contains(`no-${side}`);
-    setSideCollapsed(side, !collapsed, !collapsed);
+    const collapsed = document.body.classList.contains(`no-${side}`)
+      || visiblePanelsOfDock(side).length === 0;
+    if (collapsed && side === 'left' && visiblePanelsOfDock('left').length === 0) {
+      setPanelVisible(readLeftChoice() || 'files', true);
+    }
+    setSideCollapsed(side, !collapsed, collapsed);
     /**
      * ⚠️ 展开右栏时**必须同时保证里面有一块面板开着**（2026-10 实测踩到）：
      * 右栏两块默认都不显示，于是 `body.right-empty` 为真、`#rightCols` 是 `display:none`。
