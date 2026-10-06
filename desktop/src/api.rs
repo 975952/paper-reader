@@ -974,13 +974,12 @@ fn check_fetch_url(raw: &str, check_private: bool) -> Result<String, String> {
     if !is_external_url(s) {
         return Err("只支持 http/https 链接".to_string());
     }
-    let rest = s.split_once("://").map(|(_, r)| r).unwrap_or("");
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.contains('@') {
+    let parsed = url::Url::parse(s).map_err(|_| "链接格式无效".to_string())?;
+    if parsed.username().len() > 0 || parsed.password().is_some() {
         return Err("url 不允许携带用户名密码".to_string());
     }
     if check_private {
-        let host = host_of(s);
+        let host = parsed.host_str().unwrap_or("");
         if is_private_host(&host) {
             return Err("内网地址不允许导入".to_string());
         }
