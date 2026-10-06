@@ -1165,6 +1165,9 @@ async function handleUpload(req, res, url) {
 }
 
 async function handle(req, res) {
+  const host = String(req.headers.host || '').toLowerCase();
+  const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`]);
+  if (!allowedHosts.has(host)) return sendJson(res, 403, { error: { message: '非法 Host' } });
   const url = new URL(req.url, `http://${req.headers.host || HOST}`);
   const pathname = decodeURIComponent(url.pathname);
 

@@ -32,6 +32,7 @@ rust-embed = "8"
 # preserve_order：保持键的插入顺序，写回的 notes/state 和 Node 版逐字节一致，
 #   不会因为键被重排而让文件反复 churn。
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+url = "2"
 
 [profile.release]
 opt-level = 2

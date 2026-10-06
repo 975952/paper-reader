@@ -110,6 +110,13 @@ fn accept_loop(server: Server, ctx: Arc<Ctx>) {
 fn handle(mut rq: Request, ctx: &Ctx) {
     let method = rq.method().clone();
     let target = rq.url().to_string();
+    let host = rq.headers().iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("host"))
+        .map(|h| h.value.as_str().to_ascii_lowercase()).unwrap_or_default();
+    let allowed = [format!("127.0.0.1:{}", ctx.port), format!("localhost:{}", ctx.port), format!("[::1]:{}", ctx.port)];
+    if !allowed.iter().any(|v| v == &host) {
+        return send_text(rq, 403, "Invalid Host");
+    }
     let (raw_path, raw_query) = split_target(&target);
 
     // Node 是 decodeURIComponent(url.pathname)：先解码再匹配路由

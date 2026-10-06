@@ -1584,6 +1584,7 @@ dependencies = [
  "tao",
  "tiny_http",
  "ureq",
+ "url",
  "winres",
  "wry",
 ]
