@@ -1265,7 +1265,16 @@ async function handle(req, res) {
         const detail = capped.map((c) => `${c.field}（上限 ${c.limit} 字符）`).join('、');
         return sendJson(res, 400, { error: { message: `字段超长：${detail}。请缩短后重试（未保存任何改动）` } });
       }
-      const cur = await readDataFile('config.json', {});
+      let cur;
+      try {
+        cur = JSON.parse(await fsp.readFile(path.join(DATA_DIR, 'config.json'), 'utf8'));
+      } catch (e) {
+        if (e && e.code === 'ENOENT') cur = {};
+        else {
+          sec.diag(`读取 config.json 失败: ${e && e.message}`);
+          return sendJson(res, 500, { error: { message: '配置文件损坏，已拒绝覆盖，请先修复 config.json' } });
+        }
+      }
       const next = { ...DEFAULT_CONFIG, ...cur, ...patch };
       if (!patch.apiKey) next.apiKey = cur.apiKey || '';
       await writeDataFile('config.json', next);
@@ -1328,6 +1337,14 @@ async function handle(req, res) {
       const bad = sec.checkNotes(items);
       if (bad) return sendJson(res, 413, { error: { message: bad } });
       await writeDataFile(file, items);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'DELETE') {
+      try { await fsp.rm(path.join(DATA_DIR, file), { force: true }); }
+      catch (e) {
+        sec.diag(`删除阅读会话失败: ${e && e.message}`);
+        return sendJson(res, 500, { error: { message: '删除阅读会话失败，请重试' } });
+      }
       return sendJson(res, 200, { ok: true });
     }
     return send(res, 405, 'Method Not Allowed');
@@ -1412,17 +1429,6 @@ async function handle(req, res) {
     }
     out.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     return sendJson(res, 200, { sessions: out });
-  }
-
-  /** DELETE /api/session?doc=<doc>&sid=<sid> —— 删掉一个会话文件（不碰论文本身） */
-  if (pathname === '/api/session' && req.method === 'DELETE') {
-    const doc = url.searchParams.get('doc') || 'default';
-    const sid = (url.searchParams.get('sid') || '').replace(/[^\w-]/g, '').slice(0, 40);
-    const docKey = docIdOf(doc);
-    const file = sid ? `session-${docKey}-${sid}.json` : `session-${docKey}.json`;
-    try { await fsp.rm(path.join(DATA_DIR, file), { force: true }); }
-    catch (e) { return sendJson(res, 500, { error: { message: `删除会话失败：${e && e.message}` } }); }
-    return sendJson(res, 200, { ok: true });
   }
 
   if (pathname === '/api/health') return sendJson(res, 200, { ok: true, port: PORT });

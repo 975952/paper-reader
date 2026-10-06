@@ -150,7 +150,7 @@ function authorized(req, pathname) {
  * 附加防线：Origin / Referer 白名单。
  * **不能替代 token**（审计 §P0 第 4 条），只在 token 已经校验通过之后再看一眼，
  * 用来挡住「token 通过某种途径泄漏到别的页面」这种情况。
- * 两个头都没有时放行：非浏览器客户端（curl / 测试脚本）本来就不带。
+ * 两个头都没有时拒绝：非浏览器客户端应显式使用 token/受信任请求头。
  */
 const ALLOWED_ORIGIN_RE = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(\.)?(:\d+)?$/i;
 
@@ -165,7 +165,7 @@ function originAllowed(req) {
       return false;
     }
   }
-  return true;
+  return false;
 }
 
 /** 给 index.html 响应用的 Set-Cookie（子资源例外通道） */

@@ -413,7 +413,7 @@ pub fn notes(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
             };
             let items = match payload.get("items") {
                 Some(Value::Array(a)) => Value::Array(a.clone()),
-                _ => json!([]),
+                _ => return send_json(rq, 400, &err_json("请求体缺少 items 数组")),
             };
             // 审计 §P1：条目数 + 总字符数（请求体字节上限在 server.rs 里）
             if let Err(msg) = limits::check_notes(&items) {
@@ -722,7 +722,7 @@ pub fn static_file(rq: Request, decoded_path: &str, is_head: bool) {
 
 pub fn parse_json(body: &[u8]) -> Result<Value, String> {
     if body.is_empty() {
-        return Ok(json!({}));
+        return Err("请求体不能为空".to_string());
     }
     serde_json::from_slice::<Value>(body).map_err(|e| format!("请求体解析失败: {}", e))
 }
