@@ -1,8 +1,9 @@
 # 论文阅读器 · 改造进度
 
-> 最后更新：**2026-10-04**（①–⑧ 见下；⑨ **R12：右栏改成「列」——译文 / 问答只放右边、
+> 最后更新：**2026-10-08**（①–⑧ 见下；⑨ **R12：右栏改成「列」——译文 / 问答只放右边、
 > 一栏只开一个、右键图标再开一栏、按住图标拖出独立窗口**，见 §19。
-> ⑩ AI 结果块不再同栏堆叠，中央标签页仍未开工。）
+> ⑩ AI 结果块不再同栏堆叠，中央标签页仍未开工。
+> ⑪ **触摸屏捏合改由应用接管 + 缩放重画去掉强制同步布局**，见 §38。）
 > 细则与逐条证据在 [`refactor-baseline-phase0.md`](refactor-baseline-phase0.md)；本文件是**一页式现状**。
 >
 > 历史版本头（2026-10-03）：① 接手只读核验并同步文档；② **人眼逐张视觉验收首次完成**；
@@ -1876,3 +1877,65 @@ Range 于是从锚点一路「吃到」第 k 个子节点：
 构建前务必先 `git status` 确认工作区状态；
 若工作区里有别人的半成品，**不要替对方构建**（会把未完成的代码带进交付物），
 要么等对方提交，要么只按自己的改动范围验证源码。
+
+---
+
+## 38. 触摸屏缩放不丝滑（2026-10-08，提交 `4475b71`）
+
+用户口径：「目前的工程备份做好，然后重点解决触摸屏缩放不丝滑问题，先去做足调研。」
+
+### 38.1 备份（先做）
+
+`backup/before-touch-zoom-20261008-221348/`（`backup/` 本来就在 `.gitignore` 里）：
+
+| 文件 | 大小 | 说明 |
+|---|---:|---|
+| `repo-full-history.bundle` | 17,372,472 B | `git bundle --all`；`git bundle verify` 报 "records a complete history"（含 origin 的三个 ref） |
+| `paper-reader-src.zip` | 4,481,128 B | `test/pack.mjs` 白名单源码包（378 条目，自检无 `data/` `papers/` `.exe`） |
+| `论文阅读器.exe` | 10,233,344 B | 改动前的交付物，SHA256 与当时根目录那份一致 |
+
+### 38.2 调研结论（详见 [`触摸屏缩放丝滑化.md`](触摸屏缩放丝滑化.md)）
+
+1. **触摸屏捏合根本没进阅读器**：Chromium 对它走**整页 Page Scale**（不是触摸板的
+   `wheel + ctrlKey`）。实测 `visualViewport.scale` 1 → 4、`viewer.zoomAt` 0 次调用 ——
+   顶栏 / 侧栏 / PDF 位图一起被拉伸。桌面壳 `window.rs` 是 `.with_hotkeys_zoom(true)`，
+   而 wry 0.55.1 把它绑到 `SetIsPinchZoomEnabled` 上（`webview2/mod.rs:593`），
+   旧注释「Wry disables pinch by default」是错的。
+2. **松手重画有三处强制同步布局**：`_bindRealFonts` 152~184ms/页、
+   `_nudgeTextLayer` ~20ms、`_normalizeTextScale` ~17ms（都是「写一个 span 就回读一次几何」）；
+   并且同一页的文本流被解析两遍（pdf.js 的 `getTextContent()` 内部就是 `streamTextContent()`，无缓存）。
+3. **手势期每帧都在读几何**：`elementFromPoint` + 两次 `getBoundingClientRect`
+   （写完 transform 再读一次）+ 逐帧改 scroll。
+
+### 38.3 改动与效果
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 触摸屏捏合 | 不缩放 PDF，整页反而被放大到 400% | 2.30 → 4.60，`visualViewport.scale` 保持 1 |
+| 长任务（一次捏合含重画） | 8 个 / 779ms，最长 216ms | 4 个 / 250~283ms，最长 197~217ms |
+| 文本层三件套 / 页 | ~190ms | **~15ms** |
+| 一页文本流解析次数 | 2 | 1 |
+| 锚点漂移 | 32px | **0.0px** |
+| 单指原生滚动 | 被整页缩放带坏 | 正常（177px） |
+
+### 38.4 验收
+
+| 套件 | 结果 |
+|---|---|
+| `test/zoom-touch.mjs`（新，20 条） | 修复前 **10/20** → 修复后 **20/20**（在重编后的 exe 内嵌前端上跑的） |
+| `test/zoom.mjs` | 17 → **21/21**（补「队列外的页滚进视口会重画」+ 底栏缩放滑块 3 条） |
+| `test/desktop.mjs`（exe） | **52/52** |
+| selection / selection-stable / cjk / math / outline / home / links / smoke | 全绿（31 / 51 / 11 / 33 / 8 / 40 / 24） |
+| context / ops / stream / ux / topbar-autohide / mobile | 与 HEAD 工作树**逐条一致**失败 → 既有问题，不是本次引入 |
+
+交付物：`论文阅读器.exe` **10,246,656 B**，SHA256 `809087d01dcffe62f74d546d9976da31a774af8d98737f537bbd0f3699188823`
+（根目录与桌面副本经 `build.bat` 自校验一致），exe mtime = 最新前端文件 mtime。
+
+### 38.5 没做 / 没证实的
+
+- 本机**没有触摸硬件**，结论来自 CDP 合成触摸事件 + Chromium 154（与 WebView2 同引擎）；
+  真手指在 WebView2 里的差异没有实测 —— 首次上真机请确认「捏合只缩放 PDF、不放大界面」。
+- 没动 Rust 的 `with_hotkeys_zoom`：wry 把 `IsZoomControlEnabled` 与 `IsPinchZoomEnabled` 绑死，
+  传 `false` 之后触摸板 ctrl+wheel 还投不投递给 JS 没有实测依据，赌错就是触摸板捏合直接失效。
+- pdf.js 官方那套「页框尺寸全交给 CSS 变量 + 手势期隐藏文本层」能再省掉 commit 时的整层重排，
+  但要动虚拟化 / 命中测试 / 选区坐标的根基，本次未做。
