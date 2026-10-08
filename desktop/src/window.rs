@@ -257,8 +257,25 @@ pub fn run(url: String) -> ! {
 
     // 页面里的外链交给系统浏览器；面板 URL 由前端应用内卡片处理，不创建新的顶层窗口。
     let webview = decorate_builder(
-        // Wry disables WebView2 pinch gestures by default. Let Chromium deliver
-        // the cancelable Ctrl+wheel gesture to JS, which zooms only the PDF.
+        /* 缩放相关的取舍（2026-10-08 读 wry 0.55.1 源码 + WebView2 文档后重写；旧注释「Wry
+           disables WebView2 pinch gestures by default」是错的，会误导下一个人）：
+
+           `with_hotkeys_zoom(b)` 在 Windows 上只映射两个 WebView2 开关
+           （wry-0.55.1/src/webview2/mod.rs:572 与 :593）：
+             · SetIsZoomControlEnabled(b)
+             · SetIsPinchZoomEnabled(b)   ← 触摸屏双指捏合 = 整页 "Page Scale" 缩放
+           两者在 wry 里默认都是关的（`zoom_hotkeys_enabled: false`）。
+           这里传 true，是为了**让触摸板捏合能到达页面**：Windows 把触摸板 pinch 合成成
+           带 CONTROL 的 WM_MOUSEWHEEL，Chromium 再以 `wheel`(ctrlKey=true) 投给 JS
+           （见 public/js/app.js 的 pinch 分支）。
+
+           代价是触摸屏捏合同时被打开成整页缩放 —— 但那个**不在这里关**：
+           wry 把两个开关绑死，传 false 会连 IsZoomControlEnabled 一起关，
+           而「关掉之后触摸板 ctrl+wheel 还投不投递给 JS」没有实测依据，
+           赌错就是触摸板捏合直接失效。
+           所以改成前端拿回手势：`html { touch-action: pan-x pan-y }`
+           + public/js/pdfview.js 的 `_bindTouchZoom()`，把触摸屏捏合变成 PDF 缩放。
+           两条路径（触摸板 ctrl+wheel / 触摸屏双指）于是都只缩放 PDF，不缩放界面。 */
         WebViewBuilder::new_with_web_context(&mut web_context)
             .with_hotkeys_zoom(true)
             .with_url(url.clone()),

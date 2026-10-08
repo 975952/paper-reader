@@ -178,6 +178,21 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* ══ 触摸屏：捏合手势归应用自己管，不许浏览器拿去做整页缩放 ══════════════════
+   为什么：触摸屏两指捏合在 Chromium 里走的是**整页 Page Scale**，
+   不是触摸板那种 `wheel + ctrlKey`。不加这条的话，捏一下会把顶栏 / 侧栏 /
+   PDF 位图一起拉伸（实测 visualViewport.scale 1 → 4），而阅读器的缩放逻辑
+   一次都收不到事件 —— 用户看到的就是「缩放不丝滑、发糊」。
+   （WebView2 侧的对应开关是 `IsPinchZoomEnabled`，见 desktop/src/window.rs。）
+
+   取值 `pan-x pan-y` 而不是 `none`：**保留单指拖动 / 双指滚动的原生滚动**，
+   只关掉「捏合缩放」这一项。关掉之后两指 touchmove 会原样送到页面，
+   由 public/js/pdfview.js 的 `_bindTouchZoom()` 接管成 PDF 缩放。
+   放在 `html` 上是为了让整个界面口径一致（在侧栏上捏也不该把 UI 拉大）；
+   touch-action 不继承，取「自身与祖先的交集」，所以个别元素写 `none`
+   （如 .sec-head）仍然更严格，不受影响。 */
+html { touch-action: pan-x pan-y; }
+
 button { font-family: inherit; font-size: inherit; color: inherit; cursor: pointer; }
 code { font-family: var(--mono); font-size: .92em; background: var(--bg-sunken); padding: 1px 4px; border-radius: 4px; }
 kbd { font-family: var(--mono); font-size: var(--ui-fs-xs); background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: 5px; padding: 2px 5px; }
@@ -654,7 +669,10 @@ body.dragging .viewer { pointer-events: none; }
 /* ───────────────────────────── 阅读区 ───────────────────────────── */
 
 .viewer-wrap { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-sunken); overflow: hidden; }
-.viewer { flex: 1 1 0; min-height: 0; overflow: auto; position: relative; outline: none; }
+.viewer { flex: 1 1 0; min-height: 0; overflow: auto; position: relative; outline: none;
+  /* 缩放时页面尺寸会整体变一遍；浏览器的「滚动锚定」会自己补 scrollTop，
+     和 pdfview.js 里自己算的锚点打架（缩放后位置会飘）。锚点一律由 JS 管。 */
+  overflow-anchor: none; }
 .pages { display: flex; flex-direction: column; align-items: center; width: max-content; min-width: 100%; gap: 14px; padding: 14px 0 50px; }
 
 /* ── 滚动条（2026-10 用户口径：「PDF 上下滚动的那个栏稍微做宽一点」） ──────────

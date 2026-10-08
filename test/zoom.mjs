@@ -107,16 +107,44 @@ const afterDrag = await page.evaluate(() => {
     const r = el.getBoundingClientRect();
     if (r.bottom > vr.top && r.top < vr.bottom) visibleGrey++;
   }
+  // soft-zoom 也要按视口数（2026-10-08 修正）：
+  // 页面渲染队列只覆盖「可见 ±1 页」，队列外的已渲染页会留着拉伸预览 + dirty 标记，
+  // 等滚进视口时由 _renderVisible 重画 —— 这是设计如此，全文档计数会误报。
+  // 多页夹具（multipage-sample.pdf）在 HEAD 上就会稳定报 3 个，属于套件自身的口径问题。
+  let visibleSoft = 0;
+  for (const c of document.querySelectorAll('canvas.soft-zoom')) {
+    const r = c.getBoundingClientRect();
+    if (r.bottom > vr.top && r.top < vr.bottom) visibleSoft++;
+  }
   return {
-    soft: document.querySelectorAll('canvas.soft-zoom').length,
+    soft: visibleSoft,
     visibleGrey,
     offscreenGrey: document.querySelectorAll('.page.placeholder').length - visibleGrey,
     scale: window.__viewer.scale,
   };
 });
-check('手势停下后会重画成清晰版（没有残留的拉伸预览）', afterDrag.soft === 0, `soft-zoom 画布 ${afterDrag.soft} 个`);
+check('手势停下后会重画成清晰版（视口内没有残留的拉伸预览）', afterDrag.soft === 0, `视口内 soft-zoom 画布 ${afterDrag.soft} 个`);
 check('停下后视口内没有 placeholder（离屏的属于正常）',
   afterDrag.visibleGrey === 0, `视口内 ${afterDrag.visibleGrey} 页，离屏 ${afterDrag.offscreenGrey} 页`);
+
+/**
+ * 上面两条只保证「视口里」是清晰的。队列外的已渲染页是留着拉伸预览 + dirty 的，
+ * 所以这里补一条：把它滚进视口，必须自动重画成清晰版（而不是把糊的留在那）。
+ */
+const scrolled = await page.evaluate(async () => {
+  const v = window.__viewer;
+  v.goToPage(Math.min(2, v.numPages));
+  await new Promise((r) => setTimeout(r, 1500));
+  const vr = document.getElementById('viewer').getBoundingClientRect();
+  let soft = 0;
+  for (const c of document.querySelectorAll('canvas.soft-zoom')) {
+    const r = c.getBoundingClientRect();
+    if (r.bottom > vr.top && r.top < vr.bottom) soft++;
+  }
+  return { soft, page: v.current };
+});
+check('把队列外的页滚进视口后会立刻重画成清晰版', scrolled.soft === 0,
+  `第 ${scrolled.page} 页视口内 soft-zoom ${scrolled.soft} 个`);
 
 /* ── 二、工具条按钮 / 键盘缩放 ── */
 console.log('\n-- 按钮与快捷键缩放');
@@ -135,6 +163,57 @@ for (const sel of ['#footZoomIn', '#footZoomIn', '#footZoomOut', '#footFitWidth'
 const z2 = await stopWatch();
 check('点缩放按钮 / 适应宽度都不闪灰条', z2.greyFrames === 0 && z2.blankFrames === 0,
   `灰条帧 ${z2.greyFrames}，空白帧 ${z2.blankFrames}`);
+
+/**
+ * 底栏那个缩放滑块走的是 `previewScale()` **不带指针坐标**这条分支
+ * （见 app.js 的 `#zoomRange` input 监听）：锚点取阅读区中心，松手时 commit。
+ * 2026-10-08 重写了锚点算法（原先每帧 elementFromPoint + 两次 getBoundingClientRect），
+ * 这条分支没有别的覆盖，所以在这里补一段：拖滑块不许闪灰条、不许出空白、
+ * 停下后要回到清晰位图，而且**阅读区中心那一页不许跳**。
+ */
+console.log('\n-- 拖底栏缩放滑块');
+await page.evaluate(() => window.__viewer.fitWidth());
+await sleep(700);
+const centerPage = () => page.evaluate(() => {
+  const vr = document.getElementById('viewer').getBoundingClientRect();
+  const el = document.elementFromPoint(vr.left + vr.width / 2, vr.top + vr.height / 2)?.closest?.('.page');
+  const r = el?.getBoundingClientRect();
+  return r ? { page: Number(el.dataset.page), fx: (vr.left + vr.width / 2 - r.left) / r.width } : null;
+});
+const centerBefore = await centerPage();
+await startWatch();
+await page.evaluate(async () => {
+  const range = document.getElementById('zoomRange');
+  const target = Math.round(window.__viewer.scale * 1.35 * 100);
+  const from = Number(range.value);
+  const steps = 12;
+  for (let i = 1; i <= steps; i++) {
+    range.value = String(Math.round(from + ((target - from) * i) / steps));
+    range.dispatchEvent(new Event('input', { bubbles: true }));
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  range.dispatchEvent(new Event('change', { bubbles: true }));
+});
+const z2b = await stopWatch();
+await sleep(1400);
+const centerAfter = await centerPage();
+check('拖缩放滑块全程不闪灰条、不出空白', z2b.greyFrames === 0 && z2b.blankFrames === 0,
+  `灰条帧 ${z2b.greyFrames}，空白帧 ${z2b.blankFrames}`);
+check('拖滑块放大后中心那一页没有跳走',
+  !!centerBefore && !!centerAfter && centerBefore.page === centerAfter.page
+    && Math.abs(centerBefore.fx - centerAfter.fx) < 0.08,
+  centerBefore && centerAfter
+    ? `第 ${centerBefore.page} 页 fx ${centerBefore.fx.toFixed(3)} → 第 ${centerAfter.page} 页 fx ${centerAfter.fx.toFixed(3)}`
+    : '(取不到中心页)');
+check('滑块停下后视口内回到清晰位图',
+  await page.evaluate(() => {
+    const vr = document.getElementById('viewer').getBoundingClientRect();
+    return ![...document.querySelectorAll('canvas.soft-zoom')].some((c) => {
+      const r = c.getBoundingClientRect();
+      return r.bottom > vr.top && r.top < vr.bottom;
+    });
+  }), '视口内没有 soft-zoom');
 
 /* ── 三、拖分栏条（改阅读区宽度 → 重新适配/重画） ── */
 console.log('\n-- 拖分栏条');

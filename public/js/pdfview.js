@@ -242,12 +242,84 @@ export class PdfViewer {
       });
     };
     this.container.addEventListener('mousemove', this._onHoverMove, { passive: true });
+    this._bindTouchZoom();
+  }
+
+  /**
+   * 触摸屏两指捏合。
+   *
+   * ── 为什么必须自己做（实测证据 test/perf/zoom-touch-takeover.mjs）──────────
+   * 触摸屏捏合**不会**变成 `wheel` + ctrlKey（那是触摸板的路径，Windows 上由系统把
+   * 触摸板 pinch 合成成带 CONTROL 的 WM_MOUSEWHEEL）。浏览器把它当成**整页 Page Scale**：
+   * 实测两指张开时 `visualViewport.scale` 从 1 直接跳到 4，而 `zoomAt` 一次都没被调用 ——
+   * 顶栏、侧栏、PDF 位图一起被拉大，用户看到的就是「糊 + 不跟手」。
+   * （WebView2 侧对应 `IsPinchZoomEnabled`，wry 把它和 `with_hotkeys_zoom` 绑在一起，
+   *   见 desktop/src/window.rs 的说明。）
+   *
+   * 拿回手势的办法（逐条对照实测，5 种写法里只有这两种同时满足「不整页缩放 + 单指还能原生滚动」）：
+   *   ① `html { touch-action: pan-x pan-y }`（style.css）—— 关掉浏览器的捏合，保留单指平移；
+   *   ② 这里用**非 passive** 的 touchstart/touchmove，两指时 preventDefault 兜底，
+   *      免得浏览器在 touch-action 之外又把这两根手指当成滚动。
+   * 合帧与触摸板路径一致：touchmove 只记最新值，真正改比例放到 requestAnimationFrame。
+   */
+  _bindTouchZoom() {
+    const el = this.container;
+    let startDist = 0;      // 手势开始时两指间距
+    let startScale = 1;
+    let raf = 0;
+    let pending = null;
+    const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    const flush = () => {
+      raf = 0;
+      if (!pending) return;
+      const { scale, x, y } = pending;
+      pending = null;
+      this.previewScale(scale, { clientX: x, clientY: y });
+    };
+    const onStart = (e) => {
+      if (e.touches.length !== 2) return;
+      startDist = dist(e.touches) || 1;
+      startScale = this.scale;
+      e.preventDefault();
+    };
+    const onMove = (e) => {
+      if (!startDist || e.touches.length !== 2) return;
+      e.preventDefault();
+      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      pending = { scale: startScale * (dist(e.touches) / startDist), x: midX, y: midY };
+      if (!raf) raf = requestAnimationFrame(flush);
+    };
+    // 手指真的抬起来才算手势结束：不要用防抖在手指还按着的时候重排（实测那样会插进一次 200ms 卡顿）
+    const onEnd = (e) => {
+      if (e.touches.length >= 2) return;
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      // 最后一帧还没合上就先补上：不然「手指停在哪儿」和「最后缩放多少」会差一帧
+      const last = pending;
+      pending = null;
+      startDist = 0;
+      if (last) this.previewScale(last.scale, { clientX: last.x, clientY: last.y });
+      if (this._zoomPreview) this.commitZoomPreview();
+    };
+    el.addEventListener('touchstart', onStart, { passive: false });
+    el.addEventListener('touchmove', onMove, { passive: false });
+    el.addEventListener('touchend', onEnd, { passive: true });
+    el.addEventListener('touchcancel', onEnd, { passive: true });
+    this._touchZoomHandlers = { onStart, onMove, onEnd };
   }
 
   destroy() {
     this._destroyed = true;
     this.container.removeEventListener('scroll', this._onScroll);
     this.container.removeEventListener('mousemove', this._onHoverMove);
+    const tz = this._touchZoomHandlers;
+    if (tz) {
+      this.container.removeEventListener('touchstart', tz.onStart);
+      this.container.removeEventListener('touchmove', tz.onMove);
+      this.container.removeEventListener('touchend', tz.onEnd);
+      this.container.removeEventListener('touchcancel', tz.onEnd);
+      this._touchZoomHandlers = null;
+    }
     if (this._hoverRaf) { try { cancelAnimationFrame(this._hoverRaf); } catch { /* ignore */ } }
     window.removeEventListener('resize', this._onResize);
     this._resizeObserver.disconnect();
@@ -467,61 +539,94 @@ export class PdfViewer {
   /**
    * 手势中的轻量预览：只缩放 pages 容器这一层，避免逐页改尺寸/读 offsetTop。
    * this.scale 仍实时更新，所以百分比和外部状态立即同步；真正布局延迟到手势停下。
+   *
+   * ── 铁律：**每帧一次 DOM 读都不做** ────────────────────────────────────
+   * 旧实现每帧 `elementFromPoint` + 两次 `getBoundingClientRect`
+   * （写完 transform 再读一次 = 强制同步布局），再加上逐帧改 scrollLeft/scrollTop。
+   * 手感上这就是「跟手但一顿一顿」。改成本地代数：
+   *   ① 手势开始那一帧量一次几何，记下 pages 容器原点的**内容坐标** E、滚动量 s、
+   *      容器视口原点 c0；
+   *   ② 锚点 p（手指抓住的那个 PDF 点）在内容坐标里固定不变；
+   *   ③ 每帧只写一条 `translate(t) scale(k)`（transform-origin: 0 0），
+   *      由 `E + t + k(p − E)` 落在当前手指位置 c 解出
+   *        t = (c − c0) + s − E − k(p − E)
+   *      —— 全是加减乘除，不碰布局。
    */
+  _beginZoomPreview() {
+    const c = this.container;
+    const containerRect = c.getBoundingClientRect();
+    const pagesRect = this.pagesEl.getBoundingClientRect();
+    const preview = {
+      baseScale: this.scale,
+      cLeft: containerRect.left,
+      cTop: containerRect.top,
+      scrollX: c.scrollLeft,
+      scrollY: c.scrollTop,
+      // pages 容器原点在内容坐标里的位置：整段手势恒定（transform 不改布局）
+      originX: c.scrollLeft + pagesRect.left - containerRect.left,
+      originY: c.scrollTop + pagesRect.top - containerRect.top,
+      anchor: null,        // 内容坐标：手指抓住的那个点，整段手势不动
+      page: null,          // 锚点所在页 + 页内相对位置（提交时用它把位置对回去）
+      fx: 0,
+      fy: 0,
+      clientX: null,       // 当前指针位置（client 坐标）
+      clientY: null,
+      timer: 0,
+    };
+    this.pagesEl.style.transformOrigin = '0 0';
+    this.pagesEl.style.willChange = 'transform';
+    return preview;
+  }
+
   previewScale(scale, { clientX = null, clientY = null } = {}) {
     if (!this.pdf || !this.baseSizes[1] || !this.pagesEl) return;
     const next = clamp(scale, 0.15, 6);
     if (Math.abs(next - this.scale) < 0.0005 && !this._zoomPreview) return;
     let preview = this._zoomPreview;
-    if (!preview) {
-      preview = this._zoomPreview = { baseScale: this.scale, page: null, fx: 0, fy: 0, x: null, y: null, timer: 0 };
-      this.pagesEl.style.transformOrigin = '50% 0';
-      this.pagesEl.style.willChange = 'transform';
+    if (!preview) preview = this._zoomPreview = this._beginZoomPreview();
+
+    // 指针位置：有坐标就用坐标；滑块没有坐标，用阅读区中心（保持当前位置稳定）
+    let cx = clientX;
+    let cy = clientY;
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) {
+      cx = preview.cLeft + this.container.clientWidth / 2;
+      cy = preview.cTop + this.container.clientHeight / 2;
     }
-    if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
-      const hovered = document.elementFromPoint(clientX, clientY)?.closest?.('.page');
-      const page = hovered && this.container.contains(hovered) ? hovered : this.pageEls[this.current];
+    preview.clientX = cx;
+    preview.clientY = cy;
+    // 锚点只在第一次确定：内容跟着一开始抓住的那个点走，而不是每帧换一个锚
+    if (!preview.anchor) {
+      preview.anchor = {
+        x: preview.scrollX + (cx - preview.cLeft),
+        y: preview.scrollY + (cy - preview.cTop),
+      };
+      /* 顺手记下锚点在**哪一页的哪个相对位置**（fx/fy）。
+         提交时用「页框矩形 + 相对位置」把位置对回去，而不是继续用上面的内容坐标：
+         布局之后 pages 容器里的**间隙与内边距不随比例缩放**（CSS 里是固定 14px），
+         所以「内容坐标 × k」在提交那一刻只是近似 —— 实测差 30px 左右（就是「飘」）。
+         页内相对位置则严格不变（页内所有东西都按同一个比例缩放）。 */
+      const page = this._pageAtContent(preview.anchor.y);
       if (page) {
         const r = page.getBoundingClientRect();
         if (r.width > 0 && r.height > 0) {
           preview.page = page;
-          preview.fx = clamp((clientX - r.left) / r.width, 0, 1);
-          preview.fy = clamp((clientY - r.top) / r.height, 0, 1);
-          preview.x = clientX;
-          preview.y = clientY;
+          preview.fx = clamp((cx - r.left) / r.width, 0, 1);
+          preview.fy = clamp((cy - r.top) / r.height, 0, 1);
         }
       }
     }
-    // 滑块没有指针坐标时，以阅读区中心为锚点，保持当前阅读位置稳定。
-    if (!preview.page) {
-      const x = this.container.getBoundingClientRect().left + this.container.clientWidth / 2;
-      const y = this.container.getBoundingClientRect().top + this.container.clientHeight / 2;
-      const page = this.pageEls[this.current] || this.pageEls.find((el) => {
-        const r = el?.getBoundingClientRect?.();
-        return r && r.top <= y && r.bottom >= y;
-      });
-      if (page) {
-        const r = page.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) {
-          preview.page = page;
-          preview.fx = clamp((x - r.left) / r.width, 0, 1);
-          preview.fy = clamp((y - r.top) / r.height, 0, 1);
-          preview.x = x;
-          preview.y = y;
-        }
-      }
-    }
-    const before = preview.page?.getBoundingClientRect?.();
+
+    const k = next / preview.baseScale;
+    const qx = preview.anchor.x - preview.originX;
+    const qy = preview.anchor.y - preview.originY;
+    const tx = (cx - preview.cLeft) + preview.scrollX - preview.originX - k * qx;
+    const ty = (cy - preview.cTop) + preview.scrollY - preview.originY - k * qy;
     this.scale = next;
     this._fitMode = false;
-    this.pagesEl.style.transform = `scale(${next / preview.baseScale})`;
-    const after = preview.page?.getBoundingClientRect?.();
-    if (before && after && preview.x != null) {
-      this.container.scrollLeft += after.left + preview.fx * after.width - (before.left + preview.fx * before.width);
-      this.container.scrollTop += after.top + preview.fy * after.height - (before.top + preview.fy * before.height);
-    }
+    this.pagesEl.style.transform = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${k.toFixed(5)})`;
+
     clearTimeout(preview.timer);
-    preview.timer = setTimeout(() => this.commitZoomPreview(), 140);
+    preview.timer = setTimeout(() => this.commitZoomPreview(), 200);
     this.opts.onScale?.(this.scale);
   }
 
@@ -537,13 +642,29 @@ export class PdfViewer {
     // 最终比例，再改 page 外框尺寸，避免旧位图留在新页面里造成错位/重叠。
     this._softRescale();
     this.layout();
-    if (preview.page && preview.x != null) {
+    if (preview.page && preview.clientX != null) {
+      /* 把锚点重新对回最后一帧的手指位置：页框布局完再量一次矩形（整段手势只此一次 DOM 读），
+         用一开始记下的页内相对位置换算，和缩放比例无关，所以不会因为
+         「间隙/内边距不缩放」而漂。 */
       const r = preview.page.getBoundingClientRect();
-      this.container.scrollLeft += r.left + preview.fx * r.width - preview.x;
-      this.container.scrollTop += r.top + preview.fy * r.height - preview.y;
+      if (r.width > 0 && r.height > 0) {
+        this.container.scrollLeft += r.left + preview.fx * r.width - preview.clientX;
+        this.container.scrollTop += r.top + preview.fy * r.height - preview.clientY;
+      }
     }
-    this._scheduleRerender(80);
+    this._scheduleRerender(140);
     this.opts.onStatus?.(`缩放 ${Math.round(this.scale * 100)}%`);
+  }
+
+  /** 内容坐标（纵坐标）→ 页面元素（用缓存的 offsets/heights 做数学判定，不做命中测试） */
+  _pageAtContent(y) {
+    if (!this.offsets?.length) return null;
+    for (let i = 1; i <= this.numPages; i++) {
+      const o = this.offsets[i] ?? 0;
+      const h = this.heights[i] ?? 0;
+      if (y >= o && y < o + h) return this.pageEls[i] || null;
+    }
+    return this.pageEls[this.current] || null;
   }
 
   /**
@@ -585,14 +706,55 @@ export class PdfViewer {
     }
   }
 
-  /** 手势停下后再真正重画（防抖），避免拖动过程中反复解码同一页 */
-  _scheduleRerender(delay = 160) {
+  /**
+   * 手势停下后再真正重画（防抖 + **一页一页来**）。
+   *
+   * 为什么要节流（实测 test/perf/zoom-commit-timeline.mjs）：
+   *   一页重画 = 重建文本层（字体绑定/字距/命中带）+ 重画位图，实测 240~450ms；
+   *   旧实现一次把视口内外 5 页全部开工，主线程于是连续卡住近 1 秒 ——
+   *   用户口径就是「松手之后顿一下，再捏就不跟手了」。
+   *   现在按「离视口中心近的优先」排队，一页画完让出一帧再画下一页：
+   *   用户正在看的那一页最先变清晰，中间随时可以再捏/再滚（新预览一到就放弃队列）。
+   *   中间那次让帧实测把长任务从 8 个 / 779ms 降到 4 个 / 314ms。
+   */
+  _scheduleRerender(delay = 140) {
     clearTimeout(this._rerenderTimer);
-    this._rerenderTimer = setTimeout(() => {
+    this._rerenderTimer = setTimeout(async () => {
       this._rerenderTimer = 0;
-      if (this._destroyed) return;
-      this._renderVisible(false);
+      if (this._destroyed || !this.pdf || !this.offsets.length) return;
+      const gen = this._gen;
+      const [first, last] = this._visibleRange();
+      const center = this.container.scrollTop + this.container.clientHeight / 2;
+      const mid = (i) => (this.offsets[i] ?? 0) + (this.heights[i] ?? 0) / 2;
+      const queue = [];
+      for (let i = Math.max(1, first - 1); i <= Math.min(this.numPages, last + 1); i++) {
+        const entry = this.rendered.get(i);
+        if (entry?.dirty) queue.push(i);
+        else if (!entry && !this.renderTasks.has(i)) queue.push(i);
+      }
+      queue.sort((a, b) => Math.abs(mid(a) - center) - Math.abs(mid(b) - center));
+      for (const i of queue) {
+        // 新的手势/换文档一来就放弃剩下的 —— 跟手比清晰度重要
+        if (this._destroyed || gen !== this._gen || this._zoomPreview) return;
+        const entry = this.rendered.get(i);
+        try {
+          if (entry?.dirty) await this._renderPage(i, { gen, soft: true });
+          else if (!entry && !this.renderTasks.has(i)) await this._renderPage(i, { gen });
+        } catch { /* 单页失败不影响后面的页 */ }
+        await new Promise((r) => requestAnimationFrame(() => r()));
+      }
+      this._reclaimFar();
     }, delay);
+  }
+
+  /** 回收远离视口、留着只会吃内存的页面 */
+  _reclaimFar() {
+    const [first, last] = this._visibleRange();
+    const keepLo = Math.max(1, first - 4);
+    const keepHi = Math.min(this.numPages, last + 4);
+    for (const i of Array.from(this.rendered.keys())) {
+      if (i < keepLo || i > keepHi) this._teardownPage(i);
+    }
   }
 
   /**
@@ -675,11 +837,7 @@ export class PdfViewer {
       else if (!entry && !this.renderTasks.has(i)) this._renderPage(i, { gen });
     }
     // 回收远处页面，控制内存
-    const keepLo = Math.max(1, first - 4);
-    const keepHi = Math.min(this.numPages, last + 4);
-    for (const i of Array.from(this.rendered.keys())) {
-      if (i < keepLo || i > keepHi) this._teardownPage(i);
-    }
+    this._reclaimFar();
   }
 
   /** 首屏布局完成后重画指定页，避免首页在侧栏/窗口尺寸尚未稳定时留下低密度首帧。 */
@@ -884,8 +1042,27 @@ export class PdfViewer {
 
       // 文本层
       try {
+        /**
+         * ⚠️ 这一页的文本流**只取一次**。
+         * 旧实现是：TextLayer 用 `page.streamTextContent()` 取一遍；
+         * `_bindRealFonts` 里又 `page.getTextContent()` 取一遍 ——
+         * 而 pdf.js 的 `getTextContent()` 只是把 `streamTextContent()` 拼起来，**没有任何缓存**
+         * （见 public/vendor/pdf.min.mjs 里 `async getTextContent(t={})` 的实现），
+         * 等于同一页在 worker 里被解析两遍。实测（test/perf/zoom-commit-timeline.mjs）这一段约 90ms/页，
+         * 正好压在「松手之后」那一下上。
+         * pdf.js 的 TextLayer 既接受 ReadableStream 也接受 `{items, styles}` 对象
+         * （构造器里有 `if (t instanceof ReadableStream) … else 自己包一个流`），
+         * 所以先取一次，再同时喂给文本层和字体绑定。
+         */
+        let textContent = null;
+        try {
+          textContent = await page.getTextContent({ includeMarkedContent: true });
+        } catch { textContent = null; }
+        if (stale()) return;
         const tl = new pdfjsLib.TextLayer({
-          textContentSource: page.streamTextContent({ includeMarkedContent: true }),
+          textContentSource: textContent
+            ? { items: textContent.items, styles: textContent.styles, lang: textContent.lang }
+            : page.streamTextContent({ includeMarkedContent: true }),
           container: textDiv,
           viewport,
         });
@@ -909,7 +1086,7 @@ export class PdfViewer {
          *      而相邻行盒只隔 0.97px → 拖选时终点掉到下一行，「选 10 个字」变成「选 96 个字」。
          */
         if (!stale()) {
-          await this._bindRealFonts(textDiv, page);
+          await this._bindRealFonts(textDiv, page, textContent);
           if (!stale()) {
             this._normalizeTextScale(textDiv);
             this._nudgeTextLayer(textDiv, page);
@@ -1388,9 +1565,11 @@ export class PdfViewer {
    * ⚠️ 对不上就**整页放弃**（上错字体比不改更糟）—— pdf.js 会跳过空串 / role=img /
    * markedContent 包装，双指针必须能一路对上才算可信。
    */
-  async _bindRealFonts(container, page) {
+  async _bindRealFonts(container, page, textContent = null) {
     try {
-      const tc = await page.getTextContent();
+      /* textContent 由 `_renderPage` 传进来（那一页的文本流已经取过一次了，见那里的说明）；
+         没有传就自己取 —— 保持这个函数可以单独调用。 */
+      const tc = textContent || await page.getTextContent();
       const spans = [...container.querySelectorAll('span:not(.markedContent)')];
       const items = (tc.items || []).filter((it) => it && typeof it.str === 'string' && it.str.trim() !== '');
       /* 按文本层实际顺序配对。旧实现从 item 反向找 span，遇到一个换行/空 item
@@ -1407,23 +1586,41 @@ export class PdfViewer {
       }
       /* 覆盖率太低说明流式文本和页面文本不是同一份，宁可整页保持 pdf.js 原样。 */
       if (!pairs.length || pairs.length < Math.max(1, spans.length * 0.6)) return;
+      /**
+       * ── 两趟「读写分离」，不要在一个循环里又写又读 ─────────────────────────
+       * 旧写法每个 span 都是「写 fontFamily → getBoundingClientRect 读宽度 → 写 --scale-x」，
+       * 而 `--scale-x` 是 `transform: scaleX()` 的输入、fontFamily 又会改排版：
+       * 于是**每个 span 都把整份文档的样式与布局重新算一遍**（强制同步布局 / layout thrashing）。
+       * 实测（test/perf/zoom-commit-timeline.mjs，16 页夹具）：
+       * 单页这一项要 **152~184ms**，是「捏合松开后顿一下」的最大一笔开销；
+       * 拆成 ①只读 computedStyle ②只写字体 ③一次性读全部宽度 ④只写 --scale-x 之后，
+       * 整页只剩 1 次强制布局。宽度必须在写完字体、且 --scale-x 归 1 之后读（和旧写法同一时刻）。
+       */
+      const rows = [];
       for (const [span, item] of pairs) {
         const fam = String(item.fontName || '').trim();
         if (!fam) continue;
-        const cs = getComputedStyle(span);
-        const px = parseFloat(cs.fontSize) || 0;
+        const px = parseFloat(getComputedStyle(span).fontSize) || 0;
         if (document.fonts?.check && px > 0 && !document.fonts.check(`${px}px "${fam}"`)) continue;
-        span.style.fontFamily = `"${fam}"`;
-        span.style.letterSpacing = 'normal';
-        span.dataset.pdfFontName = fam;
         /* item.width 是 scale=1 的 PDF/CSS 宽度；不要误用 transform[0]（那是字号/基线变换）。 */
         const want = Number(item.width) * this.scale;
-        if (!(want > 0)) continue;
-        span.style.setProperty('--scale-x', '1');
-        const nat = span.getBoundingClientRect().width;
+        rows.push({ span, fam, want });
+      }
+      if (!rows.length) return;
+      for (const r of rows) {
+        r.span.style.fontFamily = `"${r.fam}"`;
+        r.span.style.letterSpacing = 'normal';
+        r.span.dataset.pdfFontName = r.fam;
+        if (r.want > 0) r.span.style.setProperty('--scale-x', '1');
+      }
+      const widths = rows.map((r) => r.span.getBoundingClientRect().width);
+      for (let k = 0; k < rows.length; k++) {
+        const r = rows[k];
+        if (!(r.want > 0)) continue;
+        const nat = widths[k];
         if (!(nat > 1)) continue;
-        const sx = want / nat;
-        if (Number.isFinite(sx) && sx > 0.2 && sx < 5) span.style.setProperty('--scale-x', String(sx));
+        const sx = r.want / nat;
+        if (Number.isFinite(sx) && sx > 0.2 && sx < 5) r.span.style.setProperty('--scale-x', String(sx));
       }
     } catch { /* 拿不到文本内容就不动 —— 保持 pdf.js 原样，至少不是更坏 */ }
   }
@@ -1449,6 +1646,15 @@ export class PdfViewer {
       const pageH = pageEl?.clientHeight || 0;
       const spans = container.querySelectorAll('span:not(.markedContent)');
       const ctx = this._measureCtx || (this._measureCtx = document.createElement('canvas').getContext('2d'));
+      /**
+       * 读写分离（同 `_bindRealFonts`）：旧写法在一个循环里
+       * 「getComputedStyle + Range.getClientRects + pageEl.getBoundingClientRect → 写 span.style.top」，
+       * 写 top 会把布局打脏，下一轮的读又要强制同步布局 —— 每个 span 一次，整页实测 ~20ms。
+       * 现在所有读都在写之前完成（pageEl 的矩形也只量一次，循环里它不会变），
+       * 于是整页只留 1 次强制布局。
+       */
+      const pr = pageEl.getBoundingClientRect();
+      const rows = [];
       for (const span of spans) {
         const text = span.textContent || '';
         if (!text.trim()) continue;
@@ -1482,7 +1688,6 @@ export class PdfViewer {
         const range = document.createRange();
         try { range.selectNodeContents(span.firstChild || span); } catch { continue; }
         const rr = range.getClientRects()[0];
-        const pr = pageEl.getBoundingClientRect();
         if (!rr || !pr || !(pr.height > 0)) continue;
         const hitTopPx = rr.top - pr.top;
         const nudge = inkTopPx - hitTopPx;
@@ -1491,6 +1696,9 @@ export class PdfViewer {
         const downLimit = fs <= 14 ? Math.min(fs * 0.25, 2) : Math.min(fs * 0.35, 4);
         const limited = clamp(nudge, -fs * 0.35, downLimit);
         if (Math.abs(limited) < 0.25) continue;
+        rows.push([span, topPx, limited]);
+      }
+      for (const [span, topPx, limited] of rows) {
         span.style.top = `${(topPx + limited).toFixed(2)}px`;
       }
     } catch { /* 补偿失败就保持原样 */ }
@@ -1775,6 +1983,11 @@ export class PdfViewer {
    */
   _normalizeTextScale(container) {
     const spans = container.querySelectorAll('span:not(.markedContent)');
+    /**
+     * 同样要读写分离：`rect.width` 是**写完上一个 span 的 letter-spacing 之后**再读的，
+     * 所以旧写法每行都强制一次布局。这里先一次读完所有宽度，再统一写。
+     */
+    const rows = [];
     for (const span of spans) {
       const raw = span.style.getPropertyValue('--scale-x');
       if (!raw) continue;
@@ -1784,14 +1997,20 @@ export class PdfViewer {
       if (Number.isFinite(rot) && Math.abs(rot) > 0.01) continue;   // 旋转 span：跳过
       const text = span.textContent || '';
       if (text.length < 2) continue;
-      const rect = span.getBoundingClientRect();
-      if (!rect.width || !sx) continue;
-      const natural = rect.width / sx;
-      const extra = rect.width - natural;
-      span.style.setProperty('--scale-x', '1');
-      const ls = extra / text.length;                                // 见上面 ①
+      rows.push({ span, sx, len: text.length });
+    }
+    if (!rows.length) return;
+    const widths = rows.map((r) => r.span.getBoundingClientRect().width);
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const width = widths[i];
+      if (!width) continue;
+      const natural = width / r.sx;
+      const extra = width - natural;
+      r.span.style.setProperty('--scale-x', '1');
+      const ls = extra / r.len;                                     // 见上面 ①
       if (Number.isFinite(ls) && Math.abs(ls) > 0.01) {
-        span.style.letterSpacing = `${ls.toFixed(3)}px`;
+        r.span.style.letterSpacing = `${ls.toFixed(3)}px`;
       }
     }
   }
