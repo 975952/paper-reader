@@ -208,6 +208,9 @@ export class PdfViewer {
      * 结果窗口一变大变小页面就不再跟着变 —— 用户看到的就是「打开后大小不对」。
      */
     this._fitMode = true;
+    // 缩放手势期间只做一次合成层变换；停止后再提交真实页面尺寸。
+    // 这样触摸板/滑块不会在每个 input 上触发全量布局和 PDF 重绘。
+    this._zoomPreview = null;
 
     this._onScroll = throttle(() => this._handleScroll(), 60);
     this.container.addEventListener('scroll', this._onScroll, { passive: true });
@@ -262,6 +265,7 @@ export class PdfViewer {
   }
 
   close() {
+    this._cancelZoomPreview();
     this._gen++;            // 作废上一份文档的所有在途任务
     for (const i of Array.from(this.rendered.keys())) this._teardownPage(i);
     this.rendered.clear();
@@ -450,6 +454,98 @@ export class PdfViewer {
 
   /* ------------------------------------------------------------ 缩放 */
 
+  _cancelZoomPreview() {
+    clearTimeout(this._zoomPreview?.timer);
+    this._zoomPreview = null;
+    if (this.pagesEl) {
+      this.pagesEl.style.transform = '';
+      this.pagesEl.style.transformOrigin = '';
+      this.pagesEl.style.willChange = '';
+    }
+  }
+
+  /**
+   * 手势中的轻量预览：只缩放 pages 容器这一层，避免逐页改尺寸/读 offsetTop。
+   * this.scale 仍实时更新，所以百分比和外部状态立即同步；真正布局延迟到手势停下。
+   */
+  previewScale(scale, { clientX = null, clientY = null } = {}) {
+    if (!this.pdf || !this.baseSizes[1] || !this.pagesEl) return;
+    const next = clamp(scale, 0.15, 6);
+    if (Math.abs(next - this.scale) < 0.0005 && !this._zoomPreview) return;
+    let preview = this._zoomPreview;
+    if (!preview) {
+      preview = this._zoomPreview = { baseScale: this.scale, page: null, fx: 0, fy: 0, x: null, y: null, timer: 0 };
+      this.pagesEl.style.transformOrigin = '50% 0';
+      this.pagesEl.style.willChange = 'transform';
+    }
+    if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
+      const hovered = document.elementFromPoint(clientX, clientY)?.closest?.('.page');
+      const page = hovered && this.container.contains(hovered) ? hovered : this.pageEls[this.current];
+      if (page) {
+        const r = page.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          preview.page = page;
+          preview.fx = clamp((clientX - r.left) / r.width, 0, 1);
+          preview.fy = clamp((clientY - r.top) / r.height, 0, 1);
+          preview.x = clientX;
+          preview.y = clientY;
+        }
+      }
+    }
+    // 滑块没有指针坐标时，以阅读区中心为锚点，保持当前阅读位置稳定。
+    if (!preview.page) {
+      const x = this.container.getBoundingClientRect().left + this.container.clientWidth / 2;
+      const y = this.container.getBoundingClientRect().top + this.container.clientHeight / 2;
+      const page = this.pageEls[this.current] || this.pageEls.find((el) => {
+        const r = el?.getBoundingClientRect?.();
+        return r && r.top <= y && r.bottom >= y;
+      });
+      if (page) {
+        const r = page.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          preview.page = page;
+          preview.fx = clamp((x - r.left) / r.width, 0, 1);
+          preview.fy = clamp((y - r.top) / r.height, 0, 1);
+          preview.x = x;
+          preview.y = y;
+        }
+      }
+    }
+    const before = preview.page?.getBoundingClientRect?.();
+    this.scale = next;
+    this._fitMode = false;
+    this.pagesEl.style.transform = `scale(${next / preview.baseScale})`;
+    const after = preview.page?.getBoundingClientRect?.();
+    if (before && after && preview.x != null) {
+      this.container.scrollLeft += after.left + preview.fx * after.width - (before.left + preview.fx * before.width);
+      this.container.scrollTop += after.top + preview.fy * after.height - (before.top + preview.fy * before.height);
+    }
+    clearTimeout(preview.timer);
+    preview.timer = setTimeout(() => this.commitZoomPreview(), 140);
+    this.opts.onScale?.(this.scale);
+  }
+
+  commitZoomPreview() {
+    const preview = this._zoomPreview;
+    if (!preview) return;
+    clearTimeout(preview.timer);
+    this._zoomPreview = null;
+    this.pagesEl.style.transform = '';
+    this.pagesEl.style.transformOrigin = '';
+    this.pagesEl.style.willChange = '';
+    // 预览期间只变换了 pages 容器；提交时先把已有 canvas/文本层同步到
+    // 最终比例，再改 page 外框尺寸，避免旧位图留在新页面里造成错位/重叠。
+    this._softRescale();
+    this.layout();
+    if (preview.page && preview.x != null) {
+      const r = preview.page.getBoundingClientRect();
+      this.container.scrollLeft += r.left + preview.fx * r.width - preview.x;
+      this.container.scrollTop += r.top + preview.fy * r.height - preview.y;
+    }
+    this._scheduleRerender(80);
+    this.opts.onStatus?.(`缩放 ${Math.round(this.scale * 100)}%`);
+  }
+
   /**
    * 换缩放前：拆掉已渲染的页，并记下还在渲染中的页（它们被 cancel 后不会自愈）
    * 只在**非**手势缩放时用（换文档之类）；拖动缩放走 _softRescale。
@@ -516,6 +612,7 @@ export class PdfViewer {
 
   setScale(scale, { keepCenter = true } = {}) {
     if (!this.pdf || !this.baseSizes[1]) return;
+    this.commitZoomPreview();
     const next = clamp(scale, 0.15, 6);
     if (Math.abs(next - this.scale) < 0.0005) return;
     const anchor = keepCenter ? this._captureAnchor() : null;
@@ -532,26 +629,12 @@ export class PdfViewer {
   /** Keep the PDF point under a touchpad pinch in place, including horizontal scroll. */
   zoomAt(scale, clientX, clientY) {
     if (!this.pdf) return;
-    const hovered = document.elementFromPoint(clientX, clientY)?.closest?.('.page');
-    const page = hovered && this.container.contains(hovered) ? hovered
-      : this.pageEls.find((el) => el && el.getBoundingClientRect().top <= clientY
-        && el.getBoundingClientRect().bottom >= clientY) || this.pageEls[this.current];
-    if (!page) { this.setScale(scale); return; }
-    const before = page.getBoundingClientRect();
-    const fx = clamp((clientX - before.left) / before.width, 0, 1);
-    const fy = clamp((clientY - before.top) / before.height, 0, 1);
-    const previous = this.scale;
-    this.setScale(scale, { keepCenter: false });
-    if (this.scale === previous) return;
-    // Touchpad pauses are short; start the sharp replacement sooner than a slider zoom.
-    this._scheduleRerender(80);
-    const after = page.getBoundingClientRect();
-    this.container.scrollLeft += after.left + fx * after.width - clientX;
-    this.container.scrollTop += after.top + fy * after.height - clientY;
+    this.previewScale(scale, { clientX, clientY });
   }
 
   fitWidth() {
     if (!this.pdf || !this.baseSizes[1]) return;
+    this.commitZoomPreview();
     const anchor = this._captureAnchor();
     this.scale = this._computeFitScale();
     this._fitMode = true;
@@ -581,7 +664,7 @@ export class PdfViewer {
   }
 
   async _renderVisible(force = false, gen = this._gen) {
-    if (!this.pdf || !this.offsets.length || gen !== this._gen) return;
+    if (!this.pdf || !this.offsets.length || gen !== this._gen || this._zoomPreview) return;
     const [first, last] = this._visibleRange();
     const lo = Math.max(1, first - 1);
     const hi = Math.min(this.numPages, last + 1);
@@ -638,6 +721,7 @@ export class PdfViewer {
 
   /** 滚动时检查切片是否还够用 */
   _refreshSlices() {
+    if (this._zoomPreview) return;
     for (const [i, entry] of Array.from(this.rendered.entries())) {
       if (!entry.slice || !entry.cssW) continue;
       const need = this._sliceFor(i, entry.cssW, entry.cssH, entry.ratio);

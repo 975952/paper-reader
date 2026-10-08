@@ -2011,7 +2011,10 @@ function initViewer() {
 
   const range = $('#zoomRange');
   if (range) {
-    range.addEventListener('input', () => viewer.setScale(Number(range.value) / 100));
+    range.addEventListener('input', () => viewer.previewScale(Number(range.value) / 100));
+    range.addEventListener('change', () => viewer.commitZoomPreview());
+    range.addEventListener('pointerup', () => viewer.commitZoomPreview());
+    range.addEventListener('blur', () => viewer.commitZoomPreview());
     range.addEventListener('dblclick', () => viewer.fitWidth());
   }
 
