@@ -675,6 +675,20 @@ body.dragging .viewer { pointer-events: none; }
   overflow-anchor: none; }
 .pages { display: flex; flex-direction: column; align-items: center; width: max-content; min-width: 100%; gap: 14px; padding: 14px 0 50px; }
 
+/* ══ 缩放预览期间把文本层藏起来（只影响绘制，不影响布局）══════════════════════
+   为什么：预览是给 .pages 整体写 transform，浏览器每帧都要重新栅格化这一层。
+   文本层有几百个绝对定位的 span（实测 16 页夹具 334 个），是这一层里最贵的部分；
+   实测（test/perf/zoom-frame-rhythm.mjs，A/B 对照）：每帧写 transform 时有 9~10 帧
+   掉到 33ms，把文本层藏掉之后捏合过程是干净的 16.7ms/帧。
+
+   为什么**视觉上完全没有副作用**：文本层的 span 本来就是 `color: transparent`
+   （见上面 .textLayer 的规则），用户看到的字全是 canvas 画出来的。这一层只负责
+   鼠标命中与选区，捏合的时候既不能选也点不到，藏起来零损失。
+   pdf.js 官方 viewer 在缩放期间也是同一条思路（`hideTextLayer: postponeDrawing`）。
+
+   类名由 pdfview.js 在 _beginZoomPreview() 加上、commitZoomPreview() 摘掉。 */
+.pages.zoom-preview .textLayer { visibility: hidden; }
+
 /* ── 滚动条（2026-10 用户口径：「PDF 上下滚动的那个栏稍微做宽一点」） ──────────
    之前全应用没有一条滚动条样式，用的是 Chrome 默认外观：约 15px、系统灰、
    和这套暖色工作台不搭，而且细得不好抓。这里统一成：

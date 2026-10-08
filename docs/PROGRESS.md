@@ -1939,3 +1939,34 @@ Range 于是从锚点一路「吃到」第 k 个子节点：
   传 `false` 之后触摸板 ctrl+wheel 还投不投递给 JS 没有实测依据，赌错就是触摸板捏合直接失效。
 - pdf.js 官方那套「页框尺寸全交给 CSS 变量 + 手势期隐藏文本层」能再省掉 commit 时的整层重排，
   但要动虚拟化 / 命中测试 / 选区坐标的根基，本次未做。
+
+### 38.6 第二轮（2026-10-09）：先判意图 + 消掉剩下那点卡顿
+
+用户口径：「好一点，还有用户下手到底是滑动还是缩放判断清楚。不要先划又变大变小。而且还是有一点点小卡顿」
+
+三条根因（都有实测）：
+
+1. **判意图之前就动手**：第一轮是「两指一落下就接管、每帧按手指间距改比例」，
+   于是想两指滑动时比例被手指间距的抖动带着一变一变。
+2. **逐帧缩放整层会把文本层一起重新栅格化**：A/B 实测（`test/perf/zoom-frame-rhythm.mjs`）
+   每帧写 transform 时捏合过程 9~10 帧掉到 33ms，停掉写操作则 0 帧；
+   预览期间把文本层藏掉（它本来就是 `color: transparent`，只负责命中/选区）后 **0~3 帧**。
+3. **两处旁路绕过了排队重画**：`commitZoomPreview` 写 scrollTop → `_handleScroll` →
+   `_renderVisible()` 把视口内 dirty 页一次性全开工；`_refreshSlices()` 又在同一时刻
+   把还没轮到的页点着 —— 实测在松手后叠出 178~233ms 的长任务。
+
+意外发现（`test/perf/touch-pan-vs-pinch.mjs`）：**在触摸序列中途写一次 `container.scrollTop`，
+后续 touchmove/touchend 全部收不到**（20 个 move 只剩 2 个，没有 touchcancel），写 `transform` 没事。
+所以两指平移也走 transform，松手才落成滚动。顺带确认：`touch-action: pan-x pan-y` 下
+浏览器对两指手势本来就是惰性的，不需要 preventDefault 去抢。
+
+改动：`_bindTouchZoom()` 加状态机（间距变化 ≥ max(16px,15%) 才算缩放；中点位移 ≥10px 才算平移；
+都没到就一个像素都不动）；新增 `previewPan()`（transform 平移 + 按滚动范围夹住 + 松手落滚动）；
+`style.css` 加 `.pages.zoom-preview .textLayer { visibility: hidden }`；
+`_renderVisible()` / `_refreshSlices()` 不再抢 dirty 页，统一交给 `_runRerenderPass()`（加了互斥）。
+
+效果：两指平行拖动 scale ×1.0000（原来会跟着抖）、几像素抖动纹丝不动、
+捏合过程平均帧间隔 19.6~21.9ms → **16.7~17.6ms**、掉帧 9~10 → **0~3 帧**；
+`test/zoom-touch.mjs` 20 → **29 条，全部通过**；zoom 21/21、selection 31/31、
+selection-stable 51/51、cjk/math/outline/home/links/smoke 全绿；
+ops 34/35 与 stream 仍为既有失败。

@@ -246,7 +246,7 @@ export class PdfViewer {
   }
 
   /**
-   * 触摸屏两指捏合。
+   * 触摸屏两指手势：**先判意图，再动手**。
    *
    * ── 为什么必须自己做（实测证据 test/perf/zoom-touch-takeover.mjs）──────────
    * 触摸屏捏合**不会**变成 `wheel` + ctrlKey（那是触摸板的路径，Windows 上由系统把
@@ -256,52 +256,89 @@ export class PdfViewer {
    * （WebView2 侧对应 `IsPinchZoomEnabled`，wry 把它和 `with_hotkeys_zoom` 绑在一起，
    *   见 desktop/src/window.rs 的说明。）
    *
-   * 拿回手势的办法（逐条对照实测，5 种写法里只有这两种同时满足「不整页缩放 + 单指还能原生滚动」）：
-   *   ① `html { touch-action: pan-x pan-y }`（style.css）—— 关掉浏览器的捏合，保留单指平移；
-   *   ② 这里用**非 passive** 的 touchstart/touchmove，两指时 preventDefault 兜底，
-   *      免得浏览器在 touch-action 之外又把这两根手指当成滚动。
-   * 合帧与触摸板路径一致：touchmove 只记最新值，真正改比例放到 requestAnimationFrame。
+   * ── 判定优先（用户口径 2026-10-09：「下手到底是滑动还是缩放判断清楚，不要先划又变大变小」）
+   * 两指落下到「看清意图」之间**一个像素都不动**，避免手指间距的抖动被当成缩放：
+   *   · 间距变化 ≥ max(16px, 15%)  → 判成**缩放**（之后整段手势都按缩放走，不再回头）
+   *   · 中点位移 ≥ 10px            → 判成**平移**（直接改 scroll，不碰比例）
+   *   · 都没到阈值                 → 什么都不做
+   * 两指平行拖动时间距几乎不变，所以只会平移、比例一动不动 —— 这正是要的效果。
+   *
+   * ── 为什么不 preventDefault（实测 test/perf/touch-pan-vs-pinch.mjs）
+   * 在 `html{touch-action:pan-x pan-y}` 下，Chromium 对**两指**手势既不滚动也不捏合、
+   * 也不发 touchcancel（四种手势全测过：事件原样送到页面、滚动 0px、vvScale 保持 1）。
+   * 也就是说浏览器层面本来就是「惰性」的，不需要 preventDefault 去抢；
+   * 反而一旦 preventDefault，后续「松开一根手指继续拖」就再也滚不动了（整个触摸序列被作废）。
+   * 只在判定成缩放之后才 preventDefault，作为「万一某个引擎想插一脚」的兜底。
+   *
+   * 合帧与触摸板路径一致：touchmove 只记最新值，真正改比例/改滚动放到 requestAnimationFrame。
    */
   _bindTouchZoom() {
     const el = this.container;
-    let startDist = 0;      // 手势开始时两指间距
+    /** 判定阈值：改这两个数之前先看上面那段「判定优先」的说明 */
+    const PINCH_ENGAGE_RATIO = 0.15;   // 间距相对变化
+    const PINCH_ENGAGE_PX = 16;        // 间距绝对变化（两指靠得近时按这个算）
+    const PAN_ENGAGE_PX = 10;          // 中点位移
+    let mode = 'idle';                 // idle | undecided | pan | pinch
+    let d0 = 0;
     let startScale = 1;
+    let mid0 = { x: 0, y: 0 };
     let raf = 0;
     let pending = null;
     const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    const mid = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+    const apply = (p) => {
+      if (p.mode === 'pinch') this.previewScale(p.scale, { clientX: p.x, clientY: p.y });
+      else this.previewPan(p.x, p.y);
+    };
     const flush = () => {
       raf = 0;
       if (!pending) return;
-      const { scale, x, y } = pending;
+      const p = pending;
       pending = null;
-      this.previewScale(scale, { clientX: x, clientY: y });
+      apply(p);
     };
     const onStart = (e) => {
       if (e.touches.length !== 2) return;
-      startDist = dist(e.touches) || 1;
+      mode = 'undecided';
+      d0 = dist(e.touches) || 1;
       startScale = this.scale;
-      e.preventDefault();
+      mid0 = mid(e.touches);
     };
     const onMove = (e) => {
-      if (!startDist || e.touches.length !== 2) return;
-      e.preventDefault();
-      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-      pending = { scale: startScale * (dist(e.touches) / startDist), x: midX, y: midY };
+      if (mode === 'idle' || e.touches.length !== 2) return;
+      const d = dist(e.touches);
+      const m = mid(e.touches);
+      if (mode !== 'pinch') {
+        // 还没定，或当前是平移：间距一旦明显变化就升级成缩放（升级后整段手势不再回头）
+        const dd = Math.abs(d - d0);
+        if (dd >= Math.max(PINCH_ENGAGE_PX, d0 * PINCH_ENGAGE_RATIO)) mode = 'pinch';
+        else if (mode === 'undecided') {
+          const dm = Math.hypot(m.x - mid0.x, m.y - mid0.y);
+          if (dm >= PAN_ENGAGE_PX) mode = 'pan';
+          else return;                    // 还没看清要干什么：不动
+        }
+      }
+      if (mode === 'pinch') e.preventDefault();
+      pending = mode === 'pinch'
+        ? { mode, scale: startScale * (d / d0), x: m.x, y: m.y }
+        : { mode, x: m.x, y: m.y };
       if (!raf) raf = requestAnimationFrame(flush);
     };
     // 手指真的抬起来才算手势结束：不要用防抖在手指还按着的时候重排（实测那样会插进一次 200ms 卡顿）
     const onEnd = (e) => {
-      if (e.touches.length >= 2) return;
+      if (mode === 'idle' || e.touches.length >= 2) return;
       if (raf) { cancelAnimationFrame(raf); raf = 0; }
       // 最后一帧还没合上就先补上：不然「手指停在哪儿」和「最后缩放多少」会差一帧
       const last = pending;
       pending = null;
-      startDist = 0;
-      if (last) this.previewScale(last.scale, { clientX: last.x, clientY: last.y });
-      if (this._zoomPreview) this.commitZoomPreview();
+      const moved = mode === 'pinch' || mode === 'pan';
+      mode = 'idle';
+      d0 = 0;
+      if (last) apply(last);
+      // 平移也要提交（把 transform 落成真实 scroll）；提交后 _zoomPreview 自然清空
+      if (moved && this._zoomPreview) this.commitZoomPreview();
     };
-    el.addEventListener('touchstart', onStart, { passive: false });
+    el.addEventListener('touchstart', onStart, { passive: true });
     el.addEventListener('touchmove', onMove, { passive: false });
     el.addEventListener('touchend', onEnd, { passive: true });
     el.addEventListener('touchcancel', onEnd, { passive: true });
@@ -533,6 +570,7 @@ export class PdfViewer {
       this.pagesEl.style.transform = '';
       this.pagesEl.style.transformOrigin = '';
       this.pagesEl.style.willChange = '';
+      this.pagesEl.classList.remove('zoom-preview');
     }
   }
 
@@ -562,6 +600,9 @@ export class PdfViewer {
       cTop: containerRect.top,
       scrollX: c.scrollLeft,
       scrollY: c.scrollTop,
+      // 两指平移能滚到哪儿（手势一开始量一次，之后不再读布局）
+      maxScrollX: Math.max(0, c.scrollWidth - c.clientWidth),
+      maxScrollY: Math.max(0, c.scrollHeight - c.clientHeight),
       // pages 容器原点在内容坐标里的位置：整段手势恒定（transform 不改布局）
       originX: c.scrollLeft + pagesRect.left - containerRect.left,
       originY: c.scrollTop + pagesRect.top - containerRect.top,
@@ -571,11 +612,48 @@ export class PdfViewer {
       fy: 0,
       clientX: null,       // 当前指针位置（client 坐标）
       clientY: null,
+      panTx: null,         // 纯平移时算好并夹住的位移（提交时一次性落到 scroll）
+      panTy: null,
       timer: 0,
     };
     this.pagesEl.style.transformOrigin = '0 0';
     this.pagesEl.style.willChange = 'transform';
+    // 预览期间把文本层藏起来：几百个绝对定位 span 是这一层最贵的栅格化对象，
+    // 而它们本来就是透明的（只负责命中/选区）。实测每帧写 transform 时掉帧 9~10 帧，
+    // 藏掉之后是干净的 16.7ms/帧（test/perf/zoom-frame-rhythm.mjs 的 A/B）。见 style.css 的说明。
+    this.pagesEl.classList.add('zoom-preview');
     return preview;
+  }
+
+  /** 手势开始那一帧记下锚点（内容坐标 + 页内相对位置），全程不再改 */
+  _anchorZoomPreview(preview, cx, cy) {
+    preview.clientX = cx;
+    preview.clientY = cy;
+    if (preview.anchor) return;
+    preview.anchor = {
+      x: preview.scrollX + (cx - preview.cLeft),
+      y: preview.scrollY + (cy - preview.cTop),
+    };
+    /* 顺手记下锚点在**哪一页的哪个相对位置**（fx/fy）。
+       提交时用「页框矩形 + 相对位置」把位置对回去，而不是继续用上面的内容坐标：
+       布局之后 pages 容器里的**间隙与内边距不随比例缩放**（CSS 里是固定 14px），
+       所以「内容坐标 × k」在提交那一刻只是近似 —— 实测差 30px 左右（就是「飘」）。
+       页内相对位置则严格不变（页内所有东西都按同一个比例缩放）。 */
+    const page = this._pageAtContent(preview.anchor.y);
+    if (page) {
+      const r = page.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        preview.page = page;
+        preview.fx = clamp((cx - r.left) / r.width, 0, 1);
+        preview.fy = clamp((cy - r.top) / r.height, 0, 1);
+      }
+    }
+  }
+
+  /** 每帧唯一的一次写：translate + scale（transform-origin 0 0），不读任何几何 */
+  _writePreviewTransform(preview, k, tx, ty) {
+    this.pagesEl.style.transform =
+      `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${k.toFixed(5)})`;
   }
 
   previewScale(scale, { clientX = null, clientY = null } = {}) {
@@ -592,29 +670,7 @@ export class PdfViewer {
       cx = preview.cLeft + this.container.clientWidth / 2;
       cy = preview.cTop + this.container.clientHeight / 2;
     }
-    preview.clientX = cx;
-    preview.clientY = cy;
-    // 锚点只在第一次确定：内容跟着一开始抓住的那个点走，而不是每帧换一个锚
-    if (!preview.anchor) {
-      preview.anchor = {
-        x: preview.scrollX + (cx - preview.cLeft),
-        y: preview.scrollY + (cy - preview.cTop),
-      };
-      /* 顺手记下锚点在**哪一页的哪个相对位置**（fx/fy）。
-         提交时用「页框矩形 + 相对位置」把位置对回去，而不是继续用上面的内容坐标：
-         布局之后 pages 容器里的**间隙与内边距不随比例缩放**（CSS 里是固定 14px），
-         所以「内容坐标 × k」在提交那一刻只是近似 —— 实测差 30px 左右（就是「飘」）。
-         页内相对位置则严格不变（页内所有东西都按同一个比例缩放）。 */
-      const page = this._pageAtContent(preview.anchor.y);
-      if (page) {
-        const r = page.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) {
-          preview.page = page;
-          preview.fx = clamp((cx - r.left) / r.width, 0, 1);
-          preview.fy = clamp((cy - r.top) / r.height, 0, 1);
-        }
-      }
-    }
+    this._anchorZoomPreview(preview, cx, cy);
 
     const k = next / preview.baseScale;
     const qx = preview.anchor.x - preview.originX;
@@ -623,11 +679,58 @@ export class PdfViewer {
     const ty = (cy - preview.cTop) + preview.scrollY - preview.originY - k * qy;
     this.scale = next;
     this._fitMode = false;
-    this.pagesEl.style.transform = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${k.toFixed(5)})`;
+    this._writePreviewTransform(preview, k, tx, ty);
 
     clearTimeout(preview.timer);
     preview.timer = setTimeout(() => this.commitZoomPreview(), 200);
     this.opts.onScale?.(this.scale);
+  }
+
+  /**
+   * 两指平移预览：只写 transform，**一个字都不写 scroll**。
+   *
+   * 为什么不直接改 scrollTop（实测 test/perf/touch-pan-vs-pinch.mjs）：
+   * 在触摸序列中途写一次 `container.scrollTop`，后续 touchmove / touchend **全部收不到**
+   * ——20 个 move 只剩 1 个，手势当场死掉（浏览器没有发 touchcancel，就是不发事件了）。
+   * 同样位置写 `transform` 则完全没事（捏合那条路一直是写 transform，20 个 move 全到）。
+   * 所以平移也走 transform，松手时一次性落到 scroll：
+   *   · 1:1 跟手，不看浏览器滚动实现的脸色；
+   *   · 提交那一刻位置严格对齐，且**不重排、不重画、不碰比例**；
+   *   · 位移按「最多能滚到哪儿」夹住（maxScroll 在手势开始时量过一次），
+   *     所以到边界的手感跟原生滚动一样，不会越拉越多再回弹。
+   */
+  previewPan(clientX, clientY) {
+    if (!this.pdf || !this.pagesEl) return;
+    let preview = this._zoomPreview;
+    if (!preview) preview = this._zoomPreview = this._beginZoomPreview();
+    this._anchorZoomPreview(preview, clientX, clientY);
+    // 手势开始时指针在哪儿（由锚点反推，不用再存一份）
+    const startX = preview.anchor.x - preview.scrollX + preview.cLeft;
+    const startY = preview.anchor.y - preview.scrollY + preview.cTop;
+    /* 手指往右下走 → 内容跟着往右下走 → scrollTop/scrollLeft 变小。
+       位移夹在「最多能滚到哪儿」之间，边界手感与原生滚动一致。 */
+    const rawTx = clientX - startX;
+    const rawTy = clientY - startY;
+    const tx = clamp(rawTx, preview.scrollX - preview.maxScrollX, preview.scrollX);
+    const ty = clamp(rawTy, preview.scrollY - preview.maxScrollY, preview.scrollY);
+    if (tx !== rawTx || ty !== rawTy) {
+      /* 到边界了：内容停在边上，手指底下那个 PDF 点就换了。
+         锚点必须跟着挪，否则「到边之后再捏合」会从旧锚点算，画面会跳一下。 */
+      preview.anchor = {
+        x: clientX + preview.scrollX - preview.cLeft - tx,
+        y: clientY + preview.scrollY - preview.cTop - ty,
+      };
+      const page = this._pageAtContent(preview.anchor.y);
+      const r = page?.getBoundingClientRect?.();
+      if (r && r.width > 0 && r.height > 0) {
+        preview.page = page;
+        preview.fx = clamp((clientX - r.left) / r.width, 0, 1);
+        preview.fy = clamp((clientY - r.top) / r.height, 0, 1);
+      }
+    }
+    preview.panTx = tx;
+    preview.panTy = ty;
+    this._writePreviewTransform(preview, 1, tx, ty);
   }
 
   commitZoomPreview() {
@@ -638,6 +741,16 @@ export class PdfViewer {
     this.pagesEl.style.transform = '';
     this.pagesEl.style.transformOrigin = '';
     this.pagesEl.style.willChange = '';
+    this.pagesEl.classList.remove('zoom-preview');
+    /* 纯平移（两指拖动）：把 transform 落成真实滚动就完事 —— 不重排、不重画、不动比例。
+       这是最常见的两指手势，所以这条捷径也很重要：它一次布局都不触发。 */
+    if (Math.abs(this.scale - preview.baseScale) < 0.0005) {
+      if (preview.panTx != null) {
+        this.container.scrollLeft = preview.scrollX - preview.panTx;
+        this.container.scrollTop = preview.scrollY - preview.panTy;
+      }
+      return;
+    }
     // 预览期间只变换了 pages 容器；提交时先把已有 canvas/文本层同步到
     // 最终比例，再改 page 外框尺寸，避免旧位图留在新页面里造成错位/重叠。
     this._softRescale();
@@ -718,33 +831,54 @@ export class PdfViewer {
    *   中间那次让帧实测把长任务从 8 个 / 779ms 降到 4 个 / 314ms。
    */
   _scheduleRerender(delay = 140) {
+    /* ⚠️ 不能因为「已经在跑」就把请求丢掉（踩过一次）：
+       拖动缩放那 41 次 setScale 会在队列跑着的时候继续标脏 + 继续请求，
+       丢掉请求的后果是「某一页明明在视口里、却一直糊着」（实测 6 秒都不自愈）——
+       因为队列是在开跑那一刻按当时的可见范围建的，之后变可见的页没人管。
+       所以：记一个「还想再跑一趟」的标记，这一趟跑完再用新的可见范围补一趟。 */
+    this._rerenderWanted = true;
+    if (this._rerenderRunning) return;
     clearTimeout(this._rerenderTimer);
-    this._rerenderTimer = setTimeout(async () => {
+    this._rerenderTimer = setTimeout(() => {
       this._rerenderTimer = 0;
-      if (this._destroyed || !this.pdf || !this.offsets.length) return;
-      const gen = this._gen;
-      const [first, last] = this._visibleRange();
-      const center = this.container.scrollTop + this.container.clientHeight / 2;
-      const mid = (i) => (this.offsets[i] ?? 0) + (this.heights[i] ?? 0) / 2;
-      const queue = [];
-      for (let i = Math.max(1, first - 1); i <= Math.min(this.numPages, last + 1); i++) {
-        const entry = this.rendered.get(i);
-        if (entry?.dirty) queue.push(i);
-        else if (!entry && !this.renderTasks.has(i)) queue.push(i);
-      }
-      queue.sort((a, b) => Math.abs(mid(a) - center) - Math.abs(mid(b) - center));
-      for (const i of queue) {
-        // 新的手势/换文档一来就放弃剩下的 —— 跟手比清晰度重要
-        if (this._destroyed || gen !== this._gen || this._zoomPreview) return;
-        const entry = this.rendered.get(i);
-        try {
-          if (entry?.dirty) await this._renderPage(i, { gen, soft: true });
-          else if (!entry && !this.renderTasks.has(i)) await this._renderPage(i, { gen });
-        } catch { /* 单页失败不影响后面的页 */ }
-        await new Promise((r) => requestAnimationFrame(() => r()));
-      }
-      this._reclaimFar();
+      this._runRerenderPass();
     }, delay);
+  }
+
+  async _runRerenderPass() {
+    if (this._rerenderRunning) return;
+    this._rerenderRunning = true;
+    try {
+      let rounds = 0;
+      do {
+        this._rerenderWanted = false;
+        if (this._destroyed || !this.pdf || !this.offsets.length) return;
+        const gen = this._gen;
+        const [first, last] = this._visibleRange();
+        const center = this.container.scrollTop + this.container.clientHeight / 2;
+        const mid = (i) => (this.offsets[i] ?? 0) + (this.heights[i] ?? 0) / 2;
+        const queue = [];
+        for (let i = Math.max(1, first - 1); i <= Math.min(this.numPages, last + 1); i++) {
+          const entry = this.rendered.get(i);
+          if (entry?.dirty) queue.push(i);
+          else if (!entry && !this.renderTasks.has(i)) queue.push(i);
+        }
+        queue.sort((a, b) => Math.abs(mid(a) - center) - Math.abs(mid(b) - center));
+        for (const i of queue) {
+          // 新的手势/换文档一来就放弃剩下的 —— 跟手比清晰度重要
+          if (this._destroyed || gen !== this._gen || this._zoomPreview) return;
+          const entry = this.rendered.get(i);
+          try {
+            if (entry?.dirty) await this._renderPage(i, { gen, soft: true });
+            else if (!entry && !this.renderTasks.has(i)) await this._renderPage(i, { gen });
+          } catch { /* 单页失败不影响后面的页 */ }
+          await new Promise((r) => requestAnimationFrame(() => r()));
+        }
+        this._reclaimFar();
+      } while (this._rerenderWanted && ++rounds < 5 && !this._destroyed && !this._zoomPreview);
+    } finally {
+      this._rerenderRunning = false;
+    }
   }
 
   /** 回收远离视口、留着只会吃内存的页面 */
@@ -830,12 +964,19 @@ export class PdfViewer {
     const [first, last] = this._visibleRange();
     const lo = Math.max(1, first - 1);
     const hi = Math.min(this.numPages, last + 1);
+    let hasDirty = false;
     for (let i = lo; i <= hi; i++) {
       const entry = this.rendered.get(i);
-      // dirty = 软缩放留下的拉伸预览，需要重画成清晰版（但不走 placeholder 那条路）
-      if (entry?.dirty) this._renderPage(i, { gen, soft: true });
-      else if (!entry && !this.renderTasks.has(i)) this._renderPage(i, { gen });
+      /* dirty = 软缩放留下的拉伸预览，需要重画成清晰版（但不走 placeholder 那条路）。
+         ⚠️ 这类**不能在这里直接开工**：本函数是滚动处理器调的，一次会把视口内所有页
+         同时点着 —— 实测那样会在 commit 之后立刻叠出一个 178ms 长任务
+         （commit 写 scrollTop → 60ms 后 _handleScroll → 这里 → 两页并行重画），
+         把上面那套「排队 + 让帧」整个绕过去了。
+         交给 _runRerenderPass 一页一页画；缺页（placeholder）仍然立刻补，滚动不能等。 */
+      if (entry?.dirty) { hasDirty = true; continue; }
+      if (!entry && !this.renderTasks.has(i)) this._renderPage(i, { gen });
     }
+    if (hasDirty) this._scheduleRerender(0);
     // 回收远处页面，控制内存
     this._reclaimFar();
   }
@@ -882,6 +1023,10 @@ export class PdfViewer {
     if (this._zoomPreview) return;
     for (const [i, entry] of Array.from(this.rendered.entries())) {
       if (!entry.slice || !entry.cssW) continue;
+      /* dirty 的页（刚被软缩放拉伸过）已经排在重画队列里了，这里再点一次就是
+         两页并行的第二个来源（实测把排队让帧绕过去，长任务又叠成 233ms）。
+         队列里那次 _renderPage(..., {soft:true}) 本来就会重算切片。 */
+      if (entry.dirty) continue;
       const need = this._sliceFor(i, entry.cssW, entry.cssH, entry.ratio);
       if (need && this._sliceCovers(entry.slice, need)) continue;
       // 滚动很快时同一页可能连续触发多次切片刷新；保留当前任务，避免每 60ms

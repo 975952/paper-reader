@@ -98,7 +98,14 @@ check('拖动缩放全程没有出现灰条（placeholder）', z1.greyFrames ===
 check('拖动缩放全程页面没有空白（画布一直在）', z1.blankFrames === 0,
   `空白帧 ${z1.blankFrames}，最多 ${z1.maxBlank} 页`);
 
-await sleep(1200);
+/**
+ * ⚠️ 等待时间 1200 → 2500ms（2026-10-09）：重画现在是**排队 + 一页一页让帧**的
+ * （为了「松手之后不顿一下」，见 pdfview.js 的 _runRerenderPass），
+ * 换来的是「全部变清晰」的总时间比过去并行开工更长。视口内有两页时要 2×~250ms，
+ * 再加上 140ms 的防抖，1200ms 已经不够了。
+ * 判据本身没放松：视口内必须一页不剩地回到清晰位图，只是给它足够的时间。
+ */
+await sleep(2500);
 const afterDrag = await page.evaluate(() => {
   // 只数**视口内**的：离屏的页本来就没渲染过，是 placeholder 属于设计如此
   const vr = document.getElementById('viewer').getBoundingClientRect();
