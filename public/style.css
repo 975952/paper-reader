@@ -655,7 +655,7 @@ body.dragging .viewer { pointer-events: none; }
 
 .viewer-wrap { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-sunken); overflow: hidden; }
 .viewer { flex: 1 1 0; min-height: 0; overflow: auto; position: relative; outline: none; }
-.pages { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 14px 0 50px; }
+.pages { display: flex; flex-direction: column; align-items: center; width: max-content; min-width: 100%; gap: 14px; padding: 14px 0 50px; }
 
 /* ── 滚动条（2026-10 用户口径：「PDF 上下滚动的那个栏稍微做宽一点」） ──────────
    之前全应用没有一条滚动条样式，用的是 Chrome 默认外观：约 15px、系统灰、
@@ -1482,6 +1482,21 @@ body.row-dragging { cursor: row-resize; user-select: none; }
 .bubble button:hover { background: var(--accent-soft); color: var(--accent); }
 
 .bubble, .notebox { opacity: var(--surface-opacity); }
+/* A closed right sidebar keeps the PDF wide; a short translation can be read beside the selection. */
+.translation-card {
+  position: fixed; z-index: 61; width: min(380px, calc(100vw - 16px));
+  max-height: min(62vh, 520px); display: flex; flex-direction: column;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.translation-card .note-quote { flex: 0 0 auto; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.translation-card .pop-head { cursor: grab; touch-action: none; user-select: none; }
+.translation-card.dragging .pop-head { cursor: grabbing; }
+.translation-card .pop-head button { cursor: pointer; }
+.translation-card .translation-card-message { flex: 1 1 auto; min-height: 0; max-width: none; padding: 0; overflow: hidden; }
+.translation-card .text { padding: 10px 12px 12px; overflow: auto; min-height: 0; }
+.translation-card .text > :first-child { margin-top: 0; }
+.translation-card .text > :last-child { margin-bottom: 0; }
 /* .pop-head / .pop-title 仍被 #citeBox（参考文献）与 #noteBox（笔记）共用，别删 */
 .pop-head { display: flex; align-items: center; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--bg-sunken); flex: 0 0 auto; }
 .pop-title { font-size: var(--ui-fs-sm); color: var(--fg-dim); font-weight: 600; padding-left: 3px; }

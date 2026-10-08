@@ -1273,6 +1273,7 @@ function applyResponsiveLayout() {
  * pin=true 表示「用户明确要展开这一侧」（活动栏 / 顶栏 ▤ 用的是这个）。
  */
 function setSideCollapsed(side, collapsed, pin = false) {
+  if (side === 'right' && !collapsed) hideTranslationCard();
   if (side === 'left') sideIntent.noLeft = !!collapsed;
   else sideIntent.noRight = !!collapsed;
   sideIntent.pinned[side] = !collapsed && !!pin;
@@ -1345,7 +1346,7 @@ function bindSideToggleButton(side, btn) {
      * 页面上再没有第二个右栏入口，等于这个问题没有别的出口）。
      * 所以这里补一句：栏是空的就先开一块（默认问答，能打字，是最常用的入口）。
      */
-    if (side === 'right' && !collapsed && rightPanelInCol(1) === '') {
+    if (side === 'right' && collapsed && rightPanelInCol(1) === '') {
       revealRightPanelFromToggle();
     }
   });
@@ -2014,11 +2015,30 @@ function initViewer() {
     range.addEventListener('dblclick', () => viewer.fitWidth());
   }
 
-  $('#viewer').addEventListener('wheel', (e) => {
+  let pinchPixels = 0;
+  let pinchPoint = null;
+  let pinchPdf = null;
+  let pinchFrame = 0;
+  const flushPinch = () => {
+    pinchFrame = 0;
+    if (!viewer?.pdf || viewer.pdf !== pinchPdf || !pinchPixels) return;
+    // Apply the full gesture in the next display frame. No easing or trailing animation.
+    const pixels = pinchPixels;
+    pinchPixels = 0;
+    viewer.zoomAt(viewer.scale * Math.exp(-pixels * .0013), pinchPoint.x, pinchPoint.y);
+  };
+  document.addEventListener('wheel', (e) => {
     if (!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
-    viewer.setScale(viewer.scale * (e.deltaY < 0 ? 1.08 : 1 / 1.08));
-  }, { passive: false });
+    if (!viewer?.pdf || !viewer.container.contains(e.target)) return;
+    // Touchpads send Ctrl+wheel for pinch. Ordinary two-finger wheel stays native scrolling.
+    const pixels = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? viewer.container.clientHeight : 1);
+    if (viewer.pdf !== pinchPdf) pinchPixels = 0;
+    pinchPdf = viewer.pdf;
+    pinchPixels += pixels;
+    pinchPoint = { x: e.clientX, y: e.clientY };
+    if (!pinchFrame) pinchFrame = requestAnimationFrame(flushPinch);
+  }, { capture: true, passive: false });
 }
 
 function refreshReturnButton() {
@@ -2425,6 +2445,7 @@ async function openDoc({ name, url, docId }) {
    */
   const myOpen = (state.openSeq = (state.openSeq || 0) + 1);
   const superseded = () => myOpen !== state.openSeq;
+  hideTranslationCard();
   state.selection = null;
   state.scannedHintShown = null;
   state.doc = { name, url, docId };
@@ -3250,6 +3271,7 @@ function onSelectionChanged({ deselect = false, down = null, up = null, retry = 
 }
 
 function showBubble(sel) {
+  hideTranslationCard();
   const b = $('#bubble');
   b.classList.remove('hidden');
   const w = b.offsetWidth || 158;
@@ -3266,6 +3288,27 @@ function showBubble(sel) {
 }
 
 function hideBubble() { $('#bubble').classList.add('hidden'); }
+
+function hideTranslationCard() { $('#translationCard')?.classList.add('hidden'); }
+
+function showTranslationCard(sel) {
+  const card = $('#translationCard');
+  const body = $('#translationCardText');
+  $('#translationCardQuote').textContent = sel.cleanText || sel.text || '';
+  body.innerHTML = '<span class="cursor"></span>';
+  card.classList.remove('hidden');
+  const box = sel.box || { left: window.innerWidth / 2, right: window.innerWidth / 2, top: 80, bottom: 80 };
+  const w = card.offsetWidth;
+  const h = card.offsetHeight;
+  const gap = 12;
+  const left = box.right + gap + w <= window.innerWidth - 8
+    ? box.right + gap
+    : box.left - gap - w >= 8 ? box.left - gap - w : box.left;
+  const top = box.bottom + gap + h <= window.innerHeight - 8
+    ? box.bottom + gap : box.top - gap - h;
+  placeCard(card, left, top, false);
+  return body;
+}
 
 /**
  * 点正文 `[n]` → 打开参考文献卡片。
@@ -3674,9 +3717,14 @@ function renderAiBar() {
  *   角色行（小圆标 + 类型 + 页码 + 回跳） / 引用原文（细竖线，不做盒子） / 截图 / 正文 / 底部小动作
  * 没有边框卡片，也没有任何折叠。
  */
-function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = 'assistant', text, retry, restore = false }) {
+function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = 'assistant', text, retry, restore = false, reveal = true }) {
   // 恢复历史时只把内容装回对应块，不强行打开右栏；用户可从下方开关按需展开。
-  if (!restore && !state.panels[block].visible) setPanelVisible(block, true);
+  if (!restore && reveal && !state.panels[block].visible) setPanelVisible(block, true);
+  // A translation card can record a result before its sidebar block has ever been opened.
+  if (!state.blockMeta[block] && isRightPanel(block)) {
+    ensureBlock(block);
+    parkRightPanel(block, panelPark());
+  }
   const bodyEl = state.blockMeta[block].body;
   const isUser = kind === 'user';
   /** 译文条目：本条的界面要「纯净」（无动作按钮，role 行也不留回原文图标） */
@@ -4397,6 +4445,7 @@ function makeDraggable(el, handleSel, { fromAnywhere = false, remember = true } 
     // 气泡整条都是按钮，所以它用 fromAnywhere：按钮上也「预备」，但要走够 5px 才算拖。
     const onControl = e.target.closest('button, a, select, label, .no-drag');
     if (onControl && !fromAnywhere) return;
+    if (el.id === 'translationCard') e.preventDefault();
     armed = true;
     sx = e.clientX;
     sy = e.clientY;
@@ -4455,6 +4504,8 @@ function makeDraggable(el, handleSel, { fromAnywhere = false, remember = true } 
 function initDraggableCards() {
   // 气泡整条都是按钮，所以用「按下后移动才算拖」的模式；它不记位置，每次贴新的选区
   makeDraggable($('#bubble'), null, { fromAnywhere: true, remember: false });
+  makeDraggable($('#translationCard'), '.pop-head', { remember: false });
+  $('#translationCardClose')?.addEventListener('click', hideTranslationCard);
   makeDraggable($('#citeBox'), '.pop-head');
   makeDraggable($('#noteBox'), '.pop-head');
   makeDraggable($('.modal-box'), '.modal-head');
@@ -5414,6 +5465,7 @@ function syncScopePrefs() {
 function revealPanel(id) {
   const p = state.panels[id];
   if (!p) return;
+  hideTranslationCard();
   showAiBlock(id);                                 // visible = true；同栏互斥由 setPanelVisible 保证
   if (document.body.classList.contains('no-right')) setSideCollapsed('right', false, true);
   if (isRightPanel(id)) document.querySelector('#rightSide')?.setAttribute('data-active-panel', id);
@@ -5430,29 +5482,35 @@ async function doTranslate(sel) {
   const lang = targetLangFor(text);
   const key = `${lang}::${text.length}-${hashStr(text)}`;
   const cached = state.cache.get(key);
+  const inCard = document.body.classList.contains('no-right') || document.body.classList.contains('right-empty');
+  const cardBody = inCard ? showTranslationCard(sel) : null;
+  if (!inCard) revealTranslatePanel();
 
   if (cached) {
     const existing = [...state.sessionEntries].reverse().find((x) => x?.block === 'translate'
       && x?.tag === 'translation' && x?.status === 'complete' && x?.quote === text
       && String(x?.text || '') === String(cached));
     if (existing) {
-      revealTranslatePanel();
-      existing.root?.scrollIntoView?.({ block: 'nearest' });
-      toast('这段翻译已在结果区，直接使用原结果', 'ok', 1800);
+      if (cardBody) cardBody.innerHTML = renderMarkdown(cached);
+      else {
+        existing.root?.scrollIntoView?.({ block: 'nearest' });
+        toast('这段翻译已在结果区，直接使用原结果', 'ok', 1800);
+      }
       return;
     }
   }
-  revealTranslatePanel();
   const entry = addEntry({ block: 'translate', tag: 'translation', page: sel.page, quote: text,
-    retry: { kind: 'translate', docId: state.doc?.docId || null, text, page: sel.page || null } });
+    retry: { kind: 'translate', docId: state.doc?.docId || null, text, page: sel.page || null }, reveal: !inCard });
   if (cached) {
     entry.body.innerHTML = renderMarkdown(cached);
+    if (cardBody) cardBody.innerHTML = renderMarkdown(cached);
     finishEntry(entry, cached, { page: sel.page, onAsk: () => addToChat(sel) });
     toast('这段翻过，直接用缓存', 'ok', 1500);
     return;
   }
 
   const target = streamTarget(entry.body);
+  const cardTarget = cardBody ? streamTarget(cardBody) : null;
   const ctl = makeController();
   if (!ctl) return;
   setBusy(true, '0s');
@@ -5462,20 +5520,23 @@ async function doTranslate(sel) {
     const full = await chat({
       messages: translateMessages({ text, targetLang: lang, context, page: sel.page, docTitle: state.doc?.name }),
       signal: ctl.signal,
-      onDelta: (piece, all) => { received = all; target.push(all); },
+      onDelta: (piece, all) => { received = all; target.push(all); cardTarget?.push(all); },
       onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
     });
     const clean = full.trim();
     target.done(clean);
+    cardTarget?.done(clean);
     state.cache.set(key, clean);
     finishEntry(entry, clean, { page: sel.page, onAsk: () => addToChat(sel) });
   } catch (e) {
     if (isAbort(e)) {
       target.done(received);
+      cardTarget?.done(received);
       finishEntry(entry, received, { page: sel.page, status: 'stopped', onRetry: () => doTranslate(sel) });
     }
     else {
       target.fail(errText(e));
+      cardTarget?.fail(errText(e));
       addFailureRetry(entry, errText(e), () => doTranslate(sel));
     }
   } finally {
@@ -5488,6 +5549,7 @@ async function doExplain(sel) {
   const text = sel.cleanText || cleanText(sel.text);
   if (!text || !ensureReady()) return;
   // 「释」直接写在侧栏里，不弹浮层 —— 解释是要读的，不是瞄一眼的
+  revealPanel('chat');
   const entry = addEntry({ block: 'chat', tag: 'explanation', page: sel.page, quote: text,
     retry: { kind: 'explain', docId: state.doc?.docId || null, text, page: sel.page || null } });
   const target = streamTarget(entry.body);

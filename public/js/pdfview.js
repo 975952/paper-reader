@@ -215,6 +215,9 @@ export class PdfViewer {
       if (this._fitMode) this.fitWidth();
     }, 200);
     window.addEventListener('resize', this._onResize);
+    // Opening a side panel changes the reader width without resizing the window.
+    this._resizeObserver = new ResizeObserver(this._onResize);
+    this._resizeObserver.observe(this.container);
 
     // 窗口被拖到另一块不同 DPI 的显示器上时，已渲染的页要重画，否则会糊
     this._onDprChange = () => {
@@ -244,6 +247,7 @@ export class PdfViewer {
     this.container.removeEventListener('mousemove', this._onHoverMove);
     if (this._hoverRaf) { try { cancelAnimationFrame(this._hoverRaf); } catch { /* ignore */ } }
     window.removeEventListener('resize', this._onResize);
+    this._resizeObserver.disconnect();
     this._dprQuery?.removeEventListener?.('change', this._onDprChange);
     this.close();
   }
@@ -525,6 +529,27 @@ export class PdfViewer {
     this.opts.onStatus?.(`缩放 ${Math.round(this.scale * 100)}%`);
   }
 
+  /** Keep the PDF point under a touchpad pinch in place, including horizontal scroll. */
+  zoomAt(scale, clientX, clientY) {
+    if (!this.pdf) return;
+    const hovered = document.elementFromPoint(clientX, clientY)?.closest?.('.page');
+    const page = hovered && this.container.contains(hovered) ? hovered
+      : this.pageEls.find((el) => el && el.getBoundingClientRect().top <= clientY
+        && el.getBoundingClientRect().bottom >= clientY) || this.pageEls[this.current];
+    if (!page) { this.setScale(scale); return; }
+    const before = page.getBoundingClientRect();
+    const fx = clamp((clientX - before.left) / before.width, 0, 1);
+    const fy = clamp((clientY - before.top) / before.height, 0, 1);
+    const previous = this.scale;
+    this.setScale(scale, { keepCenter: false });
+    if (this.scale === previous) return;
+    // Touchpad pauses are short; start the sharp replacement sooner than a slider zoom.
+    this._scheduleRerender(80);
+    const after = page.getBoundingClientRect();
+    this.container.scrollLeft += after.left + fx * after.width - clientX;
+    this.container.scrollTop += after.top + fy * after.height - clientY;
+  }
+
   fitWidth() {
     if (!this.pdf || !this.baseSizes[1]) return;
     const anchor = this._captureAnchor();
@@ -640,20 +665,15 @@ export class PdfViewer {
      * 新的画布是**另一个 canvas**，所以两边不会抢同一个上下文，
      * 也就不需要「等在途任务落定再重画」那套了。
      */
-    const prevEntry = this.rendered.get(i);
+    const storedEntry = this.rendered.get(i);
+    const prevEntry = storedEntry?.canvas?.parentElement === pageEl ? storedEntry : null;
+    if (storedEntry && !prevEntry) this.rendered.delete(i);
     const prevCanvas = prevEntry?.canvas || null;
     const reusePinLayer = !!(prevEntry?.pinLayer
       && Math.abs(Number(prevEntry.renderScale || this.scale) - this.scale) < 0.001);
-    if (prevEntry) {
-      try { prevEntry.task?.cancel(); } catch { /* ignore */ }
-      prevEntry.textDiv.remove();
-      prevEntry.hlLayer.remove();
-      prevEntry.hitLayer.remove();
-      // 同一缩放比例下切片重画只改变 canvas/text layer，旧热点仍落在同一页坐标上。
-      // 暂时复用它，等新文本层和新热点准备好后再原地替换，避免点击落空。
-      if (!reusePinLayer) prevEntry.pinLayer?.remove();
-      this.rendered.delete(i);
-    }
+    // Keep the entire old page live while the new canvas renders. In particular,
+    // a pinch can continue during this task, and _softRescale must still move the
+    // visible preview rather than only resizing a hidden replacement canvas.
 
     const stale = () => gen !== this._gen || this._destroyed;
 
@@ -715,18 +735,17 @@ export class PdfViewer {
         citeHits: [],
         hitBoxes: null,
       };
-      this.rendered.set(i, entry);
+      if (!prevEntry) this.rendered.set(i, entry);
 
       // 先把 canvas 插进去，滚动时不会闪白。
       // 有旧画布时插在它后面（DOM 顺序即层级，见上面的说明），否则插到最前面。
       pageEl.classList.remove('placeholder');
-      if (prevCanvas && prevCanvas.parentElement === pageEl) {
-        prevCanvas.before(hlLayer, hitLayer);
+      if (prevCanvas) {
         prevCanvas.after(canvas);
       } else {
         pageEl.prepend(hlLayer, hitLayer, canvas);
+        pageEl.append(textDiv, pinLayer);
       }
-      pageEl.append(textDiv, pinLayer);
 
       const renderTask = page.render({
         canvasContext: ctx,
@@ -744,17 +763,36 @@ export class PdfViewer {
           this.opts.onStatus?.(`第 ${i} 页渲染失败：${e.message}`);
         }
         // 这次没画成：把藏着的半成品摘掉，让上一张预览继续顶着
-        if (prevCanvas && this.rendered.get(i) !== prevEntry) {
+        if (prevCanvas) {
           canvas.remove();
           pageEl.classList.remove('placeholder');
         }
         return;
       }
-      if (stale() || this.rendered.get(i) !== entry) return;
+      if (stale() || this.rendered.get(i) !== (prevEntry || entry)) {
+        canvas.remove();
+        return;
+      }
+      // A later pinch moved the page while this bitmap was rendering. Keep the
+      // live preview and render once more at the latest scale; never flash an
+      // obsolete, differently sized bitmap in front of it.
+      if (Math.abs(this.scale - entry.renderScale) > 0.001) {
+        if (prevCanvas) canvas.remove();
+        (prevEntry || entry).dirty = true;
+        this._scheduleRerender(80);
+        return;
+      }
 
       // 新版画好了：露出来，再把上一张预览扔掉（这一步才是「换帧」，中间没有空白）
       if (prevCanvas) {
         canvas.style.visibility = '';
+        prevEntry.textDiv.remove();
+        prevEntry.hlLayer.remove();
+        prevEntry.hitLayer.remove();
+        if (!reusePinLayer) prevEntry.pinLayer?.remove();
+        this.rendered.set(i, entry);
+        prevCanvas.before(hlLayer, hitLayer);
+        pageEl.append(textDiv, pinLayer);
         try { prevCanvas.width = 0; prevCanvas.height = 0; } catch { /* ignore */ }
         prevCanvas.remove();
       }

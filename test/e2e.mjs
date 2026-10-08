@@ -410,28 +410,22 @@ console.log('\n▶ 译…');
 await selectSpans(1, 5);
 await sleep(250);
 await clickBubble('translate');
-/**
- * 2026-10 删减：就地结果浮层（`#popover` / `#popBody` / `#popClose`）整块删除 ——
- * 同一个 AI 结果不允许同时出现在两个地方，译文/解释一律只进右栏的块。
- * 所以这里改成等「译文」块里出现这次结果（原来是等浮层可见）。
- */
-await page.waitForFunction(() => {
-  const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')]
-    .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
-  return (msgs.at(-1)?.querySelector('.text')?.innerText || '').includes('注意力机制');
-}, { timeout: 15000 });
+await page.waitForFunction(() => document.querySelector('#translationCardText')?.innerText.includes('注意力机制'), { timeout: 15000 });
 const transShown = await page.evaluate(() => {
-  const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')]
-    .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
   return {
-    blocks: [...document.querySelectorAll('#aiArea .ai-block')].map((b) => b.dataset.block),
-    text: msgs.at(-1)?.querySelector('.text')?.innerText || '',
-    legacyPopover: !!document.getElementById('popover'),
+    card: !document.querySelector('#translationCard').classList.contains('hidden'),
+    text: document.querySelector('#translationCardText').innerText,
+    rightWidth: document.querySelector('#rightCols').getBoundingClientRect().width,
+    saved: window.__state.sessionEntries.some((x) => x.block === 'translate' && x.text.includes('注意力机制')),
   };
 });
-check('译文出现在右栏「译文」块里（就地浮层已删除）',
-  transShown.blocks.includes('translate') && transShown.text.includes('注意力机制') && !transShown.legacyPopover,
-  `blocks=${transShown.blocks.join(',')} · 旧浮层=${transShown.legacyPopover} · ${JSON.stringify(transShown.text.slice(0, 30))}`);
+check('右栏关闭时译文显示在卡片中，PDF 不让宽，结果仍保存',
+  transShown.card && transShown.text.includes('注意力机制') && transShown.rightWidth === 0 && transShown.saved,
+  JSON.stringify(transShown));
+await page.click('#topbarRightToggle');
+await page.waitForFunction(() => document.querySelector('#rightCols').getBoundingClientRect().width > 200);
+await page.click('#aiBar .aibar-btn[data-block="translate"]');
+await page.waitForFunction(() => document.querySelector('#aiArea .msg .text')?.innerText.includes('注意力机制'));
 const tEntry = await lastEntry();
 /**
  * 类型标签是**内部标记**：public/style.css 里 `.msg .tag { display: none; }`，
@@ -441,9 +435,9 @@ const tEntry = await lastEntry();
  * 现在必然失败。这里改成与当前实现一致；「标签要不要显示」「页码词法要不要统一」
  * 留给后续视觉/排版阶段决定，不在基线阶段改产品行为。
  */
-check('译文同时进「译文」块（带页码）', tEntry.tag === 'translation' && /^第\d+页$/.test(tEntry.page), `${tEntry.tag} ${tEntry.page}`);
+check('打开右栏后仍能在「译文」块找到结果（带页码）', tEntry.tag === 'translation' && /^第\d+页$/.test(tEntry.page), `${tEntry.tag} ${tEntry.page}`);
 check('动作条里没有多余的 null', !tEntry.acts.some((a) => a === 'null'), tEntry.acts.join('/'));
-check('译文块自动出现', (await page.evaluate(() => [...document.querySelectorAll('.ai-block')].map((b) => b.dataset.block))).includes('translate'));
+check('译文块按需打开', (await page.evaluate(() => [...document.querySelectorAll('#aiArea .ai-block')].map((b) => b.dataset.block))).includes('translate'));
 
 /* ══════════════ 7. 释（只在右栏） ══════════════ */
 console.log('\n▶ 释…');

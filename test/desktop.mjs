@@ -104,7 +104,16 @@ for (let attempt = 0; attempt < 40 && !base; attempt++) {
       const r = await fetch(`http://127.0.0.1:${p}/api/health`, { signal: AbortSignal.timeout(500) });
       if (r.ok) {
         const j = await r.json();
-        if (j?.ok) { base = `http://127.0.0.1:${p}`; break; }
+        if (!j?.ok) continue;
+        // Another reader may already be open on an earlier port. Only use this test's
+        // token-disabled instance and fixture, never the user's live data service.
+        const papersProbe = await fetch(`http://127.0.0.1:${p}/api/papers`, { signal: AbortSignal.timeout(500) });
+        if (!papersProbe.ok) continue;
+        const listing = await papersProbe.json();
+        if ((listing.papers || []).some((paper) => paper.name === 'fixture-multipage.pdf')) {
+          base = `http://127.0.0.1:${p}`;
+          break;
+        }
       }
     } catch { /* 还没起来 */ }
   }
@@ -121,7 +130,7 @@ try {
   const all = JSON.parse(out);
   const list = Array.isArray(all) ? all : [all];
   // Chrome 可能同时显示「论文阅读器 - Google Chrome」；只认桌面版自己的精确标题。
-  const info = list.find((x) => (x.MainWindowTitle || '') === '论文阅读器') || {};
+  const info = list.find((x) => x.Id === child.pid) || {};
   check('是原生窗口（有窗口句柄与标题）', info.MainWindowTitle === '论文阅读器', `pid=${info.Id} ${info.ProcessName} title="${info.MainWindowTitle}"`);
 } catch (e) {
   check('是原生窗口（有窗口句柄与标题）', false, String(e.message).slice(0, 60));

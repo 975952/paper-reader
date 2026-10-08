@@ -257,7 +257,11 @@ pub fn run(url: String) -> ! {
 
     // 页面里的外链交给系统浏览器；面板 URL 由前端应用内卡片处理，不创建新的顶层窗口。
     let webview = decorate_builder(
-        WebViewBuilder::new_with_web_context(&mut web_context).with_url(url.clone()),
+        // Wry disables WebView2 pinch gestures by default. Let Chromium deliver
+        // the cancelable Ctrl+wheel gesture to JS, which zooms only the PDF.
+        WebViewBuilder::new_with_web_context(&mut web_context)
+            .with_hotkeys_zoom(true)
+            .with_url(url.clone()),
         &origin,
         proxy,
     )
