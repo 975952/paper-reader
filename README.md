@@ -318,8 +318,8 @@ prt/
 上表是 **2026-10-02** 在隔离实例上的实测值（详见 [`docs/refactor-baseline-phase0.md`](docs/refactor-baseline-phase0.md)）。
 
 > **2026-10-08 / 10-09 增量**：`zoom.mjs` 17 → **21** 条（补「队列外的页滚进视口会自动重画」+ 底栏缩放滑块 3 条）；
-> 新增 `zoom-touch.mjs`（触摸屏手势：判意图 / 跟手 / 提交状态机契约，**35 条**；修复前 10 / 20）。
-> 两者都在**重新编译后的 exe** 内嵌前端上跑过（21 / 21 与 35 / 35），`desktop.mjs` 52 / 52。
+> 新增 `zoom-touch.mjs`（触摸屏手势：判意图 / 跟手 / 提交状态机契约，**36 条**；修复前 10 / 20）。
+> 两者都在**重新编译后的 exe** 内嵌前端上跑过（21 / 21 与 36 / 36），`desktop.mjs` 52 / 52。
 > 另有 `test/perf/` 下六个**调研脚本**（不做断言，只打印数字，自带隔离服务）：
 > `zoom-touch-takeover.mjs`（谁拿走触摸屏手势）、`touch-pan-vs-pinch.mjs`（两指手势：浏览器行为 + 应用判定）、
 > `zoom-frame-rhythm.mjs`（捏合过程 vs 松手之后各掉多少帧）、`zoom-commit-timeline.mjs`（松手后每一段花在哪）、

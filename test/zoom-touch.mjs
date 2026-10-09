@@ -385,6 +385,65 @@ if (anim.error) {
     `逐帧位移最大 ${Math.max(...jumps).toFixed(2)}px`);
 }
 
+/**
+ * 「手势做完之后偏移闪现」——用户 2026-10-09 的反馈，这一条专门钉它。
+ * 根因：预览原来是把 `.pages` 整层 `scale(k)`，**页间距（14px）和内边距也被一起放大**，
+ * 而提交后的真实布局里它们是固定值 → 离锚点每远一页就差一个 `间距 × (k−1)`
+ * （实测 k=2.18 时视口内第 8 页在提交那一帧跳了 16.5px）。
+ * 现在预览逐页预演真实布局，提交那一帧所有页都不该位移。
+ */
+await resetView();
+const shift = await page.evaluate(async () => {
+  const v = window.__viewer;
+  const rec = [];
+  let stop = false;
+  const tick = () => {
+    if (stop) return;
+    const pages = {};
+    const vr = v.container.getBoundingClientRect();
+    for (const [i, e] of v.rendered) {
+      const r = e.canvas.parentElement.getBoundingClientRect();
+      // 只记"与视口相交"的页：离屏页在预览里被整体缩放，与真实布局本来就不必逐像素一致
+      if (r.bottom > vr.top && r.top < vr.bottom) pages[i] = [r.left, r.top];
+    }
+    rec.push({ preview: !!v._zoomPreview, pages });
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  const base = v.scale;
+  for (let i = 1; i <= 20; i++) {
+    v.previewScale(base * (1 + 0.6 * (i / 20)), { clientX: 750, clientY: 430 });
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  v.commitZoomPreview();
+  for (let i = 0; i < 6; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  stop = true;
+  let ci = -1;
+  for (let i = 1; i < rec.length; i++) if (rec[i - 1].preview && !rec[i].preview) { ci = i; break; }
+  if (ci < 0) return { error: '没抓到提交帧' };
+  const before = rec[ci - 1].pages;
+  const after = rec[ci].pages;
+  let worst = 0;
+  let which = null;
+  for (const k of Object.keys(before)) {
+    if (!after[k]) continue;
+    const d = Math.hypot(after[k][0] - before[k][0], after[k][1] - before[k][1]);
+    if (d > worst) { worst = d; which = { page: k, from: before[k].map((x) => Math.round(x)), to: after[k].map((x) => Math.round(x)) }; }
+  }
+  return { worst: +worst.toFixed(1), which, pages: Object.keys(before).length, k: +(v.scale / base).toFixed(2) };
+});
+if (shift.error) {
+  check('提交那一帧视口内的页不位移（偏移闪现）', false, shift.error);
+} else {
+  check('提交那一帧视口内的页不位移（偏移闪现）',
+    shift.worst <= 3,
+    `放大 ×${shift.k}，视口内 ${shift.pages} 页，最大位移 ${shift.worst}px${shift.which ? `（第 ${shift.which.page} 页 ${JSON.stringify(shift.which.from)} → ${JSON.stringify(shift.which.to)}）` : ''}（整层缩放的旧实现是 16.5px）`);
+}
+
 /* ══════════════ 五、先平移后捏合 ══════════════ */
 console.log('\n-- 先平移后捏合');
 await resetView();

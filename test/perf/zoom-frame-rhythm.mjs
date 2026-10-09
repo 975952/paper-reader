@@ -23,7 +23,8 @@ const OUT = path.join(import.meta.dirname, '..', 'artifacts', 'perf-frame-rhythm
 const ROOT = path.resolve(import.meta.dirname, '..', '..');
 const DATA = path.join(OUT, 'data');
 const PAPERS = path.join(OUT, 'papers');
-const PORT = Number(process.env.PORT || 8974);
+// 8974 落在 Windows 的保留端口段里（netsh int ipv4 show excludedportrange 能看到），别用
+const PORT = Number(process.env.PORT || 8977);
 const BASE = `http://127.0.0.1:${PORT}`;
 const CHROME = process.env.CHROME || 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

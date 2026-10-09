@@ -2032,7 +2032,12 @@ function initViewer() {
     // Apply the full gesture in the next display frame. No easing or trailing animation.
     const pixels = pinchPixels;
     pinchPixels = 0;
-    viewer.zoomAt(viewer.scale * Math.exp(-pixels * .0013), pinchPoint.x, pinchPoint.y);
+    /**
+     * 触摸板捏合的灵敏度：`exp(-pixels * PINCH_GAIN)`。
+     * 2026-10-09 用户口径「可以把这个缩放的速度加快一点」→ 0.0013 → **0.0022**（约 1.7 倍）。
+     * 这个数只影响「同样的手指移动量缩放多少」；嫌快/嫌慢只改这一个常数。
+     */
+    viewer.zoomAt(viewer.scale * Math.exp(-pixels * 0.0022), pinchPoint.x, pinchPoint.y);
   };
   document.addEventListener('wheel', (e) => {
     if (!e.ctrlKey && !e.metaKey) return;

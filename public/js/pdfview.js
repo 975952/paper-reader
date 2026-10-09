@@ -387,6 +387,13 @@ export class PdfViewer {
     /** 判定阈值：改这两个数之前先看上面那段「判定优先」的说明 */
     const PINCH_ENGAGE_RATIO = 0.15;   // 间距相对变化
     const PINCH_ENGAGE_PX = 16;        // 间距绝对变化（两指靠得近时按这个算）
+    /**
+     * 触摸屏捏合的「跟手倍率」：`scale = start * (d/d0)^GAIN`。
+     * GAIN = 1 是严格的 1:1（手指张开一倍、画面放大一倍）。
+     * 2026-10-09 用户口径「可以把这个缩放的速度加快一点」→ 取 **1.25**：
+     * 同样的手指行程多缩 25%，松手更快到位。嫌快嫌慢只改这一个数（1 = 回到原生手感）。
+     */
+    const PINCH_GAIN = 1.25;
     const PAN_ENGAGE_PX = 10;          // 中点位移
     let mode = 'idle';                 // idle | undecided | pan | pinch
     let d0 = 0;
@@ -430,7 +437,7 @@ export class PdfViewer {
       }
       if (mode === 'pinch') e.preventDefault();
       pending = mode === 'pinch'
-        ? { mode, scale: startScale * (d / d0), x: m.x, y: m.y }
+        ? { mode, scale: startScale * Math.pow(d / d0, PINCH_GAIN), x: m.x, y: m.y }
         : { mode, x: m.x, y: m.y };
       if (!raf) raf = requestAnimationFrame(flush);
     };
@@ -675,6 +682,7 @@ export class PdfViewer {
 
   _cancelZoomPreview() {
     clearTimeout(this._zoomPreview?.timer);
+    this._clearPreviewTransforms(this._zoomPreview);
     this._zoomPreview = null;
     if (this.pagesEl) {
       this.pagesEl.style.transform = '';
@@ -704,12 +712,29 @@ export class PdfViewer {
     const c = this.container;
     const containerRect = c.getBoundingClientRect();
     const pagesRect = this.pagesEl.getBoundingClientRect();
+    /* `.pages` 的 padding 与行距：**预览要预演真实布局**，就必须知道这两个值
+       （真实布局里它们不随比例缩放，而容器的整体 scale 会把它们一起放大 —— 见 _predictedLayout）。
+       每个文档读一次，手势期不再读。 */
+    let padTop = 0;
+    let gap = 0;
+    try {
+      const cs = getComputedStyle(this.pagesEl);
+      padTop = parseFloat(cs.paddingTop) || 0;
+      gap = parseFloat(cs.rowGap) || parseFloat(cs.gap) || 0;
+      if (!Number.isFinite(padTop)) padTop = 0;
+      if (!Number.isFinite(gap)) gap = 0;
+    } catch { /* 读不到就按 0 算，只会让预览差一点点 */ }
     const preview = {
       baseScale: this.scale,
       cLeft: containerRect.left,
       cTop: containerRect.top,
       scrollX: c.scrollLeft,
       scrollY: c.scrollTop,
+      containerW: c.clientWidth,
+      padTop,
+      gap,
+      // 老布局（当前比例）下每页的真实位置：算一次，之后不用再读 DOM
+      oldLayout: this._predictedLayout(this.scale, padTop, gap, c.clientWidth),
       // 两指平移能滚到哪儿（手势一开始量一次，之后不再读布局）
       maxScrollX: Math.max(0, c.scrollWidth - c.clientWidth),
       maxScrollY: Math.max(0, c.scrollHeight - c.clientHeight),
@@ -718,6 +743,7 @@ export class PdfViewer {
       originY: c.scrollTop + pagesRect.top - containerRect.top,
       anchor: null,        // 内容坐标：手指抓住的那个点，整段手势不动
       page: null,          // 锚点所在页 + 页内相对位置（提交时用它把位置对回去）
+      touched: new Set(),  // 这一轮写过 transform 的页（提交/取消时要逐个清掉）
       fx: 0,
       fy: 0,
       clientX: null,       // 当前指针位置（client 坐标）
@@ -733,6 +759,38 @@ export class PdfViewer {
     // 藏掉之后是干净的 16.7ms/帧（test/perf/zoom-frame-rhythm.mjs 的 A/B）。见 style.css 的说明。
     this.pagesEl.classList.add('zoom-preview');
     return preview;
+  }
+
+  /**
+   * 预演某个比例下的真实布局：每页的内容坐标 top 与 left。
+   *
+   * 为什么要它（2026-10-09 实测「手势做完之后偏移闪现」）：
+   * 之前预览是给 `.pages` 整层 `scale(k)` —— **页间距（14px）和上下内边距也被一起放大**，
+   * 但提交后的真实布局里它们是固定值。于是离锚点每远一页，位置就差一个
+   * `间距 × (k−1)`：实测 k=2.18 时视口内第 8 页在提交那一帧跳了 **16.5px**
+   * （14 × 1.18 = 16.5，一分不差）。用户看到的就是「做完手势偏移一下」。
+   * 现在预览按这里的预测值逐页摆放，与提交后的布局逐页对齐 → 提交那一帧不动。
+   *
+   * 公式与 `layout()` 完全一致：`top = padTop + Σ(round(h×scale) + gap)`，
+   * 横向按 `.pages` 的居中规则 `(max(页宽, 容器宽) − 本页宽) / 2`。
+   */
+  _predictedLayout(scale, padTop, gap, containerW) {
+    const tops = new Array(this.numPages + 1);
+    const lefts = new Array(this.numPages + 1);
+    const widths = new Array(this.numPages + 1);
+    let top = padTop;
+    let maxW = 0;
+    for (let i = 1; i <= this.numPages; i++) {
+      const { width, height } = this._sizeOf(i);
+      const w = Math.round(width * scale);
+      tops[i] = top;
+      widths[i] = w;
+      if (w > maxW) maxW = w;
+      top += Math.round(height * scale) + gap;
+    }
+    const boxW = Math.max(maxW, containerW || 0);
+    for (let i = 1; i <= this.numPages; i++) lefts[i] = (boxW - widths[i]) / 2;
+    return { tops, lefts, bottom: top };
   }
 
   /** 手势开始那一帧记下锚点（内容坐标 + 页内相对位置），全程不再改 */
@@ -756,14 +814,77 @@ export class PdfViewer {
         preview.page = page;
         preview.fx = clamp((cx - r.left) / r.width, 0, 1);
         preview.fy = clamp((cy - r.top) / r.height, 0, 1);
+        /* 逐页预览要用：锚点在哪一页、以及它在**页内的局部坐标**（未缩放）。
+           每帧由 `old.tops[ap] + t + k*ay = 手指位置` 解出这套逐页 transform 的整体常数，
+           于是「手指抓住的那个点」始终在手指上，其余页跟着同一套相对位置走。 */
+        preview.anchorPage = Number(page.dataset.page) || null;
+        preview.anchorLocalX = cx - r.left;
+        preview.anchorLocalY = cy - r.top;
       }
     }
   }
 
-  /** 每帧唯一的一次写：translate + scale（transform-origin 0 0），不读任何几何 */
+  /**
+   * 每帧的写：**逐页**预演真实布局（不读任何几何）。
+   *
+   * k === 1（两指平移）时退化成「整层平移」，直接用容器 transform —— 一次写、和以前一样快。
+   * k ≠ 1（捏合）时逐页写：页面自己 `scale(k)`，位置按 `_predictedLayout` 预演，
+   * 于是**页间距/内边距保持固定**，与提交后的真实布局逐页对齐（提交那一帧不再位移）。
+   * 见 `_predictedLayout` 里的实测说明（16.5px → 0）。
+   *
+   * 只写"看得见的那几页"：视口外的页不写（transform 不改布局，不会影响别的页），
+   * 这样每帧的写次数与可见页数同阶（实测 1~3 页）。
+   */
   _writePreviewTransform(preview, k, tx, ty) {
-    this.pagesEl.style.transform =
-      `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${k.toFixed(5)})`;
+    if (Math.abs(k - 1) < 1e-4) {
+      // 纯平移：整层一条 transform，等价且最省
+      this.pagesEl.style.transform = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px)`;
+      return;
+    }
+    this.pagesEl.style.transform = '';
+    const [first, last] = this._visibleRange();
+    const lo = Math.max(1, first - 1);
+    const hi = Math.min(this.numPages, last + 1);
+    const pred = this._predictedLayout(this.scale, preview.padTop, preview.gap, preview.containerW);
+    const old = preview.oldLayout;
+    /* 锚点页上的常数：让「手指抓住的那个点」始终落在手指上（其余页跟着这套相对位置走）。
+       全部在**内容坐标**里算：页在内容坐标是 old.tops[i]，transform 的位移也发生在内容坐标里
+       （滚动只是平移）。页顶的屏幕位置 = cTop + (内容 top + py) − scrollY，
+       代入「锚点局部坐标 ay 缩放 k 倍后落在手指 cy 上」解出：
+         py = cy − cTop + scrollY − oldTop − k·ay
+       再减去「按真实布局该走的那一段」就得到常数 C。k=1 时 C=0（纯平移不打比例差）。 */
+    const ap = preview.anchorPage;
+    let C = 0;
+    let D = 0;
+    if (ap && old.tops[ap] != null) {
+      const ay = preview.anchorLocalY;      // 锚点在页内的局部纵坐标（未缩放）
+      const ax = preview.anchorLocalX;
+      const wantY = preview.clientY - preview.cTop + preview.scrollY - old.tops[ap] - k * ay;
+      const wantX = preview.clientX - preview.cLeft + preview.scrollX - old.lefts[ap] - k * ax;
+      C = wantY - (pred.tops[ap] - old.tops[ap]);
+      D = wantX - (pred.lefts[ap] - old.lefts[ap]);
+    }
+    for (let i = lo; i <= hi; i++) {
+      const el = this.pageEls[i];
+      if (!el) continue;
+      const oy = old.tops[i] ?? 0;
+      const ox = old.lefts[i] ?? 0;
+      const py = (pred.tops[i] ?? oy) - oy + C;
+      const px = (pred.lefts[i] ?? ox) - ox + D;
+      el.style.transformOrigin = '0 0';
+      el.style.transform = `translate(${px.toFixed(2)}px, ${py.toFixed(2)}px) scale(${k.toFixed(5)})`;
+      preview.touched.add(el);
+    }
+  }
+
+  /** 把预览期间写过 transform 的页面全部还原（提交/取消时各调一次） */
+  _clearPreviewTransforms(preview) {
+    if (!preview?.touched) return;
+    for (const el of preview.touched) {
+      el.style.transform = '';
+      el.style.transformOrigin = '';
+    }
+    preview.touched.clear();
   }
 
   previewScale(scale, { clientX = null, clientY = null } = {}) {
@@ -784,16 +905,13 @@ export class PdfViewer {
     this._anchorZoomPreview(preview, cx, cy);
 
     const k = next / preview.baseScale;
-    const qx = preview.anchor.x - preview.originX;
-    const qy = preview.anchor.y - preview.originY;
-    const tx = (cx - preview.cLeft) + preview.scrollX - preview.originX - k * qx;
-    const ty = (cy - preview.cTop) + preview.scrollY - preview.originY - k * qy;
     this.scale = next;
     this._fitMode = false;
-    this._writePreviewTransform(preview, k, tx, ty);
+    this._writePreviewTransform(preview, k, 0, 0);
 
     clearTimeout(preview.timer);
-    preview.timer = setTimeout(() => this.commitZoomPreview(), 200);
+    // 140ms（原来 200）：用户要「缩放快一点」——停手到变清晰的总延迟少 60ms
+    preview.timer = setTimeout(() => this.commitZoomPreview(), 140);
     this.opts.onScale?.(this.scale);
   }
 
@@ -871,6 +989,8 @@ export class PdfViewer {
     this.pagesEl.style.transformOrigin = '';
     this.pagesEl.style.willChange = '';
     this.pagesEl.classList.remove('zoom-preview');
+    // 逐页预览写的 transform 也要清（不然页面会带着预览位移进入真实布局）
+    this._clearPreviewTransforms(preview);
     /* 纯平移（两指拖动）：把 transform 落成真实滚动就完事 —— 不重排、不重画、不动比例。
        这是最常见的两指手势，所以这条捷径也很重要：它一次布局都不触发。 */
     if (Math.abs(this.scale - preview.baseScale) < 0.0005) {
@@ -880,7 +1000,7 @@ export class PdfViewer {
       }
       return;
     }
-    // 预览期间只变换了 pages 容器；提交时先把已有 canvas/文本层同步到
+    // 预览期间变换了页面；提交时先把已有 canvas/文本层同步到
     // 最终比例，再改 page 外框尺寸，避免旧位图留在新页面里造成错位/重叠。
     this._softRescale();
     this.layout();
@@ -894,7 +1014,8 @@ export class PdfViewer {
         this.container.scrollTop += r.top + preview.fy * r.height - preview.clientY;
       }
     }
-    this._scheduleRerender(140);
+    // 90ms（原来 140）：用户要「缩放快一点」，松手到开始重画之间的空档再短一点
+    this._scheduleRerender(90);
     this.opts.onStatus?.(`缩放 ${Math.round(this.scale * 100)}%`);
   }
 
