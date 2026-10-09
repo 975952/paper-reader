@@ -293,6 +293,23 @@ pub fn js_string(v: &Value) -> String {
     }
 }
 
+const PROFILE_FIELDS: [&str; 6] = ["model", "baseURL", "apiKey", "visionModel", "temperature", "stream"];
+
+fn model_profiles(cfg: &Value) -> (Vec<Value>, usize) {
+    let mut list = cfg.get("modelProfiles").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut current = serde_json::Map::new();
+    for key in PROFILE_FIELDS {
+        let fallback = match key { "stream" => json!(true), "temperature" => json!(0.2), _ => json!("") };
+        current.insert(key.into(), cfg.get(key).filter(|v| !v.is_null()).cloned().unwrap_or(fallback));
+    }
+    let current = Value::Object(current);
+    let active = match list.iter().position(|p| PROFILE_FIELDS.iter().all(|k| p.get(*k) == current.get(*k))) {
+        Some(i) => i,
+        None => { list.push(current); list.len() - 1 }
+    };
+    (list, active)
+}
+
 pub fn config(rq: Request, method: &Method, body: &[u8]) {
     match method {
         Method::Get => {
@@ -303,6 +320,12 @@ pub fn config(rq: Request, method: &Method, body: &[u8]) {
                     merged.insert(k, v);
                 }
             }
+            let (profiles, active) = model_profiles(&Value::Object(merged.clone()));
+            merged.insert("modelProfiles".into(), json!(profiles.iter().enumerate().map(|(i, p)| json!({
+                "id": i.to_string(), "model": p.get("model"), "baseURL": p.get("baseURL"),
+                "hasApiKey": p.get("apiKey").map(truthy).unwrap_or(false)
+            })).collect::<Vec<_>>()));
+            merged.insert("activeProfile".into(), json!(active.to_string()));
             let has_key = merged.get("apiKey").map(truthy).unwrap_or(false);
             merged.insert("apiKey".into(), json!("")); // 密钥永远不回传
             merged.insert("hasApiKey".into(), json!(has_key));
@@ -360,6 +383,16 @@ pub fn config(rq: Request, method: &Method, body: &[u8]) {
                     m.insert("apiKey".into(), keep);
                 }
             }
+            let (profiles, _) = model_profiles(&store::merge(&base, &cur));
+            if let Some(selected) = raw.get("selectProfile") {
+                let profile = selected.as_str().and_then(|s| profiles.iter().enumerate().find(|(i, _)| i.to_string() == s).map(|(_, p)| p));
+                match profile {
+                    Some(p) => { for key in PROFILE_FIELDS { next[key] = p[key].clone(); } },
+                    None => return send_json(rq, 400, &err_json("模型配置不存在，请重新打开设置")),
+                }
+            }
+            next["modelProfiles"] = json!(profiles);
+            next["modelProfiles"] = json!(model_profiles(&next).0);
             let has_key = next.get("apiKey").map(truthy).unwrap_or(false);
             if !store::write_json("config.json", &next) {
                 return send_json(rq, 500, &err_json("保存配置失败，请检查磁盘空间和目录权限"));

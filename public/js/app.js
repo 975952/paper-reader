@@ -6529,6 +6529,14 @@ const ENDPOINT_SHORT = {
 
 function fillSettings() {
   const d = Settings.data;
+  const profiles = $('#cfgProfile');
+  profiles.replaceChildren(...(d.modelProfiles || []).map(p => {
+    const option = document.createElement('option');
+    option.value = p.id;
+    option.textContent = `${p.model} · ${p.baseURL} · 配置 ${Number(p.id) + 1}`;
+    return option;
+  }));
+  profiles.value = d.activeProfile || '0';
   $('#cfgModel').value = d.model || '';
   $('#cfgBaseURL').value = d.baseURL || '';
   $('#cfgApiKey').value = '';
@@ -6681,6 +6689,22 @@ function closeSettings() {
 }
 
 function initSettings() {
+  $('#cfgProfile').onchange = async () => {
+    const select = $('#cfgProfile');
+    select.disabled = true;
+    $('#saveSettings').disabled = true;
+    try {
+      await Settings.save({ selectProfile: select.value });
+      fillSettings();
+      checkConfigWarning();
+      $('#testResult').className = 'test-result ok';
+      $('#testResult').textContent = '已切换模型配置';
+    } catch (e) {
+      select.value = Settings.data.activeProfile || '0';
+      $('#testResult').className = 'test-result err';
+      $('#testResult').textContent = e.message;
+    } finally { select.disabled = false; $('#saveSettings').disabled = false; }
+  };
   $('#settingsBtn').onclick = () => openSettings();
   $('#closeSettings').onclick = closeSettings;
   $('#settingsModal').addEventListener('mousedown', (e) => { if (e.target.id === 'settingsModal') closeSettings(); });
@@ -6705,6 +6729,7 @@ function initSettings() {
     out.textContent = '保存并测试中…';
     try {
       await Settings.save({ model, baseURL, ...(key ? { apiKey: key } : {}) });
+      fillSettings();
       $('#cfgApiKey').value = '';
       $('#cfgApiKey').placeholder = Settings.data.hasApiKey ? '已保存，留空则不改' : 'sk-…';
       updateEndpointNote();

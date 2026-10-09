@@ -18,6 +18,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const { Readable } = require('stream');
 const sec = require('./security');
+const modelProfiles = require('./model-profiles');
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -1250,7 +1251,7 @@ async function handle(req, res) {
     if (req.method === 'GET') {
       const cfg = { ...DEFAULT_CONFIG, ...(await readDataFile('config.json', {})) };
       // 密钥不回传给前端，前端只需要知道「有没有配」
-      return sendJson(res, 200, { ...cfg, apiKey: '', hasApiKey: !!cfg.apiKey });
+      return sendJson(res, 200, modelProfiles.publicConfig(cfg));
     }
     if (req.method === 'POST') {
       // 审计 §P1：1MB 上限；超限直接 413，绝不写盘
@@ -1280,6 +1281,8 @@ async function handle(req, res) {
       }
       const next = { ...DEFAULT_CONFIG, ...cur, ...patch };
       if (!patch.apiKey) next.apiKey = cur.apiKey || '';
+      try { modelProfiles.saveProfiles({ ...DEFAULT_CONFIG, ...cur }, next, raw); }
+      catch (e) { return sendJson(res, 400, { error: { message: e.message } }); }
       await writeDataFile('config.json', next);
       return sendJson(res, 200, { ok: true, hasApiKey: !!next.apiKey });
     }

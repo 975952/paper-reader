@@ -56,7 +56,6 @@ export const Settings = {
   },
 
   async save(patch) {
-    Object.assign(this.data, patch);
     const { theme, fontSize, ...serverPatch } = patch;
     if (theme !== undefined || fontSize !== undefined) {
       let local = {};
@@ -76,6 +75,7 @@ export const Settings = {
       if (r.ok) {
         const j = await r.json();
         this.data.hasApiKey = j.hasApiKey;
+        await this.load();
       }
     } catch (e) {
       throw new Error(`保存失败：${e.message}`);
