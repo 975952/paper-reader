@@ -265,7 +265,127 @@ check(`捏合 + 松手重画期间没有超长卡顿（单次 < ${PERF.maxSingle
 check(`捏合 + 松手重画期间总卡顿可控（< ${PERF.totalLongTaskMs}ms）`,
   sumLong < PERF.totalLongTaskMs, `合计 ${sumLong}ms`);
 
-/* ══════════════ 四、先平移后捏合 ══════════════ */
+/* ══════════════ 四、提交阶段的状态机契约 ══════════════ */
+/**
+ * 用户 2026-10-09 评审提出的两条，都在这里钉死：
+ *   ① 提交那一帧锚点的屏幕坐标不许跳（视觉连续性）；
+ *   ② 「旧 layer 的 CSS transform」和「新 page 的 scale factor」不许同时生效 ——
+ *      实测过一次真事故：文本层里 pdf.js 的 span 是百分比定位 + CSS 变量字号，
+ *      自己就会跟着页框缩放，再叠一层 scale(k) 就是双倍（fx 0.199 → 0.299）。
+ */
+console.log('\n-- 提交阶段的状态机契约');
+await resetView();
+const continuity = await page.evaluate(async () => {
+  const v = window.__viewer;
+  let n = null;
+  for (const [i, e] of v.rendered) {
+    if (e.textDiv?.querySelector('span:not(.markedContent)')) { n = i; break; }
+  }
+  if (n == null) return { error: '没有带文本层的已渲染页' };
+  const pageEl = v.pageEls[n];
+  const geom = () => {
+    const entry = v.rendered.get(n);
+    const span = entry?.textDiv?.querySelector('span:not(.markedContent)');
+    const pr = pageEl.getBoundingClientRect();
+    const sr = span.getBoundingClientRect();
+    return {
+      pageW: +pr.width.toFixed(2),
+      fx: +((sr.left + sr.width / 2 - pr.left) / pr.width).toFixed(5),
+      fy: +((sr.top + sr.height / 2 - pr.top) / pr.height).toFixed(5),
+      fontSize: +parseFloat(getComputedStyle(span).fontSize).toFixed(2),
+    };
+  };
+  const before = geom();
+  v.previewScale(v.scale * 1.5, { clientX: 750, clientY: 430 });   // 真实预览路径
+  v.commitZoomPreview();                                          // 真实提交路径
+  const afterCommit = geom();
+  const layersAtCommit = ['textDiv', 'hlLayer', 'hitLayer', 'pinLayer']
+    .map((k) => v.rendered.get(n)?.[k]?.style.transform || '(空)');
+  const canvasSoftAtCommit = v.rendered.get(n)?.canvas?.classList.contains('soft-zoom');
+  return { n, before, afterCommit, layersAtCommit, canvasSoftAtCommit };
+});
+if (continuity.error) {
+  check('能拿到一页带文本层的已渲染页做连续性测量', false, continuity.error);
+} else {
+  const { before, afterCommit } = continuity;
+  const scaleRatio = afterCommit.pageW / before.pageW;
+  const sizeRatio = afterCommit.fontSize / before.fontSize;
+  check('提交瞬间文本层没有被双重缩放（页内相对位置不漂）',
+    Math.abs(afterCommit.fx - before.fx) < 0.005 && Math.abs(afterCommit.fy - before.fy) < 0.005,
+    `fx ${before.fx} → ${afterCommit.fx}，fy ${before.fy} → ${afterCommit.fy}（页面 ×${scaleRatio.toFixed(2)}）`);
+  check('提交瞬间字号只被缩放一次（冻结成 px，不再吃 --total-scale-factor）',
+    Math.abs(sizeRatio - 1) < 0.01,
+    `字号 ×${sizeRatio.toFixed(3)}（修复前是 ×${scaleRatio.toFixed(2)}，正好多缩一次）`);
+  check('提交瞬间该页四个覆盖层都挂着统一的 scale(k)',
+    continuity.layersAtCommit.every((t) => /^scale\(/.test(t)),
+    `layers=${JSON.stringify(continuity.layersAtCommit)}`);
+}
+await sleep(3000);
+const settled = await page.evaluate((n) => {
+  const e = window.__viewer.rendered.get(n);
+  if (!e) return { error: '页被回收了' };
+  return {
+    layers: ['textDiv', 'hlLayer', 'hitLayer', 'pinLayer'].map((k) => e[k]?.style.transform || ''),
+    soft: e.canvas.classList.contains('soft-zoom'),
+    dirty: !!e.dirty,
+  };
+}, continuity.n);
+if (!settled.error) {
+  check('重画完成后所有层的 transform 归零（回到 steady）',
+    settled.layers.every((t) => t === '') && settled.soft === false && settled.dirty === false,
+    `layers=${JSON.stringify(settled.layers)} soft=${settled.soft} dirty=${settled.dirty}`);
+}
+
+/* 手势全程（含提交那一帧）锚点的屏幕坐标连续性 */
+await resetView();
+const anim = await page.evaluate(async () => {
+  const v = window.__viewer;
+  const midX = 750;
+  const midY = 430;
+  const el = document.elementFromPoint(midX, midY)?.closest?.('.page');
+  if (!el) return { error: '中点不在页面上' };
+  const pageNum = Number(el.dataset.page);
+  const r0 = el.getBoundingClientRect();
+  const fx = (midX - r0.left) / r0.width;
+  const fy = (midY - r0.top) / r0.height;
+  const samples = [];
+  let stopped = false;
+  const tick = () => {
+    if (stopped) return;
+    const pr = v.pageEls[pageNum]?.getBoundingClientRect();
+    if (pr && pr.width > 0) samples.push({ x: pr.left + fx * pr.width, y: pr.top + fy * pr.height });
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  const base = v.scale;
+  for (let i = 1; i <= 20; i++) {
+    v.previewScale(base * (1 + 0.5 * (i / 20)), { clientX: midX, clientY: midY });
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  v.commitZoomPreview();
+  for (let i = 0; i < 10; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  stopped = true;
+  return { midX, midY, pageNum, samples };
+});
+if (anim.error) {
+  check('手势全程锚点不跳（含提交帧）', false, anim.error);
+} else {
+  const dev = anim.samples.map((s) => Math.hypot(s.x - anim.midX, s.y - anim.midY));
+  const jumps = [];
+  for (let i = 1; i < anim.samples.length; i++) jumps.push(Math.hypot(anim.samples[i].x - anim.samples[i - 1].x, anim.samples[i].y - anim.samples[i - 1].y));
+  check('手势全程（含提交那一帧）锚点都贴在手指中点上',
+    dev.length > 10 && Math.max(...dev) < 8,
+    `${anim.samples.length} 帧，离手指最大 ${Math.max(...dev).toFixed(1)}px`);
+  check('提交那一帧没有突跳（逐帧位移都很小）',
+    jumps.length > 10 && Math.max(...jumps) < 8,
+    `逐帧位移最大 ${Math.max(...jumps).toFixed(2)}px`);
+}
+
+/* ══════════════ 五、先平移后捏合 ══════════════ */
 console.log('\n-- 先平移后捏合');
 await resetView();
 const bothBefore = await viewerState();
@@ -282,7 +402,7 @@ check('先平移再张开：两件事都发生了（先滚后缩）',
   bothAfter.scale > bothBefore.scale * 1.4,
   `scale ${bothBefore.scale} → ${bothAfter.scale}（×${(bothAfter.scale / bothBefore.scale).toFixed(2)}）`);
 
-/* ══════════════ 五、文本层开销与文本流解析次数 ══════════════ */
+/* ══════════════ 六、文本层开销与文本流解析次数 ══════════════ */
 console.log('\n-- 文本层开销与文本流解析次数');
 const detail = await page.evaluate(async () => {
   const v = window.__viewer;
@@ -336,7 +456,7 @@ check('渲染一页只解析一次文本流（旧实现是 2 次）',
   counts.stream === 1 && counts.get <= 1,
   `streamTextContent=${counts.stream} getTextContent=${counts.get}（期望 1 / ≤1）`);
 
-/* ══════════════ 六、单指拖动仍然是原生滚动 ══════════════ */
+/* ══════════════ 七、单指拖动仍然是原生滚动 ══════════════ */
 console.log('\n-- 单指拖动');
 await resetView();
 const dragScroll = await (async () => {
@@ -354,7 +474,7 @@ const dragScroll = await (async () => {
 })();
 check('单指拖动照旧是原生滚动（没有为了拿捏合把滚动也关掉）', dragScroll > 40, `scrollTop=${Math.round(dragScroll)}`);
 
-/* ══════════════ 七、触摸板捏合没被改坏 ══════════════ */
+/* ══════════════ 八、触摸板捏合没被改坏 ══════════════ */
 console.log('\n-- 触摸板捏合（ctrl+wheel）');
 await resetView();
 await resetPerf();

@@ -1970,3 +1970,40 @@ Range 于是从锚点一路「吃到」第 k 个子节点：
 `test/zoom-touch.mjs` 20 → **29 条，全部通过**；zoom 21/21、selection 31/31、
 selection-stable 51/51、cjk/math/outline/home/links/smoke 全绿；
 ops 34/35 与 stream 仍为既有失败。
+
+### 38.7 第三轮（2026-10-09 晚）：提交阶段的状态机（用户评审驱动）
+
+用户评审提了两条，一条实测被推翻、一条实测被证实且比预想的更麻烦。
+
+**「清 transform 太早会瞬移」—— 实测没有**（`test/perf/commit-continuity.mjs`）：
+手指中点固定在 (750,430)，锚点在手势全程 36 帧（含提交那一帧）里离手指最大 **0.2px**、
+逐帧位移全是 0。因为清 transform → `_softRescale` → `layout` → 修正 scroll 全在
+**同一个同步任务**里，浏览器中间不绘制。但顺序里有一处不能换：必须先清 transform 再量页框矩形
+（`getBoundingClientRect()` 会把祖先 transform 算进去），已写进代码注释并加了断言。
+
+**「文本层被双倍缩放」—— 证实了，而且层里混着两套单位**：提交后立刻量到
+fx 0.19934 → 0.29907（正好多缩 1.5 倍）、字号 ×1.5，而 fy 几乎没变 —— 因为
+span 的 `left` 是 pdf.js 写的**百分比**（自己跟着页框缩放），`top` 却被
+`_nudgeTextLayer` / `_tileTextHitBoxes` 改写成**绝对 px**（不自己缩放）。同一个层里
+两套单位，叠上 `scale(k)` 必然一半对一半错。`.sel-mark`（可见的选中蓝块）和
+`.hl-pin`（笔记书签）同样是百分比，挂在被 transform 的层里 —— 所以症状是
+**提交到该页重画完之间（最多约 1 秒）选中方块/书签画错位置、选词命中错位**
+（文本层本身 `color:transparent`，实测 66 个 span 可见的 0 个，看不到"文字变形"）。
+
+修法：**层里只允许一种单位 —— 渲染比例下的绝对 px**。
+
+- 新增 `_freezeTextLayerMetrics()`：span 的 `left`/`top` 百分比 → px、`font-size` 的
+  `calc()` → 计算后的 px；
+- `_paintSel()` 选中方块、`_paintHighlights()` 笔记书签改绝对 px；
+- `_softRescale()` 拆成 `_softRescaleCanvas()` + `_softRescaleLayers()`，`k===1` 时写空 transform
+  （不再残留 `scale(1)`）；
+- 新增 `_resetLayerScale(entry)`，在**换帧那一刻**调用：canvas 去拉伸标记、四层 transform 归零。
+
+不变量：`steady(四层全空) → preview(只有 .pages 动) → committing(四层统一 scale(k)) → steady`。
+
+效果：提交瞬间 span 页内相对位置漂移 0.0997 → **0.00005**、字号比 ×1.5 → **×1.000**、
+稳态不再残留 transform；`test/zoom-touch.mjs` 29 → **35 条全过**（新增状态机契约 6 条）；
+zoom 21/21、selection 31/31、selection-stable 51/51、cjk 11/11、home 40/40、outline 8/8、
+smoke 全绿（math/links 单跑也是 33/33、24/24，批量里各红一次是 links 打真实网络的抖动）；
+exe 重编后 desktop 52/52、zoom-touch 35/35、zoom 21/21。
+交付物 `论文阅读器.exe` 10,294,272 B。

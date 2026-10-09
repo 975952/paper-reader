@@ -733,6 +733,22 @@ export class PdfViewer {
     this._writePreviewTransform(preview, 1, tx, ty);
   }
 
+  /**
+   * 提交缩放预览：**steady → preview → committing → steady** 里的 committing 段。
+   *
+   * 这一段必须整体跑在**同一个同步任务**里，浏览器中间不会绘制，所以不存在
+   * 「旧视觉坐标被丢掉 → 重新补回来」的中间帧。实测（test/perf/commit-continuity.mjs）：
+   * 手指中点固定在 (750,430) 时，锚点在手势全程 36 帧（含提交那一帧）里
+   * 离手指最大偏差 0.2px、逐帧位移全是 0 —— 没有瞬移。
+   *
+   * 顺序上有一处**不能换**：必须先清 `.pages` 的 transform，再去量页框矩形。
+   * 因为 `getBoundingClientRect()` 会把祖先的 transform 算进去；带着 preview transform
+   * 量出来的矩形是缩放后的，用它反算滚动量会重复算一次缩放。
+   * 所以流程是「清 transform → 摆好旧内容 → 改真实布局 → 量新矩形 → 写滚动」，一次到底。
+   *
+   * 换帧（新位图换上）之后由 `_resetLayerScale()` 收尾，保证回到 steady 时
+   * canvas 没有拉伸标记、四个覆盖层没有 transform —— 见那里的不变量说明。
+   */
   commitZoomPreview() {
     const preview = this._zoomPreview;
     if (!preview) return;
@@ -797,6 +813,13 @@ export class PdfViewer {
    * 而 `.page.placeholder::after` 是一条灰色斜条纹 —— 拖动缩放时每动一下就拆一次页面，
    * 用户看到的就是「灰条一直闪」（甚至整页变灰）。
    * 现在改成：位图先拉伸（糊一下但画面连续），等手势停下来再真正重画、换上清晰的。
+   *
+   * ⚠️ 单位铁律（2026-10-09）：**层里只允许有一种定位单位 ——「渲染比例下的绝对 px」**。
+   * 这一层要整层 `scale(k)` 才能跟上新页框，而任何「自己也会跟着页框缩放」的东西
+   * （百分比定位、吃 `--total-scale-factor` 的字号）再叠一层 scale(k) 就是**双倍**。
+   * 所以：pdf.js 的 span（百分比 + CSS 变量字号）先被 `_freezeTextLayerMetrics` 冻结成 px；
+   * 选中方块与笔记书签也改成 px。唯独文本层的 `transform` 由这里统一管，
+   * 业务代码不要再自己给这几个层写 transform。
    */
   _softRescale() {
     for (const entry of this.rendered.values()) {
@@ -804,18 +827,43 @@ export class PdfViewer {
       const k = this.scale / base;
       if (!(k > 0)) continue;
       entry.dirty = true;
-      const c = entry.canvas;
-      c.style.width = `${(entry.cssW * k).toFixed(2)}px`;
-      c.style.height = `${(entry.cssH * k).toFixed(2)}px`;
-      c.style.left = `${((entry.slice ? entry.slice.x : 0) * k).toFixed(2)}px`;
-      c.style.top = `${((entry.slice ? entry.slice.y : 0) * k).toFixed(2)}px`;
-      c.classList.add('soft-zoom');
-      // 文本层 / 高亮层 / 命中层 / 书签层里都是按旧比例算好的绝对定位，整体 CSS 缩放
-      for (const layer of [entry.textDiv, entry.hlLayer, entry.hitLayer, entry.pinLayer]) {
-        if (!layer) continue;
-        layer.style.transformOrigin = '0 0';
-        layer.style.transform = `scale(${k})`;
-      }
+      this._softRescaleCanvas(entry, k);
+      this._softRescaleLayers(entry, k);
+    }
+  }
+
+  /** 旧位图按比例拉伸：位图是绝对 px，直接改宽高/偏移最省事（不重画） */
+  _softRescaleCanvas(entry, k) {
+    const c = entry.canvas;
+    if (!c) return;
+    c.style.width = `${(entry.cssW * k).toFixed(2)}px`;
+    c.style.height = `${(entry.cssH * k).toFixed(2)}px`;
+    c.style.left = `${((entry.slice ? entry.slice.x : 0) * k).toFixed(2)}px`;
+    c.style.top = `${((entry.slice ? entry.slice.y : 0) * k).toFixed(2)}px`;
+    c.classList.add('soft-zoom');
+  }
+
+  /** 四个覆盖层整层 scale(k)：里面全是渲染比例下的绝对 px（见上面的单位铁律） */
+  _softRescaleLayers(entry, k) {
+    const tf = Math.abs(k - 1) < 0.0005 ? '' : `scale(${k})`;
+    for (const layer of [entry.textDiv, entry.hlLayer, entry.hitLayer, entry.pinLayer]) {
+      if (!layer) continue;
+      layer.style.transformOrigin = '0 0';
+      layer.style.transform = tf;
+    }
+  }
+
+  /**
+   * 一页「临时缩放」的收尾：新位图换上之后必须满足
+   *   canvas 的软缩放标记 = 无、四个覆盖层的 transform = 无。
+   * 这是提交阶段的状态机不变量（steady → preview → committing → steady），
+   * 漏掉任何一项，旧 transform 就会和新比例同时生效 —— 也就是"双重缩放"。
+   */
+  _resetLayerScale(entry) {
+    if (!entry) return;
+    entry.canvas?.classList.remove('soft-zoom');
+    for (const layer of [entry.textDiv, entry.hlLayer, entry.hitLayer, entry.pinLayer]) {
+      if (layer) layer.style.transform = '';
     }
   }
 
@@ -1183,6 +1231,11 @@ export class PdfViewer {
         try { prevCanvas.width = 0; prevCanvas.height = 0; } catch { /* ignore */ }
         prevCanvas.remove();
       }
+      /* 换帧即收尾：这一页的「临时缩放」必须在这里归零 ——
+         canvas 不再是拉伸预览、四个覆盖层不再有 transform。
+         不变量：steady(transform 全空) → preview(pages 层 transform) → committing → steady。
+         漏掉这一步，旧 transform 会和新比例同时生效（就是那个"双重缩放"）。 */
+      this._resetLayerScale(entry);
       entry.dirty = false;
 
       // 文本层
@@ -1233,6 +1286,16 @@ export class PdfViewer {
         if (!stale()) {
           await this._bindRealFonts(textDiv, page, textContent);
           if (!stale()) {
+            /* 先把这个文本层「冻结」成**渲染比例下的绝对 px**，再做后面三步。
+               为什么必须冻结（2026-10-09 实测，见 test/perf/commit-continuity.mjs）：
+               提交缩放时 `_softRescale()` 会给每一层挂 `transform: scale(k)`（位图/覆盖层
+               都是按旧比例算的绝对 px，只能整层缩放跟上新页框）。但 pdf.js 写的 span
+               是 `left/top` **百分比**、字号吃 `--total-scale-factor` —— 这两样**自己就会
+               跟着页框缩放**，再叠一层 scale(k) 就是**双倍**：实测 span 的页内相对位置
+               fx 0.199 → 0.299（正好多缩了 1.5 倍），而同一层里被 `_nudgeTextLayer`
+               改写成 px 的 `top` 却是对的 —— 一个层里混着两套单位，怎么缩都有一半是错的。
+               冻结之后就只剩一套单位：**层里全是 px，整层 scale(k) 恰好正确**。 */
+            this._freezeTextLayerMetrics(textDiv, entry);
             this._normalizeTextScale(textDiv);
             this._nudgeTextLayer(textDiv, page);
             /* 顺序在最后：命中盒铺满必须按**最终**的字形盒子算（字体、字距、垂直补偿都定了）。
@@ -2126,6 +2189,27 @@ export class PdfViewer {
    *   ② `--rotate` 非 0 的 span 要跳过：那是旋转文本，`rect.width` 是旋转后的外接框，
    *      拿它算 letter-spacing 会写进完全错误的字距。
    */
+  /**
+   * 把 pdf.js 生成的文本层冻结成**渲染比例下的绝对 px**：
+   *   `left` / `top` 百分比 → px，`font-size` 的 `calc(...)` → 计算后的 px。
+   * 这样整个层只剩一套单位，提交缩放时统一 `scale(k)` 才是正确的（见 _renderPage 里的说明）。
+   * 页框尺寸用 entry.cssW/cssH —— 那正是这一层渲染时的尺寸（`.textLayer` 是 inset:0）。
+   */
+  _freezeTextLayerMetrics(container, entry) {
+    const W = entry.cssW || container.clientWidth || 0;
+    const H = entry.cssH || container.clientHeight || 0;
+    if (!(W > 0 && H > 0)) return;
+    for (const span of container.querySelectorAll('span:not(.markedContent)')) {
+      const left = span.style.left;
+      if (left && left.endsWith('%')) span.style.left = `${((parseFloat(left) / 100) * W).toFixed(2)}px`;
+      const top = span.style.top;
+      if (top && top.endsWith('%')) span.style.top = `${((parseFloat(top) / 100) * H).toFixed(2)}px`;
+      // 字号：把 CSS 里的 calc(var(--text-scale-factor) * var(--font-height)) 固定成 px
+      const fs = parseFloat(getComputedStyle(span).fontSize);
+      if (fs > 0) span.style.fontSize = `${fs.toFixed(3)}px`;
+    }
+  }
+
   _normalizeTextScale(container) {
     const spans = container.querySelectorAll('span:not(.markedContent)');
     /**
@@ -2480,7 +2564,10 @@ export class PdfViewer {
       if (topY === null) continue;
       const pin = document.createElement('div');
       pin.className = `hl-pin${h.note ? ' has-note' : ''}`;
-      pin.style.top = `calc(${(topY * 100).toFixed(3)}% - 9px)`;
+      /* 绝对 px（不是百分比）：pinLayer 在缩放提交时会被整层 scale(k)，
+         百分比定位自己也会跟着页框缩放 → 叠加起来就是双倍。层里单位必须统一。 */
+      const pinH = entry.cssH || entry.pageEl?.clientHeight || 0;
+      pin.style.top = pinH > 0 ? `${(topY * pinH - 9).toFixed(2)}px` : '0px';
       pin.dataset.id = h.id;
       pin.title = h.note ? `笔记：${h.note.slice(0, 80)}` : `收藏：${(h.text || '').slice(0, 80)}`;
       pin.addEventListener('click', (e) => {
@@ -2510,13 +2597,19 @@ export class PdfViewer {
     entry.hlLayer.querySelectorAll('.sel-mark').forEach((n) => n.remove());
     const rects = this._selRects?.[i];
     if (!rects) return;
+    /* 用绝对 px 而不是百分比：这一层在缩放提交时会被整层 scale(k)，
+       百分比定位自己也会跟着页框缩放 → 两者叠加就是双倍（实测选中方块会飘到 1.5 倍处）。
+       层里统一用 px，整层缩放才成立。 */
+    const W = entry.cssW || 0;
+    const H = entry.cssH || 0;
+    if (!(W > 0 && H > 0)) return;
     for (const r of rects) {
       const d = document.createElement('div');
       d.className = 'sel-mark';
-      d.style.left = `${(r.x * 100).toFixed(3)}%`;
-      d.style.top = `${(r.y * 100).toFixed(3)}%`;
-      d.style.width = `${(r.w * 100).toFixed(3)}%`;
-      d.style.height = `${(r.h * 100).toFixed(3)}%`;
+      d.style.left = `${(r.x * W).toFixed(2)}px`;
+      d.style.top = `${(r.y * H).toFixed(2)}px`;
+      d.style.width = `${(r.w * W).toFixed(2)}px`;
+      d.style.height = `${(r.h * H).toFixed(2)}px`;
       entry.hlLayer.append(d);
     }
   }
