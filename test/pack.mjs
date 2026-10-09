@@ -9,10 +9,11 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const STAGE = path.join(import.meta.dirname, 'artifacts', 'pkg');
+const STAGE_ROOT = path.join(import.meta.dirname, 'artifacts');
 const ZIP = path.join(import.meta.dirname, 'artifacts', 'paper-reader-src.zip');
 
 /** 要发布的顶层文件 / 目录（相对 ROOT） */
@@ -24,6 +25,13 @@ const INCLUDE = [
    * 直接 MODULE_NOT_FOUND，而这份 zip 正是 AGENTS.md 里说的"改坏了用来回退"的安全网。
    */
   'security.js',
+  /**
+   * ⚠️ 同一个坑又踩了一次（2026-10-09 复核时发现）：`server.js:21` 新增了
+   * `require('./model-profiles')`，但白名单没跟着加 —— 打出来的源码包解开后
+   * `node server.js` 会 MODULE_NOT_FOUND。**以后 server.js 每加一个 require，
+   * 这里就要跟着加一个**；下面第 4 步的「解包自检」就是专门挡这个的。
+   */
+  'model-profiles.js',
   'start.bat',
   '启动.bat',
   'README.md',
@@ -165,12 +173,56 @@ try {
 }
 fs.rmSync(STAGE, { recursive: true, force: true });
 
+/* ── 5. 解包自检：这份 zip 真的能跑起来吗 ──
+ *
+ * 为什么必须做（这个坑踩过两次）：zip 是白名单打的，白名单漏一个 `require` 的模块，
+ * 包解开后 `node server.js` 直接 MODULE_NOT_FOUND —— 而这份 zip 正是「改坏了用来回退」
+ * 的安全网，安全网自己坏了最要命。
+ *   · 2026-10-06：漏了 `security.js`（见上面白名单里的注释）；
+ *   · 2026-10-09：`server.js` 新增 `require('./model-profiles')`，白名单又漏了一次。
+ * 所以这里把包真的解开、真的起一次服务、真的打一次 /api/health。
+ */
+const VERIFY = path.join(STAGE_ROOT, 'pkg-verify');
+let verifyNote = '';
+try {
+  fs.rmSync(VERIFY, { recursive: true, force: true });
+  fs.mkdirSync(VERIFY, { recursive: true });
+  execFileSync('tar', ['-x', '-f', ZIP, '-C', VERIFY], { stdio: 'ignore' });
+  const dataDir = path.join(VERIFY, '__data__');
+  const papersDir = path.join(VERIFY, 'test', 'fixtures');
+  fs.mkdirSync(dataDir, { recursive: true });
+  const port = 8999;
+  const child = spawn(process.execPath, [path.join(VERIFY, 'server.js')], {
+    stdio: 'ignore',
+    env: { ...process.env, PORT: String(port), PRT_DATA_DIR: dataDir, PRT_PAPERS_DIR: papersDir, NO_OPEN: '1', PRT_REQUIRE_TOKEN: '0' },
+  });
+  let health = null;
+  for (let i = 0; i < 40 && !health; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    health = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  }
+  const papers = health ? await fetch(`http://127.0.0.1:${port}/api/papers`).then((r) => r.json()).catch(() => null) : null;
+  child.kill();
+  if (!health?.ok) throw new Error('解包后的服务没起来');
+  if (!(papers?.papers || []).length) throw new Error('解包后的服务读不到夹具 PDF');
+  verifyNote = `通过（起得来、/api/health ok、读到 ${papers.papers.length} 个夹具 PDF）`;
+} catch (e) {
+  verifyNote = `**失败**：${e.message}`;
+  console.error('\n拒绝交付：源码包解开后跑不起来 —— 白名单很可能漏了 server.js 依赖的模块');
+  console.error('  ' + e.message);
+  fs.rmSync(VERIFY, { recursive: true, force: true });
+  process.exit(1);
+} finally {
+  fs.rmSync(VERIFY, { recursive: true, force: true });
+}
+
 const zipSize = fs.statSync(ZIP).size;
 console.log(`\n文件数：${files.length}`);
 console.log(`原始大小：${(bytes / 1048576).toFixed(1)} MB`);
 console.log(`压缩后：${(zipSize / 1048576).toFixed(1)} MB`);
 console.log(`打包器：${zipTool}`);
 console.log(`输出：${ZIP}`);
+console.log(`解包自检：${verifyNote}`);
 console.log('\n前 20 个文件：');
 for (const f of files.slice(0, 20)) console.log('  ' + f.rel);
 // 夹具 PDF 单独列出来：它们进了包，e2e / ux / cjk 这些套件才跑得起来，值得一眼核对

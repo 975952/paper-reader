@@ -2007,3 +2007,27 @@ zoom 21/21、selection 31/31、selection-stable 51/51、cjk 11/11、home 40/40�
 smoke 全绿（math/links 单跑也是 33/33、24/24，批量里各红一次是 links 打真实网络的抖动）；
 exe 重编后 desktop 52/52、zoom-touch 35/35、zoom 21/21。
 交付物 `论文阅读器.exe` 10,294,272 B。
+
+---
+
+## 39. 源码包白名单又漏了一次（2026-10-09 晚会话复核发现）
+
+另一个会话在同一工作区提交了 `ed645ff`（保存的模型配置：`public/index.html`、`public/js/ai.js`、
+`public/js/app.js`、`desktop/src/api.rs`、`server.js` + 新增顶层 `model-profiles.js`）。
+复核时发现：`server.js:21` 已经 `require('./model-profiles')`，但 `test/pack.mjs` 的
+**白名单没跟着加** —— 打出来的源码 zip 解开后 `node server.js` 直接
+`MODULE_NOT_FOUND`。这和 §36.4 记的 `security.js` 是**同一个事故**，而这份 zip 正是
+AGENTS.md 说的「改坏了用来回退」的安全网，安全网自己坏了最要命。
+
+两步修：
+
+1. 白名单补 `model-profiles.js`（并在注释里写明「server.js 每加一个 require，这里就要跟着加」）；
+2. **给打包装上解包自检**（pack.mjs 第 5 步）：把打好的 zip 真的解到一个临时目录、
+   真的起一次服务、真的打一次 `/api/health` 与 `/api/papers`，读不到夹具 PDF 就直接
+   `exit 1` 拒绝交付。效力已实测：解包后正常能起（health ok、3 个夹具 PDF），
+   故意删掉 `model-profiles.js` 就 `MODULE_NOT_FOUND` 起不来 —— 自检抓的就是这个。
+
+顺带核对了并发写入的影响面：`ed645ff` 动到的 `public/*` 三个文件 mtime 是 20:51，
+我的 exe 构建于 21:07，**交付物里已经包含他们的改动**，并且重建后
+desktop 52/52、zoom-touch 35/35、zoom 21/21 仍然全绿。
+（§37.2 那条结论继续有效：多会话共用工作区时，谁最后构建、谁的快照进 exe。）
