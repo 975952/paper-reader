@@ -99,38 +99,47 @@ check('拖动缩放全程页面没有空白（画布一直在）', z1.blankFrame
   `空白帧 ${z1.blankFrames}，最多 ${z1.maxBlank} 页`);
 
 /**
- * ⚠️ 等待时间 1200 → 2500ms（2026-10-09）：重画现在是**排队 + 一页一页让帧**的
- * （为了「松手之后不顿一下」，见 pdfview.js 的 _runRerenderPass），
- * 换来的是「全部变清晰」的总时间比过去并行开工更长。视口内有两页时要 2×~250ms，
- * 再加上 140ms 的防抖，1200ms 已经不够了。
- * 判据本身没放松：视口内必须一页不剩地回到清晰位图，只是给它足够的时间。
+ * ⚠️ 这里**轮询等待**，不用固定 sleep（2026-10-09 第二次修正）。
+ * 重画现在是「排队 + 一页一页让帧」的（为了「松手之后不顿一下」，见
+ * pdfview.js 的 _runRerenderPass），代价是「全部变清晰」的总时间比以前并行开工更长：
+ * 视口内两页要 2×~250ms，机器忙的时候单页能到 400~500ms。
+ * 之前写死 2500ms，在同时开着 exe 的机器上偶发假红（实测 20/21）。
+ * 改成「最多等 10 秒、每 150ms 看一次」，判据一点没放松（视口内必须一页不剩地清晰），
+ * 只是不再把「机器多快」写进断言 —— 顺便把实际等了多久打出来当参考。
  */
-await sleep(2500);
-const afterDrag = await page.evaluate(() => {
-  // 只数**视口内**的：离屏的页本来就没渲染过，是 placeholder 属于设计如此
-  const vr = document.getElementById('viewer').getBoundingClientRect();
-  let visibleGrey = 0;
-  for (const el of document.querySelectorAll('.page.placeholder')) {
-    const r = el.getBoundingClientRect();
-    if (r.bottom > vr.top && r.top < vr.bottom) visibleGrey++;
+const waitUntilCrisp = async (maxMs = 10000) => {
+  const t0 = Date.now();
+  let last = null;
+  while (Date.now() - t0 < maxMs) {
+    // eslint-disable-next-line no-await-in-loop
+    last = await page.evaluate(() => {
+      const vr = document.getElementById('viewer').getBoundingClientRect();
+      let visibleGrey = 0;
+      for (const el of document.querySelectorAll('.page.placeholder')) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom > vr.top && r.top < vr.bottom) visibleGrey++;
+      }
+      let visibleSoft = 0;
+      for (const c of document.querySelectorAll('canvas.soft-zoom')) {
+        const r = c.getBoundingClientRect();
+        if (r.bottom > vr.top && r.top < vr.bottom) visibleSoft++;
+      }
+      return {
+        soft: visibleSoft,
+        visibleGrey,
+        offscreenGrey: document.querySelectorAll('.page.placeholder').length - visibleGrey,
+        scale: window.__viewer.scale,
+      };
+    });
+    if (last.soft === 0 && last.visibleGrey === 0) break;
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(150);
   }
-  // soft-zoom 也要按视口数（2026-10-08 修正）：
-  // 页面渲染队列只覆盖「可见 ±1 页」，队列外的已渲染页会留着拉伸预览 + dirty 标记，
-  // 等滚进视口时由 _renderVisible 重画 —— 这是设计如此，全文档计数会误报。
-  // 多页夹具（multipage-sample.pdf）在 HEAD 上就会稳定报 3 个，属于套件自身的口径问题。
-  let visibleSoft = 0;
-  for (const c of document.querySelectorAll('canvas.soft-zoom')) {
-    const r = c.getBoundingClientRect();
-    if (r.bottom > vr.top && r.top < vr.bottom) visibleSoft++;
-  }
-  return {
-    soft: visibleSoft,
-    visibleGrey,
-    offscreenGrey: document.querySelectorAll('.page.placeholder').length - visibleGrey,
-    scale: window.__viewer.scale,
-  };
-});
-check('手势停下后会重画成清晰版（视口内没有残留的拉伸预览）', afterDrag.soft === 0, `视口内 soft-zoom 画布 ${afterDrag.soft} 个`);
+  return { ...last, waited: Date.now() - t0 };
+};
+const afterDrag = await waitUntilCrisp();
+check('手势停下后会重画成清晰版（视口内没有残留的拉伸预览）', afterDrag.soft === 0,
+  `视口内 soft-zoom 画布 ${afterDrag.soft} 个（等了 ${afterDrag.waited}ms）`);
 check('停下后视口内没有 placeholder（离屏的属于正常）',
   afterDrag.visibleGrey === 0, `视口内 ${afterDrag.visibleGrey} 页，离屏 ${afterDrag.offscreenGrey} 页`);
 
@@ -141,14 +150,18 @@ check('停下后视口内没有 placeholder（离屏的属于正常）',
 const scrolled = await page.evaluate(async () => {
   const v = window.__viewer;
   v.goToPage(Math.min(2, v.numPages));
-  await new Promise((r) => setTimeout(r, 1500));
   const vr = document.getElementById('viewer').getBoundingClientRect();
-  let soft = 0;
-  for (const c of document.querySelectorAll('canvas.soft-zoom')) {
-    const r = c.getBoundingClientRect();
-    if (r.bottom > vr.top && r.top < vr.bottom) soft++;
+  const countSoft = () => [...document.querySelectorAll('canvas.soft-zoom')]
+    .filter((c) => { const r = c.getBoundingClientRect(); return r.bottom > vr.top && r.top < vr.bottom; }).length;
+  // 同样轮询：给它最多 8 秒（滚动会触发一次重画，和上面同一套排队逻辑）
+  const t0 = Date.now();
+  let soft = countSoft();
+  while (soft > 0 && Date.now() - t0 < 8000) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 150));
+    soft = countSoft();
   }
-  return { soft, page: v.current };
+  return { soft, page: v.current, waited: Date.now() - t0 };
 });
 check('把队列外的页滚进视口后会立刻重画成清晰版', scrolled.soft === 0,
   `第 ${scrolled.page} 页视口内 soft-zoom ${scrolled.soft} 个`);
