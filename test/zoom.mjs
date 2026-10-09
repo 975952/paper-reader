@@ -120,12 +120,31 @@ const waitUntilCrisp = async (maxMs = 10000) => {
         if (r.bottom > vr.top && r.top < vr.bottom) visibleGrey++;
       }
       let visibleSoft = 0;
+      let stuck = null;
       for (const c of document.querySelectorAll('canvas.soft-zoom')) {
         const r = c.getBoundingClientRect();
-        if (r.bottom > vr.top && r.top < vr.bottom) visibleSoft++;
+        if (r.bottom > vr.top && r.top < vr.bottom) {
+          visibleSoft++;
+          // 卡住的是哪一页、它 dirty 吗、渲染任务还在不在 —— 失败时要能一眼看出原因
+          const pgEl = c.closest('.page');
+          const n = Number(pgEl?.dataset.page);
+          const e = window.__viewer.rendered.get(n);
+          stuck = {
+            page: n,
+            dirty: !!e?.dirty,
+            renderScale: e ? +e.renderScale.toFixed(3) : null,
+            scale: +window.__viewer.scale.toFixed(3),
+            tasks: [...window.__viewer.renderTasks.keys()],
+            running: !!window.__viewer._rerenderRunning,
+            wanted: !!window.__viewer._rerenderWanted,
+            timer: !!window.__viewer._rerenderTimer,
+            rendered: [...window.__viewer.rendered.keys()].sort((a, b) => a - b),
+          };
+        }
       }
       return {
         soft: visibleSoft,
+        stuck,
         visibleGrey,
         offscreenGrey: document.querySelectorAll('.page.placeholder').length - visibleGrey,
         scale: window.__viewer.scale,
@@ -139,7 +158,8 @@ const waitUntilCrisp = async (maxMs = 10000) => {
 };
 const afterDrag = await waitUntilCrisp();
 check('手势停下后会重画成清晰版（视口内没有残留的拉伸预览）', afterDrag.soft === 0,
-  `视口内 soft-zoom 画布 ${afterDrag.soft} 个（等了 ${afterDrag.waited}ms）`);
+  `视口内 soft-zoom 画布 ${afterDrag.soft} 个（等了 ${afterDrag.waited}ms）`
+  + (afterDrag.stuck ? ` 现场=${JSON.stringify(afterDrag.stuck)}` : ''));
 check('停下后视口内没有 placeholder（离屏的属于正常）',
   afterDrag.visibleGrey === 0, `视口内 ${afterDrag.visibleGrey} 页，离屏 ${afterDrag.offscreenGrey} 页`);
 

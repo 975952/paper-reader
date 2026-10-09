@@ -40,9 +40,37 @@ export async function initPdfjs() {
  * 这是「放大就糊」的直接对策——浏览器拿到比显示尺寸更密的位图再降采样，
  * 边缘才不会发虚。
  */
+/**
+ * 渲染倍率：**按屏幕的设备像素比来，不再无条件超采样**。
+ *
+ * ⚠️ 这里以前是 `clamp(max(dpr, 2), 1, 3)` —— 在 1× 屏上也硬按 2 倍渲染。
+ * 后果（2026-10-09 用真实论文实测，test/artifacts/real-paper-perf.mjs）：
+ *   fitWidth 下一页 CSS 是 1408×1822 = 2.57 M 像素，按 2 倍就是 **10.3 MP / 41 MB 一张位图**；
+ *   单页重画 131~194ms；连续滚动时 32 帧里掉 26 帧、长任务合计 1329ms。
+ *   而 1:1（ratio=1）时 canvas 只有 2.57 MP —— **4 倍的成本差**，这就是「还是卡顿」的主因：
+ *   前几轮优化的都是主线程 JS，但真正的大头是把这些巨图栅格化出来。
+ *
+ * 为什么 ratio = dpr 就是对的：canvas 的 CSS 尺寸等于页面尺寸，设备像素比是 1 时
+ * 1 个 CSS 像素正好对应 1 个物理像素 —— 既不糊也不浪费。2 倍超采样只是让边缘更顺，
+ * 代价是 4 倍像素；在「卡顿」面前这笔买卖不划算（而且放大时我们会按新比例重画，
+ * 不靠超采样来保清晰度）。
+ */
 function renderRatio() {
   const d = window.devicePixelRatio || 1;
-  return clamp(Math.max(d, 2), 1, 3);
+  return clamp(d, 1, 2);
+}
+
+/**
+ * 单页位图的像素预算（百万像素）。`renderRatio()` 给的是「屏幕要多少」，
+ * 这里再兜一道「别超过多少」：放大到 3.5× 时一页 CSS 面积能到 6 MP，
+ * 乘上 dpr 就会突破两位数，重画一次几百毫秒、显存也吃不消。
+ * 两个限制取小的那个，并且最低保到 0.75（再低就明显糊了，那时切片逻辑会接手）。
+ */
+const RENDER_MP_BUDGET = 6;
+function renderRatioFor(cssW, cssH) {
+  const base = renderRatio();
+  const area = Math.max(1, cssW * cssH) / 1e6;         // CSS 百万像素
+  return clamp(Math.min(base, Math.sqrt(RENDER_MP_BUDGET / area)), 0.75, base);
 }
 
 /** 当前设置里的 PDF 纸张颜色。Canvas 不能直接读取 CSS 的 background，
@@ -243,6 +271,88 @@ export class PdfViewer {
     };
     this.container.addEventListener('mousemove', this._onHoverMove, { passive: true });
     this._bindTouchZoom();
+    this._watchJank();
+  }
+
+  /**
+   * 轻量掉帧自检：**给真机用的取证工具**。
+   *
+   * 为什么需要它：我这边只能用无头 Chrome + 合成事件测，测不出用户机器上的真实手感
+   * （他报「还是卡顿」，而我手上的数字是干净的）。与其继续猜，不如让应用自己报数。
+   *
+   * 规则（尽量不打扰、也尽量不耗电）：
+   *   · 只在「有动作」时采样：滚动 / 手势 / 提交；闲置 1.2s 就停掉 rAF，不常驻；
+   *   · 一个"动作窗口"里统计帧间隔、掉帧数、长任务，以及这段时间花在重画上的毫秒数；
+   *   · 只有真的卡（最长帧 ≥ 100ms 或掉帧比例 ≥ 30%）才回报一次，3 秒内不重复；
+   *   · 回报走 `opts.onJank`（app.js 接到 toast 上），同时在 console 打一行，
+   *     并把最近 20 次记录留在 `window.__jankLog` 里，方便直接抄给我。
+   */
+  _watchJank() {
+    const p = this._perf = {
+      raf: 0, frames: [], kind: '', last: 0, t0: 0, renders: 0, renderMs: 0,
+      long: [], lastReport: 0, log: [],
+    };
+    try {
+      new PerformanceObserver((l) => {
+        for (const e of l.getEntries()) {
+          p.long.push(Math.round(e.duration));
+          if (p.long.length > 200) p.long.shift();
+        }
+      }).observe({ entryTypes: ['longtask'] });
+    } catch { /* 老引擎没有 longtask 就算了 */ }
+  }
+
+  /** 有事发生 → 开一个采样窗口（kind 只在窗口开始时定一次） */
+  _touchPerf(kind) {
+    const p = this._perf;
+    if (!p || this._destroyed) return;
+    const now = performance.now();
+    if (!p.raf) {
+      p.kind = kind;
+      p.t0 = now;
+      p.renders = 0;
+      p.renderMs = 0;
+      p.long = [];
+      const tick = (t) => {
+        p.frames.push(t - p.last);
+        p.last = t;
+        if (performance.now() - p.active > 1200) { p.raf = 0; this._reportJank(); return; }
+        p.raf = requestAnimationFrame(tick);
+      };
+      p.frames = [];
+      p.last = now;
+      p.active = now;
+      p.raf = requestAnimationFrame(tick);
+      return;
+    }
+    p.active = now;                       // 还在动：把窗口往后延
+  }
+
+  _reportJank() {
+    const p = this._perf;
+    const n = p.frames.length;
+    if (!n) return;
+    const s = [...p.frames].sort((a, b) => a - b);
+    const avg = p.frames.reduce((a, b) => a + b, 0) / n;
+    const max = s[n - 1];
+    const drops = p.frames.filter((x) => x > 25).length;
+    const longMax = p.long.length ? Math.max(...p.long) : 0;
+    const rec = {
+      kind: p.kind, ms: Math.round(p.t0 ? (performance.now() - p.t0) : 0), frames: n,
+      avg: +avg.toFixed(1), p95: +s[Math.floor(n * 0.95)].toFixed(1), max: +max.toFixed(1),
+      drops, longTasks: p.long.length, longMax, renderMs: Math.round(p.renderMs),
+    };
+    p.log.push(rec);
+    if (p.log.length > 20) p.log.shift();
+    window.__jankLog = p.log;
+    const bad = max >= 100 || drops / n >= 0.3;
+    if (!bad || performance.now() - p.lastReport < 3000) return;
+    p.lastReport = performance.now();
+    const text = `掉帧：${rec.kind} ${rec.ms}ms，${rec.frames} 帧 平均 ${rec.avg}ms / 最长 ${rec.max}ms，掉 ${rec.drops} 帧`
+      + (rec.longMax ? `，单次卡顿 ${rec.longMax}ms` : '')
+      + (rec.renderMs ? `，重画占 ${rec.renderMs}ms` : '');
+    try { console.warn('[perf]', text); } catch { /* ignore */ }
+    this.opts.onJank?.(rec, text);
   }
 
   /**
@@ -658,6 +768,7 @@ export class PdfViewer {
 
   previewScale(scale, { clientX = null, clientY = null } = {}) {
     if (!this.pdf || !this.baseSizes[1] || !this.pagesEl) return;
+    this._touchPerf('手势·缩放');
     const next = clamp(scale, 0.15, 6);
     if (Math.abs(next - this.scale) < 0.0005 && !this._zoomPreview) return;
     let preview = this._zoomPreview;
@@ -701,6 +812,7 @@ export class PdfViewer {
    */
   previewPan(clientX, clientY) {
     if (!this.pdf || !this.pagesEl) return;
+    this._touchPerf('手势·平移');
     let preview = this._zoomPreview;
     if (!preview) preview = this._zoomPreview = this._beginZoomPreview();
     this._anchorZoomPreview(preview, clientX, clientY);
@@ -752,6 +864,7 @@ export class PdfViewer {
   commitZoomPreview() {
     const preview = this._zoomPreview;
     if (!preview) return;
+    this._touchPerf('提交缩放');
     clearTimeout(preview.timer);
     this._zoomPreview = null;
     this.pagesEl.style.transform = '';
@@ -896,9 +1009,9 @@ export class PdfViewer {
   async _runRerenderPass() {
     if (this._rerenderRunning) return;
     this._rerenderRunning = true;
+    let didWork = false;
     try {
-      let rounds = 0;
-      do {
+      for (let round = 0; round < 8; round++) {
         this._rerenderWanted = false;
         if (this._destroyed || !this.pdf || !this.offsets.length) return;
         const gen = this._gen;
@@ -911,9 +1024,14 @@ export class PdfViewer {
           if (entry?.dirty) queue.push(i);
           else if (!entry && !this.renderTasks.has(i)) queue.push(i);
         }
+        // 没活干就把「还想再跑」的标记清掉，免得在 finally 里空转
+        if (!queue.length) { this._rerenderWanted = false; return; }
+        didWork = true;
         queue.sort((a, b) => Math.abs(mid(a) - center) - Math.abs(mid(b) - center));
         for (const i of queue) {
-          // 新的手势/换文档一来就放弃剩下的 —— 跟手比清晰度重要
+          // 新的手势/换文档一来就放弃剩下的 —— 跟手比清晰度重要。
+          // ⚠️ 这里不能直接 return 了事：这一次请求（_rerenderWanted）还没被消费，
+          // 由 finally 负责补一趟（见下面的说明）。
           if (this._destroyed || gen !== this._gen || this._zoomPreview) return;
           const entry = this.rendered.get(i);
           try {
@@ -923,9 +1041,29 @@ export class PdfViewer {
           await new Promise((r) => requestAnimationFrame(() => r()));
         }
         this._reclaimFar();
-      } while (this._rerenderWanted && ++rounds < 5 && !this._destroyed && !this._zoomPreview);
+        if (!this._rerenderWanted) return;
+      }
     } finally {
       this._rerenderRunning = false;
+      /**
+       * ⚠️ 关键补丁（2026-10-09 实测抓到的真 bug）：
+       * `_scheduleRerender()` 在「队列正在跑」时只记 `_rerenderWanted`、不排定时器，
+       * 指望这一趟跑完把标记消费掉。但这一趟可能**中途 return**（手势插进来）
+       * 或者**跑满轮次上限**退出 —— 那样标记就永远没人处理：
+       * 现场实测（zoom.mjs 失败时的 DOM 快照）是
+       *   `page=1 dirty=true renderScale=2.694 scale=2.072 tasks=[] running=false wanted=true timer=false`
+       * ——那一页在视口里糊着，10 秒都不自愈。
+       * 所以退出时只要「做过事 + 还有请求」，就补一个定时器再跑一趟，保证请求不丢。
+       */
+      if (didWork && this._rerenderWanted && !this._destroyed) {
+        clearTimeout(this._rerenderTimer);
+        this._rerenderTimer = setTimeout(() => {
+          this._rerenderTimer = 0;
+          this._runRerenderPass();
+        }, 60);
+      } else if (!didWork) {
+        this._rerenderWanted = false;
+      }
     }
   }
 
@@ -1085,6 +1223,7 @@ export class PdfViewer {
   }
 
   async _renderPage(i, { priority = false, gen = this._gen, force = false, soft = false } = {}) {
+    const t0 = this._perf ? performance.now() : 0;
     if (!this.pdf || gen !== this._gen) return;
     // 无论调用方是否带 force，都不要取消一份正在生成的文本层；等它自然结束后
     // 再由切片检查决定是否需要下一轮。这样旧热点可以继续覆盖当前页面。
@@ -1123,9 +1262,10 @@ export class PdfViewer {
       if (stale() || !this.pageEls[i]) return;
 
       const viewport = page.getViewport({ scale: this.scale });
-      const ratio = renderRatio();
       const cssW = viewport.width;
       const cssH = viewport.height;
+      // 倍率要按「这一页的实际 CSS 面积」算：面积越大越要克制（见 renderRatioFor 的说明）
+      const ratio = renderRatioFor(cssW, cssH);
       const slice = this._sliceFor(i, cssW, cssH, ratio);
       const drawW = slice ? slice.w : cssW;
       const drawH = slice ? slice.h : cssH;
@@ -1319,7 +1459,10 @@ export class PdfViewer {
       document.dispatchEvent(new CustomEvent('pdfview:page-rendered', { detail: { page: i } }));
     };
 
-    const p = run().finally(() => this.renderTasks.delete(i));
+    const p = run().finally(() => {
+      this.renderTasks.delete(i);
+      if (this._perf) { this._perf.renders++; this._perf.renderMs += performance.now() - t0; }
+    });
     this.renderTasks.set(i, p);
     return p;
   }
@@ -1350,6 +1493,7 @@ export class PdfViewer {
 
   _handleScroll() {
     if (!this.pdf || !this.pageEls.length || !this.offsets.length) return;
+    this._touchPerf('滚动');
     const [first, last] = this._visibleRange();
     // 页码 = 视口上部 30% 处所在的页
     const probe = this.container.scrollTop + this.container.clientHeight * 0.3;

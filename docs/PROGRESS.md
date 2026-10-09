@@ -2031,3 +2031,39 @@ AGENTS.md 说的「改坏了用来回退」的安全网，安全网自己坏了�
 我的 exe 构建于 21:07，**交付物里已经包含他们的改动**，并且重建后
 desktop 52/52、zoom-touch 35/35、zoom 21/21 仍然全绿。
 （§37.2 那条结论继续有效：多会话共用工作区时，谁最后构建、谁的快照进 exe。）
+
+### 38.8 第四轮（2026-10-09 深夜）：真正的大头是渲染倍率
+
+用户第三次反馈「还是卡顿」。前三轮我优化的都是**主线程 JS**，于是换思路：
+**用他的真实论文量一次**（`test/perf/real-paper-perf.mjs`，只读拷 `attention-arxiv.pdf`
+到 artifacts，原文件不动）。
+
+**元凶**：`renderRatio()` 是 `clamp(max(dpr, 2), 1, 3)` —— 1× 屏上也硬按 **2 倍**渲染。
+fitWidth 下一页是 1409×1823 CSS = 2.57 M 像素，按 2 倍就是 **2815×3643 = 10.3 MP / 41 MB 一张位图**。
+
+| 真实论文实测 | ratio=2（旧） | ratio=1（新） |
+|---|---|---|
+| 每页 canvas | 10.3 MP（41MB） | **2.6 MP** |
+| 单页重画 | 131~194ms | 94~115ms |
+| 连续滚动 6600px 长任务 | 13 个共 **1329ms** | **1 个 54ms** |
+| 连续滚动帧节奏 | avg 70.5ms、掉 26/32 | avg 23.1ms、掉 15/40 |
+
+改成 `renderRatio() = clamp(dpr, 1, 2)` + `RENDER_MP_BUDGET = 6`（单页位图上限，
+按 `renderRatioFor(cssW, cssH)` 取小）。ratio = dpr 才是对的：1 CSS 像素对 1 物理像素，
+不糊也不浪费；2 倍超采样只值边缘那点顺滑，代价 4 倍像素。
+
+**顺带抓到「页面永远糊着」的真 bug**（`zoom.mjs` 单跑 3 次红 2 次，现场快照）：
+`page=1 dirty=true renderScale=2.694 scale=2.072 tasks=[] running=false wanted=true timer=false`
+—— 重画请求发出去了但没人处理。根因是第二轮加的 `_rerenderWanted`：队列跑着时只记标记、
+不排定时器，而这一趟可能中途 return 或跑满轮次上限退出，标记就永远丢了。
+修法：`_runRerenderPass()` 的 finally 里「做过事 + 还有请求」就补 60ms 定时器再跑一趟；
+没活干则清标记。修完 `zoom.mjs` 连跑 4 次全绿，清晰化 65~192ms。
+
+**装了掉帧自检** `_watchJank()`：只在有动作时采样（闲置 1.2s 停 rAF），
+真卡（最长帧 ≥100ms 或掉帧 ≥30%）才弹一条带数字的 toast + `console.warn('[perf]')`，
+最近 20 条留在 `window.__jankLog` —— 真机上的手感以后可以直接读数，不用再猜。
+
+验收：exe 重编后 desktop **52/52**、zoom-touch **35/35**、zoom **21/21**；
+cjk 11/11、selection 31/31、selection-stable 47/47、lab-leak/outline 8/8、home 40/40、
+links 24/24、smoke 全绿（math 单跑 33/33，批量里偶发红是它要跑假上游的时序；
+stream 仍是既有失败）。交付物 `论文阅读器.exe` 10,301,440 B，根目录与桌面副本哈希一致。

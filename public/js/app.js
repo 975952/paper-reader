@@ -1926,6 +1926,10 @@ function initViewer() {
       if (box) box.title = busy ? `正在解析 ${done}/${total} 页…` : '';
     },
     onScale: (scale) => syncZoom(scale),
+    /* 掉帧自检的出口（见 pdfview.js 的 _watchJank）：
+       真机上卡不卡只有用户看得见，所以真卡了就弹一条**带数字**的提示，
+       用户可以照原话读给我，不用开 devtools。窗口 6s 内最多弹一次（pdfview 那侧限流）。 */
+    onJank: (rec, text) => toast(text, 'err', 6000),
     onNoteClick: (id) => openNoteEditorById(id),
     /* 正文 [n] 的点击不再走 viewer 回调：热点是 pointer-events:none 的，
        点击由 initSelection 里的 mouseup 用 viewer.citeAt(x,y) 判命中后直接 handleCite()
