@@ -24,7 +24,11 @@ rem     block - "try" is a statement, not an expression, and
 rem     PowerShell will treat it as a command name and fail.
 rem  3) copy, then verify the SHA256 of BOTH destinations. A copy
 rem     onto a running exe fails silently otherwise, and tests then
-rem     "pass" against a stale binary.
+rem     "pass" against a stale binary. The LastWriteTime touch that
+rem     follows is COSMETIC (it only makes the exe look as fresh as
+rem     public/), so it is wrapped in try/catch: a locked target
+rem     used to abort the whole statement - powershell -Command then
+rem     exits 1 even though both copies verified fine.
 rem ============================================================
 setlocal
 cd /d "%~dp0"
@@ -60,7 +64,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "  try { Copy-Item -Force $src $d -ErrorAction Stop } catch { Write-Host ('      [x] ' + $d + ' : ' + $_.Exception.Message); $bad = 1; continue }" ^
   "  $got = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($d))).Replace('-', '');" ^
   "  if ($got -ne $want) { Write-Host ('      [x] MISMATCH ' + $d); $bad = 1; continue }" ^
-  "  (Get-Item $d).LastWriteTime = $latest;" ^
+  "  try { (Get-Item $d).LastWriteTime = $latest } catch { }" ^
   "  Write-Host ('      -> ' + $d + '  (' + (Get-Item $d).Length + ' B, sha256 ok)')" ^
   "}" ^
   "exit $bad"

@@ -384,16 +384,24 @@ export class PdfViewer {
    */
   _bindTouchZoom() {
     const el = this.container;
-    /** 判定阈值：改这两个数之前先看上面那段「判定优先」的说明 */
-    const PINCH_ENGAGE_RATIO = 0.15;   // 间距相对变化
-    const PINCH_ENGAGE_PX = 16;        // 间距绝对变化（两指靠得近时按这个算）
+    /**
+     * 判定阈值。
+     *
+     * ⚠️ 2026-10-09 用户口径定稿（第四轮）：
+     *   「只要判断是缩放，就不要移动位置；只要是两指之间距离增大，**不管是哪个方向**都是放大，缩小也一样」
+     * 也就是**距离优先**：两指间距变了就是缩放，与方向无关、与中点动不动无关。
+     * 所以这里把缩放的阈值压得很小（6px 或 2.5%），平移阈值保持 10px；
+     * 只有「间距几乎不变、中点明显在走」才算平移。
+     */
+    const PINCH_ENGAGE_RATIO = 0.025;  // 间距相对变化
+    const PINCH_ENGAGE_PX = 6;         // 间距绝对变化（两指靠得近时按这个算）
     /**
      * 触摸屏捏合的「跟手倍率」：`scale = start * (d/d0)^GAIN`。
      * GAIN = 1 是严格的 1:1（手指张开一倍、画面放大一倍）。
-     * 2026-10-09 用户口径「可以把这个缩放的速度加快一点」→ 取 **1.25**：
-     * 同样的手指行程多缩 25%，松手更快到位。嫌快嫌慢只改这一个数（1 = 回到原生手感）。
+     * 用户两次要求「速度调大」：1 → 1.25 → **1.6**。嫌快嫌慢只改这一个数
+     * （1 = 回到原生 1:1 手感）。
      */
-    const PINCH_GAIN = 1.25;
+    const PINCH_GAIN = 1.6;
     const PAN_ENGAGE_PX = 10;          // 中点位移
     let mode = 'idle';                 // idle | undecided | pan | pinch
     let d0 = 0;
@@ -746,8 +754,8 @@ export class PdfViewer {
       touched: new Set(),  // 这一轮写过 transform 的页（提交/取消时要逐个清掉）
       fx: 0,
       fy: 0,
-      clientX: null,       // 当前指针位置（client 坐标）
-      clientY: null,
+      refX: null,          // 锚点钉在屏幕上的位置（缩放期间不变，见 _anchorZoomPreview）
+      refY: null,
       panTx: null,         // 纯平移时算好并夹住的位移（提交时一次性落到 scroll）
       panTy: null,
       timer: 0,
@@ -795,33 +803,56 @@ export class PdfViewer {
 
   /** 手势开始那一帧记下锚点（内容坐标 + 页内相对位置），全程不再改 */
   _anchorZoomPreview(preview, cx, cy) {
-    preview.clientX = cx;
-    preview.clientY = cy;
     if (preview.anchor) return;
+    /* `refX/refY` = **锚点要钉在屏幕上的位置**，整段缩放手势都不变。
+       用户口径（2026-10-09）：「只要判断是缩放，就不要移动位置」——
+       手指搓动时中点会漂，如果让画面跟着中点走，看起来就是「闪/飘」；
+       只有对称的横竖拉伸（中点不动）才不闪，正是这个道理。
+       所以缩放期间**只缩放、不平移**：锚点钉在按下去时的位置。
+       （两指平移是另一个模式：那时才移动，见 previewPan。） */
+    preview.refX = cx;
+    preview.refY = cy;
+    this._setZoomPreviewAnchor(preview, cx, cy);
+  }
+
+  /**
+   * 记下「当前跟踪的那个点」：内容坐标 + 它在哪一页的什么相对位置。
+   *
+   * ⚠️ 下面这六个字段**必须一起更新**，它们分别是"预览每帧解常数用"和"提交时对回来用"的两套表示：
+   *   · `anchor`（内容坐标，给 previewPan 反推手指起点）
+   *   · `page` / `fx` / `fy`（提交时量一次页框矩形，用它把锚点对回 refX/refY）
+   *   · `anchorPage` / `anchorLocalX` / `anchorLocalY`（逐页预览每帧解整体常数 C/D）
+   * 只改一半的后果实测过（2026-10-09）：拖到滚动边界（平移被夹住）后再捏合，
+   * 预览钉在旧点上、提交却按新点算，**提交那一帧画面跳 519px** —— 正是用户说的偏移闪现。
+   * 所以重锚点只有这一个入口。
+   *
+   * `fx/fy` **不夹到 [0,1]**：页内相对位置允许线性外推（手指在页外时，
+   * `r.top + fy*r.height` 仍精确等于那个屏幕位置）。夹了反而会让
+   * 「预览钉的点」与「提交对回的点」变成两个不同的点。
+   */
+  _setZoomPreviewAnchor(preview, cx, cy) {
     preview.anchor = {
       x: preview.scrollX + (cx - preview.cLeft),
       y: preview.scrollY + (cy - preview.cTop),
     };
-    /* 顺手记下锚点在**哪一页的哪个相对位置**（fx/fy）。
+    /* 锚点在**哪一页的哪个相对位置**（fx/fy）。
        提交时用「页框矩形 + 相对位置」把位置对回去，而不是继续用上面的内容坐标：
        布局之后 pages 容器里的**间隙与内边距不随比例缩放**（CSS 里是固定 14px），
        所以「内容坐标 × k」在提交那一刻只是近似 —— 实测差 30px 左右（就是「飘」）。
        页内相对位置则严格不变（页内所有东西都按同一个比例缩放）。 */
     const page = this._pageAtContent(preview.anchor.y);
-    if (page) {
-      const r = page.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) {
-        preview.page = page;
-        preview.fx = clamp((cx - r.left) / r.width, 0, 1);
-        preview.fy = clamp((cy - r.top) / r.height, 0, 1);
-        /* 逐页预览要用：锚点在哪一页、以及它在**页内的局部坐标**（未缩放）。
-           每帧由 `old.tops[ap] + t + k*ay = 手指位置` 解出这套逐页 transform 的整体常数，
-           于是「手指抓住的那个点」始终在手指上，其余页跟着同一套相对位置走。 */
-        preview.anchorPage = Number(page.dataset.page) || null;
-        preview.anchorLocalX = cx - r.left;
-        preview.anchorLocalY = cy - r.top;
-      }
-    }
+    if (!page) return;
+    const r = page.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return;
+    preview.page = page;
+    preview.fx = (cx - r.left) / r.width;
+    preview.fy = (cy - r.top) / r.height;
+    /* 逐页预览要用：锚点在哪一页、以及它在**页内的局部坐标**（未缩放）。
+       每帧由 `old.tops[ap] + t + k*ay = refY` 解出这套逐页 transform 的整体常数，
+       于是「按下去抓住的那个点」始终钉在 refX/refY，其余页跟着同一套相对位置走。 */
+    preview.anchorPage = Number(page.dataset.page) || null;
+    preview.anchorLocalX = cx - r.left;
+    preview.anchorLocalY = cy - r.top;
   }
 
   /**
@@ -847,20 +878,20 @@ export class PdfViewer {
     const hi = Math.min(this.numPages, last + 1);
     const pred = this._predictedLayout(this.scale, preview.padTop, preview.gap, preview.containerW);
     const old = preview.oldLayout;
-    /* 锚点页上的常数：让「手指抓住的那个点」始终落在手指上（其余页跟着这套相对位置走）。
+    /* 锚点页上的常数：让锚点**钉在 refX/refY**（按下去的位置），不是跟着手指走。
        全部在**内容坐标**里算：页在内容坐标是 old.tops[i]，transform 的位移也发生在内容坐标里
        （滚动只是平移）。页顶的屏幕位置 = cTop + (内容 top + py) − scrollY，
-       代入「锚点局部坐标 ay 缩放 k 倍后落在手指 cy 上」解出：
-         py = cy − cTop + scrollY − oldTop − k·ay
-       再减去「按真实布局该走的那一段」就得到常数 C。k=1 时 C=0（纯平移不打比例差）。 */
+       代入「锚点局部坐标 ay 缩放 k 倍后仍落在 refY 上」解出：
+         py = refY − cTop + scrollY − oldTop − k·ay
+       再减去「按真实布局该走的那一段」就得到常数 C。 */
     const ap = preview.anchorPage;
     let C = 0;
     let D = 0;
     if (ap && old.tops[ap] != null) {
       const ay = preview.anchorLocalY;      // 锚点在页内的局部纵坐标（未缩放）
       const ax = preview.anchorLocalX;
-      const wantY = preview.clientY - preview.cTop + preview.scrollY - old.tops[ap] - k * ay;
-      const wantX = preview.clientX - preview.cLeft + preview.scrollX - old.lefts[ap] - k * ax;
+      const wantY = preview.refY - preview.cTop + preview.scrollY - old.tops[ap] - k * ay;
+      const wantX = preview.refX - preview.cLeft + preview.scrollX - old.lefts[ap] - k * ax;
       C = wantY - (pred.tops[ap] - old.tops[ap]);
       D = wantX - (pred.lefts[ap] - old.lefts[ap]);
     }
@@ -903,6 +934,23 @@ export class PdfViewer {
       cy = preview.cTop + this.container.clientHeight / 2;
     }
     this._anchorZoomPreview(preview, cx, cy);
+    /* 从「平移」升级成「缩放」时，锚点要重新钉一次，否则升级/提交那一帧会跳。
+       钉在**当前指针位置**：平移期画面一直是 1:1 跟着手指的（到边界被夹住时例外，
+       见 previewPan 的夹取分支 —— 那里会把 fx/fy/page 改成「手指底下那个点」），
+       所以「手指底下那个点」此刻就在手指上，钉住它就等于**画面纹丝不动地开始放大**。
+       注意不能写成 `refX + panTx`：被夹住过的平移，手指位置和画面位置差着「搓过头的量」，
+       那样算出来的锚点会让「预览钉的点」与「提交对回的点」分成两个点
+       （实测搓过头 480px → 提交那一帧画面跳 **660px**）。 */
+    if (preview.panTx != null && !preview.upgraded) {
+      preview.upgraded = true;
+      if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
+        preview.refX = cx;
+        preview.refY = cy;
+      } else {
+        preview.refX += preview.panTx;
+        preview.refY += preview.panTy;
+      }
+    }
 
     const k = next / preview.baseScale;
     this.scale = next;
@@ -945,18 +993,13 @@ export class PdfViewer {
     const ty = clamp(rawTy, preview.scrollY - preview.maxScrollY, preview.scrollY);
     if (tx !== rawTx || ty !== rawTy) {
       /* 到边界了：内容停在边上，手指底下那个 PDF 点就换了。
-         锚点必须跟着挪，否则「到边之后再捏合」会从旧锚点算，画面会跳一下。 */
-      preview.anchor = {
-        x: clientX + preview.scrollX - preview.cLeft - tx,
-        y: clientY + preview.scrollY - preview.cTop - ty,
-      };
-      const page = this._pageAtContent(preview.anchor.y);
-      const r = page?.getBoundingClientRect?.();
-      if (r && r.width > 0 && r.height > 0) {
-        preview.page = page;
-        preview.fx = clamp((clientX - r.left) / r.width, 0, 1);
-        preview.fy = clamp((clientY - r.top) / r.height, 0, 1);
-      }
+         锚点必须跟着挪（**整套一起挪**，见 _setZoomPreviewAnchor 的说明），
+         否则「拖到边之后再捏合」会从旧锚点算，升级帧和提交帧各跳一次。 */
+      this._setZoomPreviewAnchor(preview, clientX, clientY);
+      // `anchor` 要用**夹住之后**的内容坐标（它与「手指底下那个点」差一个夹取量），
+      // 上面的 helper 算的是未夹取的版本，这里覆盖掉。
+      preview.anchor.x = clientX + preview.scrollX - preview.cLeft - tx;
+      preview.anchor.y = clientY + preview.scrollY - preview.cTop - ty;
     }
     preview.panTx = tx;
     preview.panTy = ty;
@@ -1004,14 +1047,14 @@ export class PdfViewer {
     // 最终比例，再改 page 外框尺寸，避免旧位图留在新页面里造成错位/重叠。
     this._softRescale();
     this.layout();
-    if (preview.page && preview.clientX != null) {
-      /* 把锚点重新对回最后一帧的手指位置：页框布局完再量一次矩形（整段手势只此一次 DOM 读），
-         用一开始记下的页内相对位置换算，和缩放比例无关，所以不会因为
-         「间隙/内边距不缩放」而漂。 */
+    if (preview.page && preview.refX != null) {
+      /* 把锚点重新对回**按下去时的那个屏幕位置**（refX/refY），不是最后一帧的手指位置：
+         缩放手势本身不平移，提交时也就不该平移。
+         页框布局完再量一次矩形（整段手势只此一次 DOM 读），用一开始记下的页内相对位置换算。 */
       const r = preview.page.getBoundingClientRect();
       if (r.width > 0 && r.height > 0) {
-        this.container.scrollLeft += r.left + preview.fx * r.width - preview.clientX;
-        this.container.scrollTop += r.top + preview.fy * r.height - preview.clientY;
+        this.container.scrollLeft += r.left + preview.fx * r.width - preview.refX;
+        this.container.scrollTop += r.top + preview.fy * r.height - preview.refY;
       }
     }
     // 90ms（原来 140）：用户要「缩放快一点」，松手到开始重画之间的空档再短一点

@@ -167,9 +167,94 @@ check('两指平行拖动确实滚动了内容（不是被浏览器吃掉）',
   `scrollTop ${panBefore.scroll} → ${panAfter.scroll}`);
 check('两指平行拖动也不缩放整个界面', panAfter.vv === panBefore.vv, `vvScale ${panBefore.vv} → ${panAfter.vv}`);
 
+/* 用户口径（2026-10-09 定稿）：
+   「只要是两指之间距离增大，**不管是哪个方向**都是放大，缩小也一样」
+   → 竖着张开、斜着张开都必须算放大（判定只看距离，与方向无关）。 */
 await resetView();
-const jitterBefore = await viewerState();
-await twoFinger((t) => [{ x: 640, y: 300 + 3 * t, id: 1, force: 1 }, { x: 760, y: 300 + 3 * t, id: 2, force: 1 }], { steps: 12 });
+for (const [dirName, mk] of [
+  ['横着张开', (t) => { const d = 50 + 90 * t; return [{ x: 700 - d, y: 430, id: 1, force: 1 }, { x: 700 + d, y: 430, id: 2, force: 1 }]; }],
+  ['竖着张开', (t) => { const d = 50 + 90 * t; return [{ x: 700, y: 430 - d, id: 1, force: 1 }, { x: 700, y: 430 + d, id: 2, force: 1 }]; }],
+  ['斜着张开', (t) => { const d = 50 + 90 * t; return [{ x: 700 - d, y: 430 - d, id: 1, force: 1 }, { x: 700 + d, y: 430 + d, id: 2, force: 1 }]; }],
+]) {
+  // eslint-disable-next-line no-await-in-loop
+  await resetView();
+  // eslint-disable-next-line no-await-in-loop
+  const b = await viewerState();
+  // eslint-disable-next-line no-await-in-loop
+  await twoFinger(mk, { steps: 18 });
+  // eslint-disable-next-line no-await-in-loop
+  await sleep(1500);
+  // eslint-disable-next-line no-await-in-loop
+  const a = await viewerState();
+  check(`两指${dirName}也算放大（判定只看距离）`, a.scale > b.scale * 1.5,
+    `scale ${b.scale} → ${a.scale}（×${(a.scale / b.scale).toFixed(2)}）`);
+  // eslint-disable-next-line no-await-in-loop
+  await resetView();
+}
+
+/* 用户口径：「只要判断是缩放，就不要移动位置」——
+   手指搓动（中点漂移）时画面**只缩不放平移**，锚点必须钉在按下去的位置上。 */
+await resetView();
+const pinned = await page.evaluate(async () => {
+  const v = window.__viewer;
+  const ax = 700;
+  const ay = 400;
+  const el = document.elementFromPoint(ax, ay)?.closest?.('.page');
+  if (!el) return { error: '按下的位置不在页面上' };
+  const pageNum = Number(el.dataset.page);
+  const r0 = el.getBoundingClientRect();
+  const fx = (ax - r0.left) / r0.width;
+  const fy = (ay - r0.top) / r0.height;
+  const xs = [];
+  const ys = [];
+  let stop = false;
+  let started = false;
+  const sample = () => {
+    const pr = v.pageEls[pageNum]?.getBoundingClientRect();
+    if (pr && pr.width > 0) { xs.push(pr.left + fx * pr.width); ys.push(pr.top + fy * pr.height); }
+  };
+  const tick = () => {
+    if (stop) return;
+    // 只统计「进入预览之后」的帧：第一帧之前本来就没变换
+    if (v._zoomPreview) started = true;
+    if (started) sample();
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  const base = v.scale;
+  /* 故意让**中点一边往下走一边张开**（真实手指就会这样搓）：
+     如果画面跟着中点走，这里的 x/y 会一路漂 140px。
+     第一帧不动中点，是刻意的：锚点记在「第一次真正改比例」的那一帧的指针位置上，
+     那一帧指针在哪锚点就在哪。要是判定帧指针已经挪了 6px，那 6px 就成了
+     「锚点 vs 按下点」的固定差，再被 k 放大（实测 dy = −k·6.36，k=1.7 时 4.5px）——
+     那是**测量参考点**的问题，不是画面在动。所以判定帧与按下点重合，
+     剩下的 140px 中点漂移才是这句断言真正要否掉的东西（旧实现会漂满 140px）。 */
+  for (let i = 1; i <= 22; i++) {
+    const t = i / 22;
+    const drift = i === 1 ? 0 : (140 * (i - 1)) / 21;
+    v.previewScale(base * (1 + 0.7 * t), { clientX: ax, clientY: ay + drift });
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  v.commitZoomPreview();
+  for (let i = 0; i < 6; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  stop = true;
+  const span = (a) => (a.length > 4 ? +(Math.max(...a) - Math.min(...a)).toFixed(2) : -1);
+  return { spanX: span(xs), spanY: span(ys), n: xs.length, k: +(v.scale / base).toFixed(2) };
+});
+if (pinned.error) {
+  check('缩放时画面不跟着手指平移（锚点钉住）', false, pinned.error);
+} else {
+  check('缩放时画面不跟着手指平移（中点漂 140px 也钉住不动）',
+    pinned.spanX >= 0 && pinned.spanX < 2 && pinned.spanY < 2,
+    `中点往右下漂了 140px 的情况下，锚点在整段手势（含提交帧）里的位置波动 ${pinned.spanX}×${pinned.spanY}px（${pinned.n} 帧，×${pinned.k}）`);
+}
+
+await resetView();
+const jitterBefore = await viewerState();await twoFinger((t) => [{ x: 640, y: 300 + 3 * t, id: 1, force: 1 }, { x: 760, y: 300 + 3 * t, id: 2, force: 1 }], { steps: 12 });
 await sleep(400);
 const jitterAfter = await viewerState();
 check('两指只有几像素抖动时纹丝不动',
@@ -460,6 +545,65 @@ const bothAfter = await viewerState();
 check('先平移再张开：两件事都发生了（先滚后缩）',
   bothAfter.scale > bothBefore.scale * 1.4,
   `scale ${bothBefore.scale} → ${bothAfter.scale}（×${(bothAfter.scale / bothBefore.scale).toFixed(2)}）`);
+
+/* ══════════════ 五之二、先拖到边界、再捏合 ══════════════
+   真实用户最常见的动作之一：「已经在最上面了，还往下搓一把，然后捏合放大」。
+   平移的位移是**夹住**的（到边界就不动了），所以这时「手指底下的那个点」和
+   「画面实际上钉住的点」会差一个「搓过头的量」。如果升级成缩放时锚点没跟着
+   修正，预览期看不出来（预览本来就钉住不动），**提交那一帧**会整个画面猛拽一下 ——
+   正是用户抱怨的「手势做完之后偏移闪现」。
+   这里用同步测量（中间不 await 任何帧）：提交前后量同一批页的矩形，差值就是用户
+   在「最后一帧预览」与「下一帧」之间会看到的位移。 */
+await resetView();
+const clamp = await page.evaluate(() => {
+  const v = window.__viewer;
+  const rects = () => {
+    const vr = v.container.getBoundingClientRect();
+    const out = {};
+    for (const [i, e] of v.rendered) {
+      const r = e.canvas.parentElement.getBoundingClientRect();
+      if (r.bottom > vr.top && r.top < vr.bottom) out[i] = [r.left, r.top];
+    }
+    return out;
+  };
+  const base = v.scale;
+  // 顶到最上面：往下搓多少都只会被夹在 scrollTop=0，画面一动不动
+  v.container.scrollTop = 0;
+  for (let i = 1; i <= 12; i++) v.previewPan(700, 400 + 40 * i);
+  const overshoot = 40 * 12;
+  const panRects = rects();
+  const anchorBefore = v._zoomPreview ? { refX: v._zoomPreview.refX, refY: v._zoomPreview.refY } : null;
+  // 搓了一把之后改距离 → 升级成缩放。
+  // 升级这一帧用 ×1.001：比例几乎没变，所以「页面矩形动了多少」量的就是
+  // **锚点接得对不对**，而不是缩放本身带来的位移。
+  v.previewScale(base * 1.001, { clientX: 700, clientY: 400 + overshoot });
+  const pinned = v._zoomPreview ? { refX: v._zoomPreview.refX, refY: v._zoomPreview.refY } : null;
+  const mid = rects();
+  const midShift = Math.max(0, ...Object.keys(panRects).map((k) => (mid[k]
+    ? Math.hypot(mid[k][0] - panRects[k][0], mid[k][1] - panRects[k][1]) : 0)));
+  // 接着真的放大，然后拿**最后一帧预览**与提交后比（同步量，中间不 await 任何帧）
+  v.previewScale(base * 1.5, { clientX: 700, clientY: 400 + overshoot });
+  const before = rects();
+  v.commitZoomPreview();
+  const after = rects();
+  let worst = 0;
+  let which = null;
+  for (const k of Object.keys(before)) {
+    if (!after[k]) continue;
+    const d = Math.hypot(after[k][0] - before[k][0], after[k][1] - before[k][1]);
+    if (d > worst) { worst = d; which = { page: k, from: before[k].map(Math.round), to: after[k].map(Math.round) }; }
+  }
+  return {
+    worst: +worst.toFixed(1), which, pages: Object.keys(before).length, overshoot,
+    upgradeShift: +midShift.toFixed(1), anchorBefore, pinned, k: +(v.scale / base).toFixed(2),
+  };
+});
+check('拖到边界后再捏合：升级那一瞬画面也不动（锚点跟着边界修正）',
+  clamp.upgradeShift <= 3,
+  `搓过头 ${clamp.overshoot}px（被夹住），升级帧最大位移 ${clamp.upgradeShift}px，锚点 ${JSON.stringify(clamp.anchorBefore)} → ${JSON.stringify(clamp.pinned)}`);
+check('拖到边界后再捏合：提交那一帧画面不位移（偏移闪现）',
+  clamp.worst <= 3,
+  `放大 ×${clamp.k}，视口内 ${clamp.pages} 页，最大位移 ${clamp.worst}px${clamp.which ? `（第 ${clamp.which.page} 页 ${JSON.stringify(clamp.which.from)} → ${JSON.stringify(clamp.which.to)}）` : ''}`);
 
 /* ══════════════ 六、文本层开销与文本流解析次数 ══════════════ */
 console.log('\n-- 文本层开销与文本流解析次数');
