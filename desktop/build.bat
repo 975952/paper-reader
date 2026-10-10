@@ -24,11 +24,13 @@ rem     block - "try" is a statement, not an expression, and
 rem     PowerShell will treat it as a command name and fail.
 rem  3) copy, then verify the SHA256 of BOTH destinations. A copy
 rem     onto a running exe fails silently otherwise, and tests then
-rem     "pass" against a stale binary. The LastWriteTime touch that
-rem     follows is COSMETIC (it only makes the exe look as fresh as
-rem     public/), so it is wrapped in try/catch: a locked target
-rem     used to abort the whole statement - powershell -Command then
-rem     exits 1 even though both copies verified fine.
+rem     "pass" against a stale binary. Two hardening details learned
+rem     the hard way: the copy RETRIES for up to 10s (killing the app
+rem     releases the file handle a moment later than the process
+rem     disappears - a one-shot copy right after the kill failed),
+rem     and the cosmetic LastWriteTime touch is wrapped in try/catch
+rem     (a locked target used to abort the whole statement, so
+rem     powershell -Command exited 1 although both copies verified).
 rem ============================================================
 setlocal
 cd /d "%~dp0"
@@ -61,7 +63,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$want = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($src))).Replace('-', '');" ^
   "$bad = 0;" ^
   "foreach ($d in $dst) {" ^
-  "  try { Copy-Item -Force $src $d -ErrorAction Stop } catch { Write-Host ('      [x] ' + $d + ' : ' + $_.Exception.Message); $bad = 1; continue }" ^
+  "  $ok = 0;" ^
+  "  for ($i = 0; $i -lt 20 -and -not $ok; $i++) {" ^
+  "    try { Copy-Item -Force $src $d -ErrorAction Stop; $ok = 1 } catch { Start-Sleep -Milliseconds 500 }" ^
+  "  }" ^
+  "  if (-not $ok) { Write-Host ('      [x] ' + $d + ' : still locked (app open?)'); $bad = 1; continue }" ^
   "  $got = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($d))).Replace('-', '');" ^
   "  if ($got -ne $want) { Write-Host ('      [x] MISMATCH ' + $d); $bad = 1; continue }" ^
   "  try { (Get-Item $d).LastWriteTime = $latest } catch { }" ^

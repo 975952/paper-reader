@@ -36,11 +36,6 @@ export async function initPdfjs() {
 }
 
 /**
- * 渲染倍率：至少 2 倍超采样，保证在任何屏幕上放大后都够密。
- * 这是「放大就糊」的直接对策——浏览器拿到比显示尺寸更密的位图再降采样，
- * 边缘才不会发虚。
- */
-/**
  * 渲染倍率：**按屏幕的设备像素比来，不再无条件超采样**。
  *
  * ⚠️ 这里以前是 `clamp(max(dpr, 2), 1, 3)` —— 在 1× 屏上也硬按 2 倍渲染。
@@ -62,16 +57,32 @@ function renderRatio() {
 
 /**
  * 单页位图的像素预算（百万像素）。`renderRatio()` 给的是「屏幕要多少」，
- * 这里再兜一道「别超过多少」：放大到 3.5× 时一页 CSS 面积能到 6 MP，
- * 乘上 dpr 就会突破两位数，重画一次几百毫秒、显存也吃不消。
- * 两个限制取小的那个，并且最低保到 0.75（再低就明显糊了，那时切片逻辑会接手）。
+ * 这里再兜一道「别超过多少」：一块 canvas 撑到几十 MB 时，重画一次几百毫秒、
+ * 显存也吃不消，浏览器还会静默降采样（那就白画了）。
+ *
+ * ⚠️ 2026-10-10 修：这个预算必须**按「实际画出来的那块」算，不能按整页算**。
+ * 以前是 `renderRatioFor(cssW, cssH)` 先按**整页**面积把倍率压到 0.75，
+ * 再交给切片逻辑 —— 顺序反了：切片只有 2.4 MP、完全放得下，却继承了被压低的 0.75。
+ * 实测（`test/artifacts/sharpness.mjs`，密度 = 屏幕 1 个 CSS 像素分到几个位图像素）：
+ *   dpr=1：scale 5 起密度掉到 0.75（浏览器放大位图 = 糊）；
+ *   dpr=2：fit 宽度就已经是 1.53/2，3.5× 掉到 1.0，5× 之后 0.75 —— 用户说的
+ *   「放大之后就不太清晰了」就是这个。
+ * 现在改成 `_renderPlan()`：**先按 dpr 定要画哪一块，再按这块的面积分配预算**，
+ * 边距用剩下的预算反解（面积越大边距越小），于是可见区域**恒等于设备分辨率**。
  */
-const RENDER_MP_BUDGET = 6;
-function renderRatioFor(cssW, cssH) {
-  const base = renderRatio();
-  const area = Math.max(1, cssW * cssH) / 1e6;         // CSS 百万像素
-  return clamp(Math.min(base, Math.sqrt(RENDER_MP_BUDGET / area)), 0.75, base);
-}
+const MAX_FULL_MP = 9;
+/**
+ * 整页降采样能忍到什么程度（相对 `renderRatio()`）。
+ *
+ * 一块位图两种画法，成本都被 MAX_FULL_MP 卡住，区别在**取舍**：
+ *   · 整页 + 降一点倍率：滚动时**不用重画**（位图盖着整页），代价是轻微发虚；
+ *   · 可见区域 + 满倍率：清晰，但每滚过一个边距就要重画一次。
+ * 所以只有「降一点点就能整页放下」时才选整页：2× 屏上 fitWidth 一页 10.3 MP、
+ * 降到 1.87（93%）就能整页放下 —— 这点差别肉眼看不出来，换来滚动不重画；
+ * 而放大到 3.5× 时整页只能降到 1.23（61%），那就必须切片保满分辨率。
+ * 0.9 这条线就是这么定的（实测见 test/artifacts/sharpness.mjs）。
+ */
+const WHOLE_PAGE_TOLERANCE = 0.9;
 
 /** 当前设置里的 PDF 纸张颜色。Canvas 不能直接读取 CSS 的 background，
  * 所以页面外壳和 pdf.js 的实际绘制都必须使用同一个颜色。 */
@@ -83,10 +94,8 @@ function paperColor() {
   }
 }
 
-/** 单页整幅渲染的像素上限（百万像素）。超过就只渲染可见切片 —— 否则放大后
- *  一张 canvas 能到几十 MB，多页叠加会爆显存，浏览器会静默降采样 = 糊。 */
-const MAX_FULL_MP = 8;
-/** 切片向外多渲染一点，减少滚动时的重绘次数（CSS px） */
+/** 切片向外多渲染多少像素（CSS px，上限）。滚动时不至于一屏就重画一次；
+ *  实际边距由 `_renderPlan()` 按**剩余预算**反解，屏幕越密边距越小。 */
 const SLICE_MARGIN = 600;
 
 /**
@@ -1109,12 +1118,17 @@ export class PdfViewer {
     }
   }
 
-  /** 旧位图按比例拉伸：位图是绝对 px，直接改宽高/偏移最省事（不重画） */
+  /** 旧位图按比例拉伸：位图是绝对 px，直接改宽高/偏移最省事（不重画）。
+   *  ⚠️ 高位图可能是**切片**（`entry.slice`）：那时这块 canvas 只覆盖切片那么大，
+   *  拉伸的宽高必须是 `slice.w/h × k`，不能用整页的 `cssW/cssH` ——
+   *  否则一块 1589×1153 的切片会被拉成整页 2142×2772，画面明显错位（实测密度算出 2.317>dpr 才发现）。 */
   _softRescaleCanvas(entry, k) {
     const c = entry.canvas;
     if (!c) return;
-    c.style.width = `${(entry.cssW * k).toFixed(2)}px`;
-    c.style.height = `${(entry.cssH * k).toFixed(2)}px`;
+    const baseW = entry.slice ? entry.slice.w : entry.cssW;
+    const baseH = entry.slice ? entry.slice.h : entry.cssH;
+    c.style.width = `${(baseW * k).toFixed(2)}px`;
+    c.style.height = `${(baseH * k).toFixed(2)}px`;
     c.style.left = `${((entry.slice ? entry.slice.x : 0) * k).toFixed(2)}px`;
     c.style.top = `${((entry.slice ? entry.slice.y : 0) * k).toFixed(2)}px`;
     c.classList.add('soft-zoom');
@@ -1340,23 +1354,69 @@ export class PdfViewer {
   }
 
   /**
-   * 算出这一页当前需要渲染的区域（CSS px，相对页面左上角）。
-   * 放大到一定程度后整页渲染会撑爆显存，只渲染视口附近这一块。
-   * 返回 null 表示按整页渲染。
+   * 决定「这一页这一帧画哪一块、按多大倍率画」——顺序是**先区域、后预算**。
+   *
+   * 1. 屏幕要多少倍率是 `renderRatio()`（= dpr）定的，与页面多大无关：
+   *    页面再大，屏幕上 1 个 CSS 像素也还是对应 dpr 个物理像素。
+   * 2. 整页按 dpr 画放得进预算 → 整页。
+   * 3. 放不进、但降一点点倍率（≥ `WHOLE_PAGE_TOLERANCE`）就能整页放下 → 整页 + 那点降采样
+   *    （滚动时不用重画，值这一点点糊）。
+   * 4. 否则 → 只画**可见区域**，倍率仍然是 dpr。这一步以前是反的：先按整页面积
+   *    把倍率压到 0.75 再切片，于是切片也糊 —— 用户说的「放大之后就不太清晰」。
+   * 5. 连可见区域都超预算（超大窗口 + 2× 屏）→ 才降倍率，且降到刚好放得下。
+   * 6. 剩下的预算拿来做边距（滚动时不用马上重画）：边距面积解方程
+   *    `(w+2m)(h+2m)·ratio² = 预算`，所以屏幕越密、窗口越大，边距越小。
+   *
+   * 返回 `{ ratio, slice }`，`slice` 是相对页面左上角的 CSS px 矩形（null = 整页）。
    */
-  _sliceFor(i, cssW, cssH, ratio) {
+  _renderPlan(i, cssW, cssH) {
+    const base = renderRatio();
+    const wholeCSS = cssW * cssH;
+    if (wholeCSS * base * base / 1e6 <= MAX_FULL_MP) return { ratio: base, slice: null };
+    /* 整页放不下，但「降一点点倍率就能整页放下」时宁可要整页：
+       滚动时不用重画（切片每滚一个边距就得重画一次，2× 屏上很痛）。
+       差得多才切成可见区域、保满分辨率 —— 也就是用户要的「放大之后要清晰」。 */
+    const capped = Math.sqrt((MAX_FULL_MP * 1e6) / wholeCSS);
+    if (capped >= base * WHOLE_PAGE_TOLERANCE) return { ratio: capped, slice: null };
     const pageEl = this.pageEls[i];
-    if (!pageEl) return null;
-    const fullMP = (cssW * ratio * cssH * ratio) / 1e6;
-    if (fullMP <= MAX_FULL_MP) return null;   // 整页还在安全范围内
+    if (!pageEl) return { ratio: base, slice: null };
     const pr = pageEl.getBoundingClientRect();
     const vr = this.container.getBoundingClientRect();
-    const x0 = Math.max(0, Math.floor(vr.left - pr.left - SLICE_MARGIN));
-    const y0 = Math.max(0, Math.floor(vr.top - pr.top - SLICE_MARGIN));
-    const x1 = Math.min(cssW, Math.ceil(vr.right - pr.left + SLICE_MARGIN));
-    const y1 = Math.min(cssH, Math.ceil(vr.bottom - pr.top + SLICE_MARGIN));
-    if (x1 - x0 < 16 || y1 - y0 < 16) return null;
-    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    /* 画哪一块 = 「阅读区大小的窗口」挪进页面范围内、取离阅读区最近的位置：
+       · 页面盖住阅读区 → 就是可见区域；
+       · 页面只露出一角、或者**根本不在视口里**（离屏页被排进重画队列时就是这种）
+         → 取最近的等大窗口（页面上/下那一头）。
+       ⚠️ 这里**绝不能**退化成「整页按 dpr 画」：5× 下一页是 3060×3960 CSS，
+       dpr=2 就是 **48.5 MP / 194 MB 一张位图**，浏览器当场卡死（实测过一次）。 */
+    const winW = Math.min(cssW, Math.max(1, vr.width));
+    const winH = Math.min(cssH, Math.max(1, vr.height));
+    const vx0 = clamp(vr.left - pr.left, 0, Math.max(0, cssW - winW));
+    const vy0 = clamp(vr.top - pr.top, 0, Math.max(0, cssH - winH));
+    const visCSS = winW * winH;
+    // 连这个窗口都超预算（超大窗口 + 高 dpr）→ 才降倍率，且降到刚好放得下
+    const ratio = visCSS * base * base / 1e6 > MAX_FULL_MP
+      ? clamp(Math.sqrt((MAX_FULL_MP * 1e6) / visCSS), 0.75, base)
+      : base;
+    const targetCSS = (MAX_FULL_MP * 1e6) / (ratio * ratio);   // 这块位图最多能覆盖多少 CSS 面积
+    const spare = targetCSS - visCSS;
+    const sum = winW + winH;
+    const margin = spare > 0
+      ? clamp((-2 * sum + Math.sqrt(4 * sum * sum + 16 * spare)) / 8, 0, SLICE_MARGIN)
+      : 0;
+    return {
+      ratio,
+      /* `window` = **必须被覆盖**的那一块（就是阅读区大小的窗口）。
+         判断「已渲染的切片还够不够用」只能拿它去比 —— 拿 `slice`（= window + 边距）
+         去比的话，边距自己也在"需要"里，于是任何一点滚动都判成不够用，
+         边距等于白留：实测 5× 时 45 个滚动步触发了 45 次重画（长任务合计 2536ms）。 */
+      window: { x: vx0, y: vy0, w: winW, h: winH },
+      slice: {
+        x: Math.max(0, Math.floor(vx0 - margin)),
+        y: Math.max(0, Math.floor(vy0 - margin)),
+        w: Math.min(cssW, Math.ceil(vx0 + winW + margin)) - Math.max(0, Math.floor(vx0 - margin)),
+        h: Math.min(cssH, Math.ceil(vy0 + winH + margin)) - Math.max(0, Math.floor(vy0 - margin)),
+      },
+    };
   }
 
   /** 已渲染的切片是否仍然覆盖当前视口（否则要重画） */
@@ -1372,13 +1432,17 @@ export class PdfViewer {
   _refreshSlices() {
     if (this._zoomPreview) return;
     for (const [i, entry] of Array.from(this.rendered.entries())) {
-      if (!entry.slice || !entry.cssW) continue;
+      if (!entry.cssW) continue;
       /* dirty 的页（刚被软缩放拉伸过）已经排在重画队列里了，这里再点一次就是
          两页并行的第二个来源（实测把排队让帧绕过去，长任务又叠成 233ms）。
          队列里那次 _renderPage(..., {soft:true}) 本来就会重算切片。 */
       if (entry.dirty) continue;
-      const need = this._sliceFor(i, entry.cssW, entry.cssH, entry.ratio);
-      if (need && this._sliceCovers(entry.slice, need)) continue;
+      const plan = this._renderPlan(i, entry.cssW, entry.cssH);
+      // 倍率变了（窗口/屏幕变了）或者「以前是切片、现在整页放得下了」都要重画回整页
+      const ratioDrift = Math.abs(plan.ratio - (entry.ratio || 0)) > 0.01 * plan.ratio;
+      const backToFull = !plan.slice && entry.slice;
+      // 覆盖率只比 `window`（必须覆盖的可见窗口），边距是"提前画的余量"，不算需求
+      if (!ratioDrift && !backToFull && this._sliceCovers(entry.slice, plan.window)) continue;
       // 滚动很快时同一页可能连续触发多次切片刷新；保留当前任务，避免每 60ms
       // 取消并重开一次文本层，导致引用热点出现可点击空窗。
       if (this.renderTasks.has(i)) continue;
@@ -1428,9 +1492,8 @@ export class PdfViewer {
       const viewport = page.getViewport({ scale: this.scale });
       const cssW = viewport.width;
       const cssH = viewport.height;
-      // 倍率要按「这一页的实际 CSS 面积」算：面积越大越要克制（见 renderRatioFor 的说明）
-      const ratio = renderRatioFor(cssW, cssH);
-      const slice = this._sliceFor(i, cssW, cssH, ratio);
+      // 倍率与区域一起定：**先按 dpr 定画哪一块，再按这块的面积分配预算**（见 _renderPlan）
+      const { ratio, slice } = this._renderPlan(i, cssW, cssH);
       const drawW = slice ? slice.w : cssW;
       const drawH = slice ? slice.h : cssH;
       const ox = slice ? slice.x : 0;

@@ -361,6 +361,76 @@ if (probe.first && probe.last) {
   check('选中后气泡正常弹出', sel.bubble && !!sel.state, sel.state.slice(0, 24));
 }
 
+/* ── 七、放大之后的清晰度：位图密度必须跟上屏幕 ──
+   2026-10-10 用户口径：「怎么放大之后就不太清晰了」。
+   根因不是渲染不动，而是**像素预算按整页算**：整页面积一大就把倍率压到 0.75，
+   再交给切片逻辑 —— 切片明明放得下也继承了 0.75。实测（test/artifacts/sharpness.mjs）：
+     dpr=1：scale 5/6 密度 0.75（浏览器放大位图 = 糊）
+     dpr=2：fit 宽度 1.53、3.5× 1.0、5× 之后 0.75
+   现在改成「先按 dpr 定画哪一块，再按这块的面积分配预算」。
+   这里断言的就是那条不变量：**屏幕上一个 CSS 像素至少分到 0.9×min(dpr,2) 个位图像素**，
+   另外位图不许超过 10 MP（曾经有一版离屏页回退成整页，一张 48 MP，浏览器直接卡死）。 */
+console.log('\n-- 放大之后的清晰度（位图密度）');
+const densityAt = (scale) => page.evaluate(async (s) => {
+  const v = window.__viewer;
+  v.setScale(s, { keepCenter: true });
+  /* 等「清晰态」：视口里那一页不再 dirty、也没有 soft-zoom 拉伸标记。
+     不等的话量到的是**上一版位图被拉伸中**的中间态（密度会算出 0.46 这种假数字），
+     那不是"画得不清楚"，是"还没画完" —— 两种东西必须分开看。 */
+  for (let t = 0; t < 60; t++) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 200));
+    let pending = 0;
+    for (const e of v.rendered.values()) {
+      if (!e.canvas) continue;
+      if (e.dirty || e.canvas.classList.contains('soft-zoom')) pending++;
+    }
+    if (!pending) break;
+  }
+  const vr = v.container.getBoundingClientRect();
+  const rows = [];
+  for (const [i, e] of v.rendered) {
+    if (!e.canvas) continue;
+    const r = e.canvas.getBoundingClientRect();
+    // 只有**真在视口里**的位图才算（同一页的切片也只算露出来的那块）
+    const ovW = Math.min(r.right, vr.right) - Math.max(r.left, vr.left);
+    const ovH = Math.min(r.bottom, vr.bottom) - Math.max(r.top, vr.top);
+    if (ovW < 200 || ovH < 200) continue;
+    const styleW = parseFloat(e.canvas.style.width) || 1;
+    rows.push({
+      i, ratio: +(e.ratio ?? 0).toFixed(3), slice: !!e.slice, dirty: !!e.dirty,
+      density: +(e.canvas.width / styleW).toFixed(3),
+      mp: +((e.canvas.width * e.canvas.height) / 1e6).toFixed(1),
+    });
+  }
+  return { rows, dpr: window.devicePixelRatio, scale: +v.scale.toFixed(2) };
+}, scale);
+
+for (const dpr of [1, 2]) {
+  await page.setViewport({ width: 1500, height: 950, deviceScaleFactor: dpr });
+  await page.goto(`${BASE}/?topbar=static`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#fileList li', { timeout: 20000 });
+  await page.evaluate((id) => {
+    const li = [...document.querySelectorAll('#fileList li')].find((x) => x.dataset.id === id) || document.querySelector('#fileList li');
+    li.click();
+  }, first.docId);
+  await page.waitForFunction(() => window.__viewer?.pdf, { timeout: 40000 });
+  await sleep(2200);
+  const seen = [];
+  for (const s of [2.3, 3.5, 5]) {
+    const r = await densityAt(s);
+    seen.push(`${s}×:${r.rows.map((x) => x.density).join('/')}`);
+    const worst = r.rows.length ? Math.min(...r.rows.map((x) => x.density)) : 0;
+    const biggest = r.rows.length ? Math.max(...r.rows.map((x) => x.mp)) : 0;
+    check(`dpr=${dpr} 放大到 ${s}× 时位图密度跟得上屏幕`,
+      r.rows.length > 0 && worst >= 0.9 * dpr,
+      `最差密度 ${worst}（要 ≥ ${(0.9 * dpr).toFixed(2)}），${r.rows.length} 页：${r.rows.map((x) => `${x.density}${x.slice ? '(切片)' : '(整页)'}`).join(' ')}`);
+    check(`dpr=${dpr} ${s}× 时没有超大位图（一张不许超 10 MP）`,
+      biggest > 0 && biggest <= 10, `最大 ${biggest} MP`);
+  }
+  console.log(`   dpr=${dpr} 密度一览 ${seen.join('  ')}`);
+}
+
 check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 
 await page.screenshot({ path: path.join(OUT, 'zoom.png') });
