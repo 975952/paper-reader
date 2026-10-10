@@ -36,23 +36,36 @@ export async function initPdfjs() {
 }
 
 /**
- * 渲染倍率：**按屏幕的设备像素比来，不再无条件超采样**。
+ * 屏幕**真正**需要多少倍率：设备像素比，夹到 [1, 2]。
  *
- * ⚠️ 这里以前是 `clamp(max(dpr, 2), 1, 3)` —— 在 1× 屏上也硬按 2 倍渲染。
- * 后果（2026-10-09 用真实论文实测，test/artifacts/real-paper-perf.mjs）：
- *   fitWidth 下一页 CSS 是 1408×1822 = 2.57 M 像素，按 2 倍就是 **10.3 MP / 41 MB 一张位图**；
- *   单页重画 131~194ms；连续滚动时 32 帧里掉 26 帧、长任务合计 1329ms。
- *   而 1:1（ratio=1）时 canvas 只有 2.57 MP —— **4 倍的成本差**，这就是「还是卡顿」的主因：
- *   前几轮优化的都是主线程 JS，但真正的大头是把这些巨图栅格化出来。
- *
- * 为什么 ratio = dpr 就是对的：canvas 的 CSS 尺寸等于页面尺寸，设备像素比是 1 时
- * 1 个 CSS 像素正好对应 1 个物理像素 —— 既不糊也不浪费。2 倍超采样只是让边缘更顺，
- * 代价是 4 倍像素；在「卡顿」面前这笔买卖不划算（而且放大时我们会按新比例重画，
- * 不靠超采样来保清晰度）。
+ * 为什么 ratio = dpr 就是「够」：canvas 的 CSS 尺寸等于页面尺寸，设备像素比是 1 时
+ * 1 个 CSS 像素正好对应 1 个物理像素 —— 既不糊也不浪费。
+ * 这个函数只回答「屏幕需要多少」，用来判「整页还是切片」「密度够不够」；
+ * 实际画多大还要乘下面的超采样系数，再用像素预算收口（见 `_renderPlan`）。
  */
-function renderRatio() {
+function deviceRatio() {
   const d = window.devicePixelRatio || 1;
   return clamp(d, 1, 2);
+}
+
+/**
+ * 超采样系数：在实际需要的基础上**再多画一点**，让边缘不那么硬。
+ *
+ * 2026-10-10 用户口径：「界面的锐化太强了，就正常就行」。
+ * 起因是第四轮为了治卡顿，把「无条件 2 倍超采样」改成了「按 dpr 严格 1:1」——
+ * 1:1 时 PDF 的细笔画正好落在像素格上，看着发硬（1× / 1.25× / 1.5× 屏最明显；
+ * 2× 屏本来就是设备分辨率，超采样到 2.5 一页要 16 MP，不划算，所以封顶在 2）。
+ *
+ * 25% 是有意的**轻微**：像素数 1.56 倍（2 倍超采样是 4 倍），
+ * 实测 fitWidth 在 1× 屏上是 2.6 → 4.0 MP，滚动仍然 0 长任务；
+ * 而**密度始终高于屏幕需求**，不会退回到「放大就糊」那一轮的问题。
+ * 嫌硬/嫌糊只改这一个数（1 = 严格 1:1）。
+ */
+const SUPERSAMPLE = 1.25;
+
+/** 实际画多大：屏幕需求 × 超采样，仍然封顶 2（再高就是白烧内存） */
+function renderRatio() {
+  return clamp(deviceRatio() * SUPERSAMPLE, 1, 2);
 }
 
 /**
@@ -763,6 +776,16 @@ export class PdfViewer {
       if (!Number.isFinite(padBottom)) padBottom = 0;
       if (!Number.isFinite(gap)) gap = 0;
     } catch { /* 读不到就按 0 算，只会让预览差一点点 */ }
+    /* 能滚到哪儿：**按布局算，不读 `scrollWidth/scrollHeight`**。
+       后者会被溢出的后代（软缩放中带 transform 的层、比页面大的切片画布）撑大几千像素，
+       于是两指平移能拖进空白、松手时浏览器再夹回来 —— 一次瞬移；捏合那边同理
+       （提交要把夹取结果交给浏览器时，上限对不上就跳）。见 _writePreviewTransform 的说明。 */
+    const oldLayout = this._predictedLayout(this.scale, padTop, gap, c.clientWidth);
+    let contentW = 0;
+    for (let i = 1; i <= this.numPages; i++) {
+      const right = (oldLayout.lefts[i] ?? 0) + (oldLayout.widths[i] ?? 0);
+      if (right > contentW) contentW = right;
+    }
     const preview = {
       baseScale: this.scale,
       cLeft: containerRect.left,
@@ -775,10 +798,10 @@ export class PdfViewer {
       padBottom,
       gap,
       // 老布局（当前比例）下每页的真实位置：算一次，之后不用再读 DOM
-      oldLayout: this._predictedLayout(this.scale, padTop, gap, c.clientWidth),
-      // 两指平移能滚到哪儿（手势一开始量一次，之后不再读布局）
-      maxScrollX: Math.max(0, c.scrollWidth - c.clientWidth),
-      maxScrollY: Math.max(0, c.scrollHeight - c.clientHeight),
+      oldLayout,
+      // 两指平移能滚到哪儿（手势一开始算一次，之后不再读布局）
+      maxScrollX: Math.max(0, contentW - c.clientWidth),
+      maxScrollY: Math.max(0, oldLayout.bottom - gap + padBottom - c.clientHeight),
       // pages 容器原点在内容坐标里的位置：整段手势恒定（transform 不改布局）
       originX: c.scrollLeft + pagesRect.left - containerRect.left,
       originY: c.scrollTop + pagesRect.top - containerRect.top,
@@ -956,6 +979,13 @@ export class PdfViewer {
       const sy = clamp(wantSY, 0, maxSY);
       C = preview.scrollY - sy;
       D = preview.scrollX - sx;
+      /* 把这一帧算出来的滚动量记在 preview 上：**提交时直接落这个值**（见 commitZoomPreview）。
+         不能让提交再写一遍「未夹取」的 want、交给浏览器去夹 —— DOM 的 scrollWidth/scrollHeight
+         会被溢出的后代（拉伸中的层、切片画布）撑大，浏览器允许的滚动量比布局真正的大，
+         于是预览显示 A、提交落到 B：实测 24 次随机手势里 5 次中招、最大横移 7516px
+         （test/artifacts/gesture-fuzz.mjs）。预览与提交用同一个数才叫「所见即所得」。 */
+      preview.sx = sx;
+      preview.sy = sy;
     }
     for (let i = lo; i <= hi; i++) {
       const el = this.pageEls[i];
@@ -1109,10 +1139,18 @@ export class PdfViewer {
     // 最终比例，再改 page 外框尺寸，避免旧位图留在新页面里造成错位/重叠。
     this._softRescale();
     this.layout();
-    if (preview.page && preview.refX != null) {
-      /* 把锚点重新对回**按下去时的那个屏幕位置**（refX/refY），不是最后一帧的手指位置：
-         缩放手势本身不平移，提交时也就不该平移。
-         页框布局完再量一次矩形（整段手势只此一次 DOM 读），用一开始记下的页内相对位置换算。 */
+    /* 落滚动：**直接用预览最后一帧算出来的那两个数**（见 _writePreviewTransform）。
+       预览就是按 (sx, sy) 画的，提交写同样的值 → 这一帧在数学上不可能位移。
+       为什么不再「量页框矩形再反推」：那条路要重新解一次锚点，而且把夹取交给浏览器 ——
+       浏览器的上限来自 DOM 的 scrollWidth/scrollHeight，会被溢出的后代（拉伸中的层、
+       切片画布）撑大，比布局真正的大，于是预览夹住了、提交却没夹 → 瞬移（实测最大 7516px）。
+       `sx/sy` 一定落在真实范围内（预测的内容尺寸 ≤ 真实内容尺寸），浏览器不会再夹第二次。 */
+    if (preview.sx != null) {
+      this.container.scrollLeft = preview.sx;
+      this.container.scrollTop = preview.sy;
+    } else if (preview.page && preview.refX != null) {
+      /* 兜底（理论上走不到：只有写过逐页 transform 的预览才有 sx）。
+         把锚点对回**按下去时的那个屏幕位置**（refX/refY）：缩放手势本身不平移，提交时也不该平移。 */
       const r = preview.page.getBoundingClientRect();
       if (r.width > 0 && r.height > 0) {
         this.container.scrollLeft += r.left + preview.fx * r.width - preview.refX;
@@ -1418,28 +1456,31 @@ export class PdfViewer {
   /**
    * 决定「这一页这一帧画哪一块、按多大倍率画」——顺序是**先区域、后预算**。
    *
-   * 1. 屏幕要多少倍率是 `renderRatio()`（= dpr）定的，与页面多大无关：
-   *    页面再大，屏幕上 1 个 CSS 像素也还是对应 dpr 个物理像素。
-   * 2. 整页按 dpr 画放得进预算 → 整页。
-   * 3. 放不进、但降一点点倍率（≥ `WHOLE_PAGE_TOLERANCE`）就能整页放下 → 整页 + 那点降采样
+   * 1. 倍率两个口径：`deviceRatio()` 是屏幕**真正需要**多少（dpr），
+   *    `renderRatio()` 是实际画多大（再乘一点超采样，见 `SUPERSAMPLE`）。
+   *    「整页还是切片」「降采样能忍到哪」都按**屏幕需求**判，超采样只影响实际画的尺寸。
+   * 2. 整页按目标倍率画放得进预算 → 整页。
+   * 3. 放不进、但降一点点（≥ `WHOLE_PAGE_TOLERANCE` × 屏幕需求）就能整页放下 → 整页 + 那点降采样
    *    （滚动时不用重画，值这一点点糊）。
-   * 4. 否则 → 只画**可见区域**，倍率仍然是 dpr。这一步以前是反的：先按整页面积
+   * 4. 否则 → 只画**可见区域**，倍率仍然是目标倍率。这一步以前是反的：先按整页面积
    *    把倍率压到 0.75 再切片，于是切片也糊 —— 用户说的「放大之后就不太清晰」。
-   * 5. 连可见区域都超预算（超大窗口 + 2× 屏）→ 才降倍率，且降到刚好放得下。
+   * 5. 连可见区域都超预算（超大窗口 + 2× 屏）→ 才降倍率，
+   *    但**不低于屏幕需求**（降到屏幕以下就真的糊了）。
    * 6. 剩下的预算拿来做边距（滚动时不用马上重画）：边距面积解方程
    *    `(w+2m)(h+2m)·ratio² = 预算`，所以屏幕越密、窗口越大，边距越小。
    *
-   * 返回 `{ ratio, slice }`，`slice` 是相对页面左上角的 CSS px 矩形（null = 整页）。
+   * 返回 `{ ratio, slice, window? }`，`slice` 是相对页面左上角的 CSS px 矩形（null = 整页）。
    */
   _renderPlan(i, cssW, cssH) {
-    const base = renderRatio();
+    const base = renderRatio();          // 实际画多大（含轻微超采样）
+    const need = deviceRatio();          // 屏幕真正需要多少
     const wholeCSS = cssW * cssH;
     if (wholeCSS * base * base / 1e6 <= MAX_FULL_MP) return { ratio: base, slice: null };
     /* 整页放不下，但「降一点点倍率就能整页放下」时宁可要整页：
        滚动时不用重画（切片每滚一个边距就得重画一次，2× 屏上很痛）。
        差得多才切成可见区域、保满分辨率 —— 也就是用户要的「放大之后要清晰」。 */
     const capped = Math.sqrt((MAX_FULL_MP * 1e6) / wholeCSS);
-    if (capped >= base * WHOLE_PAGE_TOLERANCE) return { ratio: capped, slice: null };
+    if (capped >= need * WHOLE_PAGE_TOLERANCE) return { ratio: Math.min(capped, base), slice: null };
     const pageEl = this.pageEls[i];
     if (!pageEl) return { ratio: base, slice: null };
     const pr = pageEl.getBoundingClientRect();
@@ -1455,9 +1496,9 @@ export class PdfViewer {
     const vx0 = clamp(vr.left - pr.left, 0, Math.max(0, cssW - winW));
     const vy0 = clamp(vr.top - pr.top, 0, Math.max(0, cssH - winH));
     const visCSS = winW * winH;
-    // 连这个窗口都超预算（超大窗口 + 高 dpr）→ 才降倍率，且降到刚好放得下
+    // 连这个窗口都超预算（超大窗口 + 高 dpr）→ 才降倍率；夹在 [屏幕需求, 目标倍率] 之间
     const ratio = visCSS * base * base / 1e6 > MAX_FULL_MP
-      ? clamp(Math.sqrt((MAX_FULL_MP * 1e6) / visCSS), 0.75, base)
+      ? clamp(Math.sqrt((MAX_FULL_MP * 1e6) / visCSS), need, base)
       : base;
     const targetCSS = (MAX_FULL_MP * 1e6) / (ratio * ratio);   // 这块位图最多能覆盖多少 CSS 面积
     const spare = targetCSS - visCSS;

@@ -656,6 +656,72 @@ for (const [name, mx, opts] of offCenterCases) {
     `锚点第 ${r.ap} 页，预览末帧 [${r.snap.left},${r.snap.top}] → 提交后位移 ${r.dx}×${r.dy}px（修复前这类场景是 -483 / -269 / +120px）`);
 }
 
+/* ══════════════ 五之四、容器被撑大时也不许被浏览器夹到别处 ══════════════
+   2026-10-10 第二次反馈：「手势做完之后，有时候还是会出现瞬移」。
+   根因不是预览算错，而是**提交把夹取交给了浏览器**：DOM 的 scrollWidth/scrollHeight
+   会被溢出的后代撑大（软缩放中带 transform 的层、比页面大的切片画布，实测能多出几千像素），
+   浏览器允许的滚动量于是比布局真正的大 —— 预览夹在 A、提交落到 B，就是一次瞬移
+   （24 次随机手势里 5 次中招，最大 7516px，见 test/artifacts/gesture-fuzz.mjs）。
+   这里**人为把容器撑大**（塞一个绝对定位的方块）复现那个条件：
+   预览必须夹住，提交必须落在同一处。 */
+console.log('\n-- 容器被撑大时的提交位置');
+const inflated = await page.evaluate(async () => {
+  const v = window.__viewer;
+  v.fitWidth();
+  await new Promise((r) => setTimeout(r, 1800));
+  const c = v.container;
+  c.scrollTop = 0;
+  c.scrollLeft = 0;
+  await new Promise((r) => setTimeout(r, 400));
+  // 把它撑大：真实内容只有一页宽，但横向滚动范围多出 2600px
+  const junk = document.createElement('div');
+  junk.style.cssText = 'position:absolute;left:2600px;top:0;width:40px;height:40px;pointer-events:none';
+  v.pageEls[1].appendChild(junk);
+  await new Promise((r) => setTimeout(r, 200));
+  const natMaxX = Math.max(0, c.scrollWidth - c.clientWidth);
+  const base = v.scale;
+  // 锚点放在最右边 → 「想钉住」所需的滚动量远超真实范围，必被夹
+  const mx = c.getBoundingClientRect().left + c.clientWidth - 12;
+  for (let i = 1; i <= 12; i++) {
+    v.previewScale(base * (1 + 0.5 * (i / 12)), { clientX: mx, clientY: 430 });
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  const pv = v._zoomPreview;
+  const ap = pv?.anchorPage || 1;
+  const planned = pv ? { sx: pv.sx, sy: pv.sy } : null;
+  /* 自证：必须**真的被夹过**，否则这条断言会退化成空断言。
+     按同一套公式把「未夹取的 want」算出来，要求 want > sx。 */
+  const pred = v._predictedLayout(v.scale, pv.padTop, pv.gap, pv.containerW);
+  let contentW = 0;
+  for (let i = 1; i <= v.numPages; i++) {
+    const right = (pred.lefts[i] ?? 0) + (pred.widths[i] ?? 0);
+    if (right > contentW) contentW = right;
+  }
+  const maxSX = Math.max(0, contentW - pv.containerW);
+  const wantSX = pv.cLeft + pred.lefts[pv.anchorPage] + (v.scale / pv.baseScale) * pv.anchorLocalX - pv.refX;
+  const before = v.pageEls[ap].getBoundingClientRect();
+  const lastPreview = { left: before.left, top: before.top };
+  v.commitZoomPreview();
+  const after = v.pageEls[ap].getBoundingClientRect();
+  const out = {
+    natMaxX: Math.round(natMaxX),
+    planned: planned ? { sx: Math.round(planned.sx), sy: Math.round(planned.sy) } : null,
+    want: Math.round(wantSX), maxSX: Math.round(maxSX),
+    committed: { left: Math.round(c.scrollLeft), top: Math.round(c.scrollTop) },
+    dx: +(after.left - lastPreview.left).toFixed(1), dy: +(after.top - lastPreview.top).toFixed(1),
+  };
+  junk.remove();
+  return out;
+});
+check('容器被撑大时，提交仍然落在预览那一帧（不被浏览器夹到别处）',
+  Math.abs(inflated.dx) <= 3 && Math.abs(inflated.dy) <= 3
+  && !!inflated.planned && inflated.committed.left === inflated.planned.sx
+  && inflated.natMaxX > inflated.maxSX + 100 && inflated.want > inflated.maxSX + 10,
+  `容器被人为撑到 ${inflated.natMaxX}px（真实上限只有 ${inflated.maxSX}px）；`
+  + `未夹取的 want=${inflated.want} → 预览夹到 sx=${inflated.planned?.sx}，提交后 scrollLeft=${inflated.committed.left}，`
+  + `画面位移 ${inflated.dx}×${inflated.dy}px（修复前这里会落成 want，横跳几十到几千像素）`);
+
 /* ══════════════ 六、文本层开销与文本流解析次数 ══════════════ */
 console.log('\n-- 文本层开销与文本流解析次数');
 const detail = await page.evaluate(async () => {
