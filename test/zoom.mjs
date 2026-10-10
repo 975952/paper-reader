@@ -431,6 +431,56 @@ for (const dpr of [1, 2]) {
   console.log(`   dpr=${dpr} 密度一览 ${seen.join('  ')}`);
 }
 
+/* ── 八、设置页里的「缩放速度」（2026-10-10 用户口径：「把缩放速度做进设置里面」） ──
+   这个滑杆要能：① 当场改变手势速度（不用重开论文）；② 存进 localStorage reader.ui；
+   ③ 「恢复默认设置」把它带回 1.0。老存档没有这个字段时也必须落回 1.0 —— 手感不能被偷偷改。 */
+console.log('\n-- 设置里的缩放速度');
+await page.setViewport({ width: 1500, height: 950, deviceScaleFactor: 1 });
+// 先模拟「老存档」：把样式里的 zoomSpeed 抹掉，重载后应当落回默认 1（不能是 NaN / undefined）
+await page.evaluate(() => {
+  const saved = JSON.parse(localStorage.getItem('reader.ui') || '{}');
+  delete (saved.style || {}).zoomSpeed;
+  localStorage.setItem('reader.ui', JSON.stringify(saved));
+});
+await page.reload({ waitUntil: 'domcontentloaded' });
+await page.waitForFunction(() => !!window.__viewer, { timeout: 30000 });
+await sleep(1200);
+const legacyDefault = await page.evaluate(() => window.__viewer.zoomSpeed);
+check('老存档没有这个字段时，缩放速度落回默认 1.0', legacyDefault === 1, `viewer.zoomSpeed = ${legacyDefault}`);
+const settingsLink = await page.evaluate(() => {
+  document.getElementById('settingsBtn').click();
+  const el = document.getElementById('uiZoomSpeed');
+  const slider = { min: el.min, max: el.max, step: el.step, value: el.value };
+  el.value = '1.6';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  const after = {
+    viewer: window.__viewer.zoomSpeed,
+    label: document.getElementById('uiZoomSpeedValue').textContent,
+    stored: (JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {}).zoomSpeed,
+  };
+  document.getElementById('resetSettings').click();
+  const reset = {
+    viewer: window.__viewer.zoomSpeed,
+    slider: document.getElementById('uiZoomSpeed').value,
+    stored: (JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {}).zoomSpeed,
+    label: document.getElementById('uiZoomSpeedValue').textContent,
+  };
+  document.getElementById('closeSettings').click();
+  return { slider, after, reset };
+});
+check('设置页有「缩放速度」滑杆，行程 0.5~2',
+  Number(settingsLink.slider.min) === 0.5 && Number(settingsLink.slider.max) === 2,
+  `min=${settingsLink.slider.min} max=${settingsLink.slider.max} step=${settingsLink.slider.step}`);
+check('拖动滑杆当场改变手势速度（viewer 立刻拿到新值）',
+  settingsLink.after.viewer === 1.6, `viewer.zoomSpeed = ${settingsLink.after.viewer}`);
+check('缩放速度存进 localStorage（reader.ui）',
+  settingsLink.after.stored === 1.6, `reader.ui.style.zoomSpeed = ${settingsLink.after.stored}`);
+check('滑杆旁的数字跟着变（1.0 时写「默认」）',
+  /1\.60×/.test(settingsLink.after.label), `标签「${settingsLink.after.label}」`);
+check('「恢复默认设置」把缩放速度带回 1.0',
+  settingsLink.reset.viewer === 1 && Number(settingsLink.reset.slider) === 1 && settingsLink.reset.stored === 1,
+  `viewer=${settingsLink.reset.viewer} 滑杆=${settingsLink.reset.slider} 存档=${settingsLink.reset.stored} 标签「${settingsLink.reset.label}」`);
+
 check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 
 await page.screenshot({ path: path.join(OUT, 'zoom.png') });

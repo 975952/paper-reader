@@ -287,7 +287,28 @@ check('块里写清了用途',
   `${hintInfo.source}: 可见=${hintInfo.visible} 有消息故隐藏=${!!hintInfo.hiddenByDesign} 消息数=${hintInfo.msgs} · ${JSON.stringify(hintInfo.text.slice(0, 40))}`);
 await page.evaluate(() => document.querySelectorAll('#aiBar .aibar-btn')[1].click());
 await sleep(300);
-check('再点一次能关掉块', (await page.evaluate(() => document.querySelectorAll('.ai-block').length)) === 0);
+/**
+ * ⚠️ 2026-10-10 修：这条原来断言「再点一次能关掉块」= `.ai-block` 数量为 0，
+ * 但**现行语义恰好相反**，而且那是用户明确要求的（见 app.js `renderAiBar` 的注释）：
+ *   「右侧的两个选择也是这样点击已开的图标也不会关闭侧栏，而是不做反应」。
+ * 所以再点一次是 **no-op**：块还在、还是选中态；收起右栏由顶栏那个按钮负责。
+ * 断言改成钉住这个语义（顺手把「点另一个能切过去」也钉上）。
+ */
+const toggleAgain = await page.evaluate(() => {
+  document.querySelectorAll('#aiBar .aibar-btn')[1].click();
+  return {
+    blocks: document.querySelectorAll('.ai-block').length,
+    on: [...document.querySelectorAll('#aiBar .aibar-btn.on')].map((b) => b.dataset.block),
+  };
+});
+check('再点一次是 no-op（用户口径：点已开的图标不关侧栏）',
+  toggleAgain.blocks === 1 && toggleAgain.on.join() === 'chat',
+  `块 ${toggleAgain.blocks} 个，选中 ${toggleAgain.on.join(',')}`);
+const switched = await page.evaluate(() => {
+  document.querySelectorAll('#aiBar .aibar-btn')[0].click();
+  return [...document.querySelectorAll('#aiBar .aibar-btn.on')].map((b) => b.dataset.block);
+});
+check('点另一个切换器能切过去（一栏只开一个）', switched.join() === 'translate', switched.join(','));
 
 /* ══════════════ 3. 清晰度（重点） ══════════════ */
 console.log('\n▶ 放大清晰度…');
@@ -295,19 +316,43 @@ const sharp = () => page.evaluate(() => {
   const c = document.querySelector('.page[data-page="1"] canvas');
   if (!c) return null;
   const w = c.getBoundingClientRect().width;
-  return { density: +(c.width / w).toFixed(3), mp: +((c.width * c.height) / 1e6).toFixed(1), zoom: document.getElementById('zoomLabel').textContent };
+  return {
+    density: +(c.width / w).toFixed(3),
+    mp: +((c.width * c.height) / 1e6).toFixed(1),
+    dpr: window.devicePixelRatio,
+    zoom: document.getElementById('zoomLabel').textContent,
+  };
 });
+/**
+ * ⚠️ 2026-10-10 修：这两条原来要求密度 ≥ 1.99（**无条件 2 倍超采样**），
+ * 那是 2026-10-08 之前的策略。第四轮（2026-10-09）已经改成**按屏幕的 dpr** 渲染：
+ * 1× 屏上 ratio=1 时「1 个 CSS 像素正好 1 个物理像素」，既不糊也不浪费 4 倍像素
+ * （实测 10.3 MP → 2.6 MP，滚动长任务 1329ms → 54ms）。
+ * 第七轮（2026-10-10）又保证放大后仍然是满 dpr（密度不再掉到 0.75）。
+ * 所以判据改成现行契约：**密度 ≥ 0.9×min(dpr, 2)**，并加一条「单张位图 ≤ 10 MP」。
+ */
+const minDensity = (dpr) => 0.9 * Math.min(dpr, 2);
 const fit = await sharp();
-check('适应宽度下像素密度 ≥ 2（有超采样）', fit && fit.density >= 1.99, JSON.stringify(fit));
-await page.evaluate(() => { for (let i = 0; i < 8; i++) document.getElementById('zoomIn').click(); });
+check('适应宽度下像素密度跟得上屏幕（≥ 0.9×dpr）',
+  fit && fit.density >= minDensity(fit.dpr) - 1e-6, JSON.stringify(fit));
+/**
+ * ⚠️ 2026-10-10 修：缩放按钮早就从顶栏搬到**底栏**了（`#zoomIn` → `#footZoomIn`，
+ * 用户口径「底栏有的功能上面的一栏就不要了」；`test/zoom.mjs` 里记着这次改名）。
+ * 这条断言没跟着改，于是 `getElementById('zoomIn')` 拿到 null 直接抛错、
+ * 整个 e2e 从这里崩掉（后面一百多条断言一条都没跑）—— 这也是为什么它一直没人发现。
+ */
+await page.evaluate(() => { for (let i = 0; i < 8; i++) document.getElementById('footZoomIn').click(); });
 await sleep(2500);
 const zoomed = await sharp();
-check('放大 8 级后像素密度仍 ≥ 2（不糊）', zoomed && zoomed.density >= 1.99, JSON.stringify(zoomed));
+check('放大 8 级后像素密度仍跟得上屏幕（不糊）',
+  zoomed && zoomed.density >= minDensity(zoomed.dpr) - 1e-6, JSON.stringify(zoomed));
+check('放大 8 级后单张位图不超过 10 MP（别把浏览器画死）',
+  zoomed && zoomed.mp > 0 && zoomed.mp <= 10, JSON.stringify(zoomed));
 check('高倍下限制单页 canvas 面积（走切片）', zoomed && zoomed.mp <= 24, `${zoomed?.mp} MP @ ${zoomed?.zoom}`);
 
-await page.evaluate(() => { document.getElementById('zoomIn').click(); document.getElementById('zoomOut').click(); });
+await page.evaluate(() => { document.getElementById('footZoomIn').click(); document.getElementById('footZoomOut').click(); });
 await sleep(200);
-await page.click('#fitWidth');
+await page.click('#footFitWidth');
 await sleep(2500);
 const raceOk = await page.evaluate(() => {
   const vr = document.getElementById('viewer').getBoundingClientRect();
@@ -327,7 +372,7 @@ await sleep(1800);
 const slider = await page.evaluate(() => ({ label: document.getElementById('zoomLabel').textContent, scale: Math.round(window.__viewer.scale * 100), max: Number(document.getElementById('zoomRange').max) }));
 check('拖动滑块能改 PDF 大小', slider.scale === 250, `label=${slider.label}`);
 check('滑块上限够用', slider.max >= 300, `${slider.max}%`);
-await page.click('#fitWidth');
+await page.click('#footFitWidth');
 await sleep(1500);
 
 /* ══════════════ 5. 划词 + 选区不重叠 ══════════════ */
@@ -864,17 +909,20 @@ const ui = await page.evaluate(() => {
   };
 });
 /**
- * 2026-10 删减：设置弹窗从「核心三项 + 更多样式折叠」收成固定的六项 ——
- * API Key / 模型名 / 接口地址 / 主题 / 阅读字号 / 恢复默认设置。
+ * 2026-10 删减：设置弹窗从「核心三项 + 更多样式折叠」收成固定的几项 ——
+ * API Key / 模型名 / 接口地址 / 主题 / 阅读字号 / **缩放速度** / 恢复默认设置。
  * 「结果密度」「顶栏行为」和「更多样式」里那批调试刻度（界面字号 / 控件大小 / 行高 /
  * 代码大小 / 最大宽度 / 结果透明度 / PDF 纸张 / 三个显示开关）全部下架，
  * 两个 reset 按钮并成一个 `#resetSettings`。
- * 所以判据改成：留下的两项可见且**真的还能用**、下架的确实不在、恢复默认只剩一个入口。
+ * 所以判据改成：留下的项可见且**真的还能用**、下架的确实不在、恢复默认只剩一个入口。
  * 存档里的老字段仍然生效（DEFAULT_UI_STYLE 没删），只是没有界面入口了。
+ *
+ * 2026-10-10：`uiZoomSpeed` 是**新增**的核心项（用户口径「把缩放速度做进设置里面」），
+ * 所以这里跟着加进名单 —— 它是「阅读手势」而不是「外观」，故意单独一节。
  */
-check('设置是弹窗：AI 字段与主题 / 阅读字号核心项可见',
+check('设置是弹窗：AI 字段与主题 / 阅读字号 / 缩放速度核心项可见',
   ui.open && ui.visible.includes('cfgApiKey') && ui.visible.includes('cfgModel')
-    && ui.coreVisible.join() === 'uiTheme,uiFontSize',
+    && ui.coreVisible.join() === 'uiTheme,uiFontSize,uiZoomSpeed',
   `核心=${ui.coreVisible.join(', ')} · 可见=${ui.visible.join(', ')}`);
 check('下架的低频样式控件确实都不在', ui.removedPresent.length === 0, ui.removedPresent.join(', '));
 check('恢复默认只剩一个入口（#resetSettings）', ui.resets.join() === 'resetSettings', ui.resets.join(', '));
@@ -1137,7 +1185,7 @@ check('用户/助手消息区分清晰（用户圆标+气泡，助手无圆标�
   `用户 ava=${look.userHasAva} 气泡=${look.userHasBubble} ｜ 助手 无圆标=${look.assistantNoAva} 有动作条=${look.assistantHasActs}`);
 check('用户消息有独立底色气泡', look.userHasBubble, look.userBg);
 
-await page.evaluate(() => document.getElementById('fitWidth').click());
+await page.evaluate(() => document.getElementById('footFitWidth').click());
 await sleep(1500);
 await page.screenshot({ path: path.join(OUT, 'reader-light.png') });
 await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
@@ -1328,7 +1376,7 @@ check('首次打开停在首页（书架页）', firstRun.home && !firstRun.read
 check('首次打开**没有**自动进入任何论文', firstRun.reading === false);
 check('papers/ 里的论文被列出', firstRun.files >= 1, `${firstRun.files} 篇`);
 const errBefore = pageErrors.length;
-await page.evaluate(() => { document.getElementById('fitWidth').click(); document.getElementById('zoomIn').click(); document.getElementById('zoomOut').click(); });
+await page.evaluate(() => { document.getElementById('footFitWidth').click(); document.getElementById('footZoomIn').click(); document.getElementById('footZoomOut').click(); });
 await page.keyboard.press('0');
 await sleep(400);
 check('没有文档时缩放不会崩', pageErrors.length === errBefore, `${pageErrors.length - errBefore} 条新异常`);

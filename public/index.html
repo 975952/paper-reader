@@ -338,6 +338,14 @@
       <label class="field"><span>主题</span><select id="uiTheme"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
       <label class="field"><span>阅读字号 <output class="range-value" id="uiFontSizeValue"></output></span><input id="uiFontSize" type="range" min="12" max="19" step="1" /></label>
     </div>
+    <div class="settings-divider"></div>
+    <div class="settings-section-title">双指缩放</div>
+    <div class="settings-grid settings-core-grid">
+      <!-- 缩放速度：触摸屏捏合与触摸板捏合都乘这个倍率（1 = 默认手感，见 pdfview.js 的 clampZoomSpeed）。
+           min/max 必须与 pdfview.js 的 ZOOM_SPEED_MIN/MAX 一致（那边是权威，这里只是滑杆行程）。 -->
+      <label class="field"><span>缩放速度 <output class="range-value" id="uiZoomSpeedValue"></output></span><input id="uiZoomSpeed" type="range" min="0.5" max="2" step="0.05" /></label>
+    </div>
+    <div class="modal-note"><span>触摸屏两指张开、触摸板两指捏合都按这个速度；1.0× 是默认手感，往右更快。</span></div>
     <!--
       发送范围（2026-10 用户口径）：「范围 / 选中文本 + 当前页 / 清空会话这些……第一个应该是
       默认全文加联网，在设置里面调节」。

@@ -98,6 +98,21 @@ function paperColor() {
  *  实际边距由 `_renderPlan()` 按**剩余预算**反解，屏幕越密边距越小。 */
 const SLICE_MARGIN = 600;
 
+/* ────────────────────────── 双指缩放速度（设置项） ──────────────────────────
+   用户口径（2026-10-10）：「把缩放速度做进设置里面」。
+   以前速度是两个写死的常数：触摸屏捏合的跟手倍率 `PINCH_GAIN = 1.6`
+   （`scale = start × (d/d0)^gain`）和触摸板的灵敏度 `0.0022`（`app.js` 的 ctrl+wheel）。
+   现在两者都乘一个**用户可在设置里调**的倍率 `zoomSpeed`，默认 1（= 原来的手感）。
+
+   为什么上限是 2、下限是 0.5：gain 的物理含义是「手指距离变化 1% → 画面缩放百分之几」。
+   1.6 已经是 1:1 之上的加速；再往上（2 倍 → 3.2）手指稍微一动就翻页级地跳，
+   往下（0.5 倍 → 0.8）则比原生还迟钝、捏合会像没反应。范围卡在这里是防止
+   调出一个自己都控制不住的手感。 */
+export const ZOOM_SPEED_MIN = 0.5;
+export const ZOOM_SPEED_MAX = 2;
+/** 把设置里的值夹到合法范围；空值 / NaN / 字符串都回落到默认 1 */
+export const clampZoomSpeed = (v) => clamp(Number(v) || 1, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX);
+
 /**
  * 文本层命中盒**纵向**最多扩张多少像素（见 `_tileTextHitBoxes`）。
  *
@@ -207,6 +222,8 @@ export class PdfViewer {
     this.url = '';
     this.numPages = 0;
     this.scale = 1;
+    /** 双指缩放速度倍率（设置项，默认 1；见 setZoomSpeed / clampZoomSpeed） */
+    this.zoomSpeed = clampZoomSpeed(opts.zoomSpeed);
     this.baseSizes = [];      // [{width,height}] 按 scale=1 的尺寸，index 从 1 开始
     this.pageEls = [];        // .page 元素，index 从 1 开始
     this.rendered = new Map();  // pageNum -> {canvas, textDiv, task, hlLayer}
@@ -407,8 +424,9 @@ export class PdfViewer {
     /**
      * 触摸屏捏合的「跟手倍率」：`scale = start * (d/d0)^GAIN`。
      * GAIN = 1 是严格的 1:1（手指张开一倍、画面放大一倍）。
-     * 用户两次要求「速度调大」：1 → 1.25 → **1.6**。嫌快嫌慢只改这一个数
-     * （1 = 回到原生 1:1 手感）。
+     * 用户两次要求「速度调大」：1 → 1.25 → **1.6**；2026-10-10 又要求
+     * 「把缩放速度做进设置里面」→ 这里只是**基准值**，实际乘 `this.zoomSpeed`
+     * （设置页那个滑杆，1 = 就是这个手感，0.5~2 可调）。每帧现读，改了立刻生效。
      */
     const PINCH_GAIN = 1.6;
     const PAN_ENGAGE_PX = 10;          // 中点位移
@@ -454,7 +472,8 @@ export class PdfViewer {
       }
       if (mode === 'pinch') e.preventDefault();
       pending = mode === 'pinch'
-        ? { mode, scale: startScale * Math.pow(d / d0, PINCH_GAIN), x: m.x, y: m.y }
+        // 每帧现读 zoomSpeed：设置页拖滑杆时正在做的手势也立刻跟上新速度
+        ? { mode, scale: startScale * Math.pow(d / d0, PINCH_GAIN * this.zoomSpeed), x: m.x, y: m.y }
         : { mode, x: m.x, y: m.y };
       if (!raf) raf = requestAnimationFrame(flush);
     };
@@ -733,12 +752,15 @@ export class PdfViewer {
        （真实布局里它们不随比例缩放，而容器的整体 scale 会把它们一起放大 —— 见 _predictedLayout）。
        每个文档读一次，手势期不再读。 */
     let padTop = 0;
+    let padBottom = 0;
     let gap = 0;
     try {
       const cs = getComputedStyle(this.pagesEl);
       padTop = parseFloat(cs.paddingTop) || 0;
+      padBottom = parseFloat(cs.paddingBottom) || 0;
       gap = parseFloat(cs.rowGap) || parseFloat(cs.gap) || 0;
       if (!Number.isFinite(padTop)) padTop = 0;
+      if (!Number.isFinite(padBottom)) padBottom = 0;
       if (!Number.isFinite(gap)) gap = 0;
     } catch { /* 读不到就按 0 算，只会让预览差一点点 */ }
     const preview = {
@@ -748,7 +770,9 @@ export class PdfViewer {
       scrollX: c.scrollLeft,
       scrollY: c.scrollTop,
       containerW: c.clientWidth,
+      containerH: c.clientHeight,
       padTop,
+      padBottom,
       gap,
       // 老布局（当前比例）下每页的真实位置：算一次，之后不用再读 DOM
       oldLayout: this._predictedLayout(this.scale, padTop, gap, c.clientWidth),
@@ -807,7 +831,10 @@ export class PdfViewer {
     }
     const boxW = Math.max(maxW, containerW || 0);
     for (let i = 1; i <= this.numPages; i++) lefts[i] = (boxW - widths[i]) / 2;
-    return { tops, lefts, bottom: top };
+    /* `widths` 也要带出去：`_writePreviewTransform` 用它算「新布局的内容宽度」
+       → 新布局真正能滚到多远（横向没得滚时要夹住，否则缩小方向提交那一帧会跳，
+       见那里的说明与 test/artifacts/offcenter-commit.mjs 的实测）。 */
+    return { tops, lefts, widths, bottom: top };
   }
 
   /** 手势开始那一帧记下锚点（内容坐标 + 页内相对位置），全程不再改 */
@@ -887,22 +914,48 @@ export class PdfViewer {
     const hi = Math.min(this.numPages, last + 1);
     const pred = this._predictedLayout(this.scale, preview.padTop, preview.gap, preview.containerW);
     const old = preview.oldLayout;
-    /* 锚点页上的常数：让锚点**钉在 refX/refY**（按下去的位置），不是跟着手指走。
-       全部在**内容坐标**里算：页在内容坐标是 old.tops[i]，transform 的位移也发生在内容坐标里
-       （滚动只是平移）。页顶的屏幕位置 = cTop + (内容 top + py) − scrollY，
-       代入「锚点局部坐标 ay 缩放 k 倍后仍落在 refY 上」解出：
-         py = refY − cTop + scrollY − oldTop − k·ay
-       再减去「按真实布局该走的那一段」就得到常数 C。 */
+    /**
+     * 预览 = **把提交后的那一帧画出来**：页面位置用预测布局，滚动量用「钉住锚点所需的值」
+     * 再夹到这个布局真正能滚到的范围里。
+     *
+     * 为什么必须夹（2026-10-10 用户口径：「要归中就固定归中，不要已经移到左右又闪回中间」）：
+     * 提交后能不能停在我们想要的位置，取决于**新布局的滚动范围**。缩小的时候页面会变得比
+     * 阅读区窄（`maxScrollX` 变 0），布局会把页居中 —— 而预览期却在按手指横向钉住，
+     * 于是提交那一帧被硬拽回去。实测（test/artifacts/offcenter-commit.mjs）：
+     *   5× → 1.75× 缩小：中点居中时提交帧横移 **269px**、中点偏右时 **483px**，
+     *   纵向也有一例 **83px**（顶到文档头）。
+     * 夹住之后「预览看到的位置」与「提交后的位置」在数学上恒等：
+     *   px = (pred.lefts[i] − old.lefts[i]) + (scrollX − sx)，sx 就是提交会写的那个 scrollLeft。
+     * 横向没得滚时 sx ≡ 0，预览从头到尾就是居中的 —— 也就是用户要的「固定归中放大」。
+     */
     const ap = preview.anchorPage;
     let C = 0;
     let D = 0;
     if (ap && old.tops[ap] != null) {
-      const ay = preview.anchorLocalY;      // 锚点在页内的局部纵坐标（未缩放）
-      const ax = preview.anchorLocalX;
-      const wantY = preview.refY - preview.cTop + preview.scrollY - old.tops[ap] - k * ay;
-      const wantX = preview.refX - preview.cLeft + preview.scrollX - old.lefts[ap] - k * ax;
-      C = wantY - (pred.tops[ap] - old.tops[ap]);
-      D = wantX - (pred.lefts[ap] - old.lefts[ap]);
+      const ax = preview.anchorLocalX;      // 锚点在页内的局部坐标（未缩放）
+      const ay = preview.anchorLocalY;
+      /* 坐标系（这是唯一一套，别再加别的项）：`.pages` 自己就是被滚动的那个内容，
+         所以页顶的屏幕位置 = `cTop + 内容 top − scrollY`，内容坐标原点就在 `.pages` 的
+         padding 起点。（`originX/originY` 是捕获时顺手记的、恒等于 0，**不要**再拿它加减，
+         否则会凭空多出一个 `scrollY` 的量级 —— 实测那样写预览会整体飞掉。）
+         新布局的内容尺寸 → 新布局真正能滚到的范围：
+         纵向：`bottom` 含最后一页后面那个 gap（row-gap 不会渲染出来），所以减掉再加 padding-bottom。
+         横向：`lefts` 已经是按「居中、且不小于容器宽」算的，所以取每页右边缘的最大值即可
+         （页比容器窄时它小于容器宽 → 结果为 0，正是「没得滚」）。 */
+      let contentW = 0;
+      for (let i = 1; i <= this.numPages; i++) {
+        const right = (pred.lefts[i] ?? 0) + (pred.widths[i] ?? 0);
+        if (right > contentW) contentW = right;
+      }
+      const maxSX = Math.max(0, contentW - preview.containerW);
+      const maxSY = Math.max(0, pred.bottom - preview.gap + preview.padBottom - preview.containerH);
+      // 钉住锚点所需的滚动量，再夹进真实范围
+      const wantSX = preview.cLeft + pred.lefts[ap] + k * ax - preview.refX;
+      const wantSY = preview.cTop + pred.tops[ap] + k * ay - preview.refY;
+      const sx = clamp(wantSX, 0, maxSX);
+      const sy = clamp(wantSY, 0, maxSY);
+      C = preview.scrollY - sy;
+      D = preview.scrollX - sx;
     }
     for (let i = lo; i <= hi; i++) {
       const el = this.pageEls[i];
@@ -1290,6 +1343,15 @@ export class PdfViewer {
   zoomAt(scale, clientX, clientY) {
     if (!this.pdf) return;
     this.previewScale(scale, { clientX, clientY });
+  }
+
+  /**
+   * 设置双指缩放速度（1 = 默认手感，见 `clampZoomSpeed` 的说明）。
+   * 触摸屏捏合每帧都现读 `this.zoomSpeed`，所以设置页拖动滑杆时**下一帧就生效**，
+   * 不用重开论文，也不打断正在做的手势。
+   */
+  setZoomSpeed(mult) {
+    this.zoomSpeed = clampZoomSpeed(mult);
   }
 
   fitWidth() {

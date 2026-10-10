@@ -605,6 +605,57 @@ check('拖到边界后再捏合：提交那一帧画面不位移（偏移闪现�
   clamp.worst <= 3,
   `放大 ×${clamp.k}，视口内 ${clamp.pages} 页，最大位移 ${clamp.worst}px${clamp.which ? `（第 ${clamp.which.page} 页 ${JSON.stringify(clamp.which.from)} → ${JSON.stringify(clamp.which.to)}）` : ''}`);
 
+/* ══════════════ 五之三、偏离中心的捏合（横向没得滚时不许横跳） ══════════════
+   2026-10-10 用户口径：「要归中就固定归中，不要已经移到左右又闪回中间」。
+   预览期画面是**按手指钉住**的，但提交后能停在哪儿取决于新布局的滚动范围：
+   缩小时页面会变得比阅读区窄（`maxScrollX` 变 0），布局把页居中 —— 于是预览期已经
+   横向挪出去的画面，在提交那一帧被硬拽回中间。修复前实测（同一套激励）：
+     缩小 5×→1.75× 中点偏右 **-483.2px**、中点居中 **-268.7px**、
+     缩小 2.3×→1.5× 偏左 **+119.8px / 纵向 -130.9px**。
+   修法：预览直接预演「提交后的几何」，滚动量夹进新布局真正能滚到的范围
+   （横向没得滚时 ≡ 0，预览从头到尾就是居中的）。
+   这里量的是**锚点所在页**（可见范围之外的页根本没有 preview transform）。 */
+console.log('\n-- 偏离中心的捏合（提交那一帧不许横跳）');
+const commitShift = (midX, opts) => page.evaluate(async ({ midX: mx, startScale, zoom, scrollTo }) => {
+  const v = window.__viewer;
+  if (startScale) v.setScale(startScale, { keepCenter: false });
+  else v.fitWidth();
+  await new Promise((r) => setTimeout(r, 1800));
+  const c = v.container;
+  if (scrollTo != null) c.scrollTop = scrollTo;
+  await new Promise((r) => setTimeout(r, 500));
+  const base = v.scale;
+  v.previewScale(base * (1 + (zoom - 1) / 16), { clientX: mx, clientY: 430 });
+  const ap = v._zoomPreview?.anchorPage || 1;
+  for (let i = 1; i <= 12; i++) {
+    v.previewScale(base * (1 + (zoom - 1) * (i / 12)), { clientX: mx, clientY: 430 });
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  const before = v.pageEls[ap].getBoundingClientRect();
+  const snap = { left: +before.left.toFixed(1), top: +before.top.toFixed(1) };
+  v.commitZoomPreview();
+  const after = v.pageEls[ap].getBoundingClientRect();
+  return {
+    ap, snap, dx: +(after.left - before.left).toFixed(1), dy: +(after.top - before.top).toFixed(1),
+    scrollTop: Math.round(c.scrollTop),
+  };
+}, { midX, ...opts });
+
+const offCenterCases = [
+  ['放大：中点居中（对照）', 750, { zoom: 1.45, scrollTo: 0 }],
+  ['缩小 5×→1.75×：中点偏左', 430, { startScale: 5, zoom: 0.35, scrollTo: 1200 }],
+  ['缩小 5×→1.75×：中点偏右', 1080, { startScale: 5, zoom: 0.35, scrollTo: 1200 }],
+  ['缩小 5×→1.75×：中点居中', 750, { startScale: 5, zoom: 0.35, scrollTo: 1200 }],
+  ['缩小 2.3×→1.5×：中点偏左（顶到文档头）', 430, { startScale: 2.302, zoom: 0.65, scrollTo: 0 }],
+];
+for (const [name, mx, opts] of offCenterCases) {
+  // eslint-disable-next-line no-await-in-loop
+  const r = await commitShift(mx, opts);
+  check(`偏离中心的捏合 · ${name}：提交那一帧不横跳`, Math.abs(r.dx) <= 3 && Math.abs(r.dy) <= 3,
+    `锚点第 ${r.ap} 页，预览末帧 [${r.snap.left},${r.snap.top}] → 提交后位移 ${r.dx}×${r.dy}px（修复前这类场景是 -483 / -269 / +120px）`);
+}
+
 /* ══════════════ 六、文本层开销与文本流解析次数 ══════════════ */
 console.log('\n-- 文本层开销与文本流解析次数');
 const detail = await page.evaluate(async () => {
@@ -693,6 +744,77 @@ const wheelAfter = await page.evaluate(() => ({ scale: window.__viewer.scale, vv
 check('触摸板捏合（ctrl+wheel）仍然缩放 PDF',
   wheelAfter.scale > wheelBefore.scale * 1.1, `${wheelBefore.scale.toFixed(2)} → ${wheelAfter.scale.toFixed(2)}`);
 check('触摸板捏合也不会缩放整个界面', wheelAfter.vv === wheelBefore.vv, `${wheelBefore.vv} → ${wheelAfter.vv}`);
+
+/* ══════════════ 九、缩放速度是设置项（2026-10-10 用户口径「把缩放速度做进设置里面」） ══════════════
+   同一段手势、同样的手指行程，只改 `viewer.setZoomSpeed(v)`：
+   倍率应当按 (d/d0)^(1.6·v) 走，也就是**取对数之后与 v 成正比** —— 2 倍速度 ≈ 2 倍 log 增量。
+   手指行程特意取小（100 → 115px），否则会撞上 scale 上限 6，比出来的全是饱和值。 */
+console.log('\n-- 缩放速度设置项');
+const pinchAtSpeed = async (speed) => {
+  await resetView();
+  await page.evaluate((s) => window.__viewer.setZoomSpeed(s), speed);
+  const before = await page.evaluate(() => window.__viewer.scale);
+  await twoFinger((t) => {
+    const d = 100 + 15 * t;
+    return [{ x: 750 - d, y: 430, id: 1, force: 1 }, { x: 750 + d, y: 430, id: 2, force: 1 }];
+  }, { steps: 12 });
+  await sleep(500);
+  const after = await page.evaluate(() => window.__viewer.scale);
+  return { before, after, log: Math.log(after / before) };
+};
+const sp05 = await pinchAtSpeed(0.5);
+const sp10 = await pinchAtSpeed(1);
+const sp20 = await pinchAtSpeed(2);
+check('缩放速度 0.5× 时同样手势缩得更少、2× 时缩得更多',
+  sp05.log > 0 && sp05.log < sp10.log && sp10.log < sp20.log,
+  `log 增量 ${sp05.log.toFixed(3)}（0.5×） < ${sp10.log.toFixed(3)}（1×） < ${sp20.log.toFixed(3)}（2×）`);
+check('缩放速度与倍率成正比（取对数后约 2 倍递增）',
+  Math.abs(sp20.log / sp10.log - 2) < 0.35 && Math.abs(sp10.log / sp05.log - 2) < 0.35,
+  `倍数 ${(sp10.log / sp05.log).toFixed(2)}× / ${(sp20.log / sp10.log).toFixed(2)}×（期望 ≈2）`);
+// 触摸板那条路走的是 app.js 的 exp(-px × 0.0022 × speed)，读的是 uiStyle ——
+// 所以这里**走真实设置面板**（滑杆 → input → applyUiSettingsFromControls），
+// 顺带把「设置页那个滑杆真的接通了」也测掉。
+await resetView();
+const setSpeedViaSettings = async (v) => {
+  await page.evaluate(() => document.getElementById('settingsBtn').click());
+  await page.evaluate((s) => {
+    const el = document.getElementById('uiZoomSpeed');
+    el.value = String(s);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }, v);
+  const out = await page.evaluate(() => ({
+    viewer: window.__viewer.zoomSpeed,
+    label: document.getElementById('uiZoomSpeedValue').textContent,
+    stored: (JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {}).zoomSpeed,
+  }));
+  await page.evaluate(() => document.getElementById('closeSettings').click());
+  return out;
+};
+const wheelAtSpeed = async (speed) => {
+  const set = await setSpeedViaSettings(speed);
+  await resetView();
+  const before = await page.evaluate(() => window.__viewer.scale);
+  for (let i = 0; i < 8; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    await client.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: 750, y: 430, deltaX: 0, deltaY: -12, modifiers: 2 });
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(20);
+  }
+  await sleep(900);
+  const after = await page.evaluate(() => window.__viewer.scale);
+  return { log: Math.log(after / before), set };
+};
+const wh05 = await wheelAtSpeed(0.5);
+const wh20 = await wheelAtSpeed(2);
+check('设置页滑杆真的接通了（viewer 与 localStorage 同步）',
+  wh05.set.viewer === 0.5 && wh20.set.viewer === 2
+  && wh05.set.stored === 0.5 && wh20.set.stored === 2,
+  `0.5× → viewer ${wh05.set.viewer} / 存档 ${wh05.set.stored} / 标签「${wh05.set.label}」；`
+  + `2× → viewer ${wh20.set.viewer} / 存档 ${wh20.set.stored} / 标签「${wh20.set.label}」`);
+check('触摸板捏合也吃同一个「缩放速度」设置',
+  wh20.log > wh05.log * 1.8, `同样滚 8 下：0.5× 时 log 增量 ${wh05.log.toFixed(3)}，2× 时 ${wh20.log.toFixed(3)}`);
+// 收尾：速度还原成默认（后面还有别的断言，别让速度影响它们）
+await setSpeedViaSettings(1);
 
 check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 

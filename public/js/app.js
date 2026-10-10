@@ -9,7 +9,7 @@
  */
 import { $, $$, el, appendAll, toast, toastAction, cleanText, renderMarkdown, escapeHtml, debounce, throttle, clamp, fmtSize } from './util.js';
 import { iconEl, iconHTML, hasIcon } from './icons.js';
-import { PdfViewer } from './pdfview.js';
+import { PdfViewer, clampZoomSpeed, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX } from './pdfview.js';
 import { OPS, opById } from './ops.js';
 import {
   Settings, streamChat, testConnection, targetLangFor,
@@ -823,6 +823,14 @@ const DEFAULT_UI_STYLE = Object.freeze({
    * 跨论文、跨会话都不用再点。开关在设置页（#cfgUseFullText / #cfgUseWeb）。
    */
   useFullText: true, useWeb: true,
+  /**
+   * 双指缩放速度倍率（2026-10-10 用户口径：「把缩放速度做进设置里面」）。
+   *
+   * 以前速度是两个写死的常数：触摸屏捏合 `PINCH_GAIN = 1.6`、触摸板灵敏度 `0.0022`。
+   * 现在两者都乘这个倍率，**默认 1 = 原来的手感**（老存档没有这个字段时也就落回 1，
+   * 用户的手感不会因为升级被偷偷改掉）。范围 0.5~2，见 pdfview.js 的 clampZoomSpeed。
+   */
+  zoomSpeed: 1,
 });
 let uiStyle = { ...DEFAULT_UI_STYLE };
 
@@ -1888,6 +1896,10 @@ function applyUiStyle() {
    */
   const paperTint = getComputedStyle(root).getPropertyValue('--paper-tint').trim();
   root.style.setProperty('--paper', paperMode === 'white' ? '#FFFFFF' : PAPER_TINT_LIGHT(paperTint));
+  /* 双指缩放速度也得跟着 uiStyle 走。设置页改动那条路走 applyUiSettingsFromControls，
+     但「恢复默认设置」是**直接换 uiStyle 再 applyUiStyle()** —— 两条路都要把值推给 viewer，
+     否则点完「恢复默认」滑杆回到 1.0、实际手势还是旧速度。 */
+  viewer?.setZoomSpeed?.(uiStyle.zoomSpeed);
   applyMessageVisibility();
 }
 
@@ -1930,6 +1942,9 @@ function initViewer() {
        真机上卡不卡只有用户看得见，所以真卡了就弹一条**带数字**的提示，
        用户可以照原话读给我，不用开 devtools。窗口 6s 内最多弹一次（pdfview 那侧限流）。 */
     onJank: (rec, text) => toast(text, 'err', 6000),
+    /* 双指缩放速度：开局就把存档里的值交给 viewer（触摸屏捏合的跟手倍率），
+       之后设置页改动走 viewer.setZoomSpeed()。这样不依赖「先 applyUiStyle 再建 viewer」的顺序。 */
+    zoomSpeed: clampZoomSpeed(uiStyle.zoomSpeed),
     onNoteClick: (id) => openNoteEditorById(id),
     /* 正文 [n] 的点击不再走 viewer 回调：热点是 pointer-events:none 的，
        点击由 initSelection 里的 mouseup 用 viewer.citeAt(x,y) 判命中后直接 handleCite()
@@ -2033,11 +2048,14 @@ function initViewer() {
     const pixels = pinchPixels;
     pinchPixels = 0;
     /**
-     * 触摸板捏合的灵敏度：`exp(-pixels * PINCH_GAIN)`。
+     * 触摸板捏合的灵敏度：`exp(-pixels * PINCH_GAIN * 缩放速度)`。
      * 2026-10-09 用户口径「可以把这个缩放的速度加快一点」→ 0.0013 → **0.0022**（约 1.7 倍）。
-     * 这个数只影响「同样的手指移动量缩放多少」；嫌快/嫌慢只改这一个常数。
+     * 2026-10-10「把缩放速度做进设置里面」→ 再乘设置页那个 `zoomSpeed`（默认 1 = 上面这个手感），
+     * 于是触摸屏捏合与触摸板捏合**同一个滑杆**控制，两边不会各快各慢。
+     * 这里每帧现读 `uiStyle`，设置页拖动时立刻生效。
      */
-    viewer.zoomAt(viewer.scale * Math.exp(-pixels * 0.0022), pinchPoint.x, pinchPoint.y);
+    const speed = clampZoomSpeed(uiStyle.zoomSpeed);
+    viewer.zoomAt(viewer.scale * Math.exp(-pixels * 0.0022 * speed), pinchPoint.x, pinchPoint.y);
   };
   document.addEventListener('wheel', (e) => {
     if (!e.ctrlKey && !e.metaKey) return;
@@ -6568,6 +6586,8 @@ function fillUiSettings() {
   if (theme) theme.value = uiStyle.theme;
   const size = $('#uiFontSize');
   if (size) size.value = uiStyle.fontSize;
+  const zoom = $('#uiZoomSpeed');
+  if (zoom) zoom.value = String(clampZoomSpeed(uiStyle.zoomSpeed));
   // 发送范围两个开关：默认开着，存档里显式关掉才关（`!== false`，缺字段按默认 true）
   const full = $('#cfgUseFullText');
   if (full) full.checked = uiStyle.useFullText !== false;
@@ -6579,6 +6599,13 @@ function fillUiSettings() {
 function updateUiRangeLabels() {
   const size = $('#uiFontSize');
   if (size && $('#uiFontSizeValue')) $('#uiFontSizeValue').textContent = `${size.value}px`;
+  const zoom = $('#uiZoomSpeed');
+  if (zoom && $('#uiZoomSpeedValue')) {
+    /* 1.00× 时直接把「默认」写出来 —— 用户调完想知道自己有没有调过头，
+       看这个字比看数字快。 */
+    const v = Number(zoom.value);
+    $('#uiZoomSpeedValue').textContent = Math.abs(v - 1) < 0.001 ? '1.0×（默认）' : `${v.toFixed(2)}×`;
+  }
 }
 
 /**
@@ -6605,6 +6632,7 @@ function applyUiSettingsFromControls() {
   const size = $('#uiFontSize');
   const full = $('#cfgUseFullText');
   const web = $('#cfgUseWeb');
+  const zoom = $('#uiZoomSpeed');
   const wasFullText = state.useFullText;
   uiStyle = {
     ...uiStyle,
@@ -6612,7 +6640,10 @@ function applyUiSettingsFromControls() {
     ...(size ? { fontSize: clamp(Number(size.value), 12, 19) } : {}),
     ...(full ? { useFullText: !!full.checked } : {}),
     ...(web ? { useWeb: !!web.checked } : {}),
+    ...(zoom ? { zoomSpeed: clampZoomSpeed(zoom.value) } : {}),
   };
+  /* 缩放速度当场推给 viewer：触摸屏捏合下一帧就用新速度，不用重开论文、不打断手势 */
+  viewer?.setZoomSpeed?.(uiStyle.zoomSpeed);
   applyUiStyle();
   /**
    * ⚠️ **主题变化也要重画 PDF 页面**，不能只在「纸面背景」变化时重画。
@@ -6722,10 +6753,10 @@ function initSettings() {
     updateEndpointNote();
   };
   $('#cfgBaseURL').addEventListener('input', updateEndpointNote);
-  // 设置页里「即时生效」的控件：主题、阅读字号，以及两个默认发送范围偏好
+  // 设置页里「即时生效」的控件：主题、阅读字号、双指缩放速度，以及两个默认发送范围偏好
   // （第 2 步起范围回到发送框，设置页这两个勾 = 默认值；两个入口必须同一套语义，
   //   所以勾选也走 applyUiSettingsFromControls → syncScopePrefs → renderScopeRange）。
-  ['uiTheme', 'uiFontSize', 'cfgUseFullText', 'cfgUseWeb']
+  ['uiTheme', 'uiFontSize', 'uiZoomSpeed', 'cfgUseFullText', 'cfgUseWeb']
     .forEach((id) => document.getElementById(id)?.addEventListener('input', applyUiSettingsFromControls));
   $('#resetSettings').onclick = () => resetSettings();
 
