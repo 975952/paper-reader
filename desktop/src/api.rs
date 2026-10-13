@@ -791,35 +791,346 @@ fn fetch_text(agent: &ureq::Agent, url: &str) -> Option<String> {
     }
 }
 
-/// 从一条参考文献里猜标题：作者列表通常在第一段，标题紧随其后
-fn guess_title(reference: &str) -> String {
-    let s = reference.trim();
-    let s = if let Some(rest) = s.strip_prefix('[') {
-        match rest.find(']') {
-            Some(i) => rest[i + 1..].trim(),
-            None => s,
-        }
-    } else {
-        s
-    };
-    let parts: Vec<&str> = s.split(". ").collect();
-    let mut out = if parts.len() >= 2 {
-        let first = parts[0];
-        let looks_like_authors =
-            (first.contains(',') || first.contains(" and ")) && first.split_whitespace().count() <= 80;
-        if looks_like_authors { parts[1] } else { parts[0] }
-    } else {
-        parts[0]
-    };
-    let t = out.trim();
-    if t.starts_with("In ") || t.starts_with("Proceedings") || t.starts_with("Advances") {
-        out = s;
+/* ── 从参考文献串里猜标题（与 server.js 的 guessTitle 逐条一致） ──────────
+ * 2026-10 用户报的 bug：`V. Sindhwani, T. Sainath, and S. Kumar. Structured
+ * transforms …` 被猜成标题 **`V`**，于是拿单个字母 V 去 arXiv 检索，搜回来
+ * 「$V$-rings versus $Σ$-$V$ Rings」「On a conjecture of V. V. Shchigolev」这类
+ * 毫不相干的论文，用户完全看不懂在查什么。
+ * 根因是「按 `. ` 硬切成句 + 第一段里没有逗号/and 就当标题」：作者名的缩写点
+ * （`V.` `T.` `S.`）正好把作者列表切成了单字母段，第一个单字母段就被当成标题。
+ *
+ * 现在的口径：
+ *   1. 切段时不把**缩写点**当句子边界（点号前是一个孤零零的大写字母就不切）；
+ *   2. 从前往后跳过「像作者列表」的段（纯缩写段 / 逗号多 / and / et al / 带缩写的人名）；
+ *   3. 取第一段「像标题」的（不是 In/Proceedings/期刊名，长度够）；
+ *      都没命中就用跳完作者后的第一段兜底。
+ * 猜出来的东西如果不具备可检索性（单字母、纯数字…），ref_search 会退回整条文献串
+ * 去搜 —— 宁可搜不准，也不能拿一个字母去搜。 */
+
+/// 刊名 / 出版信息的前缀：以这些词开头的段不是标题（JS 里是 `REF_VENUE_RE`）
+const REF_VENUE_PREFIXES: [&str; 35] = [
+    "in", "proceedings", "proc", "advances", "journal", "transactions", "conference", "workshop",
+    "symposium", "arxiv", "corr", "page", "pages", "vol", "pp", "press", "ieee", "acm", "springer",
+    "elsevier", "wiley", "neurips", "nips", "icml", "iclr", "cvpr", "iccv", "eccv", "acl", "emnlp",
+    "naacl", "aaai", "ijcai", "kdd", "sigir",
+];
+
+fn is_cjk_char(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fa5}').contains(&c)
+}
+
+fn has_cjk(s: &str) -> bool {
+    s.chars().any(is_cjk_char)
+}
+
+/// JS 的 `\b`（`\w` = 字母数字下划线）
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// `lower` 是不是以 `kw` 开头、且 `kw` 后面是词的边界（等价 JS 的 `^kw\b`）
+fn has_word_prefix(lower: &str, kw: &str) -> bool {
+    match lower.strip_prefix(kw) {
+        Some(rest) => rest.chars().next().map(|c| !is_word_char(c)).unwrap_or(true),
+        None => false,
     }
-    out.trim()
-        .trim_end_matches(['.', ',', ';', ':'])
-        .chars()
-        .take(160)
-        .collect()
+}
+
+fn is_venue_like(t: &str) -> bool {
+    let lower = t.to_lowercase();
+    REF_VENUE_PREFIXES.iter().any(|kw| has_word_prefix(&lower, kw))
+}
+
+/// `V.` → 真（段尾是「开头或空白 + 单个大写字母」= 缩写点）
+fn ends_with_single_upper(s: &str) -> bool {
+    let t = s.trim_end();
+    let mut it = t.chars().rev();
+    match it.next() {
+        Some(c) if c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    match it.next() {
+        None => true,
+        Some(c) => c.is_whitespace(),
+    }
+}
+
+/// `Hochreiter, S` → 真（段尾是「逗号 + 空白 + 单个大写字母」= 完整的作者名写法）
+/// 这种段末的点号是句子边界，该切；`V. Sindhwani` 那种才不切。
+fn ends_with_comma_upper(s: &str) -> bool {
+    let t = s.trim_end();
+    let mut it = t.chars().rev();
+    match it.next() {
+        Some(c) if c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    for c in it {
+        if c.is_whitespace() {
+            continue;
+        }
+        return c == ',';
+    }
+    false
+}
+
+/// 「姓, 名首字母」被切成一段：`Hochreiter, S` / `Schmidhuber, J.`（JS `/,[ ]*[A-Z]\.?$/`）
+fn ends_with_comma_initial(s: &str) -> bool {
+    let t = s.trim_end().trim_end_matches('.');
+    if !ends_with_single_upper(t) {
+        return false;
+    }
+    let mut it = t.chars().rev();
+    it.next(); // 那个大写字母
+    let mut saw_comma = false;
+    for c in it {
+        if c.is_whitespace() {
+            continue;
+        }
+        saw_comma = c == ',';
+        break;
+    }
+    saw_comma
+}
+
+/// `V.` / `A.` 这种单个大写字母（可带点）的词
+fn is_initial_token(w: &str) -> bool {
+    let b = w.strip_suffix('.').unwrap_or(w);
+    let mut it = b.chars();
+    matches!(it.next(), Some(c) if c.is_ascii_uppercase()) && it.next().is_none()
+}
+
+/// `Smith,` / `Smith.` / `Smith` 这种「首字母大写、后面全是字母」的词（JS `/^[A-Z][A-Za-z'’-]+[,.]?$/`）
+fn is_name_token(w: &str) -> bool {
+    let b = w.strip_suffix(',').or_else(|| w.strip_suffix('.')).unwrap_or(w);
+    let mut it = b.chars();
+    match it.next() {
+        Some(c) if c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    let rest: Vec<char> = it.collect();
+    !rest.is_empty()
+        && rest
+            .iter()
+            .all(|c| c.is_ascii_alphabetic() || matches!(c, '\'' | '’' | '-'))
+}
+
+/// `/(^|\s)[A-Z]\.[\s,]/` —— 段里有没有「缩写点 + 后面还是作者」的形态
+fn has_initial_dot_pattern(t: &str) -> bool {
+    let cs: Vec<char> = t.chars().collect();
+    for (i, &c) in cs.iter().enumerate() {
+        if c != '.' || i == 0 {
+            continue;
+        }
+        if !cs[i - 1].is_ascii_uppercase() {
+            continue;
+        }
+        let before_ok = i < 2 || cs[i - 2].is_whitespace();
+        let after_ok = cs.get(i + 1).map(|n| n.is_whitespace() || *n == ',').unwrap_or(false);
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// 按「句末点号」切段，但缩写点不切（`V. Sindhwani`），中文句号照切。
+/// 与 server.js 的 `splitRefSegments` 逐条一致。
+fn split_ref_segments(s: &str) -> Vec<String> {
+    let cs: Vec<char> = s.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    fn flush(out: &mut Vec<String>, buf: &mut String) {
+        let t = buf.trim();
+        if !t.is_empty() {
+            out.push(t.to_string());
+        }
+        buf.clear();
+    }
+    for (i, &ch) in cs.iter().enumerate() {
+        if matches!(ch, '。' | '．' | '！' | '？') {
+            flush(&mut out, &mut buf);
+            continue;
+        }
+        if ch == '.' {
+            let next_is_ws = cs.get(i + 1).map(|c| c.is_whitespace()).unwrap_or(true);
+            if next_is_ws {
+                let initial = ends_with_single_upper(&buf);
+                if !initial || ends_with_comma_upper(&buf) {
+                    flush(&mut out, &mut buf);
+                    continue;
+                }
+            }
+        }
+        buf.push(ch);
+    }
+    flush(&mut out, &mut buf);
+    out
+}
+
+/// 这一段像不像「作者列表」
+fn looks_like_authors(seg: &str) -> bool {
+    let t = seg.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let words: Vec<&str> = t.split_whitespace().collect();
+    if !words.is_empty() && words.iter().all(|w| is_initial_token(w)) {
+        return true; // 纯缩写：V. T. S.
+    }
+    // 作者列表被切成两段的后半截：`and Schmidhuber, J`
+    if words.len() >= 2
+        && words.len() <= 6
+        && matches!(words[0].to_ascii_lowercase().as_str(), "and" | "&")
+        && !t.contains(',')
+    {
+        return true;
+    }
+    if ends_with_comma_initial(t) {
+        return true; // 「姓, 名首字母」被切成一段
+    }
+    let lower = t.to_lowercase();
+    if ends_with_phrase(&lower, "et al.") || ends_with_phrase(&lower, "et al")
+        || lower.ends_with("等人") || lower.ends_with("等")
+    {
+        return true; // et al. / 等
+    }
+    if words.len() > 16 {
+        return false; // 太长不像作者
+    }
+    let commas = t.chars().filter(|c| matches!(c, ',' | '，' | '、')).count();
+    let ands = words.iter().any(|w| w.eq_ignore_ascii_case("and")) || t.contains('&');
+    if commas >= 2 {
+        return true; // A, B, C
+    }
+    if commas >= 1 && (ands || (has_cjk(t) && t.chars().count() <= 20)) {
+        return true;
+    }
+    if has_initial_dot_pattern(t) {
+        let names = words.iter().filter(|w| is_initial_token(w) || is_name_token(w)).count();
+        if names >= words.len().saturating_sub(1) {
+            return true; // 带缩写的人名：J. Smith
+        }
+    }
+    false
+}
+
+/// 结尾是不是一个独立的短语（前面必须是开头或空白）
+fn ends_with_phrase(lower: &str, phrase: &str) -> bool {
+    match lower.strip_suffix(phrase) {
+        Some(head) => head.is_empty() || head.ends_with(char::is_whitespace),
+        None => false,
+    }
+}
+
+/// 这一段像不像「标题」（而不是出版信息 / 期刊名 / 页码）
+fn looks_like_title(seg: &str) -> bool {
+    let t = seg.trim();
+    if t.is_empty() || is_venue_like(t) {
+        return false;
+    }
+    let letters = t.chars().filter(|c| c.is_ascii_alphabetic() || is_cjk_char(*c)).count();
+    if has_cjk(t) {
+        return t.chars().count() >= 6; // 中文标题没空格，按字数
+    }
+    letters >= 12 && t.split_whitespace().count() >= 2
+}
+
+/// 去掉开头的 `[12]`（纯数字的编号）
+fn strip_ref_number(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix('[') {
+        if let Some(close) = rest.find(']') {
+            let num = &rest[..close];
+            if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                return rest[close + 1..].trim_start().to_string();
+            }
+        }
+    }
+    s.to_string()
+}
+
+/// 去掉首尾的点号 / 空白，并截到 160 字（JS `cleanTitle`）
+fn clean_title(t: &str) -> String {
+    let is_trim = |c: char| c.is_whitespace() || matches!(c, '.' | ',' | ';' | ':' | '，' | '。' | '；' | '：');
+    t.trim_matches(is_trim).chars().take(160).collect()
+}
+
+/// 从一条参考文献里猜标题。与 server.js 的 `guessTitle` 逐条一致。
+fn guess_title(reference: &str) -> String {
+    let collapsed = reference.split_whitespace().collect::<Vec<_>>().join(" ");
+    let s = strip_ref_number(&collapsed);
+    if s.is_empty() {
+        return String::new();
+    }
+    let segs = split_ref_segments(&s);
+    if segs.is_empty() {
+        return String::new();
+    }
+    let mut i = 0usize;
+    while i + 1 < segs.len() && i < 6 && looks_like_authors(&segs[i]) {
+        i += 1;
+    }
+    for seg in segs.iter().skip(i) {
+        if looks_like_title(seg) {
+            return clean_title(seg);
+        }
+    }
+    clean_title(&segs[i])
+}
+
+/// 猜出来的标题能不能拿去检索：单字母 / 一两个词的碎片不算（JS `titleIsSearchable`）
+fn title_is_searchable(t: &str) -> bool {
+    let s = t.trim();
+    let letters = s.chars().filter(|c| c.is_ascii_alphabetic() || is_cjk_char(*c)).count();
+    if has_cjk(s) {
+        return letters >= 4; // 中文标题没空格，4 个字就够
+    }
+    if letters < 6 {
+        return false;
+    }
+    let words = s.split_whitespace().count();
+    words >= 2 || letters >= 8
+}
+
+/// 归一化成一堆词（小写、只留字母数字汉字）。与 JS `normWords` 同口径：
+/// 注意这里**不能**用 `is_alphanumeric()`，那会把西里尔 / 希腊字母也算进词里。
+fn norm_words(x: &str) -> Vec<String> {
+    let mut s = String::new();
+    for c in x.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() || is_cjk_char(c) {
+            s.push(c);
+        } else {
+            s.push(' ');
+        }
+    }
+    s.split_whitespace().map(|w| w.to_string()).collect()
+}
+
+/// 去重后的词集合（JS 里用的是 `Set`）
+fn unique_words(x: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in norm_words(x) {
+        if !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    out
+}
+
+/// 这条结果和我们搜的那个标题到底是不是同一篇（JS `resultMatchesTitle`）。
+/// 检索标题认错时几个源都会返回一堆无关论文，老实现照单全收 —— 这就是用户看到的
+/// 「我都不知道这个查找是怎么在找」。
+fn result_matches_title(search_title: &str, confident: bool, cand_title: &str) -> bool {
+    let q = unique_words(search_title);
+    let c = unique_words(cand_title);
+    if q.is_empty() || c.is_empty() {
+        return false;
+    }
+    let hit = c.iter().filter(|w| q.contains(w)).count();
+    if !confident {
+        // 标题没认出来（退回整条文献串）：只要求候选标题的词几乎都出现在这条串里
+        return hit as f64 / c.len() as f64 >= 0.8;
+    }
+    hit as f64 / q.len().max(c.len()) as f64 >= 0.34
 }
 
 /// 取 XML 里某个标签的文本（把换行折成空格）
@@ -1649,7 +1960,11 @@ pub fn ref_search(rq: Request, raw_query: &str) {
         return send_json(rq, 400, &err_json("缺少 q"));
     }
     let raw: String = raw.chars().take(300).collect();
-    let title = guess_title(&raw);
+    // 标题认不出来（单字母 / 碎片）就别拿它去搜 —— 退回整条文献串。
+    // 事故回顾：`V. Sindhwani, …` 猜成 `V`，arXiv 就按「标题含 V」返回了一堆无关论文。
+    let guessed = guess_title(&raw);
+    let confident = title_is_searchable(&guessed);
+    let title = if confident { guessed } else { raw.clone() };
     let agent = http_agent();
     let mut results: Vec<Value> = Vec::new();
 
@@ -1769,9 +2084,10 @@ pub fn ref_search(rq: Request, raw_query: &str) {
         }
     }
 
-    // 去重 → 按「标题相似度 + 有没有 PDF 直链」排序
+    // 去重 → 丢掉和标题无关的 → 按「标题相似度 + 有没有 PDF 直链」排序
     let mut seen: Vec<String> = Vec::new();
     let mut scored: Vec<(f64, Value)> = Vec::new();
+    let mut dropped = 0usize;
     for mut r in results {
         let key: String = r
             .get("title")
@@ -1787,6 +2103,12 @@ pub fn ref_search(rq: Request, raw_query: &str) {
         }
         seen.push(key);
         let t = r.get("title").and_then(|x| x.as_str()).unwrap_or("");
+        // 相关性判据：和标题无关的直接丢掉，不再列给用户（JSON 里回报 dropped，
+        // 前端据此解释「为什么一条都没有」）。与 server.js 的 resultMatchesTitle 同口径。
+        if !result_matches_title(&title, confident, t) {
+            dropped += 1;
+            continue;
+        }
         let has_pdf = r.get("pdfUrl").and_then(|x| x.as_str()).map(|s| !s.is_empty()).unwrap_or(false);
         // 与 server.js:515 一致：doi.org / arxiv.org 链接再 +0.1。
         // 少这一项会让「有稳定 DOI 的正式版本」排不过随手抓到的条目（D9）。
@@ -1815,6 +2137,10 @@ pub fn ref_search(rq: Request, raw_query: &str) {
         &json!({
             "query": raw,
             "title": title,
+            // false = 没认出标题，这次是拿整条文献串搜的（前端据此提示用户）
+            "titleGuessed": confident,
+            // 被相关性判据丢掉的条数（前端据此解释「为什么一条都没有」）
+            "dropped": dropped,
             "results": list,
             "searchUrl": search_url,
             "scholarUrl": scholar_url,
@@ -1923,5 +2249,124 @@ mod tests {
         let plain = ref_score(t, t, false, "https://random.example/x");
         let doi = ref_score(t, t, false, "https://doi.org/10.1/x");
         assert!(doi > plain, "doi={} 应大于 plain={}", doi, plain);
+    }
+
+    /* ── 参考文献标题猜测（2026-10 用户报的 bug） ─────────────────────────────
+     * 事故：`V. Sindhwani, T. Sainath, and S. Kumar. Structured transforms …`
+     * 猜出标题 `V`，于是按「标题含 V」搜回 V-rings / shchigolev 那堆无关论文。
+     * 这一组用例把口径钉死，和 server.js 的 guessTitle 表一模一样
+     * （.tmp-vps 那次的 12 条 + 相关性判据）。 */
+
+    /// 用户报的那条：作者缩写点不能被当成句子边界
+    #[test]
+    fn guess_title_does_not_treat_initial_as_title() {
+        let r = "V. Sindhwani, T. Sainath, and S. Kumar. Structured transforms for small-footprint deep learning. In Advances in Neural Information Processing Systems, pages 3088–3096, 2015.";
+        assert_eq!(guess_title(r), "Structured transforms for small-footprint deep learning");
+        assert_ne!(guess_title(r), "V");
+        assert!(title_is_searchable(&guess_title(r)), "猜出来的标题必须可检索");
+    }
+
+    #[test]
+    fn guess_title_table() {
+        let cases: [(&str, &str); 12] = [
+            (
+                "[1] V. Sindhwani, T. Sainath, and S. Kumar. Structured transforms for small-footprint deep learning. In Advances in Neural Information Processing Systems, pages 3088-3096, 2015.",
+                "Structured transforms for small-footprint deep learning",
+            ),
+            (
+                "Ashish Vaswani, Noam Shazeer, Niki Parmar. Attention is all you need. NeurIPS 2017.",
+                "Attention is all you need",
+            ),
+            (
+                "K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning for image recognition. CVPR 2016.",
+                "Deep residual learning for image recognition",
+            ),
+            (
+                "Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. BERT: Pre-training of deep bidirectional transformers for language understanding. NAACL 2019.",
+                "BERT: Pre-training of deep bidirectional transformers for language understanding",
+            ),
+            (
+                "Vaswani, A., Shazeer, N., Parmar, N., et al. Attention is all you need. In NIPS, 2017.",
+                "Attention is all you need",
+            ),
+            (
+                "Hochreiter, S. and Schmidhuber, J. Long short-term memory. Neural computation, 9(8):1735-1780, 1997.",
+                "Long short-term memory",
+            ),
+            (
+                "J. Smith. A survey of neural machine translation. ACM Computing Surveys, 2020.",
+                "A survey of neural machine translation",
+            ),
+            (
+                "Structured transforms for small-footprint deep learning. NeurIPS 2015.",
+                "Structured transforms for small-footprint deep learning",
+            ),
+            (
+                "Y. LeCun, Y. Bengio, and G. Hinton. Deep learning. Nature, 521(7553):436-444, 2015.",
+                "Deep learning",
+            ),
+            (
+                "张三, 李四. 基于深度学习的图像识别综述. 计算机学报, 2020, 43(5): 1-20.",
+                "基于深度学习的图像识别综述",
+            ),
+            (
+                "王五、赵六. 注意力机制研究进展. 软件学报, 2021.",
+                "注意力机制研究进展",
+            ),
+            (
+                "Sindhwani, V., Sainath, T., Kumar, S. Structured transforms for small-footprint deep learning. NIPS 2015.",
+                "Structured transforms for small-footprint deep learning",
+            ),
+        ];
+        for (r, want) in cases {
+            assert_eq!(guess_title(r), want, "输入：{}", r);
+        }
+    }
+
+    /// 单字母 / 碎片不能算「可检索的标题」（否则又要拿它去搜）
+    #[test]
+    fn title_is_searchable_rejects_fragments() {
+        assert!(!title_is_searchable("V"));
+        assert!(!title_is_searchable("V."));
+        assert!(!title_is_searchable(""));
+        assert!(!title_is_searchable("2020"));
+        assert!(title_is_searchable("Deep learning"));
+        assert!(title_is_searchable("AlphaFold"));
+        assert!(title_is_searchable("注意力机制"));
+    }
+
+    /// 相关性判据：V-rings 那类垃圾必须丢掉，真匹配必须留着
+    #[test]
+    fn result_matches_title_filters_unrelated() {
+        let q = "Structured transforms for small-footprint deep learning";
+        assert!(!result_matches_title(q, true, "$V$-rings versus $\\Sigma$-$V$ Rings"));
+        assert!(!result_matches_title(q, true, "On a conjecture of V. V. Shchigolev"));
+        assert!(!result_matches_title(q, true, "Deep learning"));
+        assert!(result_matches_title(q, true, "Structured Transforms for Small-Footprint Deep Learning"));
+        assert!(result_matches_title(
+            "Attention is all you need",
+            true,
+            "Attention Is All You Need: A Survey of Transformer Architectures"
+        ));
+
+        // 标题认不出来时退回整条文献串：真匹配要留，垃圾要丢
+        let raw = "V. Sindhwani, T. Sainath, and S. Kumar. Structured transforms for small-footprint deep learning. In Advances in Neural Information Processing Systems, pages 3088-3096, 2015.";
+        assert!(result_matches_title(raw, false, "Structured Transforms for Small-Footprint Deep Learning"));
+        assert!(!result_matches_title(raw, false, "$V$-rings versus $\\Sigma$-$V$ Rings"));
+    }
+
+    /// 与 server.js 的 `splitRefSegments` 同口径：缩写点不切，中文句号切。
+    /// 注意 `V. Sindhwani, T.` 里的 `T` 前面有逗号 —— 那是「姓, 名首字母」这种完整
+    /// 写法，该切（`Hochreiter, S. Long short-term memory` 就靠这条才切得对）。
+    /// 切碎没关系：guess_title 会跳过所有作者段再往后找标题。
+    #[test]
+    fn split_ref_segments_keeps_initials() {
+        let segs = split_ref_segments("V. Sindhwani, T. Sainath, and S. Kumar. Structured transforms. In NIPS, 2015.");
+        assert_eq!(segs[0], "V. Sindhwani, T", "{:?}", segs);
+        assert_eq!(segs[2], "Structured transforms", "{:?}", segs);
+        assert_eq!(guess_title("V. Sindhwani, T. Sainath, and S. Kumar. Structured transforms. In NIPS, 2015."), "Structured transforms");
+        let cn = split_ref_segments("张三, 李四. 深度学习综述. 计算机学报, 2020.");
+        assert_eq!(cn.len(), 3, "{:?}", cn);
+        assert_eq!(cn[0], "张三, 李四", "{:?}", cn);
     }
 }

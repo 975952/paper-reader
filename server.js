@@ -517,27 +517,133 @@ async function getText(url, accept = '*/*', ua = 'paper-reader/1.0 (local; refer
   return r.text();
 }
 
-/** 从一条参考文献里猜标题：作者列表通常在第一段，标题紧随其后 */
-function guessTitle(ref) {
-  let s = String(ref).replace(/^\[\d+\]\s*/, '').replace(/\s+/g, ' ').trim();
-  const parts = s.split(/\.\s+/);
-  if (parts.length >= 2) {
-    const first = parts[0];
-    const looksLikeAuthors = /,|\band\b/i.test(first) && first.split(/\s+/).length <= 80;
-    s = looksLikeAuthors ? parts[1] : parts[0];
+/* ── 从参考文献串里猜标题 ────────────────────────────────────────────────
+ * 2026-10 用户报的 bug：`V. Sindhwani, T. Sainath, and S. Kumar. Structured
+ * transforms …` 被猜成标题 **`V`**，于是拿单个字母 V 去 arXiv 检索，搜回来
+ * 「$V$-rings versus $Σ$-$V$ Rings」「On a conjecture of V. V. Shchigolev」这类
+ * 毫不相干的论文，用户完全看不懂在查什么。
+ * 根因是「按 `. ` 硬切成句 + 第一段里没有逗号/and 就当标题」：作者名的缩写点
+ * （`V.` `T.` `S.`）正好把作者列表切成了单字母段，第一个单字母段就被当成标题。
+ *
+ * 现在的口径：
+ *   1. 切段时不把**缩写点**当句子边界（点号前是一个孤零零的大写字母就不切）；
+ *   2. 从前往后跳过「像作者列表」的段（纯缩写段 / 逗号多 / and / et al / 带缩写的人名）；
+ *   3. 取第一段「像标题」的（不是 In/Proceedings/期刊名，长度够）；
+ *      都没命中就用跳完作者后的第一段兜底。
+ * 猜出来的东西如果不具备可检索性（单字母、纯数字…），searchReference 会退回
+ * 整条文献串去搜 —— 宁可搜不准，也不能拿一个字母去搜。 */
+
+const REF_VENUE_RE = /^(in|proceedings|proc\.?|advances|journal|transactions|conference|workshop|symposium|arxiv|corr|pages?|vol\.?|pp\.?|press|ieee|acm|springer|elsevier|wiley|neurips|nips|icml|iclr|cvpr|iccv|eccv|acl|emnlp|naacl|aaai|ijcai|kdd|sigir|www)\b/i;
+const REF_CJK_RE = /[\u4e00-\u9fa5]/;
+
+/** 按「句末点号」切段，但 `V.` `J. R.` 这类**缩写点不切**（就是本 bug 的根因） */
+function splitRefSegments(s) {
+  const out = [];
+  let buf = '';
+  const push = () => { const t = buf.trim(); if (t) out.push(t); buf = ''; };
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '。' || ch === '．' || ch === '！' || ch === '？') { push(); continue; }
+    if (ch === '.' && (i + 1 >= s.length || /\s/.test(s[i + 1]))) {
+      // `V. Sindhwani` 的 `V.` 不切；但 `Hochreiter, S. Long short-term memory` 里的
+      // `S.` 前面有逗号 —— 那是「姓, 名首字母」这种**完整**的作者写法，该切。
+      const tail = buf.replace(/\s+$/, '');
+      const initial = /(^|\s)[A-Z]$/.test(tail);
+      const surnameInitial = /,\s*[A-Z]$/.test(tail);
+      if (!initial || surnameInitial) { push(); continue; }
+    }
+    buf += ch;
   }
-  s = s.replace(/^(In|Proceedings|Proc\.|Advances)\b.*$/i, '').trim();
-  return (s || String(ref)).replace(/[.,;:]+$/, '').slice(0, 160);
+  push();
+  return out;
+}
+
+/** 这一段像不像「作者列表」 */
+function looksLikeAuthors(seg) {
+  const t = String(seg).trim();
+  if (!t) return false;
+  if (/^[A-Z]\.?(\s+[A-Z]\.?)*$/.test(t)) return true;                    // 纯缩写：V. T. S.
+  if (/^(and|&)\s+[^,]+$/i.test(t) && t.split(/\s+/).length <= 6) return true;   // 作者列表被切成两段的后半截
+  if (/,[ ]*[A-Z]\.?$/.test(t)) return true;                              // 「姓, 名首字母」被切成一段：Hochreiter, S
+  if (/(^|\s)et\s+al\.?$|等人$|等$/i.test(t)) return true;                 // et al. / 等
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length > 16) return false;                                    // 太长不像作者
+  const commas = (t.match(/[,，、]/g) || []).length;
+  const ands = /\band\b|&/i.test(t);
+  if (commas >= 2) return true;                                           // A, B, C
+  if (commas >= 1 && (ands || (REF_CJK_RE.test(t) && t.length <= 20))) return true;
+  if (/(^|\s)[A-Z]\.[\s,]/.test(t)) {                                     // 带缩写的人名：J. Smith
+    const names = words.filter((w) => /^[A-Z]\.?$/.test(w) || /^[A-Z][A-Za-z'’-]+[,.]?$/.test(w)).length;
+    if (names >= words.length - 1) return true;
+  }
+  return false;
+}
+
+/** 这一段像不像「标题」（而不是出版信息 / 期刊名 / 页码） */
+function looksLikeTitle(seg) {
+  const t = String(seg).trim();
+  if (!t || REF_VENUE_RE.test(t)) return false;
+  const letters = (t.match(/[A-Za-z\u4e00-\u9fa5]/g) || []).length;
+  if (REF_CJK_RE.test(t)) return t.length >= 6;                           // 中文标题没空格，按字数
+  return letters >= 12 && t.split(/\s+/).filter(Boolean).length >= 2;
+}
+
+function guessTitle(ref) {
+  const s = String(ref).replace(/^\[\d+\]\s*/, '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  const segs = splitRefSegments(s);
+  if (!segs.length) return '';
+  let i = 0;
+  while (i < segs.length - 1 && i < 6 && looksLikeAuthors(segs[i])) i++;
+  for (let j = i; j < segs.length; j++) if (looksLikeTitle(segs[j])) return cleanTitle(segs[j]);
+  return cleanTitle(segs[i]);
+}
+
+function cleanTitle(t) {
+  return String(t).replace(/^[\s.,;:，。；：]+|[\s.,;:，。；：]+$/g, '').slice(0, 160);
+}
+
+/** 猜出来的标题能不能拿去检索：单字母 / 一两个词的碎片不算 */
+function titleIsSearchable(t) {
+  const s = String(t || '').trim();
+  const letters = (s.match(/[A-Za-z\u4e00-\u9fa5]/g) || []).length;
+  if (REF_CJK_RE.test(s)) return letters >= 4;                            // 中文标题没空格，4 个字就够
+  if (letters < 6) return false;
+  const words = s.split(/\s+/).filter(Boolean);
+  return words.length >= 2 || letters >= 8;                               // 单个长词（AlphaFold）也算
+}
+
+/** 归一化成一堆词（小写、只留字母数字汉字） */
+function normWords(x) {
+  return String(x).toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, ' ').trim().split(' ').filter(Boolean);
 }
 
 function titleScore(a, b) {
-  const norm = (x) => String(x).toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, ' ').trim();
-  const A = new Set(norm(a).split(' ').filter(Boolean));
-  const B = new Set(norm(b).split(' ').filter(Boolean));
+  const A = new Set(normWords(a));
+  const B = new Set(normWords(b));
   if (!A.size || !B.size) return 0;
   let hit = 0;
   for (const w of A) if (B.has(w)) hit++;
   return hit / Math.max(A.size, B.size);
+}
+
+/**
+ * 这条结果和我们搜的那个标题到底是不是同一篇。
+ * 检索标题认错时（比如猜成单字母 V），几个源都会返回一堆完全无关的论文；
+ * 老实现照单全收列给用户，用户看到的就是「我都不知道这个查找是怎么在找」。
+ * 两档判据：
+ *   * 标题可信：重合词占**较长一边**的 34% 以上（与排序用的 titleScore 同口径）；
+ *   * 标题不可信（退回整条文献串）：只要求候选标题的词几乎都出现在这条串里（≥80%）——
+ *     整串里有作者、期刊、年份，按比例算会把正确的候选稀释掉。
+ */
+function resultMatchesTitle(searchTitle, confident, candTitle) {
+  const Q = new Set(normWords(searchTitle));
+  const C = new Set(normWords(candTitle));
+  if (!Q.size || !C.size) return false;
+  let hit = 0;
+  for (const w of C) if (Q.has(w)) hit++;
+  if (!confident) return hit / C.size >= 0.8;
+  return hit / Math.max(Q.size, C.size) >= 0.34;
 }
 
 /**
@@ -548,7 +654,11 @@ function titleScore(a, b) {
  */
 async function searchReference(q) {
   const raw = String(q).replace(/\s+/g, ' ').trim().slice(0, 300);
-  const title = guessTitle(raw);
+  const guessed = guessTitle(raw);
+  // 标题认不出来（单字母 / 碎片）就别拿它去搜 —— 退回整条文献串。
+  // 事故回顾：`V. Sindhwani, …` 猜成 `V`，arXiv 就按「标题含 V」返回了一堆无关论文。
+  const confident = titleIsSearchable(guessed);
+  const title = confident ? guessed : raw;
   const results = [];
 
   // 1) arXiv：先按标题精确搜，没有再退回全文搜
@@ -626,13 +736,15 @@ async function searchReference(q) {
     }
   } catch { /* 忽略 */ }
 
-  // 去重 → 按「标题相似度 + 有没有 PDF 直链」排序
+  // 去重 → 丢掉和标题无关的 → 按「标题相似度 + 有没有 PDF 直链」排序
   const seen = new Set();
   const uniq = [];
+  let dropped = 0;
   for (const r of results) {
     const key = (r.title || r.url || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, '').slice(0, 60);
     if (!key || seen.has(key)) continue;
     seen.add(key);
+    if (!resultMatchesTitle(title, confident, r.title)) { dropped++; continue; }
     r.score = titleScore(title, r.title) + (r.pdfUrl ? 0.35 : 0) + (r.url?.includes('doi.org') || r.url?.includes('arxiv.org') ? 0.1 : 0);
     uniq.push(r);
   }
@@ -641,6 +753,8 @@ async function searchReference(q) {
   return {
     query: raw,
     title,
+    titleGuessed: confident,     // false = 没认出标题，这次是拿整条文献串搜的
+    dropped,                     // 被相关性判据丢掉的条数（前端据此解释「为什么是空的」）
     results: uniq.slice(0, 6).map(({ score, ...r }) => r),
     searchUrl: `https://www.bing.com/search?q=${encodeURIComponent(`${title} pdf`)}`,
     scholarUrl: `https://scholar.google.com/scholar?q=${encodeURIComponent(title)}`,

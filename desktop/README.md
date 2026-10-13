@@ -136,6 +136,15 @@ data/paper-reader.log  运行日志（超过 512KB 就不再追加）
 > **2026-10-03（R10）已把 4 处「用户可见」差异全部对齐**（D5/D8/D9/D11），
 > 并补了 6 个 Rust 单元测试锁死它们（`cargo test --release` → 9 passed）。
 > 剩下 7 处都是「正常使用看不出来」的协议细节差异，**有意保留**（见每条说明）。
+>
+> **2026-10-06（参考文献标题猜测）**：用户报「找这篇的 PDF」返回一堆毫不相干的论文
+> —— `V. Sindhwani, T. Sainath, and S. Kumar. Structured transforms …` 被猜成标题
+> **`V`**，于是拿单个字母去 arXiv 检索。根因（按 `. ` 硬切 + 第一段没逗号/and 就当标题）
+> 两边一模一样，所以 `server.js` 的 `guessTitle` 与这里的 `guess_title` **一起改**，
+> 口径逐条对齐：缩写点不切段 → 跳过作者段 → 取第一段像标题的；认不出可检索的标题时
+> 退回整条文献串；结果再按标题相关性过滤（`resultMatchesTitle` / `result_matches_title`，
+> 响应多两个字段 `titleGuessed` / `dropped`）。
+> 锁死方式：Rust 单测 5 组 + `test/refsearch.mjs`（隔离服务，标题猜测不依赖外网）。
 
 1. **D1 · 额外响应头**（不可见）：tiny_http 会额外加 `Server: tiny-http (Rust)` 和 `Date`
    （Node 只加 `Date`）；静态/PDF 响应头与 Node 逐条一致。SSE 响应由本程序手写响应头，

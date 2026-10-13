@@ -3007,8 +3007,22 @@ function renderCiteResults(data) {
   const out = $('#citeResult');
   out.innerHTML = '';
   const list = data?.results || [];
+  /* 先交代「这次到底拿什么去搜的」。以前这一步是完全不可见的：标题猜错时
+     （2026-10 bug：`V. Sindhwani, …` 猜成 `V`）用户只看到一堆莫名其妙的结果，
+     没有任何线索知道后端在查什么。这一行只解释口径，不是结果项（不占 .cite-item，
+     e2e / relations 都按 .cite-item 断言）。 */
+  const got = String(data?.title || '').trim();
+  if (got) {
+    const hint = el('div', { class: 'cite-msg' });
+    hint.append(document.createTextNode(data?.titleGuessed === false
+      ? '没能从这条文献里认出标题，这次用整条文献串检索：'
+      : '按标题检索：'));
+    hint.append(el('b', { text: got }));
+    out.append(hint);
+  }
   if (!list.length) {
-    out.append(el('div', { class: 'cite-msg', text: '几家公开库里都没查到这个标题的开放版本，可以直接用下面的搜索引擎链接。' }));
+    const why = data?.dropped ? `（已丢掉 ${data.dropped} 条与标题无关的结果）` : '';
+    out.append(el('div', { class: 'cite-msg', text: `几家公开库里都没查到这个标题的开放版本${why}，可以直接用下面的搜索引擎链接。` }));
   }
   for (const r of list) {
     const link = r.pdfUrl || r.url || '';
