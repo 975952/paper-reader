@@ -64,6 +64,7 @@ papers/          放 PDF（不存在会自动创建；/api/papers 只列这里�
 data/config.json    设置（API Key 只存在这里，不回传前端）
 data/state.json     阅读进度 / 上次打开的文件
 data/notes-*.json   按文档存的高亮笔记
+data/papers-order.json  左栏文件列表的手工排序（`{"order":["b.pdf","a.pdf"]}`；不改 papers/ 里的文件名）
 data/window.json    窗口大小
 data/webview2/      WebView2 的用户数据目录（浏览器缓存，删了会自动重建）
 data/paper-reader.log  运行日志（超过 512KB 就不再追加）
@@ -93,7 +94,9 @@ data/paper-reader.log  运行日志（超过 512KB 就不再追加）
 | --- | --- | --- |
 | GET/HEAD | `/`、`/<静态路径>` | 返回内嵌的 public/ 资源；MIME 按扩展名（`.mjs`/`.js` → `text/javascript; charset=utf-8`）。未知路径且无扩展名 → 回落 `index.html` |
 | GET | `/api/health` | `{"ok":true,"port":<port>}` |
-| GET | `/api/papers` | `{"papers":[{name,size,mtime,docId,url}],"dir":"<papers 绝对路径>"}`，mtime 倒序，只列 `.pdf` |
+| GET | `/api/papers` | `{"papers":[{name,size,mtime,docId,url}],"dir":"<papers 绝对路径>"}`，只列 `.pdf`；顺序 = `data/papers-order.json` 里排过的按数组顺序，**没排过的排最前（mtime 倒序）** |
+| POST | `/api/papers` | body `{"order":["a.pdf","b.pdf"]}` 保存文件列表顺序（只写 `data/papers-order.json`，不改文件名）；回 `{ok,count}` |
+| DELETE | `/api/papers?name=<name>` | 删除 `papers/` 里的这篇 PDF，并把它从顺序文件里摘掉；文件不存在 404、非法名 400。**不删** `data/` 里按 docId 存的笔记 / 会话 / 进度 |
 | GET/HEAD | `/api/pdf?name=<name>` | 支持 Range：`bytes=a-b`、`bytes=a-`、`bytes=-N`；206 + `Content-Range`，越界 416 + `bytes */<total>`，无 Range 200 + `Content-Length`；总是带 `Accept-Ranges: bytes` |
 | GET | `/api/config` | `{baseURL,apiKey:"",model,visionModel,targetLang,temperature,theme,fontSize,autoTranslate,stream,glossary,idleMs,hasApiKey}` —— **apiKey 永远回传空串** |
 | POST | `/api/config` | 合并写入 `data/config.json`；body 里 apiKey 为空串/缺失时保留原 key，回 `{ok,hasApiKey}` |

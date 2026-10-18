@@ -35,7 +35,74 @@ pub fn health(rq: Request, ctx: &Ctx) {
 
 /* --------------------------------------------------------------- papers */
 
-pub fn papers(rq: Request, _ctx: &Ctx) {
+/// 用户手工排好的书架顺序（与 server.js 的 `papers-order.json` 同一份数据）。
+/// 顺序只写 data/，**不改 papers/ 里的文件名** —— 文件名是 docId / 笔记 / 会话的主键。
+fn paper_order() -> Vec<String> {
+    let v = store::read_json("papers-order.json", json!({ "order": [] }));
+    match v.get("order").and_then(|x| x.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+fn write_paper_order(order: &[String]) -> bool {
+    store::write_json("papers-order.json", &json!({ "order": order }))
+}
+
+/// 校验前端传来的顺序：只收合法 PDF 文件名（对齐 server.js 的 sanitizePaperOrder）
+fn sanitize_paper_order(body: &[u8]) -> Option<Vec<String>> {
+    let payload = parse_json(body).ok()?;
+    let arr = payload.get("order")?.as_array()?;
+    let mut out: Vec<String> = Vec::new();
+    for v in arr {
+        let raw = match v.as_str() {
+            Some(s) => s.trim(),
+            None => continue,
+        };
+        if raw.is_empty() || raw.len() > 200 {
+            continue;
+        }
+        if raw.contains('/') || raw.contains('\\') || raw.contains('\0') {
+            continue;
+        }
+        if !raw.to_ascii_lowercase().ends_with(".pdf") {
+            continue;
+        }
+        if out.iter().any(|x| x == raw) {
+            continue;
+        }
+        out.push(raw.to_string());
+        if out.len() >= 5000 {
+            break;
+        }
+    }
+    Some(out)
+}
+
+/// /api/papers：GET 列表 / POST 保存顺序 / DELETE 删除
+pub fn papers(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
+    match method {
+        Method::Get => papers_list(rq),
+        Method::Post => match sanitize_paper_order(body) {
+            Some(order) => {
+                if !write_paper_order(&order) {
+                    return send_json(rq, 500, &err_json("保存文件顺序失败，请检查磁盘空间与目录权限"));
+                }
+                send_json(rq, 200, &json!({ "ok": true, "count": order.len() }))
+            }
+            None => send_json(rq, 400, &err_json("请求体缺少 order 数组")),
+        },
+        Method::Delete => papers_delete(rq, raw_query),
+        _ => send_text(rq, 405, "Method Not Allowed"),
+    }
+}
+
+fn papers_list(rq: Request) {
     let dir = &dirs().papers;
     let mut out: Vec<Value> = Vec::new();
 
@@ -68,11 +135,22 @@ pub fn papers(rq: Request, _ctx: &Ctx) {
         }
     }
 
-    // mtime 倒序（server.js: b.mtime - a.mtime）
+    // 排序规则与 server.js 一致：**没进 order 的排最前（mtime 倒序）**，
+    // 进过 order 的按数组顺序排 —— 新导入的 PDF 永远出现在最上面。
+    let order = paper_order();
+    let rank: std::collections::HashMap<&str, usize> =
+        order.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
     out.sort_by(|a, b| {
+        let an = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let bn = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let am = a.get("mtime").and_then(|v| v.as_u64()).unwrap_or(0);
         let bm = b.get("mtime").and_then(|v| v.as_u64()).unwrap_or(0);
-        bm.cmp(&am)
+        match (rank.get(an), rank.get(bn)) {
+            (None, None) => bm.cmp(&am),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(ra), Some(rb)) => ra.cmp(rb),
+        }
     });
 
     // 审计 §P2：默认不返回本机绝对路径；只有显式开启诊断才给
@@ -85,6 +163,40 @@ pub fn papers(rq: Request, _ctx: &Ctx) {
         );
     }
     send_json(rq, 200, &Value::Object(payload));
+}
+
+/// DELETE /api/papers?name=xxx.pdf —— 删除篇论文文件，并把它从顺序里摘掉。
+/// 只删 papers/ 里的 PDF，data/ 里按 docId 存的笔记 / 会话 / 进度保留。
+fn papers_delete(rq: Request, raw_query: &str) {
+    let raw = query_get(raw_query, "name").unwrap_or_default();
+    let abs = match safe_join(&dirs().papers, &raw) {
+        Some(p) => p,
+        None => return send_json(rq, 400, &err_json("非法文件名")),
+    };
+    let name = abs
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    if !raw.to_ascii_lowercase().ends_with(".pdf")
+        || name.is_empty()
+        || abs.parent() != Some(dirs().papers.as_path())
+    {
+        return send_json(rq, 400, &err_json("非法文件名"));
+    }
+    match std::fs::metadata(&abs) {
+        Ok(m) if m.is_file() => {}
+        _ => return send_json(rq, 404, &err_json("文件不存在（可能已被手动删除）")),
+    }
+    if let Err(e) = std::fs::remove_file(&abs) {
+        store::log_line(&format!("[delete] {} 失败: {}", name, e));
+        return send_json(rq, 500, &err_json("删除失败：文件可能正被其它程序占用"));
+    }
+    let mut order = paper_order();
+    order.retain(|n| n != &name);
+    let _ = write_paper_order(&order);
+    store::log_line(&format!("[delete] {}", name));
+    send_json(rq, 200, &json!({ "ok": true, "name": name }));
 }
 
 /* ------------------------------------------------------------------ pdf */

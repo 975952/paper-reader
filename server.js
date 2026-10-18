@@ -242,6 +242,48 @@ const DEFAULT_CONFIG = {
 
 /* ---------------------------------------------------------------- papers */
 
+/**
+ * 用户手工排好的书架顺序（2026-10「移动 PDF 顺序」）。
+ *
+ * 单独存一个 `data/papers-order.json`，**不改 papers/ 里的文件名** ——
+ * 文件名是 docId / 笔记 / 会话 / 阅读进度的主键，改名字等于把所有历史记录弄丢。
+ * 文件里只放一个名字数组：`{ "order": ["b.pdf", "a.pdf"] }`。
+ *
+ * 列表排序规则（/api/papers）：**没进 order 的文件排在最前（按 mtime 倒序）**，
+ * 进过 order 的按数组顺序排。这样新导入的 PDF 一定出现在最上面（和以前一样），
+ * 用户排好的旧文件也不会被新文件打乱。
+ */
+const PAPER_ORDER_FILE = 'papers-order.json';
+
+async function readPaperOrder() {
+  const cur = await readDataFile(PAPER_ORDER_FILE, {});
+  if (!Array.isArray(cur?.order)) return [];
+  return cur.order.filter((n) => typeof n === 'string' && n);
+}
+
+async function writePaperOrder(order) {
+  await writeDataFile(PAPER_ORDER_FILE, { order });
+}
+
+/** 校验前端传来的顺序数组：只收 papers/ 里合法 PDF 文件名 */
+function sanitizePaperOrder(raw) {
+  if (!raw || !Array.isArray(raw.order)) return null;
+  const out = [];
+  const seen = new Set();
+  for (const v of raw.order) {
+    if (typeof v !== 'string') continue;
+    const name = v.trim();
+    if (!name || name.length > 200) continue;
+    if (/[\\/\u0000]/.test(name)) continue;
+    if (!/\.pdf$/i.test(name)) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+    if (out.length >= 5000) break;
+  }
+  return out;
+}
+
 async function listPapers() {
   let entries = [];
   try {
@@ -249,6 +291,8 @@ async function listPapers() {
   } catch {
     return [];
   }
+  const order = await readPaperOrder();
+  const rank = new Map(order.map((name, i) => [name, i]));
   const out = [];
   for (const e of entries) {
     if (!e.isFile()) continue;
@@ -263,8 +307,47 @@ async function listPapers() {
       url: `/api/pdf?name=${encodeURIComponent(e.name)}`,
     });
   }
-  out.sort((a, b) => b.mtime - a.mtime);
+  // 未排序（=-1）的在最前，且内部按 mtime 倒序；已排序的按 order 下标
+  out.sort((a, b) => {
+    const ra = rank.has(a.name) ? rank.get(a.name) : -1;
+    const rb = rank.has(b.name) ? rank.get(b.name) : -1;
+    if (ra === -1 && rb === -1) return b.mtime - a.mtime;
+    if (ra === -1) return -1;
+    if (rb === -1) return 1;
+    return ra - rb;
+  });
   return out;
+}
+
+/**
+ * DELETE /api/papers?name=xxx.pdf —— 删除一篇论文文件。
+ *
+ * 只删 papers/ 里的 PDF，**不删** data/ 里按 docId 存的笔记 / 会话 / 阅读进度：
+ * 万一用户重新导入同一个文件，笔记还在。删完之后把名字从排序文件里摘掉。
+ */
+async function handleDeletePaper(req, res, url) {
+  const base = path.basename(String(url.searchParams.get('name') || ''));
+  const abs = safeJoin(PAPERS_DIR, base);
+  if (!abs || base !== path.basename(abs) || !/\.pdf$/i.test(abs)) {
+    return sendJson(res, 400, { error: { message: '非法文件名' } });
+  }
+  try {
+    const st = await fsp.stat(abs);
+    if (!st.isFile()) throw Object.assign(new Error('not a file'), { code: 'ENOENT' });
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return sendJson(res, 404, { error: { message: '文件不存在（可能已被手动删除）' } });
+    return sendJson(res, 500, { error: { message: '读取文件失败，请重试' } });
+  }
+  try {
+    await fsp.unlink(abs);
+  } catch (e) {
+    sec.diag(`删除 papers/ 文件失败: ${e && e.message}`);
+    return sendJson(res, 500, { error: { message: '删除失败：文件可能正被其它程序占用' } });
+  }
+  const order = (await readPaperOrder()).filter((n) => n !== base);
+  await writePaperOrder(order);
+  console.log(`[delete] ${base}`);
+  return sendJson(res, 200, { ok: true, name: base });
 }
 
 /**
@@ -1325,12 +1408,30 @@ async function handle(req, res) {
     return handleChat(req, res);
   }
 
-  // ---- 论文目录
+  // ---- 论文目录 / 排序 / 删除
   if (pathname === '/api/papers') {
-    const body = { papers: await listPapers() };
-    // 审计 §P2：默认不返回本机绝对路径；只有显式开启诊断才给
-    if (DIAGNOSTICS) body.dir = PAPERS_DIR;
-    return sendJson(res, 200, body);
+    if (req.method === 'GET') {
+      const body = { papers: await listPapers() };
+      // 审计 §P2：默认不返回本机绝对路径；只有显式开启诊断才给
+      if (DIAGNOSTICS) body.dir = PAPERS_DIR;
+      return sendJson(res, 200, body);
+    }
+    if (req.method === 'POST') {
+      // 保存拖拽后的书架顺序；只写 data/papers-order.json，不动文件本身
+      const raw = await readJsonBodyOrReq(req, res, sec.BODY_LIMITS.papers);
+      if (raw === null) return undefined;
+      const order = sanitizePaperOrder(raw);
+      if (!order) return sendJson(res, 400, { error: { message: '请求体缺少 order 数组' } });
+      try {
+        await writePaperOrder(order);
+      } catch (e) {
+        sec.diag(`保存 papers-order.json 失败: ${e && e.message}`);
+        return sendJson(res, 500, { error: { message: '保存文件顺序失败，请检查磁盘空间与目录权限' } });
+      }
+      return sendJson(res, 200, { ok: true, count: order.length });
+    }
+    if (req.method === 'DELETE') return handleDeletePaper(req, res, url);
+    return send(res, 405, 'Method Not Allowed');
   }
 
   /**

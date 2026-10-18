@@ -398,6 +398,8 @@ function sanitizeConfigPatch(patch) {
 const BODY_LIMITS = {
   config: 1 * 1024 * 1024,
   state: 1 * 1024 * 1024,
+  // 书架顺序（/api/papers 的 POST）：一个文件名数组，正常只有几百字节
+  papers: 1 * 1024 * 1024,
   notes: 4 * 1024 * 1024,
   session: 16 * 1024 * 1024,
   chat: 64 * 1024 * 1024,

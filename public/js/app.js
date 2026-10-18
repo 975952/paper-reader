@@ -2356,8 +2356,16 @@ async function refreshPaperList() {
   renderPaperList();
 }
 
+/* ── 文件行两侧的小图标（2026-10）──
+   ⚠️ 删除按钮**必须用 SVG、不能用字符 `×`**：文件行的 textContent 会被
+   e2e 套件当成「文件名」来比对（`li.textContent.trim()` → 文件名），
+   多出来的可见字符会让断言突然变红。SVG 没有文本节点，不参与 textContent。 */
+const PAPER_GRIP_SVG = '<svg viewBox="0 0 24 24" width="10" height="16" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>';
+const PAPER_X_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6.5 6.5 17.5 17.5"/><path d="M17.5 6.5 6.5 17.5"/></svg>';
+
 function renderPaperList() {
   const list = $('#fileList');
+  if (!list) return;
   const filter = ($('#fileFilter').value || '').trim().toLowerCase();
   list.innerHTML = '';
   const items = state.papers.filter((p) => !filter || p.name.toLowerCase().includes(filter));
@@ -2370,38 +2378,73 @@ function renderPaperList() {
   }
   for (const p of items) {
     const li = el('li', {
-      title: `${p.name}\n${fmtSize(p.size)}`,
-      text: p.name.replace(/\.pdf$/i, ''),
-      dataset: { id: p.docId },
-      onclick: () => openDoc({ name: p.name, url: p.url, docId: p.docId }),
-    });
+      title: `${p.name}\n${fmtSize(p.size)}\n按住拖动可调整顺序`,
+      dataset: { id: p.docId, name: p.name },
+      draggable: 'true',
+      onclick: (e) => {
+        // 抓手与删除按钮各自处理，点它们不打开论文
+        if (e.target.closest?.('.file-row-x, .file-grip')) return;
+        openDoc({ name: p.name, url: p.url, docId: p.docId });
+      },
+    },
+      el('span', { class: 'file-grip', title: '按住拖动调整顺序', 'aria-hidden': 'true', html: PAPER_GRIP_SVG }),
+      el('span', { class: 'file-name', text: p.name.replace(/\.pdf$/i, '') }),
+      el('button', {
+        type: 'button', class: 'file-row-x', html: PAPER_X_SVG,
+        title: `删除「${p.name}」（只删 papers/ 里的这个文件）`,
+        'aria-label': `删除「${p.name}」`,
+        onclick: (e) => { e.stopPropagation(); deletePaper(p); },
+      }));
     if (state.doc?.url === p.url) li.classList.add('active');
     list.append(li);
+  }
+}
+
+/* ───────────────── 文件列表：批量导入 / 拖拽排序 / 删除（2026-10） ───────────────── */
+
+/** 从 FileList / DataTransfer 里挑出 PDF（大小写不敏感） */
+function pdfFilesFrom(files) {
+  return Array.from(files || []).filter((f) => f && /\.pdf$/i.test(f.name));
+}
+
+/** 是不是「从资源管理器拖文件进来」——内部拖动排序不算 */
+function isExternalFileDrag(e) {
+  try {
+    return Array.from(e.dataTransfer?.types || []).includes('Files');
+  } catch {
+    return false;
   }
 }
 
 function initFiles() {
   const dz = $('#dropzone');
   $('#fileFilter').addEventListener('input', debounce(renderPaperList, 150));
+  // 多选：一次选多个 PDF 一起导入（原来只取 files[0]）
   $('#fileInput').addEventListener('change', (e) => {
-    const f = e.target.files?.[0];
-    if (f) openLocalFile(f);
+    const pdfs = pdfFilesFrom(e.target.files);
     e.target.value = '';
+    if (pdfs.length) importLocalFiles(pdfs);
   });
   for (const ev of ['dragenter', 'dragover']) {
-    dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('over'); });
+    dz.addEventListener(ev, (e) => {
+      if (!isExternalFileDrag(e)) return;
+      e.preventDefault();
+      dz.classList.add('over');
+    });
   }
   for (const ev of ['dragleave', 'drop']) dz.addEventListener(ev, () => dz.classList.remove('over'));
   dz.addEventListener('drop', (e) => {
+    if (!isExternalFileDrag(e)) return;   // 内部拖动排序：交给文件列表自己处理
     e.preventDefault();
-    const f = e.dataTransfer?.files?.[0];
-    if (f) openLocalFile(f);
+    const pdfs = pdfFilesFrom(e.dataTransfer?.files);
+    if (pdfs.length) importLocalFiles(pdfs);
   });
   window.addEventListener('dragover', (e) => e.preventDefault());
   window.addEventListener('drop', (e) => {
     e.preventDefault();
-    const f = e.dataTransfer?.files?.[0];
-    if (f && /\.pdf$/i.test(f.name)) openLocalFile(f);
+    if (!isExternalFileDrag(e)) return;
+    const pdfs = pdfFilesFrom(e.dataTransfer?.files);
+    if (pdfs.length) importLocalFiles(pdfs);
   });
 
   /* ── 首页上的两个入口（2026-10）──
@@ -2412,18 +2455,167 @@ function initFiles() {
   const drop = $('#homeDrop');
   if (drop) {
     for (const ev of ['dragenter', 'dragover']) {
-      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); });
+      drop.addEventListener(ev, (e) => {
+        if (!isExternalFileDrag(e)) return;
+        e.preventDefault();
+        drop.classList.add('over');
+      });
     }
     for (const ev of ['dragleave', 'drop']) drop.addEventListener(ev, () => drop.classList.remove('over'));
     // 拖放区只处理拖入，不再绑定点击打开文件选择器。
     // 「打开 PDF」是唯一的点击选文件入口，两个入口保持明确分工。
   }
+
+  bindPaperReorder($('#fileList'));
+}
+
+/**
+ * 文件列表拖拽排序（原生 HTML5 DnD，桌面 WebView2 / Chrome 都支持）。
+ *
+ * 只改**显示顺序**：把新的名字数组 POST 给 /api/papers，服务端存进
+ * data/papers-order.json，不动 papers/ 里的文件（文件名是 docId 的主键）。
+ * 列表被筛选框过滤时也能排：拖到的目标行映射回完整列表的下标。
+ */
+function bindPaperReorder(list) {
+  if (!list) return;
+  let from = '';
+  const clearMarks = () => {
+    for (const n of list.querySelectorAll('li')) n.classList.remove('dragging', 'drop-before', 'drop-after');
+  };
+  const markAt = (e) => {
+    const li = e.target.closest?.('li[data-name]');
+    if (!li) return null;
+    const r = li.getBoundingClientRect();
+    const after = e.clientY > r.top + r.height / 2;
+    for (const n of list.querySelectorAll('li')) n.classList.remove('drop-before', 'drop-after');
+    li.classList.add(after ? 'drop-after' : 'drop-before');
+    return { li, after };
+  };
+
+  list.addEventListener('dragstart', (e) => {
+    const li = e.target.closest?.('li[data-name]');
+    if (!li) return;
+    if (e.target.closest?.('.file-row-x')) { e.preventDefault(); return; }
+    from = li.dataset.name || '';
+    if (!from) return;
+    li.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', from); } catch { /* 忽略 */ }
+  });
+  list.addEventListener('dragend', () => { from = ''; clearMarks(); });
+  list.addEventListener('dragover', (e) => {
+    if (!from) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    markAt(e);
+  });
+  list.addEventListener('dragleave', (e) => {
+    if (!list.contains(e.relatedTarget)) {
+      for (const n of list.querySelectorAll('li')) n.classList.remove('drop-before', 'drop-after');
+    }
+  });
+  list.addEventListener('drop', (e) => {
+    if (!from) return;
+    e.preventDefault();
+    const hit = markAt(e);
+    const moved = from;
+    clearMarks();
+    if (!hit || !hit.li.dataset.name || hit.li.dataset.name === moved) return;
+    applyPaperOrder(moved, hit.li.dataset.name, hit.after);
+  });
+}
+
+/**
+ * 把 `from` 挪到 `target` 前/后，先乐观更新界面，再保存到服务端。
+ *
+ * 保存请求**串行化**：连续快速拖两下时，两个 POST 如果乱序到达，
+ * 后到的旧顺序会把新顺序覆盖掉（服务端只认最后一次写入）。
+ */
+let paperOrderSave = Promise.resolve();
+function applyPaperOrder(from, target, after) {
+  const names = state.papers.map((p) => p.name);
+  const i = names.indexOf(from);
+  if (i < 0) return;
+  names.splice(i, 1);
+  const t = names.indexOf(target);
+  if (t < 0) names.push(from);
+  else names.splice(after ? t + 1 : t, 0, from);
+  const by = new Map(state.papers.map((p) => [p.name, p]));
+  state.papers = names.map((n) => by.get(n)).filter(Boolean);
+  renderPaperList();
+  paperOrderSave = paperOrderSave.catch(() => {}).then(async () => {
+    try {
+      const r = await fetch('/api/papers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: names }),
+      });
+      let j = {};
+      try { j = await r.json(); } catch { /* 非 JSON */ }
+      if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
+    } catch (e) {
+      toast(`顺序保存失败：${e.message}`, 'err', 4200);
+      await refreshPaperList();
+    }
+  });
+}
+
+/** 删除一篇 PDF（只删文件；笔记 / 会话 / 进度留在 data/，重新导入还能看到） */
+async function deletePaper(p) {
+  const opened = !!state.doc && (state.doc.name === p.name || state.doc.url === p.url);
+  const ok = confirm(`删除「${p.name}」？\n\n只删除 papers/ 里的这个 PDF 文件`
+    + `${opened ? '（这篇正在阅读，删除后会回到首页）' : ''}。\n`
+    + '笔记、问答会话与阅读进度会保留：重新导入同一个文件仍能看到。');
+  if (!ok) return;
+  try {
+    const r = await fetch(`/api/papers?name=${encodeURIComponent(p.name)}`, { method: 'DELETE' });
+    let j = {};
+    try { j = await r.json(); } catch { /* 非 JSON */ }
+    if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
+    state.papers = state.papers.filter((x) => x.name !== p.name);
+    if (opened) closeDeletedDoc();
+    renderPaperList();
+    renderHome();
+    toast(`已删除「${p.name}」`, 'ok', 2800);
+  } catch (e) {
+    toast(`删除失败：${e.message}`, 'err', 5000);
+  }
+}
+
+/** 正在读的那篇被删掉：把阅读态收干净并回首页（viewer 不卸载，下次打开会重新加载） */
+function closeDeletedDoc() {
+  abortStream('paper-deleted');
+  state.doc = null;
+  state.viewerDocId = null;
+  document.title = '论文阅读器';
+  const nameEl = $('#docName');
+  if (nameEl) { nameEl.textContent = '未打开文档'; nameEl.title = ''; }
+  const page = $('#pageInput');
+  if (page) page.value = '–';
+  const count = $('#pageCount');
+  if (count) count.textContent = '–';
+  for (const li of $$('#fileList li')) li.classList.remove('active');
+  setView('home');
 }
 
 let localObjectUrl = null;
 
+/** 上传一个 PDF 到 papers/（返回服务端落盘信息） */
+async function uploadPdfFile(file) {
+  const buf = await file.arrayBuffer();
+  const r = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/pdf' },
+    body: buf,
+  });
+  let j = {};
+  try { j = await r.json(); } catch { /* 非 JSON */ }
+  if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
+  return j;
+}
+
 /**
- * 打开本地 PDF：先上传到服务端的 papers/ 存下来，再从服务端打开。
+ * 单文件打开：先上传到服务端的 papers/ 存下来，再从服务端打开。
  * 这样下次启动还在列表里（以前用 blob URL，关掉就没了）。
  * 万一上传失败（比如 papers/ 不可写），退回临时打开，至少还能看。
  */
@@ -2431,15 +2623,7 @@ async function openLocalFile(file) {
   if (!/\.pdf$/i.test(file.name)) { toast('只支持 PDF 文件', 'err'); return; }
   setBusy(true, '正在导入…');
   try {
-    const buf = await file.arrayBuffer();
-    const r = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/pdf' },
-      body: buf,
-    });
-    let j = {};
-    try { j = await r.json(); } catch { /* 非 JSON */ }
-    if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
+    const j = await uploadPdfFile(file);
     await refreshPaperList();
     await openDoc({ name: j.name, url: j.url, docId: j.docId });
     toast(`已存到 papers/：${j.name}`, 'ok', 2600);
@@ -2451,6 +2635,38 @@ async function openLocalFile(file) {
   } finally {
     setBusy(false);
   }
+}
+
+/**
+ * 批量导入（2026-10 用户口径：「一次性导入或者拖入多个 pdf」）。
+ * 一个文件时保持原来的行为（导入后直接打开）；多个文件时**不自动打开任何一篇**，
+ * 导入完停在你原来的位置，并在提示里告诉数量 —— 打开哪一篇交给用户自己点。
+ * 逐个串行上传：大 PDF 同时发几份会把内存和网络打满，进度提示也更准确。
+ */
+async function importLocalFiles(files) {
+  const pdfs = pdfFilesFrom(files);
+  if (!pdfs.length) { toast('只支持 PDF 文件', 'err'); return; }
+  if (pdfs.length === 1) return openLocalFile(pdfs[0]);
+  setBusy(true, `正在导入 1/${pdfs.length}…`);
+  const imported = [];
+  const failed = [];
+  for (let i = 0; i < pdfs.length; i++) {
+    setBusy(true, `正在导入 ${i + 1}/${pdfs.length}…`);
+    try {
+      imported.push(await uploadPdfFile(pdfs[i]));
+    } catch (e) {
+      failed.push({ name: pdfs[i].name, msg: e.message });
+    }
+  }
+  setBusy(false);
+  await refreshPaperList();
+  if (imported.length) {
+    const note = failed.length ? `，${failed.length} 篇失败（${failed[0].name}：${failed[0].msg}）` : '';
+    toast(`已导入 ${imported.length} 篇 PDF${note}`, failed.length ? 'err' : 'ok', failed.length ? 6000 : 3400);
+  } else {
+    toast(`导入失败：${failed[0]?.name || ''} ${failed[0]?.msg || '未知错误'}`, 'err', 6000);
+  }
+  if (failed.length) console.warn('[import] 导入失败的 PDF：', failed);
 }
 
 async function openDoc({ name, url, docId }) {

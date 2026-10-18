@@ -28,6 +28,8 @@ fn body_limit(path: &str) -> usize {
         "/api/upload" => MAX_UPLOAD,
         "/api/config" => limits::BODY_CONFIG,
         "/api/state" => limits::BODY_STATE,
+        // 书架排序（/api/papers 的 POST）：一个文件名数组，正常只有几百字节
+        "/api/papers" => limits::BODY_STATE,
         "/api/notes" => limits::BODY_NOTES,
         "/api/session" => limits::BODY_SESSION,
         _ => MAX_BODY,
@@ -171,7 +173,7 @@ fn handle(mut rq: Request, ctx: &Ctx) {
             }
             return chat::handle(rq, &body, ctx);
         }
-        "/api/papers" => return api::papers(rq, ctx),
+        "/api/papers" => return api::papers(rq, &method, &raw_query, &body),
         "/api/pdf" => return api::pdf(rq, &raw_query, &method),
         "/api/upload" => return api::upload(rq, &method, &raw_query, &body),
         "/api/config" => return api::config(rq, &method, &body),

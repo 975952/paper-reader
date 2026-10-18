@@ -80,8 +80,8 @@
       <input id="fileFilter" class="filter" placeholder="筛选文件…" />
     </div>
     <div class="dropzone" id="dropzone">
-      拖入 PDF　<label class="link" for="fileInput">选文件</label>
-      <input type="file" id="fileInput" accept="application/pdf,.pdf" hidden />
+      拖入 PDF（可多选）　<label class="link" for="fileInput">选文件</label>
+      <input type="file" id="fileInput" accept="application/pdf,.pdf" multiple hidden />
     </div>
     <ul class="filelist" id="fileList"></ul>
 
@@ -156,7 +156,7 @@
         </button>
         <div class="home-drop" id="homeDrop">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 16.4V4.6"/><path d="m7.6 9 4.4-4.4L16.4 9"/><path d="M4.6 16.4v2a1.6 1.6 0 0 0 1.6 1.6h11.6a1.6 1.6 0 0 0 1.6-1.6v-2"/></svg>
-          <span>把 PDF 拖到这里</span>
+          <span>把 PDF 拖到这里（支持多选）</span>
         </div>
       </div>
 
