@@ -4,6 +4,7 @@
  * 所有请求都发到本机 /api/chat，由 server.js 转发。
  * 好处：绕开浏览器 CORS；API Key 存在本机 data/config.json，不进 localStorage。
  */
+import { resolveReadingRequest, historyMessages, stripPageLabels } from './reading-context.js';
 
 export const PRESETS = {
   deepseek: { baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-flash', visionModel: '' },
@@ -336,39 +337,42 @@ export function matchGlossary(text, glossaryText) {
   return entries.filter(([k]) => hay.includes(k.toLowerCase()));
 }
 
-export function askMessages({ question, selection, context, page, docTitle, fullText, webResults, history = [] }) {
+export function askMessages({ question, selection, context, page, docTitle, fullText, webResults, history = [], reading, references = [] }) {
+  const request = reading || resolveReadingRequest({ question, selection, page, history });
   const sys = [
     '你是嵌在论文阅读器里的阅读助手，帮助读者读懂正在看的论文。',
     '',
     '回答规则：',
-    '1. 优先依据【选中文本】【所在页上下文】【论文全文】回答；这些材料里没有的，再参考【联网搜索结果】。',
-    '2. 论文里没有的信息不要编造。数据、结论、引用必须能在给出的材料里找到；找不到就说「给出的内容里没有提到」。',
-    '3. 用到联网结果时，在相应句子末尾标出来源，写成 [来源1]、[来源2] 这种形式。',
-    '   注意：论文自己的参考文献编号长这样 —— [27]、[32]，两者的含义完全不同，千万不要混用。',
-    '   用到领域常识（联网结果和论文都没有的）时标「（背景知识）」，与原文区分开。',
-    '4. 用中文回答，简洁、结构化，能用短列表就用短列表。不要空话套话。',
-    '5. 数学公式用行内 LaTeX：$...$；独立公式用 $$...$$。',
-    '6. 术语保留英文原词（括号里给中文），方便读者回原文核对。',
+    '1. 用户明确指定新对象或整篇任务时，按明确问题回答；否则当前阅读对象由【选中文本】或【当前话题】确定。新选区优先；「他是谁」「为什么更快」「继续」「？」等短追问沿用这个对象。所在页和全文只是辅助材料，搜索结果不能另起一个同名话题。有明确人名时直接回答这个人，不要列举电视剧等无关可能；只有材料确实无法消除歧义时，才问一个具体的澄清问题。',
+    '2. 默认任务是讲懂选区提到的知识。人名：身份及与本论文的关系；术语：含义和直观例子；方法或模型：解决什么问题、关键做法及为什么有效；公式：符号、计算过程与含义；图表：读准内容再解释结论。按本次对象选择需要的内容，不套用固定栏目，不输出「没有公式」「没有实验数据」等无关检查清单。先直接回答，再补必要解释；知识点复杂时用一个小例子逐步讲清。',
+    '3. 本论文的数字、实验、结论和作者主张须有论文原文依据。解释基础概念可以补充可靠的领域知识，在一段开头用「补充理解」区分即可，不要逐句反复标记。特定人物履历、被引方法的技术细节和外部实验数据须有可靠材料；未核实的细节省略或简短指出不确定，不能因本文只提了名字就停止解释基础原理。',
+    '4. 用到联网材料时，只有摘录确实支持的事实才标 [来源1]、[来源2]；不得用标题或书目猜出技术细节。论文自己的 [27]、[32] 是参考文献编号。不要把无关来源写入回答，也不要例行解释两种编号的区别。',
+    '5. 用户纠正或设定默认讲解方式时，简短确认后落实到当前阅读对象；「？」若附有新选区就解释新选区，否则围绕上一回答纠正或换个具体说法。不要凭空编造自己检索了什么、拿到了什么或内部运行原因。',
+    '6. 用中文和短段落，术语首次出现保留英文；数学公式用 $...$ 或 $$...$$。不要客套、无关扩写或例行邀请用户继续提问。',
+    request.guidance ? `读者持续的讲解偏好：${request.guidance}` : '',
   ].join('\n');
 
   const contextBlock = [];
   if (docTitle) contextBlock.push(`【论文】${docTitle}${page ? `（第 ${page} 页）` : ''}`);
-  if (selection) contextBlock.push(`【选中文本】\n"""\n${selection}\n"""`);
+  if (request.selection) contextBlock.push(`【选中文本${request.inherited ? ' · 本次追问沿用' : ''}】\n"""\n${request.selection}\n"""`);
+  else if (request.inherited) contextBlock.push(`【当前话题】\n${request.focus.text}`);
+  if (references.length) contextBlock.push('【选区涉及的参考文献 · 书目信息，不代表技术细节】\n'
+    + references.map((r) => `[${r.num}] ${r.text}${r.page ? `（文献表第${r.page}页）` : ''}`).join('\n'));
   if (context) contextBlock.push(`【所在页上下文】\n"""\n${context}\n"""`);
   if (fullText) contextBlock.push(`【论文全文${fullText.length > 60000 ? '（很长，已按页给出）' : ''}】\n"""\n${fullText}\n"""`);
   if (webResults?.length) {
     contextBlock.push('【联网搜索结果】\n' + webResults.map((r, i) => {
-      const snip = String(r.snippet || '').replace(/\s+/g, ' ').slice(0, 400);
-      return `[来源${i + 1}] ${r.title}\n${r.url}${snip ? `\n${snip}` : ''}`;
+      const snip = String(r.snippet || '').replace(/\s+/g, ' ').slice(0, 4000);
+      return `[来源${i + 1}] ${r.title}\n${r.url}${snip ? `\n【${r.excerptKind === 'abstract' ? '原论文摘要' : '搜索摘录'}】${snip}` : '\n【仅书目或标题，无正文摘录】'}`;
     }).join('\n\n'));
     contextBlock.push(`（引用联网结果时只能写 [来源1]～[来源${webResults.length}]；论文原文里的 [27] 那类编号是论文自己的参考文献，不要拿来当联网来源）`);
   }
 
   const messages = [{ role: 'system', content: sys }];
-  for (const h of history.slice(-6)) messages.push(h);
+  messages.push(...historyMessages(history));
   messages.push({
     role: 'user',
-    content: contextBlock.length ? `${contextBlock.join('\n\n')}\n\n【问题】\n${question}` : question,
+    content: contextBlock.length ? `${contextBlock.join('\n\n')}\n\n【问题】\n${request.question}` : request.question,
   });
   return messages;
 }
@@ -470,42 +474,48 @@ export function searchTerms(text) {
 }
 
 /** 真正发给搜索引擎的查询串 */
-export function webQueryFor(question, selection) {
-  const q = String(question || '').replace(/\s+/g, ' ').trim();
-  const sel = String(selection || '').replace(/\s+/g, ' ').trim();
+export function webQueryFor(question, selection, { history = [], reading } = {}) {
+  const request = reading || resolveReadingRequest({ question, selection, history });
+  const q = request.question;
+  if (['guidance', 'feedback'].includes(request.intent) || /^[?？!！。.\s]+$/.test(q)) return '';
+  const sel = stripPageLabels(request.selection || (request.inherited ? request.focus.text : ''));
+  const anchor = searchTerms(sel.slice(0, 1600));
   const terms = searchTerms(q);
+  // 追问先补对象，不能拿「谁 / 更快 / 默认」去决定检索主题。
+  if (request.intent !== 'question' && anchor.length) return anchor.slice(0, 12).join(' ').slice(0, 180);
+  if (!terms.length) return anchor.slice(0, 12).join(' ').slice(0, 180);
+  const extra = terms.length < 2 ? anchor.filter((t) => !terms.includes(t)).slice(0, 3) : [];
+  return [...terms, ...extra].join(' ').slice(0, 180);
+}
 
-  // 一句全是口水话（「这段什么意思」）时没词可搜，就退回选中原文当线索
-  if (!terms.length) {
-    return `${q} ${sel.slice(0, 80)}`.replace(/\s+/g, ' ').trim().slice(0, 140);
-  }
-  let out = terms.join(' ');
-  // 只搜到一个词、又刚好有选中的原文，就补上原文里的术语
-  if (terms.length < 2 && sel) {
-    const extra = searchTerms(sel).filter((t) => !out.includes(t)).slice(0, 3).join(' ');
-    if (extra) out += ` ${extra}`;
-  }
-  return out.slice(0, 140);
+/** 每条结果必须与对象相关；后端的整批词语筛选不足以排除混入的无关条目。 */
+export function filterWebResults(query, results = []) {
+  const terms = searchTerms(query).map((t) => t.toLowerCase());
+  const generic = new Set(['deep', 'learning', 'neural', 'network', 'networks', 'model', 'models']);
+  const anchors = terms.filter((t) => !generic.has(t));
+  const keys = anchors.length ? anchors : terms;
+  if (!keys.length) return [];
+  const contains = (hay, key) => {
+    if (hay.includes(key)) return true;
+    if (!/^[\u4e00-\u9fa5]{4,}$/.test(key)) return false;
+    const parts = Array.from({ length: key.length - 1 }, (_, i) => key.slice(i, i + 2));
+    return parts.filter((p) => hay.includes(p)).length >= Math.ceil(parts.length * 0.7);
+  };
+  const needed = Math.min(3, keys.length === 1 ? 1 : Math.max(2, Math.ceil(keys.length / 2)));
+  const seen = new Set();
+  return results.filter((r) => {
+    if (!r || !/^https?:\/\//i.test(r.url || '') || seen.has(r.url)) return false;
+    const hay = `${r.title || ''} ${r.snippet || ''}`.toLowerCase();
+    if (keys.filter((t) => contains(hay, t)).length < needed) return false;
+    seen.add(r.url);
+    return true;
+  });
 }
 
 /** 「释」：不提问，直接把这段讲明白 */
-export function explainMessages({ selection, context, page, docTitle }) {
-  const sys = [
-    '读者读论文时选中了一段看不懂的内容，请你直接把它讲明白。',
-    '',
-    '要求：',
-    '1. 先用一两句话说明「这段在讲什么」，再拆解关键概念、符号和逻辑关系。',
-    '2. 有公式就解释每个符号的含义和整体在算什么；有实验结论就说明它意味着什么。',
-    '3. 只依据给出的文本，不要编造论文里没有的数据或结论；需要领域常识时标「（背景知识）」。',
-    '4. 用中文，短段落或列表，不要复述原文，不要客套。',
-    '5. 数学公式用行内 LaTeX：$...$。',
-  ].join('\n');
-  const user = [
-    docTitle ? `【论文】${docTitle}${page ? `（第 ${page} 页）` : ''}` : '',
-    `【需要解释的段落】\n"""\n${selection}\n"""`,
-    context ? `【所在页上下文】\n"""\n${context}\n"""` : '',
-  ].filter(Boolean).join('\n\n');
-  return [{ role: 'system', content: sys }, { role: 'user', content: user }];
+export function explainMessages({ selection, context, page, docTitle, history = [], reading, references = [] }) {
+  return askMessages({ question: '请解释这段内容涉及的知识。', selection, context, page, docTitle,
+    history, reading, references });
 }
 
 export function regionMessages({ question, targetLang, page, docTitle }) {

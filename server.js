@@ -508,10 +508,10 @@ async function handleChat(req, res) {
 
 const FETCH_TIMEOUT = 9000;
 
-async function getText(url, accept = '*/*', ua = 'paper-reader/1.0 (local; reference lookup)') {
+async function getText(url, accept = '*/*', ua = 'paper-reader/1.0 (local; reference lookup)', timeoutMs = FETCH_TIMEOUT) {
   const r = await fetch(url, {
     headers: { 'User-Agent': ua, Accept: accept, 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.text();
@@ -652,7 +652,19 @@ function resultMatchesTitle(searchTitle, confident, candTitle) {
  * Semantic Scholar 只在没被限流时作为补充（公开接口经常 429）。
  * 全是公开接口，不需要密钥；某个源失败就跳过，不会整体失败。
  */
-async function searchReference(q) {
+function openAlexAbstract(work) {
+  const index = work?.abstract_inverted_index;
+  if (!index || typeof index !== 'object') return '';
+  const words = [];
+  for (const [word, positions] of Object.entries(index)) {
+    for (const p of Array.isArray(positions) ? positions : []) {
+      if (Number.isInteger(p) && p >= 0 && p < 10000) words.push([p, word]);
+    }
+  }
+  return words.sort((a, b) => a[0] - b[0]).slice(0, 800).map((w) => w[1]).join(' ').slice(0, 4000);
+}
+
+async function searchReference(q, { reading = false } = {}) {
   const raw = String(q).replace(/\s+/g, ' ').trim().slice(0, 300);
   const guessed = guessTitle(raw);
   // 标题认不出来（单字母 / 碎片）就别拿它去搜 —— 退回整条文献串。
@@ -660,11 +672,12 @@ async function searchReference(q) {
   const confident = titleIsSearchable(guessed);
   const title = confident ? guessed : raw;
   const results = [];
+  const read = (url, accept) => getText(url, accept, undefined, reading ? 2500 : FETCH_TIMEOUT);
 
   // 1) arXiv：先按标题精确搜，没有再退回全文搜
-  for (const query of [`ti:"${title}"`, `all:"${title}"`]) {
+  for (const query of [`ti:"${title}"`, `all:"${title}"`].slice(0, reading ? 1 : 2)) {
     try {
-      const xml = await getText(
+      const xml = await read(
         `https://export.arxiv.org/api/query?search_query=${encodeURIComponent(query)}&max_results=3`,
         'application/atom+xml',
       );
@@ -673,16 +686,17 @@ async function searchReference(q) {
         const id = (/<id>([\s\S]*?)<\/id>/.exec(e)?.[1] || '').trim();
         const year = (/<published>(\d{4})/.exec(e)?.[1]) || '';
         if (!/arxiv\.org\/abs\//.test(id)) continue;
-        results.push({ source: 'arXiv', title: t, year, venue: 'arXiv', url: id, pdfUrl: id.replace('/abs/', '/pdf/') });
+        const snippet = stripTags((/<summary>([\s\S]*?)<\/summary>/.exec(e)?.[1] || '')).slice(0, 4000);
+        results.push({ source: 'arXiv', title: t, year, venue: 'arXiv', url: id, pdfUrl: id.replace('/abs/', '/pdf/'), snippet, excerptKind: 'abstract' });
       }
       if (results.length) break;
     } catch { /* 换下一个源 */ }
   }
 
   // 2) OpenAlex：免费无密钥，而且有开放获取直链
-  try {
-    const j = JSON.parse(await getText(
-      `https://api.openalex.org/works?search=${encodeURIComponent(title)}&per-page=4&select=title,publication_year,doi,open_access,primary_location`,
+  if (!(reading && results.some((r) => r.snippet && resultMatchesTitle(title, confident, r.title)))) try {
+    const j = JSON.parse(await read(
+      `https://api.openalex.org/works?search=${encodeURIComponent(title)}&per-page=4&select=title,publication_year,doi,open_access,primary_location,abstract_inverted_index`,
       'application/json',
     ));
     for (const w of j.results || []) {
@@ -695,13 +709,14 @@ async function searchReference(q) {
         url: w.doi || w.primary_location?.landing_page_url || '',
         pdfUrl: /\.pdf(\?|$)/i.test(oa) ? oa : '',
         oaUrl: oa,
+        snippet: openAlexAbstract(w), excerptKind: 'abstract',
       });
     }
   } catch { /* 忽略 */ }
 
   // 3) Crossref：用整条文献串检索，覆盖最广
-  try {
-    const j = JSON.parse(await getText(
+  if (!reading) try {
+    const j = JSON.parse(await read(
       `https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(raw.slice(0, 220))}&rows=3&select=title,DOI,URL,issued,container-title`,
       'application/json',
     ));
@@ -719,8 +734,8 @@ async function searchReference(q) {
   } catch { /* 忽略 */ }
 
   // 4) Semantic Scholar：能通就补一条（经常 429，失败无所谓）
-  try {
-    const j = JSON.parse(await getText(
+  if (!reading) try {
+    const j = JSON.parse(await read(
       `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(title)}&limit=3&fields=title,year,venue,url,openAccessPdf`,
       'application/json',
     ));
@@ -740,6 +755,7 @@ async function searchReference(q) {
   const seen = new Set();
   const uniq = [];
   let dropped = 0;
+  results.sort((a, b) => Number(!!b.snippet) - Number(!!a.snippet));
   for (const r of results) {
     const key = (r.title || r.url || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, '').slice(0, 60);
     if (!key || seen.has(key)) continue;
@@ -1558,7 +1574,7 @@ async function handle(req, res) {
     const q = (url.searchParams.get('q') || '').trim();
     if (!q) return sendJson(res, 400, { error: { message: '缺少 q' } });
     try {
-      const out = await searchReference(q);
+      const out = await searchReference(q, { reading: url.searchParams.get('scope') === 'reading' });
       return sendJson(res, 200, out);
     } catch (e) {
       sec.diag(`/api/ref-search 失败: ${e && e.message}`);

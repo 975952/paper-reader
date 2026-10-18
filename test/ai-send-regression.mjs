@@ -48,7 +48,9 @@ try {
   const page = await browser.newPage();
   const errors = []; page.on('pageerror', e => errors.push(String(e)));
   await page.goto(base + '/?open=fixture.pdf');
-  await page.waitForFunction(() => window.__viewer?.pdf && window.__ctx);
+  // PDF 存在时会话仍可能在恢复；等论文的完整打开流程结束再开始发送。
+  await page.waitForFunction(() => window.__viewer?.pdf && window.__ctx
+    && window.__state.viewerDocId === window.__state.doc?.docId);
   for (const kind of ['translate', 'explain', 'chat']) {
     const before = hits;
     const entriesBefore = await page.evaluate(() => window.__state.sessionEntries.length);

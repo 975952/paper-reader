@@ -5,6 +5,7 @@
  * 保证选区的读取顺序和浏览器原生 selection 一致。
  */
 import { clamp, throttle, sleep } from './util.js';
+import { stripPageLabels } from './reading-context.js';
 
 let pdfjsLib = null;
 
@@ -2149,14 +2150,19 @@ export class PdfViewer {
   async getContextAround(pageNum, text, span = 700) {
     const full = await this.getPageText(pageNum);
     if (!full) return '';
-    const key = String(text).slice(0, 60).replace(/\s+/g, ' ');
-    let idx = full.indexOf(key);
+    const normalize = (s) => String(s).normalize('NFKC').replace(/([A-Za-z])-\s+([a-z])/g, '$1$2').replace(/\s+/g, ' ').trim();
+    const body = normalize(full);
+    const selected = normalize(stripPageLabels(text));
+    // 没有指定选区时给当前页；选区定位失败时留空，不能拿页首冒充选区附近。
+    if (!selected) return body.slice(0, 8000);
+    const key = selected.slice(0, 120);
+    let idx = body.toLowerCase().indexOf(key.toLowerCase());
     if (idx < 0) {
       const probe = key.split(' ').slice(0, 4).join(' ');
-      idx = full.indexOf(probe);
+      if (probe.length >= 8) idx = body.toLowerCase().indexOf(probe.toLowerCase());
     }
-    if (idx < 0) return full.slice(0, span * 2);
-    return full.slice(Math.max(0, idx - span), Math.min(full.length, idx + key.length + span));
+    if (idx < 0) return '';
+    return body.slice(Math.max(0, idx - span), Math.min(body.length, idx + selected.length + span));
   }
 
   /* ------------------------------------------------------------ 框选截取 */

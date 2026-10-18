@@ -1950,6 +1950,24 @@ pub fn open_url(rq: Request, raw_query: &str) {
     }
 }
 
+fn openalex_abstract(work: &Value) -> String {
+    let Some(index) = work.get("abstract_inverted_index").and_then(|v| v.as_object()) else {
+        return String::new();
+    };
+    let mut words: Vec<(u64, &str)> = Vec::new();
+    for (word, positions) in index {
+        if let Some(positions) = positions.as_array() {
+            for position in positions {
+                if let Some(p) = position.as_u64().filter(|p| *p < 10000) {
+                    words.push((p, word.as_str()));
+                }
+            }
+        }
+    }
+    words.sort_by_key(|w| w.0);
+    words.into_iter().take(800).map(|w| w.1).collect::<Vec<_>>().join(" ").chars().take(4000).collect()
+}
+
 /// GET /api/ref-search?q=<文献条目>
 /// 依次查 arXiv（常有直链 PDF）→ OpenAlex（免费、有开放获取链接）→ Crossref（覆盖最广）。
 /// 全是公开接口、不需要密钥；某个源失败就跳过，不会整体失败。
@@ -1965,11 +1983,12 @@ pub fn ref_search(rq: Request, raw_query: &str) {
     let guessed = guess_title(&raw);
     let confident = title_is_searchable(&guessed);
     let title = if confident { guessed } else { raw.clone() };
-    let agent = http_agent();
+    let reading = query_get(raw_query, "scope").as_deref() == Some("reading");
+    let agent = if reading { http_agent_with(2, 3) } else { http_agent() };
     let mut results: Vec<Value> = Vec::new();
 
     // 1) arXiv
-    for q in [format!("ti:\"{}\"", title), format!("all:\"{}\"", title)] {
+    for q in [format!("ti:\"{}\"", title), format!("all:\"{}\"", title)].into_iter().take(if reading { 1 } else { 2 }) {
         let url = format!(
             "https://export.arxiv.org/api/query?search_query={}&max_results=3",
             encode_uri_component(&q)
@@ -1988,6 +2007,8 @@ pub fn ref_search(rq: Request, raw_query: &str) {
                     "venue": "arXiv",
                     "url": id,
                     "pdfUrl": id.replace("/abs/", "/pdf/"),
+                    "snippet": tag_text(entry, "summary").unwrap_or_default().chars().take(4000).collect::<String>(),
+                    "excerptKind": "abstract",
                 }));
             }
             if results.len() > before {
@@ -1997,8 +2018,13 @@ pub fn ref_search(rq: Request, raw_query: &str) {
     }
 
     // 2) OpenAlex
+    let have_abstract = reading && results.iter().any(|r| {
+        !r.get("snippet").and_then(|v| v.as_str()).unwrap_or("").is_empty()
+            && result_matches_title(&title, confident, r.get("title").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+    if !have_abstract {
     let url = format!(
-        "https://api.openalex.org/works?search={}&per-page=4&select=title,publication_year,doi,open_access,primary_location",
+        "https://api.openalex.org/works?search={}&per-page=4&select=title,publication_year,doi,open_access,primary_location,abstract_inverted_index",
         encode_uri_component(&title)
     );
     if let Some(txt) = fetch_text(&agent, &url) {
@@ -2026,12 +2052,16 @@ pub fn ref_search(rq: Request, raw_query: &str) {
                         "venue": w.pointer("/primary_location/source/display_name").and_then(|x| x.as_str()).unwrap_or(""),
                         "url": link,
                         "pdfUrl": pdf,
+                        "snippet": openalex_abstract(w),
+                        "excerptKind": "abstract",
                     }));
                 }
             }
         }
     }
 
+    }
+    if !reading {
     // 3) Crossref（用整条文献串检索，覆盖最广）
     let url = format!(
         "https://api.crossref.org/works?query.bibliographic={}&rows=3&select=title,DOI,URL,issued,container-title",
@@ -2084,7 +2114,9 @@ pub fn ref_search(rq: Request, raw_query: &str) {
         }
     }
 
+    }
     // 去重 → 丢掉和标题无关的 → 按「标题相似度 + 有没有 PDF 直链」排序
+    results.sort_by_key(|r| r.get("snippet").and_then(|v| v.as_str()).unwrap_or("").is_empty());
     let mut seen: Vec<String> = Vec::new();
     let mut scored: Vec<(f64, Value)> = Vec::new();
     let mut dropped = 0usize;
@@ -2155,6 +2187,13 @@ pub fn ref_search(rq: Request, raw_query: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openalex_abstract_keeps_word_order_and_repetition() {
+        let work = json!({"abstract_inverted_index": {"fast": [2], "a": [0, 3], "transform": [1], "invalid": [-1, 10000]}});
+        assert_eq!(openalex_abstract(&work), "a transform fast a");
+        assert_eq!(openalex_abstract(&json!({"abstract_inverted_index": null})), "");
+    }
 
     /// D11：词元只能以字母开头 —— 纯数字 / 数字开头的串不算词元。
     /// server.js: `s.match(/[a-z][a-z0-9+#._-]*/g)`，`if (w.length >= 2)`。

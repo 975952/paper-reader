@@ -14,8 +14,10 @@ import { OPS, opById } from './ops.js';
 import {
   Settings, streamChat, testConnection, targetLangFor,
   translateMessages, askMessages, explainMessages, regionMessages,
-  digestMessages, webQueryFor, opMessages,
+  digestMessages, webQueryFor, filterWebResults, opMessages,
 } from './ai.js';
+import { resolveReadingRequest, snapshotReadingRequest, snapshotHistory, readingTurn,
+  restoreReadingHistory, citedSources, stripPageLabels } from './reading-context.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
 function readFlag(key, dflt = false) {
@@ -850,7 +852,7 @@ const state = {
   quote: null,          // 对话引用 {page, text}
   _dragSelecting: false,   // 正在正文里拖选（用于「松手在窗口外」的兜底）
   _downAt: null,           // 这次按下的坐标，用来区分「单击」和「拖选」
-  history: [],          // 对话历史（只含真正发出去的问答）
+  history: [],          // 已完成的问答与解释，包含各轮阅读对象
   sessionEntries: [],
   highlights: [],
   cache: new Map(),     // 翻译缓存
@@ -3858,7 +3860,7 @@ function finishEntry(entry, fullText, { page, onAsk, onRetry, sources, meta, sta
   requestAnimationFrame(updateScrollFades);
   // 同一个条目可能被收尾多次（典型：操作「重试」复用同一条），
   // 先把上一次的元信息行与来源列表摘掉，否则会叠出两行、旧的那行还写着「N 页失败」。
-  entry.root.querySelectorAll('.entry-meta, .src-list').forEach((node) => node.remove());
+  entry.root.querySelectorAll('.entry-meta, .source-details, .src-list').forEach((node) => node.remove());
   entry.acts.replaceChildren();
   entry.acts.classList.remove('hidden');
   /**
@@ -3921,6 +3923,9 @@ function serialiseRetryPayload(raw) {
       inputValue: String(raw.inputValue || '').slice(0, 6000), question: String(raw.question || '').slice(0, 6000),
       quoteText: String(raw.quoteText || '').slice(0, 6000), firstPage: raw.firstPage || null,
       useFullText: !!raw.useFullText, useWeb: !!raw.useWeb,
+      scopeRange: String(raw.scopeRange || Object.values(SCOPE_RANGES).find((r) => r.full === !!raw.useFullText && r.web === !!raw.useWeb)?.key || ''),
+      reading: snapshotReadingRequest(raw.reading),
+      history: snapshotHistory(raw.history || []).slice(-6).map((m) => ({ ...m, content: m.content.slice(0, 6000) })),
       attachments: (Array.isArray(raw.attachments) ? raw.attachments : []).slice(0, 12).map((a) => {
         const kind0 = a?.kind === 'image' ? 'image' : 'text';
         return kind0 === 'image'
@@ -3989,7 +3994,7 @@ function sessionPayload() {
     quote: String(x.quote || '').slice(0, 3000), kind: x.kind === 'user' ? 'user' : 'assistant',
     text: String(x.text || '').slice(0, 12000), screenshot: !!x.screenshot,
     status: ['pending', 'complete', 'stopped', 'failed', 'user'].includes(x.status) ? x.status : (x.kind === 'user' ? 'user' : 'complete'),
-    sources: (Array.isArray(x.sources) ? x.sources : []).slice(0, 8).map((s) => ({ title: String(s.title || '').slice(0, 500), url: String(s.url || '').slice(0, 2000) })),
+    sources: (Array.isArray(x.sources) ? x.sources : []).slice(0, 8).map((s) => ({ title: String(s.title || '').slice(0, 500), url: String(s.url || '').slice(0, 2000), number: s.number || null })),
     meta: String(x.meta || '').slice(0, 500),
     retry: serialiseRetryPayload(x.retry),
   }));
@@ -4012,7 +4017,7 @@ function sessionPayload() {
   const prefix = `${state.doc.docId}:`;
   const ops = [...state.opsCache.entries()].filter(([key]) => key.startsWith(prefix)).slice(-20)
     .map(([key, value]) => ({ id: key.slice(prefix.length), text: String(value.text || '').slice(0, 12000), at: value.at || Date.now(), page: value.page || null }));
-  const payload = { entries: allEntries, history: state.history.slice(-80).map((m) => ({ role: m.role, content: String(m.content).slice(0, 12000) })), ops, updatedAt: Date.now() };
+  const payload = { entries: allEntries, history: snapshotHistory(state.history), ops, updatedAt: Date.now() };
   let encoded = JSON.stringify(payload);
   const encodedBytes = () => new TextEncoder().encode(encoded).byteLength;
   while (encodedBytes() > 350000 && payload.entries.length > 1) { payload.entries.shift(); encoded = JSON.stringify(payload); }
@@ -4095,9 +4100,12 @@ function restoreRetryCallback(row, entry, priorUser) {
       firstPage: payload.firstPage || attachments[0]?.page || entry.root.dataset.page || null,
       docId: state.doc?.docId || payload.docId || null,
       docTitle: state.doc?.name || payload.docTitle || '',
-      history: state.history.map((m) => ({ role: m.role, content: m.content })),
+      history: snapshotHistory(payload.history || state.history),
+      reading: snapshotReadingRequest(payload.reading),
+      openSeq: state.openSeq, sid: activeSidFor(state.doc?.docId),
       useFullText: !!payload.useFullText,
       useWeb: !!payload.useWeb,
+      scopeRange: payload.scopeRange || Object.values(SCOPE_RANGES).find((r) => r.full === !!payload.useFullText && r.web === !!payload.useWeb)?.key,
       entry,
       userEntry: null,
     };
@@ -4120,9 +4128,11 @@ function restoreRetryCallback(row, entry, priorUser) {
 async function restoreSession(docId, { only = 'all' } = {}) {
   try {
     const sid = activeSidFor(docId);
+    const openSeq = state.openSeq;
     const r = await fetch(`/api/session?${sessionQuery(docId, sid)}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const saved = await r.json();
+    if (!readingRequestCurrent({ docId, openSeq, sid })) return;
     /**
      * 文件里**所有**条目留一份底账（`state._fileEntries`）。
      * 用途：会话只覆盖问答区，译文不属于任何会话 —— 保存时要靠这份底账把
@@ -4130,7 +4140,7 @@ async function restoreSession(docId, { only = 'all' } = {}) {
      */
     state._fileEntries = Array.isArray(saved.entries) ? saved.entries : [];
     state.sessionEntries = Array.isArray(saved.entries) ? saved.entries.slice(-90) : [];
-    state.history = Array.isArray(saved.history) ? saved.history.slice(-80) : [];
+    state.history = restoreReadingHistory(saved.history, state.sessionEntries);
     state.opsDone = {};
     state.opsDoc = docId;
     for (const op of Array.isArray(saved.ops) ? saved.ops : []) {
@@ -4382,7 +4392,7 @@ function renderSources(sources) {
       title: `${s.title || ''}\n${s.url}`,
     });
     // 标成「来源1」而不是「[1]」：论文正文里的 [27] 是它自己的参考文献编号，两者不能混
-    const li = el('li', {}, el('span', { class: 'src-n', text: `[来源${i + 1}]` }), a);
+    const li = el('li', {}, el('span', { class: 'src-n', text: `[来源${s.number || i + 1}]` }), a);
     return li;
   }));
   const details = el('details', { class: 'source-details' },
@@ -4662,7 +4672,7 @@ async function runOperation(opId, { force = false, block = 'chat', retryEntry = 
     entry.acts.replaceChildren();
     entry.acts.classList.add('hidden');
     entry.root.classList.remove('err', 'error');
-    entry.root.querySelectorAll('.entry-meta, .src-list').forEach((node) => node.remove());
+    entry.root.querySelectorAll('.entry-meta, .source-details, .src-list').forEach((node) => node.remove());
     const record = entry.root.__sessionRecord;
     if (record) { record.text = ''; record.meta = ''; record.status = 'pending'; }
   }
@@ -5592,6 +5602,11 @@ async function doExplain(sel) {
   if (state.busy) return;
   const text = sel.cleanText || cleanText(sel.text);
   if (!text || !ensureReady()) return;
+  const docId = state.doc?.docId || null;
+  const openSeq = state.openSeq;
+  const sid = activeSidFor(docId);
+  const history = snapshotHistory(state.history);
+  const reading = resolveReadingRequest({ question: '请解释这段内容涉及的知识。', selection: text, page: sel.page, history });
   // 「释」直接写在侧栏里，不弹浮层 —— 解释是要读的，不是瞄一眼的
   revealPanel('chat');
   const entry = addEntry({ block: 'chat', tag: 'explanation', page: sel.page, quote: text,
@@ -5603,15 +5618,21 @@ async function doExplain(sel) {
   let received = '';
   try {
     const context = sel.page ? await viewer.getContextAround(sel.page, text) : '';
+    const references = await readingReferences(text);
+    if (!readingRequestCurrent({ docId, openSeq, sid })) return;
+    if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
     const full = await chat({
-      messages: explainMessages({ selection: text, context, page: sel.page, docTitle: state.doc?.name }),
+      messages: explainMessages({ selection: text, context, page: sel.page, docTitle: state.doc?.name, history, reading, references }),
       signal: ctl.signal,
       onDelta: (piece, all) => { received = all; target.push(all); },
       onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
     });
+    if (!readingRequestCurrent({ docId, openSeq, sid })) return;
     target.done(full);
+    state.history = snapshotHistory([...state.history, ...readingTurn(reading, full)]);
     finishEntry(entry, full, { page: sel.page, onAsk: () => addToChat(sel) });
   } catch (e) {
+    if (!readingRequestCurrent({ docId, openSeq, sid })) return;
     if (isAbort(e)) {
       target.done(received);
       finishEntry(entry, received, { page: sel.page, status: 'stopped', onAsk: () => addToChat(sel), onRetry: () => doExplain(sel) });
@@ -6046,17 +6067,68 @@ function pickRelevantPages(text, query, k = PICK_K, per = 1600) {
   const hit = scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, k);
   const use = hit.length ? hit : scored.slice(0, k);
   return use.sort((a, b) => a.page - b.page)
-    .map((s) => `[p.${s.page}] ${s.body.replace(/\s+/g, ' ').trim().slice(0, per)}`)
+    .map((s) => {
+      const body = s.body.replace(/\s+/g, ' ').trim();
+      const positions = terms.map((t) => body.toLowerCase().indexOf(t)).filter((n) => n >= 0);
+      const at = positions.length ? Math.min(...positions) : 0;
+      const start = Math.max(0, at - Math.floor(per / 3));
+      return `[p.${s.page}] ${start ? '…' : ''}${body.slice(start, start + per)}`;
+    })
     .join('\n\n');
 }
 
 /** 联网搜索（服务端带 5 分钟缓存，多引擎兜底） */
 async function webSearch(query, signal) {
+  if (!String(query || '').trim()) return [];
   const url = `/api/web-search?q=${encodeURIComponent(String(query).slice(0, 200))}&n=6`;
   const r = await fetch(url, { signal });
   if (!r.ok) throw new Error(`搜索失败 HTTP ${r.status}`);
   const j = await r.json();
-  return (j.results || []).filter((x) => x && x.url).slice(0, 6);
+  return filterWebResults(query, j.results || []).slice(0, 6);
+}
+
+function readingRequestCurrent({ docId, openSeq, sid }) {
+  return (state.doc?.docId || null) === docId && (openSeq == null || state.openSeq === openSeq)
+    && (sid == null || activeSidFor(docId) === sid);
+}
+
+async function readingReferences(selection) {
+  const nums = [...new Set([...String(selection || '').matchAll(/\[(\d{1,3})\]/g)].map((m) => Number(m[1])))].slice(0, 3);
+  if (!nums.length || !viewer?.pdf) return [];
+  const results = await Promise.all(nums.map((n) => viewer.findReference(n).catch(() => null)));
+  return results.filter(Boolean);
+}
+
+/** 被引工作先按完整书目查询原论文摘要；失败后才用普通检索。 */
+async function readingSources(reading, references, signal) {
+  const query = webQueryFor(reading.question, reading.selection, { reading });
+  if (!query) return [];
+  if (!references.length) return webSearch(query, signal);
+  const sources = await Promise.all(references.map(async (ref) => {
+    const lookup = new AbortController();
+    const forward = () => lookup.abort();
+    signal?.addEventListener('abort', forward, { once: true });
+    if (signal?.aborted) lookup.abort();
+    const timeout = setTimeout(() => lookup.abort(), 10000);
+    try {
+      const r = await fetch(`/api/ref-search?q=${encodeURIComponent(ref.text)}&scope=reading`, { signal: lookup.signal });
+      if (!r.ok) return [];
+      const j = await r.json();
+      const matched = filterWebResults(j.title || query, j.results || []).slice(0, 2);
+      if (matched.some((s) => s.snippet)) return matched;
+      const fallback = await webSearch(j.title || query, lookup.signal);
+      return fallback.length ? fallback : matched;
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      return [];
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', forward);
+    }
+  }));
+  const flat = sources.flat();
+  const unique = flat.filter((s, i) => flat.findIndex((r) => r.url === s.url) === i).slice(0, 6);
+  return unique.length ? unique : webSearch(query, signal);
 }
 
 async function send(retryPending = null) {
@@ -6082,15 +6154,18 @@ async function send(retryPending = null) {
     const quotes = attachments.filter((a) => a.kind === 'text');
     const images = attachments.filter((a) => a.kind === 'image');
     const quoteText = quotes.map((a) => (a.page ? `[第${a.page}页] ` : '') + a.text).join('\n\n');
-    const firstPage = quotes[0]?.page || images[0]?.page || (state.doc ? viewer?.current : null);
+    const attachmentPage = quotes[0]?.page || images[0]?.page || (state.doc ? viewer?.current : null);
     const question = q || (images.length
       ? '请识别并解释我加进来的这些内容（图/表/公式/文字），说明它们在论文里的作用。'
       : '请解释我加进来的这段内容。');
+    const history = snapshotHistory(state.history);
+    const reading = resolveReadingRequest({ question, selection: quoteText, page: attachmentPage, history });
+    const firstPage = reading.page;
     pending = {
-      inputValue, question, attachments, quoteText, firstPage,
+      inputValue, question, attachments, quoteText, firstPage, reading,
       docId: state.doc?.docId || null,
       docTitle: state.doc?.name || '',
-      history: state.history.map((m) => ({ role: m.role, content: m.content })),
+      history, openSeq: state.openSeq, sid: activeSidFor(state.doc?.docId),
       // 本次发送按**发送框当前范围**决定（四选项里选的那个），不再直接读设置页偏好
       useFullText: SCOPE_RANGES[currentRange()].full,
       useWeb: SCOPE_RANGES[currentRange()].web,
@@ -6104,7 +6179,7 @@ async function send(retryPending = null) {
     pending.scope = SCOPE_RANGES[currentRange()].short;
     // 同一条待发问题在失败或停止后重试时复用这两行，不再追加用户消息。
     pending.userEntry = addEntry({
-      block: 'chat', kind: 'user', text: question, quote: quoteText,
+      block: 'chat', kind: 'user', text: question, quote: reading.selection,
       thumbs: images.map((im) => im.dataUrl),
     });
     pending.entry = addEntry({
@@ -6114,6 +6189,8 @@ async function send(retryPending = null) {
         inputValue: pending.inputValue, question: pending.question, quoteText: pending.quoteText,
         firstPage: pending.firstPage, attachments: pending.attachments,
         useFullText: pending.useFullText, useWeb: pending.useWeb,
+        scopeRange: pending.scopeRange,
+        reading, history,
       },
     });
     // 回答存笔记时标题默认用用户的问题（会话恢复时另有一处从历史里回填）
@@ -6125,7 +6202,7 @@ async function send(retryPending = null) {
     pending.entry.acts.replaceChildren();
     pending.entry.acts.classList.add('hidden');
     pending.entry.root.classList.remove('err', 'error');
-    pending.entry.root.querySelectorAll('.entry-meta, .src-list').forEach((node) => node.remove());
+    pending.entry.root.querySelectorAll('.entry-meta, .source-details, .src-list').forEach((node) => node.remove());
     const record = pending.entry.root.__sessionRecord;
     if (record) { record.text = ''; record.meta = ''; record.status = 'pending'; }
   }
@@ -6152,10 +6229,20 @@ async function send(retryPending = null) {
   let meta = '';
   let docCtx = null;
   try {
+    const reading = pending.reading || resolveReadingRequest({ question: pending.question,
+      selection: pending.quoteText, page: pending.firstPage, history: pending.history });
+    pending.reading = reading;
     // 没有选区时也带当前页上下文；整篇论文仍只有在用户点「整篇」后才加入。
-    const context = pending.firstPage && pending.docId
-      ? await viewer.getContextAround(pending.firstPage, pending.quoteText)
-      : '';
+    const quotes = pending.attachments.filter((a) => a.kind === 'text');
+    const contextParts = quotes.length ? await Promise.all(quotes.slice(0, 6).map(async (a) => {
+      const nearby = await viewer.getContextAround(a.page || pending.firstPage, a.text);
+      return nearby ? `[第${a.page || pending.firstPage}页]\n${nearby}` : '';
+    })) : [pending.firstPage && pending.docId
+      ? await viewer.getContextAround(reading.page || pending.firstPage, stripPageLabels(reading.selection)) : ''];
+    const context = [...new Set(contextParts.filter(Boolean))].join('\n\n');
+    const references = await readingReferences(reading.selection);
+    if (!readingRequestCurrent(pending)) return;
+    if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
     pending.scope = sendScopeText({
       attachments: pending.attachments, history: pending.history,
       useFullText: pending.useFullText, useWeb: pending.useWeb,
@@ -6164,11 +6251,12 @@ async function send(retryPending = null) {
     state.activeSendScope = pending.scope;
     updateSendScope();
 
-    // ① 联网搜索：仅当用户输入了问题时运行，附件识别提示不会触发联网搜索。
-    if (pending.useWeb && pending.inputValue.trim()) {
+    // 联网是允许查找材料；短追问先确定对象，纠正消息和纯问号不会拿去检索。
+    if (pending.useWeb && (!images.length || pending.inputValue.trim() || reading.selection)
+      && webQueryFor(pending.question, reading.selection, { reading })) {
       setHint('正在联网搜索…');
       try {
-        sources = await webSearch(webQueryFor(pending.question, pending.quoteText), ctl.signal);
+        sources = await readingSources(reading, references, ctl.signal);
         setHint(sources.length ? `搜到 ${sources.length} 条来源` : '没搜到相关结果，只用论文内容回答');
       } catch (e) {
         if (isAbort(e)) throw e;
@@ -6180,7 +6268,7 @@ async function send(retryPending = null) {
     // ② 整篇论文上下文。长文会降为阅读索引和与问题相关的段落。
     if (pending.useFullText && pending.docId) {
       try {
-        docCtx = await buildDocContext(pending.question, pending.quoteText);
+        docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text);
       } catch (e) {
         if (isAbort(e)) throw e;
         docCtx = null;
@@ -6200,15 +6288,18 @@ async function send(retryPending = null) {
     state.activeSendScope = pending.scope;
     updateSendScope();
 
+    if (!readingRequestCurrent(pending)) return;
+    if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
     const messages = askMessages({
       question: pending.question,
-      selection: pending.quoteText,
+      selection: reading.selection,
       context,
       page: pending.firstPage,
       docTitle: pending.docTitle,
       fullText: docCtx?.text,
       webResults: sources,
       history: pending.history,
+      reading, references,
     });
     if (images.length) {
       const last = messages[messages.length - 1];
@@ -6226,22 +6317,21 @@ async function send(retryPending = null) {
       onDelta: (piece, all) => { received = all; target.push(all); },
       onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
     });
-    if ((state.doc?.docId || null) !== pending.docId) return;
+    if (!readingRequestCurrent(pending)) return;
     target.done(full);
-    state.history.push({ role: 'user', content: pending.question });
-    state.history.push({ role: 'assistant', content: full });
-    finishEntry(pending.entry, full, { page: pending.firstPage, sources, meta, status: 'complete' });
+    state.history = snapshotHistory([...state.history, ...readingTurn(reading, full)]);
+    finishEntry(pending.entry, full, { page: pending.firstPage, sources: citedSources(full, sources), meta, status: 'complete' });
     const sentIds = new Set(pending.attachments.map((a) => a.id));
     state.attachments = state.attachments.filter((a) => !sentIds.has(a.id));
     renderAttachments();
     scheduleSessionSave();
   } catch (e) {
-    if ((state.doc?.docId || null) !== pending.docId) return;
+    if (!readingRequestCurrent(pending)) return;
     if (isAbort(e)) {
       // 保留已经收到的回答；状态放在回答下方，绝不覆盖回答正文。
       target.done(received);
       finishEntry(pending.entry, received, {
-        page: pending.firstPage, meta, status: 'stopped', onRetry: () => send(pending),
+        page: pending.firstPage, sources: citedSources(received, sources), meta, status: 'stopped', onRetry: () => send(pending),
       });
     } else {
       target.fail(errText(e));
