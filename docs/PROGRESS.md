@@ -2368,12 +2368,14 @@ zoom-touch **52/52**、zoom **39/39**、selection 31/31、cjk 11/11。
 - 40 个提交、425 个文件、只有 `main` 一个分支；
 - **凭据 0 命中**：用当时的 VPS 公网 IP、以及两种代理协议的地址前缀作关键词，对 `$(git rev-list --all)` 全历史 `git grep`，无任何结果（本文件里也不写这些明文）；
 - **垃圾路径 0 命中**：`internal/`、`archive/`、`brightness`、`profile-launch` 在所有提交的文件名里都不存在；
-- 文档相对链接 37 条 **0 坏链**；
+- 文档相对链接 35 条 **0 坏链**；
 - 工作树 14.8 MB + `.git` 9.7 MB；历史里最大文件从 4.2 MB 的 Chrome 缓存降到 1.26 MB 的 `pdf.worker.min.mjs`（正常资源）。
 
-### 41.4 遗留（需要本人动手）
+### 41.4 遗留
 
-- 这些凭据**曾经存在于 GitHub 私有仓库历史中**：仓库已私有 + 历史已抹，但最彻底的收口是
-  **在 VPS 上改掉 hysteria2 密码、重新生成 vless UUID、换 SSH 密钥**。
+- **凭据已随 VPS 释放作废（用户确认，2026-10-22）**：那台机器已释放，仓库历史里那批
+  hysteria2 密码 / vless UUID / SSH 登录**已不可用，无需再做轮换**。本次清理到此完全收口。
 - 其它机器上的旧克隆的 SHA 已全部变化，需要 `git fetch origin && git reset --hard origin/main`（或重新 clone）。
 - 本机 `.git` 里的 `refs/codex/*` 是 Codex 工具自己的快照引用（tree，不是提交，不在远端），未动。
+- 重写前的全量备份 `backup/prt-pre-rewrite-20261022.bundle`（16.6 MB，含旧历史与旧凭据）
+  只在本机、被 `.gitignore` 排除；**确认不需要回滚后可删**。
