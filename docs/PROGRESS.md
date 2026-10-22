@@ -354,7 +354,7 @@ x=0–7 纯白 min=255），且独立量出折叠态"左竖边 4px 高向右收�
 2. `import.meta.dirname` 层级别数错：采集脚本在 `test/artifacts/preview/`，
    写 `'..','..'` 得到 `test/` 而不是 `test/artifacts/`，产物落错位置（已移回）。
 
-**专项证据**：[`../test/artifacts/r7-visual-20261003/RESULTS.md`](../test/artifacts/r7-visual-20261003/RESULTS.md)
+**专项证据**：本机 `test/artifacts/r7-visual-20261003/RESULTS.md`（测试产物不进仓库）
 （含 7 张复核小图 `crops/` 与 14 张全页图 `shots/`）。回退点 `backup/r7-before-20261003-135406/public/`。
 
 **仍未做**：D1 对比度（用户决定暂缓）、D5 图标（复现不了）、结果块底部渐隐提示、
@@ -433,7 +433,7 @@ x=0–7 纯白 min=255），且独立量出折叠态"左竖边 4px 高向右收�
 **没有放宽断言**）；随后 `e2e` 110/112 才是**夹具污染**（同一 exe 连跑 8 个套件），
 清沙箱单独跑即 **112/112**。
 
-**专项证据**：[`../test/artifacts/r8-ocr-20261003/RESULTS.md`](../test/artifacts/r8-ocr-20261003/RESULTS.md)。
+**专项证据**：本机 `test/artifacts/r8-ocr-20261003/RESULTS.md`（测试产物不进仓库）。
 OCR 现场截图：`test/artifacts/scan-run/ocr.png`、`test/artifacts/scan-fail/ocr-retry.png`。
 
 **未做**：没有用**真实付费视觉模型**跑过真实扫描件（按规则不调用真实 API）；
@@ -2327,3 +2327,53 @@ zoom-touch **52/52**、zoom **39/39**、selection 31/31、cjk 11/11。
 隔离实例 + puppeteer **11/11** —— 内嵌 `app.js` 已无 `onJank`、页面正常进阅读态（16 页、
 5 张 canvas、0 条 pageerror）、连续滚动 60 次后 `#toastWrap` 里**0 条** toast、
 而 `window.__jankLog` 仍有 **2 条**静默记录（证明只是不弹 UI，不是把自检删了）。
+
+---
+
+## 41. GitHub 仓库整理（2026-10-22）
+
+用户口径：「将现在的项目同步到 github 上，然后需要把 GitHub 仓库整理一下」
++「安全问题你自己决定，直接处理完，不要再问我任何东西」。
+
+### 41.1 查到的问题（全历史扫描 `git log --all --name-only` + `git grep`）
+
+1. **真实凭据在版本控制里**：`docs/internal/VPS使用说明.md`、`挂GPT最简说明.md`、`给同学的说明.md`
+   含 VPS 公网 IP、SSH 别名、hysteria2 明文密码、vless UUID；其前身还以根目录同名文件的形式
+   存在过更早的提交 —— 也就是说**几十个提交**里都有。另有 `tools/internal/`（DSH 内部脚本，与本项目无关）。
+2. **仓库垃圾**：`archive/android`（旧安卓壳，7.4 MB 前端资源重复副本）、`brightness-research-report.md`
+   （与本项目无关的个人调研）、历史里的 `test/profile-launch-*`（Chrome 用户目录，单个 blob 最大 4.2 MB；
+   2026-10-06 清过工作区，但**历史里一直在**）。
+3. **远端废分支**：`legacy-20260921`（2026-09-21 的旧快照）。
+
+### 41.2 处理顺序（先备份 → 再改当前版本 → 最后重写历史）
+
+1. **备份**：`git bundle create backup/prt-pre-rewrite-20261022.bundle --all`（17.4 MB，`git bundle verify` 通过；`backup/` 不进仓库）。
+2. **当前版本整理**（提交 `b0901ea`）：上述路径 `git rm --cached`（**本地文件全部保留**）并写进 `.gitignore`；
+   `docs/` 收敛为 3 份长期文档（PROGRESS / 使用说明书 / 触摸屏缩放丝滑化）+ 新增 `docs/README.md` 索引，
+   其余 14 份过程文档 `git mv` 进 `docs/archive/`；README 的 27 条反馈对照表也移入 archive，
+   目录结构 / 测试 / 文档三节同步更新，修掉已移除的 OCR 说明；AGENTS.md 加「本机资料不进仓库 / 不要 `git add -A`」。
+3. **历史重写**：`git filter-branch --index-filter 'git rm -r --cached --ignore-unmatch --pathspec-from-file=…' --prune-empty -- refs/heads/main`
+   —— 路径表 10 条：`docs/internal`、`tools/internal`、`archive`、`android`、
+   `brightness-research-report.md`、`VPS使用说明.md`、`挂GPT最简说明.md`、`给同学的说明.md`、`vps-run.ps1`、`test/profile-*`。
+   43 个提交 → **40 个**（4 个只含被删路径的空提交被 `--prune-empty` 剪掉）；`--force-with-lease` 推送，
+   删除远端 `legacy-20260921`，本地 `reflog expire --expire=now --all` + `gc --prune=now --aggressive`（`.git` ~33 MB → **9.3 MB**）。
+   > 踩坑：filter-branch 的 index-filter 在 `.git-rewrite/t` 里跑（不是仓库根），所以路径表要用**绝对路径**；
+   > 且 `--pathspec-from-file` 的值不能带空格（改用 8.3 短路径 `C:/Users/WANGWE~1/...`）。
+4. **收尾**（提交 `86aeec3` + 本节）：`.gitignore` 里裸写 `archive/` 是**任意层级**匹配，把 `docs/archive/` 也挡了
+   （对照表一度没进仓库），改成 `/archive/`、`/android/` 只匹配仓库根并补回文件；
+   PROGRESS 里两条指向 `test/artifacts/` 的历史链接改成纯代码字（测试产物本就不入库）。
+
+### 41.3 验收（从 GitHub 全新 clone 复验）
+
+- 40 个提交、425 个文件、只有 `main` 一个分支；
+- **凭据 0 命中**：用当时的 VPS 公网 IP、以及两种代理协议的地址前缀作关键词，对 `$(git rev-list --all)` 全历史 `git grep`，无任何结果（本文件里也不写这些明文）；
+- **垃圾路径 0 命中**：`internal/`、`archive/`、`brightness`、`profile-launch` 在所有提交的文件名里都不存在；
+- 文档相对链接 37 条 **0 坏链**；
+- 工作树 14.8 MB + `.git` 9.7 MB；历史里最大文件从 4.2 MB 的 Chrome 缓存降到 1.26 MB 的 `pdf.worker.min.mjs`（正常资源）。
+
+### 41.4 遗留（需要本人动手）
+
+- 这些凭据**曾经存在于 GitHub 私有仓库历史中**：仓库已私有 + 历史已抹，但最彻底的收口是
+  **在 VPS 上改掉 hysteria2 密码、重新生成 vless UUID、换 SSH 密钥**。
+- 其它机器上的旧克隆的 SHA 已全部变化，需要 `git fetch origin && git reset --hard origin/main`（或重新 clone）。
+- 本机 `.git` 里的 `refs/codex/*` 是 Codex 工具自己的快照引用（tree，不是提交，不在远端），未动。
