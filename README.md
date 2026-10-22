@@ -23,7 +23,7 @@ PDF 不离开本机；问答默认只发送选中文字和当前页上下文，�
 | **自动适配** | 打开论文按窗口宽度自动铺满，窗口缩放跟着变；手动缩放过就不再抢 |
 
 > 规划中：**Coach 模式**（苏格拉底式多轮：它问、你答、答完才往下讲）。
-> 调研与设计见 [`docs/paper-explainer-plan.md`](docs/paper-explainer-plan.md)。
+> 调研与设计见 [`docs/archive/paper-explainer-plan.md`](docs/archive/paper-explainer-plan.md)。
 
 ---
 
@@ -231,37 +231,12 @@ node e2e.mjs
 
 ---
 
-## 逐条对照你的反馈
+## 开发记录
 
-| # | 反馈 | 根因 | 修法 | 验证 |
-|---|---|---|---|---|
-| 1 | 放大之后就不清晰 | 高倍下单页 canvas 涨到 **69.8 MP（≈280MB）**，多页叠加爆显存，浏览器静默降采样 | 高倍时**只渲染可见切片** + 至少 2× 超采样 | 444% 时密度仍 2.0、面积封顶 17.7MP |
-| 2 | 界面不能拖动 | 固定列宽 | 左右分隔条可拖 | 210→300px、360→430px |
-| 3 | 设置太复杂 | 低频样式和核心选项混在一起 | 主题 / 结果密度直接可见，其余低频项收进「更多样式」 | 核心可见；展开后保留全部旧控件 |
-| 4 | 要单独的大小调节 | 只有 ± | 独立「大小」控件：`−` + **滑块** + `+` + `⤢` | 拖到 250% → scale=250% |
-| 5 | **翻译功能不正常** | 重写时丢了 `onDelta` —— 译文只在整段生成完后一次性出现 | 四个调用点补回逐块渲染 | 第一块 **420ms** / 全部 2470ms（17%） |
-| 6 | 问和解释没区别 | 「问」直接发请求了 | **释 = 直接输出**；**问 = 只放引用不发请求** | 点「问」新请求数 = 0 |
-| 7 | 选中的词和送去的词差几位 | pdf.js 用 `scaleX()` 压整段文字，命中测试差 1~2 字符 | 换成等效 `letter-spacing` | 真实拖选 35% 处 **26/26 零误差** |
-| 8 | 等很久没输出像卡住 | ①同 5；②上游回 JSON 时代理仍贴 `text/event-stream` 标签（**Node 和 Rust 两侧都有**）；③没有超时 | ①逐块渲染；②透传上游 content-type；③客户端空闲看门狗 + 服务端空闲超时 + 「■停止」和计时 | 卡死用例 4.0s 后明确报错 |
-| 9 | 除核心按键外全部移除 | — | 删掉标签页、快捷行、术语表、预设、温度、字号等 | 审计：标签页 0 / 折叠 0 / 术语表 0 |
-| 10 | 桌面应用，不依赖浏览器 | — | Rust + wry/tao + WebView2 原生窗口，前端编译进 exe | 窗口句柄 + 标题校验通过 |
-| 11 | 右侧做成 Copilot 那样，不要折叠 | 卡片式 | 扁平对话流：小圆标 + 类型 + 页码，引用用细竖线 | `details=0`、无圆角卡片、无左边框 |
-| 12 | 搜索一个词整排变黄 | `_paintHits` 标的是整个 span（pdf.js 的 span 常是一整行） | 用 Range 精确到**命中的字符区间** | 最宽高亮 105px / 页宽 888px = **12%** |
-| 13 | 动作条里出现 `null` | `Element.append(null)` 会插入文本 "null" | 统一走 `appendAll()` 过滤空值 | 断言动作条无 `null` |
-| 14 | 输入框很难看 | 替换右栏样式时把 `.composer` 整段 CSS 删掉了 | 补回并做成圆角外框、按钮在框内 | 输入框容器/按钮尺寸断言 |
-| 15 | 「看图」是干什么的 | 名字不自解释 | 每块加用途说明 + 开关悬停提示 + 空态列出三块用途 | 断言说明文本存在 |
-| 16 | 笔记功能没用 | 只能存高亮，没法写字，文中也没标记 | 可写笔记 + 文中边缘书签（可点开）+ 列表可编辑 | 写入→文中标记→点开→改→刷新仍在 |
-| 17 | 正文引用能不能跳转 | — | `[n]` 标成可点，点了跳到文末条目并弹出来 | 第 3 页 22 处标记，点 `[11]` → p.11 |
-| 18 | 引用论文能不能自动找到 PDF | — | 后端 `/api/ref-search`：arXiv → OpenAlex → Crossref，前端给直链 + 复制 | 首条即 `arxiv.org/pdf/1706.03762` |
-| 19 | AI 区要可选 / 分块 / 随便调 / 上下换位 | 只有一个固定时间线 | 三块独立：开开关、拖分隔条调高、拖块头换位；开关栏放输入框下面 | 高度 259/260→329/190，顺序 translate>chat→chat>translate |
-| 20 | 「问」不需要，改成 Add to Chat，可加多个 | 原来是「放引用再问」的单步流程 | 去掉「问」，改成 **＋对话**：选中的文字/截图都进附件区，可以连续加很多个，再自己提问 | 连加 2 段后附件区 2 项；发送请求里带全部原文 |
-| 21 | 要支持选中图片、截屏、滚动截屏 | 框选只能截视口内、且会立刻自动问 AI | 截图/长截图都变成**对话图片附件**；拖到正文区上下边缘**自动滚动**，从 PDF 重新渲染拼成一张竖图 | 跨 p.1–3 长图 3000px 高；2 张图作为多模态内容发出 |
-| 22 | 把「看图」去掉 | 图片现在归对话 | AI 区只剩译文 / 问答两块 | 开关栏只有 2 个按钮 |
-| 23 | 选中文字上下有重叠 | 原生 `::selection` 画的是行盒，pdf.js 行盒比行距高 | 原生选区设透明，改成**自绘不重叠方块**（重叠部分对半分） | 选中 6 行时重叠对数 = **0** |
-| 24 | 笔记不要高亮 | 之前笔记 = 高亮 | 笔记只在页边留一个小书签，正文不加黄色块 | `.hl-mark` 数 = 0，书签 = 1 |
-| 25 | 截图用不了 | **`✂` 按钮绑的 `startRegion` 函数根本不存在**（点了直接抛 ReferenceError）；而且 `captureToChat` 里有个多余的 `ensureReady()`，**没配 API Key 时截图会被静默拦掉**（截图本来不需要密钥） | 补上 `startRegion` 并让 `⎚` / `✂` 走同一入口；去掉截图路径上的密钥检查 | ✂ 能进截图模式并高亮；**没配 Key 时截图照样成功、不弹设置框** |
-| 26 | API Key 填一次就存下来 | Key 本身一直是存 `data/config.json` 的，但**我清过两次 `data/`**，而且**测试脚本每次跑都会把它覆盖成假 key** | 测试改为**拒绝式护栏**：`test/_env.mjs` 要求被测服务的 data 目录必须位于 `test/artifacts/` 下，否则在任何写请求之前直接抛错退出；不再快照、也不再触碰真实 `data/` | 填一次→刷新→仍是「已保存」；跑完 145 项测试后你填的 key 一字未动；用你的 key 真实调用 DeepSeek 成功 |
-| 27 | `＋对话` 超出框了 | 气泡按钮写死 `width: 28px`（按单字设计的），「＋对话」三个字溢出 | 改成 `min-width: 28px; width: auto; padding: 0 7px` | 按钮宽度 译28 / 释28 / **＋对话53** / ✎28 / ⧉28，全部 `scrollWidth ≤ clientWidth` |
+需求 → 根因 → 修法 → 验证的**逐条对照（27 条）**见
+[`docs/archive/开发记录-用户反馈对照.md`](docs/archive/开发记录-用户反馈对照.md)；
+逐轮改造过程（触摸屏手势、渲染倍率、书架、仓库卫生…）见
+[`docs/PROGRESS.md`](docs/PROGRESS.md)。
 
 ---
 
@@ -269,29 +244,33 @@ node e2e.mjs
 
 ```
 prt/
-├── 论文阅读器.exe          桌面应用（双击即用；也可自己 build）
+├── 论文阅读器.exe          桌面应用（双击即用；也可自己 build，产物不进仓库）
 ├── 启动.bat / start.bat    浏览器模式（开发调试用）
 ├── server.js               Node 版后端（零依赖）：静态托管 + AI 转发 + 联网搜索 + 文献检索 + PDF 导入 + 存储
+├── security.js             服务端安全模块（server.js 与多套测试共用）
+├── model-profiles.js       模型预设（Node 版后端用）
 ├── desktop/                Rust 桌面壳：原生窗口 + 内嵌前端 + 同款 HTTP 接口
-│   ├── src/{main,window,server,api,chat,store,assets,util}.rs
+│   ├── src/{main,window,server,api,chat,store,assets,auth,limits,util}.rs
 │   ├── build.bat           一键编译 + 复制 exe + 校验 SHA256（会先碰 assets.rs，保证新增前端文件被嵌进去）
 │   └── tools/              假 OpenAI 服务、验收脚本
 ├── public/                 前端（桌面版与浏览器版共用同一份，零依赖、无打包）
 │   ├── index.html  style.css
-│   ├── js/{app,pdfview,ai,util,ops}.js
+│   ├── js/{app,pdfview,ai,util,ops,icons,reading-context}.js
 │   │                       ops.js = 「论文操作」目录（15 个操作的 prompt 都在这里）
 │   └── vendor/             pdf.js + KaTeX（都本地内置，不走 CDN）
-├── papers/                 放 PDF
-├── data/                   运行时：config.json（含密钥）、state.json、notes-*.json、webview2/
-│                           ⚠️ 不要提交到 git，见 .gitignore
-├── test/                   自动化测试（26 个 .mjs：17 个套件 + 诊断/打包脚本，见「测试」一节）
-├── backup/                 改造期间每个阶段的 public/ 回退副本（逐文件 SHA256 可比对）
-├── docs/PROGRESS.md        改造进度（一页式现状：阶段状态 / 交付物 / 验证矩阵 / 待拍板）
-├── docs/refactor-baseline-phase0.md  基线冻结与各阶段细则
-└── docs/paper-explainer-plan.md      Coach/操作模块的调研与设计
+├── papers/                 放 PDF（不进仓库）
+├── data/                   运行时：config.json（含密钥）、state.json、notes-*.json、webview2/（不进仓库）
+├── test/                   自动化测试（40+ 个 .mjs：套件 + perf 调研脚本，见「测试」一节）
+├── docs/                   长期文档：PROGRESS / 使用说明书 / 触摸屏缩放丝滑化
+│   └── archive/            历史过程文档（交接提示词、审计清单、旧设计稿…共 15 份）
+├── backup/                 本机快照（不进仓库）
+└── AGENTS.md               给接手的人（或 AI）看的项目约定
 ```
 
-> `data/` 和 `papers/` 都在 `.gitignore` 里 —— 前者含你的 API Key，后者是你的论文。
+> `data/`、`papers/`、`backup/`、`archive/`、`docs/internal/`、`tools/internal/` 都在 `.gitignore` 里
+> —— 前两个是密钥和论文，`archive/` 是旧 Android 壳，`*/internal/` 是 VPS 等私人资料。
+> 详细清单见 [`.gitignore`](.gitignore)，文档分类见 [`docs/README.md`](docs/README.md)。
+
 
 ---
 
@@ -300,7 +279,7 @@ prt/
 跑法见上面「从源码跑」一节（要点：**隔离实例 + 每个套件前清空隔离 data + 先塞一个假 Key**）。
 进度与当前状态见 [`docs/PROGRESS.md`](docs/PROGRESS.md)；
 完整的隔离 harness 配方、冻结基线和逐阶段记录在
-[`docs/refactor-baseline-phase0.md`](docs/refactor-baseline-phase0.md)。
+[`docs/archive/refactor-baseline-phase0.md`](docs/archive/refactor-baseline-phase0.md)。
 
 | 套件 | 覆盖 | 基线结果（2026-09-27） |
 |---|---|---|
@@ -312,7 +291,7 @@ prt/
 | `cards.mjs` | 弹层拖动 / 自适应宽度 / 窄窗正文保护 | **41 / 41** |
 | `selection.mjs` | 选区覆盖层与命中精度 | **31 / 31** |
 | `zoom.mjs` | 缩放不闪灰条 / 清晰度 | **17 / 17** |
-| `zoom-touch.mjs` | 触摸屏捏合：只缩放 PDF、不缩放界面、跟手不飘、主线程预算 | **20 / 20**（2026-10-08 新增） |
+| `zoom-touch.mjs` | 触摸屏捏合：只缩放 PDF、不缩放界面、跟手不飘、主线程预算 | **51 / 51**（2026-10-08 新增，10-10 补到 51） |
 | `stream.mjs` | 真实流式 / 停止 / 非流式回退 | **14 / 14** |
 | `cjk.mjs` | 中文 PDF + 文本层对齐 | **11 / 11** |
 | `links.mjs` | 外链一律交给系统浏览器 | **24 / 24** |
@@ -324,7 +303,12 @@ prt/
 | `desktop/tools/acceptance.ps1` | Rust 侧 HTTP / 流式 / 并发 / 安全 | **91 / 91** |
 
 零控制台报错、零页面异常。截图在 `test/artifacts/`。
-上表是 **2026-10-02** 在隔离实例上的实测值（详见 [`docs/refactor-baseline-phase0.md`](docs/refactor-baseline-phase0.md)）。
+上表是 **2026-10-02** 在隔离实例上的实测值（详见 [`docs/archive/refactor-baseline-phase0.md`](docs/archive/refactor-baseline-phase0.md)）。
+
+> **2026-10-13 ～ 10-18 增量**：新增 `library.mjs`（书架：批量导入 / 拖拽排序 / 删除文件）、
+> `qa.mjs`（问答回归）、`refsearch.mjs`（参考文献检索）、`translation-layout.mjs`（译文块布局）、
+> `sidebar-reopen.mjs`（侧栏重开）、`ai-send-regression.mjs`、`test/perf/` 下 7 个调研脚本；
+> 这批套件在隔离实例上全绿。
 
 > **2026-10-08 / 10-10 增量**：`zoom.mjs` 17 → **39** 条（补「队列外的页滚进视口会自动重画」+ 底栏缩放滑块 3 条
 > + 「放大之后的清晰度」9 条：dpr 1/2 × 2.3/3.5/5× 的位图密度，要求 ≥ 0.9×dpr，且单张位图 ≤ 10 MP
@@ -364,6 +348,18 @@ prt/
 
 ---
 
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/README.md`](docs/README.md) | 文档索引（长期文档 / 历史归档 / 本机私人资料的分界） |
+| [`docs/使用说明书.md`](docs/使用说明书.md) | 界面与操作说明 |
+| [`docs/PROGRESS.md`](docs/PROGRESS.md) | 逐轮改造记录（需求 → 根因 → 改法 → 验收） |
+| [`docs/触摸屏缩放丝滑化.md`](docs/触摸屏缩放丝滑化.md) | 触摸屏手势 / 渲染倍率的专项技术记录 |
+| [`docs/archive/`](docs/archive/) | 历史过程文档（交接提示词、审计清单、早期设计稿等 15 份，不再维护） |
+
+---
+
 ## 隐私
 
 - 只监听 `127.0.0.1`，不对局域网暴露（实测局域网 IP 访问超时）
@@ -379,18 +375,18 @@ prt/
 
 ## 已知限制
 
-- **扫描版 PDF** 没有文本层，划词无效 → 用顶栏「⬚」整篇 OCR，或用「⎚ 框选」交给视觉模型
+- **扫描版 PDF** 没有文本层，划词无效 → 用「⎚ 框选」把那块区域交给视觉模型（整篇 OCR 已在 2026-10 移除）
 - **双栏排版**跨栏划选可能把两栏文字混在一起（按列重排未做）
 - 引用跳转依赖 PDF 文本层里的 `[n]` 编号和文末文献列表；**作者-年份制**的引用（如 `(Vaswani et al., 2017)`）暂时点不了
 - 文献检索靠三个公开接口，**需要联网**；冷门文献或有付费墙的论文可能只有 DOI 落地页，没有免费 PDF
 - 一次只能开一篇论文
-- 扫描版 OCR 逐页发图，**页数多的论文会比较慢**，而且需要支持图片输入的模型
+- 扫描版交给视觉模型时会逐块发图，**页数多的论文会比较慢**，而且需要支持图片输入的模型
 
 ---
 
 ## 为什么长这样
 
-完整调研见 [`docs/RESEARCH.md`](docs/RESEARCH.md)。一句话：
+完整调研见 [`docs/archive/RESEARCH.md`](docs/archive/RESEARCH.md)。一句话：
 
 > 「开源 + 划词 + 本地 + 自带阅读器」这个组合，在调研范围内不存在 —— 做划词的都要装 Zotero 或没有阅读器，
 > 做全文对照的全是 Python + ONNX 的离线批处理，闭源阵营全是把论文上传到云端的 SaaS。

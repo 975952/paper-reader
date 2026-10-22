@@ -30,6 +30,21 @@ Thumbs.db
 dsh-phone-bridge.mjs
 check_python_env.py
 
+# 本机内部资料 / 与本项目无关、**永远不进仓库**的东西（2026-10-22 仓库整理）
+#   docs/internal/      VPS、代理、SSH 等私人资料（曾误提交，已从全部历史抹掉）
+#   tools/internal/     DSH 等 AI 工具的内部脚本
+#   archive/            旧 Android 壳（7MB 重复的前端副本），只留本机
+#   brightness-*.md     与本项目无关的个人技术调研报告
+docs/internal/
+tools/internal/
+archive/
+android/
+brightness-research-report.md
+VPS使用说明.md
+挂GPT最简说明.md
+给同学的说明.md
+vps-run.ps1
+
 # 本地快照与临时目录（体积大、且不是源码）——2026-10-04 推 GitHub 前补上
 backup/
 .tmp-vps/

@@ -26,3 +26,8 @@
    **改之前先 `git commit` 一次**，改坏了 `git checkout` 就能回退；
    `test/pack.mjs` 打的源码 zip 是第二道保险（2026-10-06 修好了它漏掉 `security.js` 的白名单）。
    注意 `data/`、`papers/` 永远不进 git，也不要进 zip。
+8. **本机专属资料永远不进仓库**（`.gitignore` 已挡，2026-10-22 整理时还从**全部 git 历史**里抹掉了）：
+   `docs/internal/`（VPS/SSH/代理等私人资料）、`tools/internal/`（DSH 等工具内部脚本）、
+   仓库根的 `archive/`（旧 Android 壳）、`brightness-research-report.md`。
+   `docs/` 只留长期文档（PROGRESS / 使用说明书 / 触摸屏缩放丝滑化），历史过程文档在
+   `docs/archive/`，分类见 `docs/README.md`。**不要 `git add -A` 一把梭**——历史上就是这么把内部资料带进仓库的。
