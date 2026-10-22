@@ -37,8 +37,8 @@ check_python_env.py
 #   brightness-*.md     与本项目无关的个人技术调研报告
 docs/internal/
 tools/internal/
-archive/
-android/
+/archive/
+/android/
 brightness-research-report.md
 VPS使用说明.md
 挂GPT最简说明.md
