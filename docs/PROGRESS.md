@@ -2305,3 +2305,25 @@ dpr=2 完全不变（1.87 / 2 / 2）。滚动代价同量级（fit 1 次重画 /
 
 **验收**：exe 重编后（**10,327,040 B**，两副本 sha 一致）desktop **52/52**、
 zoom-touch **52/52**、zoom **39/39**、selection 31/31、cjk 11/11。
+
+---
+
+## 40. 去掉右下角的「掉帧」提示框（2026-10-22）
+
+用户口径：「把现在的那些右下角的画面渲染的提示，就是什么掉帧多少啊，之类的提示框全部去掉」
+
+**根因**：`pdfview.js` 的掉帧自检（§38.8 装了 `_watchJank()`）在真卡时通过
+`opts.onJank` 往 app.js 报一条**带数字**的 toast（`.toast.err`，6s）。而 `.toast-wrap`
+在 UI refresh 之后固定停在右下角，于是滚动 / 捏合时偶尔冒出一条红色的
+「掉帧：滚动 1420ms，86 帧 平均 24ms / 最长 320ms，掉 21 帧…」浮层。
+
+**改法**：只删这条**界面出口**，采集侧一行不动 ——
+- `app.js` 的 viewer opts 里删除 `onJank: (rec, text) => toast(text, 'err', 6000)`，
+  注释写明是用户口径，且 `window.__jankLog` 仍可取证；
+- `pdfview.js` 的 `_reportJank()` 删除 `this.opts.onJank?.(rec, text)`，
+  保留 `console.warn('[perf]', ...)` 与最近 20 条 `window.__jankLog` 记账。
+
+**验收**：两文件 `node --check` 通过；exe 重编（**10,383,360 B**，根目录与桌面副本 sha 一致）；
+隔离实例 + puppeteer **11/11** —— 内嵌 `app.js` 已无 `onJank`、页面正常进阅读态（16 页、
+5 张 canvas、0 条 pageerror）、连续滚动 60 次后 `#toastWrap` 里**0 条** toast、
+而 `window.__jankLog` 仍有 **2 条**静默记录（证明只是不弹 UI，不是把自检删了）。

@@ -324,8 +324,10 @@ export class PdfViewer {
    *   · 只在「有动作」时采样：滚动 / 手势 / 提交；闲置 1.2s 就停掉 rAF，不常驻；
    *   · 一个"动作窗口"里统计帧间隔、掉帧数、长任务，以及这段时间花在重画上的毫秒数；
    *   · 只有真的卡（最长帧 ≥ 100ms 或掉帧比例 ≥ 30%）才回报一次，3 秒内不重复；
-   *   · 回报走 `opts.onJank`（app.js 接到 toast 上），同时在 console 打一行，
-   *     并把最近 20 次记录留在 `window.__jankLog` 里，方便直接抄给我。
+   *   · **不弹任何界面提示**：只 console 打一行，并把最近 20 次记录留在
+   *     `window.__jankLog` 里，方便直接抄给我。
+   *     （2026-10-22 用户口径：右下角那些「掉帧 N 帧」的提示框全部去掉。
+   *      采集逻辑保留，是因为真机手感只能靠它取证 —— 但它只需要静默记账。）
    */
   _watchJank() {
     const p = this._perf = {
@@ -392,7 +394,6 @@ export class PdfViewer {
       + (rec.longMax ? `，单次卡顿 ${rec.longMax}ms` : '')
       + (rec.renderMs ? `，重画占 ${rec.renderMs}ms` : '');
     try { console.warn('[perf]', text); } catch { /* ignore */ }
-    this.opts.onJank?.(rec, text);
   }
 
   /**

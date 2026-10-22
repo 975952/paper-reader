@@ -1940,10 +1940,10 @@ function initViewer() {
       if (box) box.title = busy ? `正在解析 ${done}/${total} 页…` : '';
     },
     onScale: (scale) => syncZoom(scale),
-    /* 掉帧自检的出口（见 pdfview.js 的 _watchJank）：
-       真机上卡不卡只有用户看得见，所以真卡了就弹一条**带数字**的提示，
-       用户可以照原话读给我，不用开 devtools。窗口 6s 内最多弹一次（pdfview 那侧限流）。 */
-    onJank: (rec, text) => toast(text, 'err', 6000),
+    /* 掉帧自检**不再往界面上报**（2026-10-22 用户口径：「右下角那些画面渲染的提示，
+       什么掉帧多少啊，之类的提示框全部去掉」）。
+       采集那一侧还在（pdfview.js 的 _watchJank），但只写 console 和 window.__jankLog：
+       要取证时照旧读得到，界面上不会再冒出「掉帧 N 帧」这类浮层。 */
     /* 双指缩放速度：开局就把存档里的值交给 viewer（触摸屏捏合的跟手倍率），
        之后设置页改动走 viewer.setZoomSpeed()。这样不依赖「先 applyUiStyle 再建 viewer」的顺序。 */
     zoomSpeed: clampZoomSpeed(uiStyle.zoomSpeed),
