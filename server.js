@@ -1520,6 +1520,36 @@ async function handle(req, res) {
     return send(res, 405, 'Method Not Allowed');
   }
 
+  /**
+   * ---- 学习档案（全局一份；不属于任何论文 / 会话）
+   *
+   * 用户口径（2026-10）：「知识库写入的时候应该要带有当时的时间，现在的时间在后续
+   * 过程中要交给模型获得输出」。所以：
+   *   · 时间戳由**前端**在写入时生成（客户端本地时区），服务端只校验格式、不改写；
+   *   · 这里只负责安全落盘（校验失败不覆盖旧文件），不参与模型调用。
+   */
+  if (pathname === '/api/profile') {
+    if (req.method === 'GET') {
+      const saved = await readDataFile('learning-profile.json', null);
+      if (saved && typeof saved === 'object' && !Array.isArray(saved)) return sendJson(res, 200, saved);
+      return sendJson(res, 200, { version: 1, revision: 0, updatedAt: '', selfReport: '', selfReportAt: '', items: [] });
+    }
+    if (req.method === 'POST') {
+      const raw = await readJsonBodyOrReq(req, res, sec.BODY_LIMITS.profile);
+      if (raw === null) return undefined;
+      const checked = sec.checkProfile(raw);
+      if (checked.error) return sendJson(res, 400, { error: { message: checked.error } });
+      try {
+        await writeDataFile('learning-profile.json', checked.value);
+      } catch (e) {
+        sec.diag(`保存学习档案失败: ${e && e.message}`);
+        return sendJson(res, 500, { error: { message: '保存学习档案失败，请重试' } });
+      }
+      return sendJson(res, 200, { ok: true, revision: checked.value.revision });
+    }
+    return send(res, 405, 'Method Not Allowed');
+  }
+
   // ---- 阅读进度 / 上次打开的文件
   if (pathname === '/api/state') {
     if (req.method === 'GET') return sendJson(res, 200, await readDataFile('state.json', {}));
@@ -1616,6 +1646,20 @@ async function handle(req, res) {
       catch (e) {
         sec.diag(`保存阅读会话失败: ${e && e.message}`);
         return sendJson(res, 500, { error: { message: '保存阅读会话失败，请重试' } });
+      }
+      return sendJson(res, 200, { ok: true });
+    }
+    /**
+     * DELETE /api/session?doc=<doc>[&sid=<sid>] —— 删掉一个会话文件（不碰论文 / 笔记）。
+     * Rust 版（desktop/src/api.rs 的 session()）一直有这个动词；Node 版此前只实现了
+     * GET/POST，于是「删除会话」在浏览器版里静默 405（多会话列表的删除按钮只在 exe 里能用）。
+     * 这里补齐，两套后端行为一致。
+     */
+    if (req.method === 'DELETE') {
+      try { await fsp.rm(path.join(DATA_DIR, file), { force: true }); }
+      catch (e) {
+        sec.diag(`删除阅读会话失败: ${e && e.message}`);
+        return sendJson(res, 500, { error: { message: '删除阅读会话失败，请重试' } });
       }
       return sendJson(res, 200, { ok: true });
     }

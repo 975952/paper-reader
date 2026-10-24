@@ -32,6 +32,8 @@ fn body_limit(path: &str) -> usize {
         "/api/papers" => limits::BODY_STATE,
         "/api/notes" => limits::BODY_NOTES,
         "/api/session" => limits::BODY_SESSION,
+        // 学习档案（2026-10）：正常几 KB，上限与 server.js 的 BODY_LIMITS.profile 一致
+        "/api/profile" => limits::BODY_PROFILE,
         _ => MAX_BODY,
     }
 }
@@ -178,6 +180,7 @@ fn handle(mut rq: Request, ctx: &Ctx) {
         "/api/upload" => return api::upload(rq, &method, &raw_query, &body),
         "/api/config" => return api::config(rq, &method, &body),
         "/api/state" => return api::state(rq, &method, &body),
+        "/api/profile" => return api::profile(rq, &method, &body),
         "/api/notes" => return api::notes(rq, &method, &raw_query, &body),
         "/api/session" => return api::session(rq, &method, &raw_query, &body),
         // 会话列表（2026-10 多会话）。Node 版与 Rust 版必须同时有 —— 少一边就会出现

@@ -3,7 +3,7 @@
 //! 与 `security.js` 一一对应（审计 §P0 请求体白名单、§P1 配置白名单与大小限制、§P2 脱敏）。
 //! 两套后端的判定结果必须一致，所以这里每个常量都注明 Node 那边的对应值。
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 /* ============================================================ 聊天请求体 */
 
@@ -45,8 +45,19 @@ pub const BODY_CONFIG: usize = 1024 * 1024;
 pub const BODY_STATE: usize = 1024 * 1024;
 pub const BODY_NOTES: usize = 4 * 1024 * 1024;
 pub const BODY_SESSION: usize = 16 * 1024 * 1024;
+// 学习档案：全局一份，正常几 KB；与 security.js 的 BODY_LIMITS.profile 一致
+pub const BODY_PROFILE: usize = 512 * 1024;
 #[allow(dead_code)]
 pub const BODY_CHAT: usize = 64 * 1024 * 1024;
+
+/// 学习档案的条目数 / 总字符数 / 单字段长度上限（与 security.js 的 PROFILE_LIMITS 一致）
+pub const PROFILE_MAX_ITEMS: usize = 200;
+pub const PROFILE_MAX_TOTAL_CHARS: usize = 400_000;
+pub const PROFILE_MAX_TOPIC: usize = 120;
+pub const PROFILE_MAX_LEVEL: usize = 300;
+pub const PROFILE_MAX_BOUNDARY: usize = 2_000;
+pub const PROFILE_MAX_SELF_REPORT: usize = 4_000;
+pub const PROFILE_MAX_NOTE: usize = 2_000;
 
 pub const NOTES_MAX_ITEMS: usize = 5_000;
 pub const NOTES_MAX_CHARS: usize = 4 * 1024 * 1024;
@@ -298,6 +309,169 @@ pub fn check_session(payload: &Value) -> Result<(), String> {
         Err(_) => Err("会话包含无法序列化的内容".to_string()),
         Ok(_) => Ok(()),
     }
+}
+
+/* ------------------------------------------------------------ 学习档案 */
+
+fn clip(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
+/// 时间格式与 security.js 的 `ISO_LIKE` 一致：
+/// `YYYY-MM-DDTHH:MM:SS[.mmm](Z|±HH:MM)`。不用正则（Rust 这边没引入 regex），手写逐位判断。
+fn is_iso_like(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() < 20 {
+        return false;
+    }
+    if !(b[4] == b'-' && b[7] == b'-' && b[10] == b'T' && b[13] == b':' && b[16] == b':') {
+        return false;
+    }
+    for i in [0usize, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18] {
+        if !b[i].is_ascii_digit() {
+            return false;
+        }
+    }
+    let mut i = 19usize;
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        let n = i - start;
+        if !(1..=3).contains(&n) {
+            return false;
+        }
+    }
+    let rest = &b[i..];
+    if rest == b"Z" {
+        return true;
+    }
+    rest.len() == 6
+        && (rest[0] == b'+' || rest[0] == b'-')
+        && rest[3] == b':'
+        && rest[1].is_ascii_digit()
+        && rest[2].is_ascii_digit()
+        && rest[4].is_ascii_digit()
+        && rest[5].is_ascii_digit()
+}
+
+/// `/api/profile` 的校验：版本 / 条目数 / 字符串长度 / 时间格式。
+///
+/// 与 `security.js` 的 `checkProfile()`、前端 `public/js/profile.js` 的
+/// `validateProfile()` 保持同一口径。**校验失败绝不落盘**（旧档案原样保留）。
+pub fn check_profile(raw: &Value) -> Result<Value, String> {
+    let obj = match raw {
+        Value::Object(m) => m,
+        _ => return Err("学习档案必须是对象".to_string()),
+    };
+    if obj.get("version").and_then(Value::as_u64) != Some(1) {
+        return Err("学习档案版本不支持".to_string());
+    }
+    let items = match obj.get("items") {
+        Some(Value::Array(a)) => a,
+        _ => return Err("学习档案缺少 items 数组".to_string()),
+    };
+    if items.len() > PROFILE_MAX_ITEMS {
+        return Err(format!("学习档案条目过多（上限 {} 条）", PROFILE_MAX_ITEMS));
+    }
+    let mut out_items: Vec<Value> = Vec::with_capacity(items.len());
+    for (idx, it) in items.iter().enumerate() {
+        let io = match it {
+            Value::Object(m) => m,
+            _ => return Err("学习档案条目必须是对象".to_string()),
+        };
+        let topic = io
+            .get("topic")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if topic.is_empty() {
+            return Err("学习档案条目缺少 topic".to_string());
+        }
+        let status = match io.get("status").and_then(Value::as_str) {
+            Some("pending") => "pending",
+            Some("confirmed") => "confirmed",
+            _ => return Err("学习档案条目状态不合法".to_string()),
+        };
+        let basis = match io.get("basis").and_then(Value::as_str) {
+            Some("user_confirmed") => "user_confirmed",
+            Some("user_self_report") => "user_self_report",
+            Some("model_inferred") => "model_inferred",
+            _ => "user_confirmed",
+        };
+        let created = match io.get("createdAt").and_then(Value::as_str) {
+            Some(s) if is_iso_like(s) => s.to_string(),
+            _ => return Err("学习档案条目缺少合法的 createdAt 时间".to_string()),
+        };
+        let updated = match io.get("updatedAt").and_then(Value::as_str) {
+            Some(s) if is_iso_like(s) => s.to_string(),
+            _ => created.clone(),
+        };
+        let last_confirmed = match io.get("lastConfirmedAt").and_then(Value::as_str) {
+            Some(s) if is_iso_like(s) => Value::String(s.to_string()),
+            _ => Value::Null,
+        };
+        let aliases: Vec<Value> = match io.get("aliases") {
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .take(8)
+                .map(|s| Value::String(clip(s.trim(), PROFILE_MAX_TOPIC)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let source = match io.get("source") {
+            Some(Value::Object(sm)) => json!({
+                "docId": clip(sm.get("docId").and_then(Value::as_str).unwrap_or(""), 120),
+                "paper": clip(sm.get("paper").and_then(Value::as_str).unwrap_or(""), 300),
+                "capability": clip(sm.get("capability").and_then(Value::as_str).unwrap_or(""), 40),
+            }),
+            _ => Value::Null,
+        };
+        let id = match io.get("id").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => clip(s.trim(), 80),
+            _ => format!("kp-{}", idx),
+        };
+        out_items.push(json!({
+            "id": id,
+            "topic": clip(topic.trim(), PROFILE_MAX_TOPIC),
+            "aliases": aliases,
+            "level": clip(io.get("level").and_then(Value::as_str).unwrap_or(""), PROFILE_MAX_LEVEL),
+            "boundary": clip(io.get("boundary").and_then(Value::as_str).unwrap_or(""), PROFILE_MAX_BOUNDARY),
+            "basis": basis,
+            "status": status,
+            "createdAt": created,
+            "updatedAt": updated,
+            "lastConfirmedAt": last_confirmed,
+            "source": source,
+            "note": clip(io.get("note").and_then(Value::as_str).unwrap_or(""), PROFILE_MAX_NOTE),
+        }));
+    }
+    let revision = obj.get("revision").and_then(Value::as_u64).unwrap_or(0);
+    let updated_at = match obj.get("updatedAt").and_then(Value::as_str) {
+        Some(s) if is_iso_like(s) => Value::String(s.to_string()),
+        _ => Value::String(String::new()),
+    };
+    let self_report_at = match obj.get("selfReportAt").and_then(Value::as_str) {
+        Some(s) if is_iso_like(s) => Value::String(s.to_string()),
+        _ => Value::String(String::new()),
+    };
+    let value = json!({
+        "version": 1,
+        "revision": revision,
+        "updatedAt": updated_at,
+        "selfReport": clip(obj.get("selfReport").and_then(Value::as_str).unwrap_or("").trim(), PROFILE_MAX_SELF_REPORT),
+        "selfReportAt": self_report_at,
+        "items": out_items,
+    });
+    if count_chars(&value) > PROFILE_MAX_TOTAL_CHARS {
+        return Err("学习档案内容过大".to_string());
+    }
+    Ok(value)
 }
 
 /* -------------------------------------------------------------- 脱敏 */

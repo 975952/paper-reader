@@ -539,6 +539,48 @@ pub fn state(rq: Request, method: &Method, body: &[u8]) {
     }
 }
 
+/* ---------------------------------------------------------------- 学习档案 */
+
+/**
+ * `/api/profile` —— 学习档案（全局一份，不属于任何论文 / 会话）。
+ *
+ * 用户口径（2026-10）：「知识库写入的时候应该要带有当时的时间，现在的时间在后续
+ * 过程中要交给模型获得输出」。时间戳由**前端**在写入时生成，这里只校验格式、不改写；
+ * 校验失败返回 400 且**不落盘**，旧档案原样保留（与 server.js 一致）。
+ */
+pub fn profile(rq: Request, method: &Method, body: &[u8]) {
+    match method {
+        Method::Get => {
+            let cur = store::read_json("learning-profile.json", Value::Null);
+            if cur.is_object() {
+                send_json(rq, 200, &cur);
+            } else {
+                send_json(
+                    rq,
+                    200,
+                    &json!({ "version": 1, "revision": 0, "updatedAt": "", "selfReport": "", "selfReportAt": "", "items": [] }),
+                );
+            }
+        }
+        Method::Post => {
+            let payload = match parse_json(body) {
+                Ok(v) => v,
+                Err(e) => return send_json(rq, 400, &err_json(&e)),
+            };
+            match limits::check_profile(&payload) {
+                Err(msg) => send_json(rq, 400, &err_json(&msg)),
+                Ok(value) => {
+                    if !store::write_json("learning-profile.json", &value) {
+                        return send_json(rq, 500, &err_json("保存学习档案失败，请重试"));
+                    }
+                    send_json(rq, 200, &json!({ "ok": true, "revision": value["revision"].clone() }))
+                }
+            }
+        }
+        _ => send_text(rq, 405, "Method Not Allowed"),
+    }
+}
+
 /* ---------------------------------------------------------------- 笔记 */
 
 pub fn notes(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
@@ -666,9 +708,10 @@ pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
             }
             send_json(rq, 200, &json!({"ok":true}));
         }
-        // 删掉一个会话文件（不碰论文本身）
+        // 删掉一个会话文件（不碰论文本身）。与 Node 版一致：文件本来就不在也算成功（幂等）。
         Method::Delete => {
-            if store::remove_file(&file) {
+            let existed = store::data_path(&file).exists();
+            if !existed || store::remove_file(&file) {
                 send_json(rq, 200, &json!({"ok":true}))
             } else {
                 send_json(rq, 500, &err_json("删除会话失败"))

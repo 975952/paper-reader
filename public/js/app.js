@@ -12,9 +12,20 @@ import { iconEl, iconHTML, hasIcon } from './icons.js';
 import { PdfViewer, clampZoomSpeed, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX } from './pdfview.js';
 import { OPS, opById } from './ops.js';
 import {
+  TEACHING_OPS, teachingOpById, TEACHING_PROMPT_VERSION, WALK_CONTINUE_SYS, walkReteachSys,
+  PREREQ_ONE_SYS, splitPrtBlock, hideStreamTail, parsePrereqItems, detectPageObjects,
+  pageTextOf, collectDocObjects, sanitiseChips,
+} from './teaching.js';
+import {
+  profileStore, buildProfileBlock, nowISO, nowContext, summary as profileSummary,
+  withConfirmed, withNotKnown, withEdited, withDeleted, withPendingConfirmed, withPendingRejected,
+  withPendingDeleted, withSelfReport, withPendingSuggestions, findItem, profileItemsForMenu,
+  relativeLabel, isoDate, staleness,
+} from './profile.js';
+import {
   Settings, streamChat, testConnection, targetLangFor,
   translateMessages, askMessages, explainMessages, regionMessages,
-  digestMessages, webQueryFor, filterWebResults, opMessages,
+  digestMessages, webQueryFor, filterWebResults, opMessages, teachMessages, condenseMessages,
 } from './ai.js';
 import { resolveReadingRequest, snapshotReadingRequest, snapshotHistory, readingTurn,
   restoreReadingHistory, citedSources, stripPageLabels } from './reading-context.js';
@@ -926,6 +937,14 @@ const state = {
   opsCache: new Map(),
   opsDone: {},
   opsDoc: null,
+  /**
+   * 「读懂论文」的教学状态（随会话存进 session-*.json）：
+   *   walk = { docId, sid, step, messages, updatedAt } —— 「带我一步步读」的进度与续讲历史
+   *   current = 当前教学对象（前置知识单项 / 图表公式对象），给「这个我懂了 / 这里没懂」用
+   * 教学类回答的缓存（带档案版本号）单独放，不混进 opsCache。
+   */
+  teaching: { walk: null, current: null },
+  teachingCache: new Map(),
 };
 
 let viewer = null;
@@ -974,7 +993,11 @@ let serverState = {};
   initDraggableCards();
   initRelations();
   initOps();
+  initProfile();
+  initPageRefs();
 
+  await profileStore.load();
+  renderProfileMenuHint();
   await loadServerState();
   // 服务端记住的「上次打开哪篇」这时才拿到：如果刚才的 reader.ai 迁移还没能认出当前论文，
   // 这里补一次 byDoc 覆盖（只在「刚迁移过」时发生，之后用户怎么摆就怎么算）
@@ -1975,6 +1998,16 @@ function initViewer() {
     buildDocContext, pickRelevantPages, webSearch, renderScopeMenu, PICK_K, openExternal,
     alignProbe: selectionAlignProbe, clearSelectionState,
     OPS, opById, runOperation, doTranslate, doExplain, send, restoreSession, saveSessionNow,
+    // 「读懂论文」：四项教学能力 + 学习档案（自动化直接点这些入口，不必去点菜单）
+    TEACHING_OPS, teachingOpById, runTeaching, continueWalk, runPrereqItem, runVisual,
+    openVisualPicker, detectPageObjects, pageTextOf, collectDocObjects, parsePrereqItems,
+    splitPrtBlock, hideStreamTail, renderAnswerHTML, renderTeachingExtras, teachingEntryFor,
+    get teaching() { return state.teaching; },
+    get profile() { return profileStore.data; },
+    get profileEnabled() { return profileStore.enabled; },
+    profileStore, openProfile, closeProfile, renderProfileModal, PROFILE_INFO: { staleDays: 90 },
+    // 学习档案的行为钩子（测试里用来验证 pending 不参与跳过、时间戳格式等）
+    markTeachingKnown, applyProfileSuggestions,
     get FULL_LIMIT() { return FULL_LIMIT; },
     jumpToPageWithHistory, jumpToDestWithHistory, returnToPreviousPosition,
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
@@ -2735,6 +2768,8 @@ async function openDoc({ name, url, docId }) {
   // 换论文：操作结果不再适用（缓存按 docId 存，别串到新论文头上）
   state.opsDone = {};
   state.opsDoc = null;
+  // 「读懂论文」的教学进度 / 教学对象 / 教学缓存也属于上一篇论文
+  resetTeachingState();
   hideOpsMenu();
   renderRelations();
   // 换论文时把「这次会发什么」重新播报一遍（范围没变，但可用性变了：整篇要有一篇装好的论文）
@@ -4031,7 +4066,7 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
     : null;
   const textEl = el('div', {
     class: 'text',
-    html: text !== undefined ? renderMarkdown(text) : '<span class="cursor"></span>',
+    html: text !== undefined ? renderAnswerHTML(text) : '<span class="cursor"></span>',
   });
   const acts = el('div', { class: 'acts hidden' });
   const root = el('div', { class: `msg ${isUser ? 'user' : 'assistant'}`, dataset: { operation: tag || '', page: page || '' } }, role, ref, shot, textEl, acts);
@@ -4063,7 +4098,7 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   return { root, body: textEl, acts, role };
 }
 
-function finishEntry(entry, fullText, { page, onAsk, onRetry, sources, meta, status = 'complete' } = {}) {
+function finishEntry(entry, fullText, { page, onAsk, onRetry, retryLabel = '', sources, meta, status = 'complete' } = {}) {
   const rec = entry.root.__sessionRecord;
   if (rec) {
     rec.text = String(fullText || '').slice(0, 12000);
@@ -4101,7 +4136,7 @@ function finishEntry(entry, fullText, { page, onAsk, onRetry, sources, meta, sta
       onclick: () => jumpToPageWithHistory(page, { smooth: true }),
     }, iconEl('jump-back')) : null,
     bare ? null : (onAsk ? el('button', { text: '接着问', onclick: onAsk }) : null),
-    onRetry ? el('button', { text: status === 'stopped' ? '重新生成' : '重试', onclick: onRetry }) : null,
+    onRetry ? el('button', { text: retryLabel || (status === 'stopped' ? '重新生成' : '重试'), onclick: onRetry }) : null,
   );
   const extra = [];
   if (sources?.length) extra.push(renderSources(sources));
@@ -4156,6 +4191,20 @@ function serialiseRetryPayload(raw) {
   if (kind === 'operation') {
     return { kind, docId: String(raw.docId || '').slice(0, 240), opId: String(raw.opId || '').slice(0, 120), block: String(raw.block || 'chat').slice(0, 40) };
   }
+  if (kind === 'teaching') {
+    return {
+      kind, docId: String(raw.docId || '').slice(0, 240), opId: String(raw.opId || '').slice(0, 120),
+      block: String(raw.block || 'chat').slice(0, 40),
+      ask: String(raw.ask || '').slice(0, 500),
+      extraUser: String(raw.extraUser || '').slice(0, 4000),
+      teaching: raw.teaching && typeof raw.teaching === 'object' ? {
+        kind: String(raw.teaching.kind || '').slice(0, 40),
+        name: String(raw.teaching.name || '').slice(0, 160),
+        boundary: String(raw.teaching.boundary || '').slice(0, 2000),
+        page: raw.teaching.page || null,
+      } : null,
+    };
+  }
   return null;
 }
 
@@ -4203,9 +4252,27 @@ function sessionQuery(docId, sid) {
   return sid ? `${base}&sid=${encodeURIComponent(sid)}` : base;
 }
 
+/** 教学状态存档：只存当前论文当前会话的「带我一步步读」进度与续讲历史 */
+function serializeTeachingState() {
+  const walk = activeWalk();
+  if (!walk) return null;
+  return {
+    walk: {
+      docId: walk.docId,
+      sid: walk.sid || '',
+      step: walk.step || 1,
+      routeCount: walk.routeCount || null,
+      updatedAt: walk.updatedAt || nowISO(),
+      messages: (walk.messages || []).slice(-16).map((m) => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: String(m.content || '').slice(0, 12000),
+      })),
+    },
+  };
+}
+
 function sessionPayload() {
-  if (!state.doc) return null;
-  const entries = state.sessionEntries.slice(-90).map((x) => ({
+  if (!state.doc) return null;  const entries = state.sessionEntries.slice(-90).map((x) => ({
     block: String(x.block || 'chat'), tag: String(x.tag || '').slice(0, 120), page: x.page || null,
     quote: String(x.quote || '').slice(0, 3000), kind: x.kind === 'user' ? 'user' : 'assistant',
     text: String(x.text || '').slice(0, 12000), screenshot: !!x.screenshot,
@@ -4213,6 +4280,12 @@ function sessionPayload() {
     sources: (Array.isArray(x.sources) ? x.sources : []).slice(0, 8).map((s) => ({ title: String(s.title || '').slice(0, 500), url: String(s.url || '').slice(0, 2000), number: s.number || null })),
     meta: String(x.meta || '').slice(0, 500),
     retry: serialiseRetryPayload(x.retry),
+    // 「读懂论文」的教学按钮 / 教学对象：恢复会话后「继续下一步 / 这个我懂了」仍然可用
+    chips: (Array.isArray(x.chips) ? x.chips : []).slice(0, 4).map((c) => ({ label: String(c.label || '').slice(0, 12), prompt: String(c.prompt || '').slice(0, 200), op: ['evidence', 'limits'].includes(c.op) ? c.op : '' })),
+    teaching: x.teaching && typeof x.teaching === 'object' ? {
+      kind: String(x.teaching.kind || '').slice(0, 40), name: String(x.teaching.name || '').slice(0, 160),
+      boundary: String(x.teaching.boundary || '').slice(0, 2000), page: x.teaching.page || null,
+    } : null,
   }));
   /**
    * **非问答**的条目（也就是译文）必须保留在文件里。
@@ -4233,7 +4306,7 @@ function sessionPayload() {
   const prefix = `${state.doc.docId}:`;
   const ops = [...state.opsCache.entries()].filter(([key]) => key.startsWith(prefix)).slice(-20)
     .map(([key, value]) => ({ id: key.slice(prefix.length), text: String(value.text || '').slice(0, 12000), at: value.at || Date.now(), page: value.page || null }));
-  const payload = { entries: allEntries, history: snapshotHistory(state.history), ops, updatedAt: Date.now() };
+  const payload = { entries: allEntries, history: snapshotHistory(state.history), ops, teaching: serializeTeachingState(), updatedAt: Date.now() };
   let encoded = JSON.stringify(payload);
   const encodedBytes = () => new TextEncoder().encode(encoded).byteLength;
   while (encodedBytes() > 350000 && payload.entries.length > 1) { payload.entries.shift(); encoded = JSON.stringify(payload); }
@@ -4298,6 +4371,14 @@ function restoreRetryCallback(row, entry, priorUser) {
       runOperation(payload.opId, { force: true, block: payload.block || 'chat', retryEntry: entry });
       return;
     }
+    if (payload.kind === 'teaching') {
+      runTeaching(payload.opId, {
+        force: true, retryEntry: entry,
+        ask: payload.ask || '', extraUser: payload.extraUser || '',
+        teaching: payload.teaching || null,
+      });
+      return;
+    }
     const rawAttachments = Array.isArray(payload.attachments) ? payload.attachments : [];
     const lostShots = rawAttachments.some((a) => a?.kind === 'image' || a?.screenshot);
     if (lostShots) {
@@ -4359,6 +4440,17 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     state.history = restoreReadingHistory(saved.history, state.sessionEntries);
     state.opsDone = {};
     state.opsDoc = docId;
+    // 「带我一步步读」的进度随会话存盘；老会话没有这个字段就按没有进度处理
+    state.teaching = { walk: null, current: null };
+    const savedWalk = saved?.teaching?.walk;
+    if (savedWalk && savedWalk.docId === docId && (savedWalk.sid || '') === sid) {
+      state.teaching.walk = {
+        docId, sid, step: Number(savedWalk.step) || 1, routeCount: savedWalk.routeCount || null,
+        updatedAt: savedWalk.updatedAt || nowISO(),
+        messages: (Array.isArray(savedWalk.messages) ? savedWalk.messages : []).slice(-16)
+          .map((m) => ({ role: m?.role === 'assistant' ? 'assistant' : 'user', content: String(m?.content || '').slice(0, 12000) })),
+      };
+    }
     for (const op of Array.isArray(saved.ops) ? saved.ops : []) {
       if (!op?.id || typeof op.text !== 'string') continue;
       state.opsCache.set(`${docId}:${op.id}`, { text: op.text.slice(0, 12000), at: op.at || Date.now(), page: op.page || null });
@@ -4403,6 +4495,8 @@ async function restoreSession(docId, { only = 'all' } = {}) {
         entry.acts.classList.remove('hidden');
         entry.root.append(el('div', { class: 'entry-meta stopped', text: '未完成 · 问题和文字附件仍保留；截图需重新添加' }));
       }
+      // 教学类条目：补回「继续下一步 / 讲第 N 项 / 这个我懂了」等按钮
+      if (row.kind !== 'user' && row.status !== 'pending' && row.status !== 'failed') restoreTeachingEntry(entry, row);
     }
   } catch (e) { toast(`读取当前论文会话失败：${e.message}`, 'err', 5000); }
 }
@@ -4416,6 +4510,7 @@ async function clearCurrentSession() {
   const prefix = `${state.doc.docId}:`;
   for (const key of state.opsCache.keys()) if (key.startsWith(prefix)) state.opsCache.delete(key);
   state.opsDone = {};
+  resetTeachingState();
   clearAllBlocks();
   try {
     const r = await fetch(`/api/session?${sessionQuery(state.doc.docId, activeSidFor(state.doc.docId))}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries: [], history: [], ops: [], updatedAt: Date.now() }) });
@@ -4518,6 +4613,7 @@ async function switchSession(sid) {
   state.history = [];
   state.opsDone = {};
   state.opsDoc = null;
+  resetTeachingState();
   await restoreSession(docId, { only: 'chat' });
   closeSessionMenu();
   renderSessionBar();
@@ -4538,6 +4634,7 @@ async function newSession() {
   state.history = [];
   state.opsDone = {};
   state.opsDoc = null;
+  resetTeachingState();
   // 立刻落盘一次：不存的话新会话在服务端**没有文件**，会话列表里就看不到它，
   // 用户会以为「新建了但列表里没有」（实测踩过）。空会话也是一次有效的保存。
   try { await saveSessionNow(); } catch { /* 存不下也不阻塞新建 */ }
@@ -4793,12 +4890,13 @@ function applyCardPos(el, left, top) {
   return { left: Math.round(left), top: Math.round(top) };
 }
 
-/* ══════════════════════════ 论文操作（可按需调用） ══════════════════════════ */
+/* ══════════════════════════ 读懂论文（顶栏 ✦ 菜单 + 教学式回答） ══════════════════════════ */
 
 /**
- * 一排「对这篇论文能做的事」，用户自己挑；结果流进问答块，可缓存、可重新生成。
- * 只有 4 个文档级操作，全部平铺：没有分组菜单、没有「更多操作」折叠区，
- * 也没有 Coach（苏格拉底式多轮）入口 —— 那个模式和它的状态字段都已删除。
+ * 顶栏菜单：只剩四项教学能力（`teaching.js` 的 TEACHING_OPS）+ 头部学习档案入口。
+ *
+ * 旧的「实验够不够支撑结论 / 局限与可疑之处」不再占菜单：它们降级成「先给我讲明白」
+ * 等回答末尾的深入按钮（见 teachingDeepButtons），提示词仍保留在 ops.js。
  */
 function initOps() {
   const btn = $('#opsBtn');
@@ -4807,30 +4905,52 @@ function initOps() {
 
   const build = () => {
     menu.replaceChildren();
-    const head = el('div', { class: 'ops-head' },
-      el('div', { class: 'ops-head-title', text: `论文摘要${state.doc ? '' : '（先打开一篇）'}` }),
-      el('div', { class: 'ops-head-note', text: '结果会进右侧问答栏；想追问直接在输入框里问' }));
-    menu.append(head);
+    const s = profileSummary();
+    const profileRow = el('button', {
+      type: 'button',
+      class: `ops-profile${s.isEmpty ? ' empty' : ''}`,
+      title: '打开学习档案：记录你已确认的理解程度和具体边界（只存在本机）',
+      onclick: () => { hideOpsMenu(); openProfile(); },
+    },
+    el('span', { class: 'ops-profile-icon' }, iconEl('graduation')),
+    el('span', { class: 'ops-profile-text' },
+      el('span', {
+        class: 'ops-profile-title',
+        text: s.isEmpty ? '学习档案 · 还没有' : `学习档案 · 已确认 ${s.confirmed} 条${s.pending ? ` · ${s.pending} 条待确认` : ''}`,
+      }),
+      el('span', {
+        class: 'ops-profile-note',
+        text: s.isEmpty ? '花 30 秒写一下基础，回答会更贴合你' : (s.latest ? `最近确认 ${relativeLabel(s.latest)} · 点开编辑` : '点开查看 / 编辑'),
+      })));
+
+    menu.append(
+      el('div', { class: 'ops-head' },
+        el('div', { class: 'ops-head-title', text: `读懂论文${state.doc ? '' : '（先打开一篇）'}` }),
+        el('div', { class: 'ops-head-note', text: '结果会进右侧问答栏；每一项都能接着追问' })),
+      profileRow,
+    );
 
     const opButton = (op) => {
-      const cached = state.opsDoc === state.doc?.docId && state.opsDone[op.id];
+      const walk = activeWalk();
+      const progress = op.id === 'walk' && walk ? ` · 进行到第 ${walk.step} 步` : '';
+      const cached = op.id !== 'visual' && !!teachingEntryFor(op.id);
       return el('button', {
         class: 'ops-item' + (cached ? ' cached' : ''),
         type: 'button',
         title: op.hint,
-        onclick: () => { hideOpsMenu(); runOperation(op.id, { force: false }); },
+        dataset: { op: op.id },
+        onclick: () => {
+          hideOpsMenu();
+          if (op.id === 'visual') { openVisualPicker({}); return; }
+          runTeaching(op.id, { force: false });
+        },
       },
-      // ops.js 现在给的是 icons.js 的 id（不再是一堆平台相关的 Emoji）
       el('span', { class: 'ops-icon' }, iconEl(hasIcon(op.icon) ? op.icon : 'ops')),
       el('span', { class: 'ops-text' },
-        el('span', { class: 'ops-title', text: op.title + (cached ? ' · 已生成' : '') }),
+        el('span', { class: 'ops-title', text: op.title + (cached ? ' · 已生成' : '') + progress }),
         el('span', { class: 'ops-hint', text: op.hint })));
     };
-
-    // 删减（批次一）：只有 4 个文档级操作，全部平铺 —— 不再有分组菜单、
-    // 不再有「更多操作」折叠区，也不再有 Coach 模式入口。
-    // 「自由提问」不占格子：它就是右栏下面的输入框本身。
-    for (const op of OPS) menu.append(opButton(op));
+    for (const op of TEACHING_OPS) menu.append(opButton(op));
   };
 
   btn.onclick = (e) => {
@@ -4847,6 +4967,586 @@ function initOps() {
 }
 
 function hideOpsMenu() { $('#opsMenu')?.classList.add('hidden'); }
+
+/** 菜单每次打开都重建，学习档案变化后不需要常驻刷新（保留函数名给 boot 调用） */
+function renderProfileMenuHint() { /* no-op：menu 打开时按最新档案重建 */ }
+
+/* ── 教学状态小工具 ──────────────────────────────────────────────── */
+
+/** 当前论文 + 当前会话下有效的 walk 进度（换论文/换会话自动失效） */
+function activeWalk() {
+  const walk = state.teaching?.walk;
+  if (!walk || !state.doc) return null;
+  if (walk.docId !== state.doc.docId) return null;
+  if ((walk.sid || '') !== activeSidFor(state.doc.docId)) return null;
+  return walk;
+}
+
+function walkSid() {
+  return state.doc ? activeSidFor(state.doc.docId) : '';
+}
+
+/** 会话里找到某能力最近一条已完成回答（用于菜单「已生成」与缓存命中） */
+function teachingEntryFor(opId) {
+  const op = teachingOpById(opId);
+  if (!op) return null;
+  return [...state.sessionEntries].reverse().find((x) => x?.block === 'chat' && x?.tag === op.title
+    && (x.status === 'complete' || x.status === 'stopped') && x?.kind !== 'user') || null;
+}
+
+/** 重置教学状态（换会话 / 新建会话 / 清空会话时调用） */
+function resetTeachingState() {
+  state.teaching = { walk: null, current: null };
+  const prefix = state.doc ? `${state.doc.docId}:` : '';
+  for (const key of state.teachingCache.keys()) if (!prefix || key.startsWith(prefix)) state.teachingCache.delete(key);
+}
+
+/** 把「当前教学对象」写进 system（自由追问时让模型知道还在讲哪一步） */
+function teachingProgressBlock() {
+  const walk = activeWalk();
+  if (!walk) return '';
+  return `【当前教学进度】正在用「带我一步步读」，已经讲到第 ${walk.step} 步（共 ${walk.route?.length || walk.routeCount || '?'} 步）。`
+    + '用户是在这一步的基础上提问：先解答提问，不要擅自推进到下一步。';
+}
+
+/** 当前问题该用哪段论文文本来筛学习档案（有全文用全文，没有用页文本） */
+function profileSelectionText(question = '') {
+  const docText = state.docText || '';
+  return { docText, question };
+}
+
+/** 组一份「教学类回答」的档案块（调用前确保 state.docText 已按需加载） */
+function teachingProfileBlock(question = '') {
+  const { docText } = profileSelectionText(question);
+  return buildProfileBlock(profileStore.data, docText, question);
+}
+
+/* ── 教学类回答的缓存 ────────────────────────────────────────────── */
+
+function teachingCacheKey(docId, opId, suffix = '') {
+  return `${docId}:${opId}:${TEACHING_PROMPT_VERSION}:p${profileStore.data.revision}${suffix ? `:${suffix}` : ''}`;
+}
+
+function teachingCacheGet(docId, opId) {
+  return state.teachingCache.get(teachingCacheKey(docId, opId)) || null;
+}
+
+function teachingCacheSet(docId, opId, value) {
+  state.teachingCache.set(teachingCacheKey(docId, opId), value);
+}
+
+/* ── 跑一项教学能力 ──────────────────────────────────────────────── */
+
+/**
+ * 跑一项「读懂论文」能力。和 runOperation 同一套骨架（流式、停止、失败重试、缓存、会话存档），
+ * 区别只在三处：
+ *   1. 材料用 teachMessages（带当前时间 + 学习档案块），而不是 opMessages；
+ *   2. 回答里可能有 prt 隐藏块 → 收尾时解析成按钮与「待确认」档案建议；
+ *   3. 不同能力有各自的后续按钮（继续下一步 / 讲第 N 项 / 这个我懂了 / 换一个对象…）。
+ *
+ * @param {string} opId  intro | prereq | walk | visual
+ * @param {object} opts
+ *   force      重新生成（忽略缓存）
+ *   retryEntry 复用同一条结果（失败重试）
+ *   extraUser  追加到用户消息的材料（图表对象 / 点开的清单项 / 初始进度）
+ *   ask        覆盖本次任务文本
+ *   history    续讲时带上的历史消息（[{role, content}]）
+ *   tag        结果条目的标签（默认能力名；续讲用「第 2 步」这类）
+ *   teaching   本次的教学对象（写进会话记录，恢复后「这个我懂了」仍可用）
+ *   baseText   续讲时基于的原文（walk 的 route 已存在 state.teaching.walk.messages 里）
+ */
+async function runTeaching(opId, {
+  force = false, retryEntry = null, extraUser = '', ask = '', history = [],
+  tag = '', teaching = null,
+} = {}) {
+  const op = teachingOpById(opId);
+  if (!op) return null;
+  if (!state.doc || !viewer?.pdf) { toast('先打开一篇论文', 'err', 3000); return null; }
+  if (state.busy) { toast('正在生成中，等它跑完或者点停止', 'err', 3000); return null; }
+
+  const docId = state.doc.docId;
+  const entryTag = tag || op.title;
+
+  // 缓存只给「一次生成、内容稳定」的三项；图表公式依赖页/对象，不缓存
+  if (!force && opId !== 'visual' && !retryEntry && !history.length) {
+    const hit = teachingCacheGet(docId, opId);
+    // 恢复出来的会话里已经有这条结果（跨重启的「已生成」）：直接定位过去，不重新花钱
+    const existing = teachingEntryFor(opId);
+    if (existing) {
+      showAiBlock('chat');
+      existing.root?.scrollIntoView?.({ block: 'nearest' });
+      toast(`「${op.title}」已在结果区，点「重新生成」可以重跑`, 'ok', 3000);
+      return hit || { text: String(existing.text || '') };
+    }
+    if (hit) {
+      // 缓存有、DOM 没有（清过问答区）：直接把缓存内容补回一条结果，不重新花钱
+      const restored = addEntry({ block: 'chat', tag: entryTag, text: hit.text, kind: 'assistant', retry: { kind: 'teaching', docId, opId, block: 'chat', ask, extraUser: extraUser.slice(0, 4000), ...(teaching ? { teaching } : {}) } });
+      finishEntry(restored, hit.text, { page: hit.page || null, retryLabel: '重新生成', onRetry: () => runTeaching(opId, { force: true, retryEntry: restored, extraUser, ask, tag, teaching }) });
+      renderTeachingExtras(restored, { opId, chips: hit.chips || [], teaching: hit.teaching || teaching });
+      return hit;
+    }
+  }
+
+  if (!ensureReady()) return null;
+  const entry = retryEntry || addEntry({
+    block: 'chat', tag: entryTag, kind: 'assistant',
+    retry: { kind: 'teaching', docId, opId, block: 'chat', ask: String(ask || '').slice(0, 500), extraUser: String(extraUser || '').slice(0, 4000), ...(teaching ? { teaching } : {}) },
+  });
+  if (retryEntry) {
+    entry.body.replaceChildren();
+    entry.acts.replaceChildren();
+    entry.acts.classList.add('hidden');
+    entry.root.classList.remove('err', 'error');
+    entry.root.querySelectorAll('.entry-meta, .source-details, .src-list').forEach((node) => node.remove());
+    const record = entry.root.__sessionRecord;
+    if (record) { record.text = ''; record.meta = ''; record.status = 'pending'; record.chips = []; record.teaching = teaching || null; }
+  }
+  const target = streamTarget(entry.body);
+  const ctl = makeController();
+  if (!ctl) return null;
+  setBusy(true, `0s · ${entryTag}`);
+  let received = '';
+  try {
+    const ctx = await buildDocContext(op.ask, extraUser || '');
+    const messages = teachMessages(op, {
+      docTitle: state.doc?.name,
+      fullText: ctx?.text,
+      digest: state.docDigest,
+      extraUser,
+      ask,
+      history,
+      profileBlock: teachingProfileBlock(ask || op.ask),
+    });
+    const full = await chat({
+      messages,
+      signal: ctl.signal,
+      onDelta: (piece, all) => { received = all; target.push(all); },
+      onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s · ${entryTag}`),
+    });
+    if (state.doc?.docId !== docId) return null;
+    const split = splitPrtBlock(full);
+    const clean = split.text || full;
+    target.done(clean);
+    finishEntry(entry, clean, {
+      page: viewer.current, retryLabel: '重新生成',
+      onRetry: () => runTeaching(opId, { force: true, retryEntry: entry, extraUser, ask, tag, teaching }),
+    });
+    renderTeachingExtras(entry, { opId, chips: split.chips, teaching, profileSuggestions: split.profile });
+    if (opId === 'walk' && !history.length) startWalkSession(clean, entry);
+    if (opId !== 'visual' && !history.length) {
+      teachingCacheSet(docId, opId, { text: clean, at: Date.now(), page: viewer.current, chips: split.chips, teaching });
+    }
+    state.teaching.current = teaching || null;
+    scheduleSessionSave();
+    return { text: clean, chips: split.chips };
+  } catch (e) {
+    if (state.doc?.docId !== docId) return null;
+    if (isAbort(e)) {
+      target.done(received);
+      finishEntry(entry, received, {
+        page: viewer.current, status: 'stopped',
+        onRetry: () => runTeaching(opId, { force: true, retryEntry: entry, extraUser, ask, tag, teaching }),
+      });
+    } else {
+      target.fail(errText(e));
+      addFailureRetry(entry, errText(e), () => runTeaching(opId, { force: true, retryEntry: entry, extraUser, ask, tag, teaching }));
+    }
+    return null;
+  } finally {
+    if (state.abort === ctl) { state.abort = null; state.abortReason = ''; setBusy(false); }
+  }
+}
+
+/* ── 回答后的按钮 / 档案写入 ──────────────────────────────────────── */
+
+/** 把 chips 画成按钮（prt 块解析出来的自由操作） */
+function renderChips(entry, chips) {
+  for (const chip of chips) {
+    if (chip.op) {
+      entry.acts.append(el('button', {
+        class: 'act-chip', type: 'button', text: chip.label,
+        onclick: () => runOperation(chip.op, { force: false }),
+      }));
+    } else {
+      entry.acts.append(el('button', {
+        class: 'act-chip', type: 'button', text: chip.label,
+        onclick: () => sendTeachingPrompt(chip.prompt),
+      }));
+    }
+  }
+}
+
+/** chip 的 prompt 走普通发送（继承对话历史与当前教学进度） */
+function sendTeachingPrompt(prompt) {
+  const ta = $('#chatInput');
+  if (!ta) return;
+  ta.value = String(prompt || '').slice(0, 2000);
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  ta.focus();
+  $('#sendBtn')?.click();
+}
+
+/**
+ * 画「能力相关」的后续按钮 + 处理学习档案建议。
+ * 各能力的按钮都是**静态兜底**：即使模型没输出 prt 块，这里也一定有可用操作。
+ */
+function renderTeachingExtras(entry, { opId, chips = [], teaching = null, profileSuggestions = [] } = {}) {
+  const record = entry.root.__sessionRecord;
+  if (record) {
+    record.chips = sanitiseChips(chips);
+    record.teaching = teaching ? { kind: teaching.kind || '', name: String(teaching.name || '').slice(0, 160), boundary: String(teaching.boundary || '').slice(0, 2000), page: teaching.page || null } : null;
+  }
+  const add = (label, onclick, cls = '') => entry.acts.append(el('button', { class: `act-chip ${cls}`.trim(), type: 'button', text: label, onclick }));
+  const walk = activeWalk();
+
+  if (opId === 'intro') {
+    add('讲简单一点', () => sendTeachingPrompt('上面这一段讲得太细了，请用更简单的话把「这篇论文在做什么」再讲一遍，保留关键页码。'));
+    add('给个例子', () => sendTeachingPrompt('给一个更具体的教学例子，把这篇论文要解决的问题说明白（标明是教学例子，不是论文实验）。'));
+    add('再压短', () => condenseEntry(entry));
+    add('看实验够不够', () => runOperation('evidence', { force: false }), 'deep');
+    add('它有什么局限', () => runOperation('limits', { force: false }), 'deep');
+    renderChips(entry, chips.filter((c) => c.op !== 'evidence' && c.op !== 'limits'));
+  } else if (opId === 'prereq' && teaching?.kind === 'prereq-item') {
+    // 单项前置知识：只留「再讲一次 / 再压短」；没有「讲第 N 项」（这一条就是从清单点进来的）
+    renderChips(entry, chips);
+    add('再压短', () => condenseEntry(entry));
+  } else if (opId === 'prereq') {
+    // 优先用模型给的 chips；没有再解析回答里的加粗名称兜底
+    const chipItems = chips.filter((c) => c.prompt && !c.op);
+    if (chipItems.length) renderChips(entry, chipItems);
+    else {
+      const names = parsePrereqItems(record?.text || '');
+      names.forEach((name, i) => add(`讲第 ${i + 1} 项`, () => runPrereqItem(name, entry)));
+    }
+    add('大概都懂了，开始读', () => runTeaching('walk', { force: false }));
+    add('再压短', () => condenseEntry(entry));
+    renderChips(entry, chips.filter((c) => c.op));
+  } else if (opId === 'walk') {
+    add('继续下一步', () => continueWalk('continue', entry));
+    add('讲简单一点', () => continueWalk('simpler', entry));
+    add('给个例子', () => continueWalk('example', entry));
+    add('重新规划路线', () => { state.teaching.walk = null; scheduleSessionSave(); runTeaching('walk', { force: true }); });
+    add('再压短', () => condenseEntry(entry));
+    renderChips(entry, chips.filter((c) => c.op));
+  } else if (opId === 'visual') {
+    add('换一个对象', () => openVisualPicker({ replace: true }));
+    add('讲简单一点', () => sendTeachingPrompt('刚才这个图表/公式讲得有点难，请用更简单的说法再讲一遍重点。'));
+    add('再压短', () => condenseEntry(entry));
+    renderChips(entry, chips);
+  } else {
+    renderChips(entry, chips);
+  }
+
+  // 有明确教学对象时给「这个我懂了 / 这里没懂」
+  if (teaching?.name) {
+    add('这个我懂了', () => markTeachingKnown(teaching, entry), 'know');
+    add('这里没懂', () => reexplainTeaching(teaching, entry), 'dunno');
+  }
+
+  // AI 观察 → 只写「待确认」，不确认
+  if (profileSuggestions.length && profileStore.enabled) {
+    applyProfileSuggestions(profileSuggestions, teaching).catch((e) => toast(`学习档案写入失败：${e.message}`, 'err', 4000));
+  }
+}
+
+/** 把模型建议写成待确认条目（去重、最多 3 条、失败只 toast） */
+async function applyProfileSuggestions(suggestions, teaching = null) {
+  if (!suggestions.length) return;
+  const next = withPendingSuggestions(profileStore.data, suggestions, {
+    docId: state.doc?.docId || '', paper: state.doc?.name || '', capability: teaching?.kind || '',
+  });
+  if (!next.added.length) return;
+  await profileStore.save(next.profile);
+  toast(`学习档案：记下 ${next.added.length} 条待确认（在菜单里点「学习档案」可确认）`, 'ok', 4200);
+}
+
+/** 点「这个我懂了」：写 confirmed + 更新时间；并给下一项的入口 */
+async function markTeachingKnown(teaching, entry) {
+  const next = withConfirmed(profileStore.data, {
+    topic: teaching.name,
+    level: teaching.level || '本文所需层面已理解',
+    boundary: teaching.boundary || '',
+    source: { docId: state.doc?.docId || '', paper: state.doc?.name || '', capability: teaching.kind || '' },
+  });
+  try {
+    await profileStore.save(next.profile);
+    toast(`已记入学习档案（${isoDate(nowISO())}）：${teaching.name}`, 'ok', 3200);
+  } catch (e) {
+    toast(`学习档案写入失败：${e.message}`, 'err', 4000);
+    return;
+  }
+  // 按钮变成「已记入」避免重复点
+  entry.acts.querySelectorAll('.act-chip.know').forEach((b) => { b.disabled = true; b.textContent = '已记入学习档案'; });
+}
+
+/** 点「这里没懂」：立即换一种更基础的说法重讲（不推进教学进度） */
+function reexplainTeaching(teaching, entry) {
+  state.teaching.current = teaching;
+  const prompt = `这里没懂：「${teaching.name}」没听懂。请先不往下推进，换一种更基础的说法，从我可能缺的最基础的一步讲起，并给一个最小例子。`;
+  sendTeachingPrompt(prompt);
+}
+
+/** 点列表里的某一项：单独讲这一项前置知识 */
+async function runPrereqItem(name, listEntry) {
+  if (!state.doc || state.busy) return;
+  const item = findItem(profileStore.data, name);
+  const teaching = {
+    kind: 'prereq-item', name,
+    level: item?.level || '',
+    boundary: item?.boundary || '能用自己的话说清它是什么、本文为什么需要它',
+    page: viewer?.current || null,
+  };
+  const extraUser = [
+    `【用户点开的前置知识】${name}`,
+    '【要求】只讲这一项，不要重复整份清单；结尾回到论文原文（章节 + 页码）。',
+  ].join('\n');
+  await runTeaching('prereq', {
+    force: true, extraUser, ask: `讲第几项：${name}`, tag: `先懂一点：${name}`,
+    teaching,
+  });
+}
+
+/** 压缩上一条回答（「再压短」） */
+async function condenseEntry(entry) {
+  if (!state.doc || state.busy) return;
+  const rec = entry.root.__sessionRecord;
+  const answer = String(rec?.text || '').trim();
+  if (!answer) return;
+  if (!ensureReady()) return;
+  const shortEntry = addEntry({ block: 'chat', tag: '精简版', kind: 'assistant' });
+  const target = streamTarget(shortEntry.body);
+  const ctl = makeController();
+  if (!ctl) return;
+  setBusy(true, '0s · 精简版');
+  let received = '';
+  try {
+    const full = await chat({
+      messages: condenseMessages({ answer, docTitle: state.doc?.name }),
+      signal: ctl.signal,
+      onDelta: (piece, all) => { received = all; target.push(all); },
+      onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s · 精简版`),
+    });
+    target.done(full);
+    finishEntry(shortEntry, full, { page: rec?.page || viewer.current, onRetry: () => condenseEntry(entry) });
+  } catch (e) {
+    if (isAbort(e)) { target.done(received); finishEntry(shortEntry, received, { status: 'stopped' }); }
+    else { target.fail(errText(e)); addFailureRetry(shortEntry, errText(e), () => condenseEntry(entry)); }
+  } finally {
+    if (state.abort === ctl) { state.abort = null; state.abortReason = ''; setBusy(false); }
+  }
+}
+
+/* ── 带我一步步读：续讲 ──────────────────────────────────────────── */
+
+/**
+ * 点「继续下一步 / 讲简单一点 / 给个例子」。
+ * 三类操作共用一条续讲链路，只有 system 与用户指令不同；「继续」才推进 step。
+ */
+async function continueWalk(kind, entry) {
+  if (!state.doc || state.busy) return;
+  const walk = activeWalk();
+  if (!walk) { toast('教学进度已失效，请重新点「带我一步步读」', 'err', 3200); return; }
+  if (!ensureReady()) return;
+  const nextStep = walk.step + 1;
+  const instruction = kind === 'continue' ? '继续下一步。'
+    : kind === 'example' ? '这一步给一个具体例子，不要推进到下一步。'
+      : '这一步讲简单一点，不要推进到下一步。';
+  const sys = kind === 'continue' ? WALK_CONTINUE_SYS : walkReteachSys(kind);
+  const tag = kind === 'continue' ? `第 ${nextStep} 步` : (kind === 'example' ? '给个例子' : '讲简单一点');
+  const newEntry = addEntry({ block: 'chat', tag, kind: 'assistant', retry: { kind: 'teaching', docId: state.doc.docId, opId: 'walk', block: 'chat' } });
+  const target = streamTarget(newEntry.body);
+  const ctl = makeController();
+  if (!ctl) return;
+  setBusy(true, `0s · ${tag}`);
+  let received = '';
+  try {
+    const ctx = await buildDocContext('继续下一步', '');
+    const history = walk.messages.map((m) => ({ role: m.role, content: String(m.content || '').slice(0, 12000) }));
+    const messages = teachMessages({ sys, ask: instruction }, {
+      docTitle: state.doc?.name,
+      fullText: ctx?.text,
+      digest: state.docDigest,
+      history,
+      ask: instruction,
+      profileBlock: teachingProfileBlock(instruction),
+    });
+    const full = await chat({
+      messages,
+      signal: ctl.signal,
+      onDelta: (piece, all) => { received = all; target.push(all); },
+      onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s · ${tag}`),
+    });
+    const split = splitPrtBlock(full);
+    const clean = split.text || full;
+    target.done(clean);
+    finishEntry(newEntry, clean, { page: viewer.current });
+    // 只有「继续」才推进；讲简单/给例子仍停在这一步
+    walk.messages.push({ role: 'user', content: instruction }, { role: 'assistant', content: clean });
+    if (kind === 'continue') walk.step = nextStep;
+    walk.updatedAt = nowISO();
+    scheduleSessionSave();
+    renderTeachingExtras(newEntry, { opId: 'walk', chips: split.chips, teaching: null });
+    if (profileStore.enabled) applyProfileSuggestions(split.profile, { kind: 'walk' }).catch(() => {});
+  } catch (e) {
+    if (isAbort(e)) {
+      target.done(received);
+      finishEntry(newEntry, received, { status: 'stopped', onRetry: () => continueWalk(kind, newEntry) });
+    } else {
+      target.fail(errText(e));
+      addFailureRetry(newEntry, errText(e), () => continueWalk(kind, newEntry));
+    }
+  } finally {
+    if (state.abort === ctl) { state.abort = null; state.abortReason = ''; setBusy(false); }
+  }
+}
+
+/** 「带我一步步读」首轮结束：初始化/覆盖教学进度 */
+function startWalkSession(cleanText, entry) {
+  const walk = activeWalk() || { docId: state.doc.docId, sid: walkSid(), step: 0, messages: [] };
+  walk.step = 1;
+  walk.updatedAt = nowISO();
+  walk.routeCount = (String(cleanText).match(/^\s*(?:\d+[.、)]|[-*])\s+/gm) || []).length || null;
+  // 首轮消息：用户初始任务 + 助手回答（续讲时作为历史发回模型）
+  walk.messages = [
+    { role: 'user', content: '带我一步步读这篇论文：先给路线，再开始第一步。' },
+    { role: 'assistant', content: String(cleanText || '').slice(0, 12000) },
+  ];
+  state.teaching.walk = walk;
+  scheduleSessionSave();
+}
+
+/* ── 图表与公式：对象选择器 ────────────────────────────────────────── */
+
+/** 确保整篇文本已抽出（对象识别要用；不触发模型索引） */
+async function ensureDocTextForObjects() {
+  if (state.docText && state.docTextDoc === state.doc?.docId) return state.docText;
+  if (!viewer?.pdf) return '';
+  try {
+    const text = await viewer.getAllText();
+    if (state.doc?.docId) { state.docText = text; state.docTextDoc = state.doc.docId; }
+    return text;
+  } catch { return state.docText || ''; }
+}
+
+/**
+ * 「讲懂图表与公式」先选对象：
+ *   当前页 0 个候选 → 给全文清单 + 框选截图提示；
+ *        1 个     → 直接讲；
+ *        ≥2 个    → 菜单原位列出候选，让用户按图号/表号/公式编号选。
+ * `replace` 为 true 时表示从回答上的「换一个对象」回来，菜单可能已经关了，直接重开。
+ */
+async function openVisualPicker({ replace = false } = {}) {
+  if (!state.doc || !viewer?.pdf) { toast('先打开一篇论文', 'err', 3000); return; }
+  const menu = $('#opsMenu');
+  if (!menu) return;
+  menu.classList.remove('hidden');
+  menu.replaceChildren(el('div', { class: 'ops-head' },
+    el('div', { class: 'ops-head-title', text: '讲懂图表与公式' }),
+    el('div', { class: 'ops-head-note', text: `正在读取第 ${viewer.current} 页的对象…` })));
+  const docText = await ensureDocTextForObjects();
+  const page = viewer.current;
+  const objects = detectPageObjects(pageTextOf(docText, page), page);
+  const fullList = () => {
+    const all = collectDocObjects(docText);
+    menu.replaceChildren(
+      el('div', { class: 'ops-head' },
+        el('div', { class: 'ops-head-title', text: '全文的图表与公式' }),
+        el('div', { class: 'ops-head-note', text: '选一个：会先跳到那一页，再讲懂它' })),
+      el('button', { type: 'button', class: 'ops-back', text: '← 回到当前页', onclick: () => openVisualPicker({ replace: true }) }),
+      ...(all.length ? all.map((obj) => el('button', {
+        type: 'button', class: 'ops-item ops-obj',
+        onclick: () => { hideOpsMenu(); jumpToPageWithHistory(Number(obj.page) || page, { smooth: true }); setTimeout(() => runVisual(obj), 260); },
+      },
+      el('span', { class: 'ops-icon' }, iconEl(obj.kind === 'table' ? 'chart' : obj.kind === 'formula' ? 'formula' : 'explain')),
+      el('span', { class: 'ops-text' },
+        el('span', { class: 'ops-title', text: `${obj.label}${obj.page ? ` · 第 ${obj.page} 页` : ''}` }),
+        el('span', { class: 'ops-hint', text: obj.title || obj.snippet || '（抽取文本里没有标题）' })))) : [
+        el('div', { class: 'ops-empty', text: '整篇文本里没识别到图/表/公式编号。可以直接用「框选截图」把这一块发进对话问。' }),
+      ]),
+    );
+  };
+  const head = [
+    el('div', { class: 'ops-head-title', text: '讲懂图表与公式' }),
+    el('div', { class: 'ops-head-note', text: `当前是第 ${page} 页；先选一个对象（不会默认分析整篇）` }),
+  ];
+  const items = objects.map((obj) => el('button', {
+    type: 'button', class: 'ops-item ops-obj',
+    onclick: () => { hideOpsMenu(); runVisual(obj); },
+  },
+  el('span', { class: 'ops-icon' }, iconEl(obj.kind === 'table' ? 'chart' : obj.kind === 'formula' ? 'formula' : 'explain')),
+  el('span', { class: 'ops-text' },
+    el('span', { class: 'ops-title', text: obj.label }),
+    el('span', { class: 'ops-hint', text: obj.title || obj.snippet || '（抽取文本里没有标题）' }))));
+  const extras = [
+    el('button', { type: 'button', class: 'ops-back', text: '看全文的图表清单', onclick: fullList }),
+  ];
+  if (!objects.length) {
+    menu.replaceChildren(
+      el('div', { class: 'ops-head' }, ...head),
+      el('div', { class: 'ops-empty', text: `第 ${page} 页没识别到图 / 表 / 公式编号（可能是扫描页，或标题被拆行）。` }),
+      el('button', { type: 'button', class: 'ops-back', text: '看全文的图表清单', onclick: fullList }),
+      el('div', { class: 'ops-empty', text: '也可以回到正文框选一块图/表/公式，用「⎚ 截图」发进对话问。' }),
+    );
+    return;
+  }
+  if (objects.length === 1) {
+    hideOpsMenu();
+    runVisual(objects[0]);
+    return;
+  }
+  menu.replaceChildren(el('div', { class: 'ops-head' }, ...head), ...items, ...extras);
+}
+
+/** 选中对象后真正跑「讲懂图表与公式」 */
+async function runVisual(obj) {
+  if (!state.doc || !viewer?.pdf) { toast('先打开一篇论文', 'err', 3000); return; }
+  const page = Number(obj.page) || viewer.current;
+  let pageText = pageTextOf(state.docText || '', page);
+  if (!pageText) {
+    await ensureDocTextForObjects();
+    pageText = pageTextOf(state.docText || '', page);
+  }
+  const kindName = obj.kind === 'table' ? '表格' : obj.kind === 'formula' ? '公式' : obj.kind === 'algorithm' ? '算法' : '图';
+  const extraUser = [
+    `【当前页】p.${page}`,
+    `【用户选择的对象】${obj.label}（${kindName}）${obj.title ? `：${obj.title}` : ''}`,
+    '【当前页识别出的对象】' + (detectPageObjects(pageText, page).map((o) => o.label).join('、') || '（只有这一个）'),
+    '【当前页文本（供定位；图内标签可能缺失）】',
+    '"""',
+    String(pageText || '').slice(0, 8000),
+    '"""',
+  ].join('\n');
+  const teaching = { kind: `visual-${obj.kind}`, name: obj.label, boundary: '知道这个图/表/公式在表达什么、怎么看', page };
+  await runTeaching('visual', {
+    force: true, extraUser, ask: `讲懂第 ${page} 页的 ${obj.label}`,
+    tag: `讲懂：${obj.label}`, teaching,
+  });
+}
+
+/** 深入阅读按钮的「后续建议」标签（保留给自动化测试识别） */
+function teachingDeepButtons() { return ['看实验够不够', '它有什么局限']; }
+
+/**
+ * 恢复会话时给教学条目补回按钮（普通 finishEntry 只画「复制 / 填笔记 / 重新生成」）。
+ * 只补静态按钮，不再重新请求模型。
+ */
+function restoreTeachingEntry(entry, row) {
+  if (!row || row.kind === 'user') return;
+  const op = TEACHING_OPS.find((o) => o.title === row.tag);
+  const teach = row.teaching || null;
+  const chips = Array.isArray(row.chips) ? sanitiseChips(row.chips) : [];
+  if (op) {
+    renderTeachingExtras(entry, { opId: op.id, chips, teaching: teach });
+    if (op.id === 'walk' && activeWalk() && row.tag === TEACHING_OPS.find((o) => o.id === 'walk').title) {
+      // 首轮回答：初始化 walk（老的存档没有 teaching 字段也能接上）
+      if (!activeWalk()) startWalkSession(row.text || entry.root.__sessionRecord?.text || '', entry);
+    }
+  } else if (row.tag === '精简版') {
+    // 无需额外按钮
+  } else if (teach) {
+    renderTeachingExtras(entry, { opId: 'prereq', chips, teaching: teach });
+  }
+}
 
 /**
  * 跑一个操作。
@@ -5485,6 +6185,38 @@ function markReversedBodies() {
 }
 
 /**
+ * 回答正文渲染：**先剥掉 prt 隐藏块**，再把 〔p.N〕 / 〔p.N–M〕 变成可点击页码。
+ * 渲染失败/页码越界时保持普通文字，不影响回答本身。
+ */
+function decoratePageRefs(html) {
+  const pages = Number(viewer?.numPages) || 0;
+  return String(html || '').replace(/〔p\.(\d{1,4})(?:[–\-](\d{1,4}))?〕/g, (raw, a, b) => {
+    const p = Number(a);
+    if (!Number.isInteger(p) || p < 1 || (pages && p > pages)) return raw;
+    const label = b ? `p.${a}–${b}` : `p.${a}`;
+    const title = b ? `跳到第 ${a}–${b} 页` : `跳到第 ${a} 页`;
+    return `<button type="button" class="page-ref" data-page="${p}" title="${title}">${label}</button>`;
+  });
+}
+
+function renderAnswerHTML(text) {
+  const split = splitPrtBlock(String(text || ''));
+  return decoratePageRefs(renderMarkdown(split.text || ''));
+}
+
+/** 页码按钮：按住委托，流式重绘也不用重绑 */
+function initPageRefs() {
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.page-ref');
+    if (!btn) return;
+    const page = Number(btn.dataset.page);
+    if (!Number.isInteger(page) || page < 1) return;
+    e.preventDefault();
+    jumpToPageWithHistory(page, { smooth: true });
+  });
+}
+
+/**
  * 流式渲染目标：~30fps 合帧 + 只在贴底时自动跟随。
  * 注意：不能只靠 requestAnimationFrame —— 窗口被遮挡/最小化/无头环境下
  * rAF 会被浏览器节流甚至完全不触发，那样文字会攒到全部生成完才一次性出现，
@@ -5515,7 +6247,9 @@ function streamTarget(node) {
     const entry = node.closest('.msg');
     // 新结果保持在视口顶部；一旦用户手动上滑，后续分块不再抢回滚动位置。
     const follow = parent && entry && Math.abs(parent.scrollTop - entry.offsetTop) < 100;
-    if (!pending.startsWith(paintedText)) {
+    // 回答末尾的 prt 隐藏块（程序用）不能露给用户看：出现就截断
+    const display = hideStreamTail(pending);
+    if (!display.startsWith(paintedText)) {
       node.replaceChildren();
       rawNode = null;
       cursorNode = null;
@@ -5523,14 +6257,14 @@ function streamTarget(node) {
       scan.cursor = 0; scan.safe = 0; scan.fence = ''; scan.inMath = false;
     }
     ensureTail();
-    const safeEnd = completedMarkdownEnd(pending, scan);
+    const safeEnd = completedMarkdownEnd(display, scan);
     if (safeEnd > paintedText.length) {
       const template = document.createElement('template');
-      template.innerHTML = renderMarkdown(pending.slice(paintedText.length, safeEnd));
+      template.innerHTML = renderMarkdown(display.slice(paintedText.length, safeEnd));
       node.insertBefore(template.content, rawNode);
-      paintedText = pending.slice(0, safeEnd);
+      paintedText = display.slice(0, safeEnd);
     }
-    rawNode.data = pending.slice(paintedText.length);
+    rawNode.data = display.slice(paintedText.length);
     if (follow) requestAnimationFrame(() => { parent.scrollTop = entry.offsetTop; });
   };
   return {
@@ -5543,7 +6277,7 @@ function streamTarget(node) {
     done(finalText) {
       stopTimers();
       pending = null;
-      node.innerHTML = renderMarkdown(finalText);
+      node.innerHTML = renderAnswerHTML(finalText);
       rawNode = null; cursorNode = null; paintedText = '';
       scrollEntryToTop(node.closest('.ai-body'), node.closest('.msg'));
     },
@@ -6506,6 +7240,10 @@ async function send(retryPending = null) {
 
     if (!readingRequestCurrent(pending)) return;
     if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
+    // 学习档案：只把和当前问题/所在页相关的少数条目交给模型；当前时间由 ai.js 固定注入。
+    // 教学进度（「带我一步步读」）也在这里带上，避免自由追问时模型擅自推进下一步。
+    const profileForAsk = buildProfileBlock(profileStore.data,
+      state.docText || context || '', pending.question);
     const messages = askMessages({
       question: pending.question,
       selection: reading.selection,
@@ -6516,6 +7254,8 @@ async function send(retryPending = null) {
       webResults: sources,
       history: pending.history,
       reading, references,
+      profileBlock: profileForAsk,
+      teachingBlock: teachingProgressBlock(),
     });
     if (images.length) {
       const last = messages[messages.length - 1];
@@ -6864,6 +7604,189 @@ function stepHit(dir) {
   showSearchHit((idx + dir + hits.length) % hits.length, true);
 }
 
+/* ══════════════════════ 学习档案（可查看 / 可编辑 / 带时间戳） ══════════════════════ */
+
+/**
+ * 用户口径（2026-10）：
+ *   · 值得做，但第一版只做「学习档案」，不做自动判定掌握的知识库；
+ *   · 记录知识点 + 理解程度 + **具体边界** + 依据 + 时间；
+ *   · AI 只能写「待确认」，确认只能由用户点；「讲过了 / 继续」都不算掌握。
+ * 时间：每条写入都带时间；打开弹窗时按「当前时间」重新算相对时间（不存相对值）。
+ */
+
+const BASIS_LABEL = { user_confirmed: '用户确认', user_self_report: '自述', model_inferred: 'AI 观察' };
+
+function initProfile() {
+  const modal = $('#profileModal');
+  if (!modal) return;
+  $('#profileClose')?.addEventListener('click', closeProfile);
+  modal.addEventListener('mousedown', (e) => { if (e.target === modal) closeProfile(); });
+  $('#profileSelfSave')?.addEventListener('click', saveSelfReport);
+  $('#profileAdd')?.addEventListener('click', () => { profileDraft.creating = true; renderProfileModal(); });
+  $('#profileClear')?.addEventListener('click', clearProfileAll);
+  const personal = $('#cfgProfilePersonal');
+  if (personal) {
+    personal.checked = profileStore.enabled;
+    personal.addEventListener('change', () => {
+      profileStore.setEnabled(personal.checked);
+      toast(personal.checked ? '已开启：回答会参考学习档案' : '已关闭：回答不再参考学习档案（档案保留）', 'ok', 3000);
+    });
+  }
+}
+
+/** 弹窗里的临时编辑状态（不落盘） */
+const profileDraft = { creating: false, editingId: '' };
+
+function openProfile() {
+  renderProfileModal();
+  $('#profileModal')?.classList.remove('hidden');
+}
+
+function closeProfile() {
+  profileDraft.creating = false;
+  profileDraft.editingId = '';
+  $('#profileModal')?.classList.add('hidden');
+}
+
+const profileDateText = (item) => {
+  const bits = [];
+  if (item.lastConfirmedAt) bits.push(`${isoDate(item.lastConfirmedAt)} 确认（${relativeLabel(item.lastConfirmedAt)}）`);
+  else bits.push(`${isoDate(item.createdAt)} 记录（待确认）`);
+  if (item.updatedAt && isoDate(item.updatedAt) !== isoDate(item.lastConfirmedAt)) bits.push(`${isoDate(item.updatedAt)} 修改`);
+  return bits.join(' · ');
+};
+
+/** 一条档案卡片：查看态 / 编辑态 */
+function profileCard(item, isPending) {
+  if (profileDraft.editingId === item.id) return profileEditorCard(item, isPending);
+  const st = staleness(item);
+  const meta = el('div', { class: 'profile-meta' },
+    el('span', { class: `profile-chip ${item.status}`, text: isPending ? '待确认' : '已确认' }),
+    st.days !== null && item.status === 'confirmed' ? el('span', { class: `profile-chip ${st.tier}`, text: st.tier === 'stale' ? '可能生疏' : st.tier === 'aging' ? '有一阵没确认' : '较新' }) : null,
+    el('span', { class: 'profile-date', text: profileDateText(item) }),
+    el('span', { class: 'profile-basis', text: BASIS_LABEL[item.basis] || '' }),
+  );
+  const rows = [
+    item.level ? el('div', { class: 'profile-row' }, el('span', { class: 'profile-key', text: '理解程度' }), el('span', { text: item.level })) : null,
+    item.boundary ? el('div', { class: 'profile-row' }, el('span', { class: 'profile-key', text: '具体边界' }), el('span', { text: item.boundary })) : null,
+  ];
+  const actions = isPending
+    ? [
+      el('button', { type: 'button', class: 'profile-btn ok', text: '确认掌握', onclick: () => mutateProfile((p) => withPendingConfirmed(p, item.id), '已确认') }),
+      el('button', { type: 'button', class: 'profile-btn', text: '还不会', onclick: () => mutateProfile((p) => withPendingRejected(p, item.id), '已记为还不会') }),
+      el('button', { type: 'button', class: 'profile-btn danger', text: '删除', onclick: () => mutateProfile((p) => withPendingDeleted(p, item.id), '已删除') }),
+    ]
+    : [
+      el('button', { type: 'button', class: 'profile-btn', text: '编辑', onclick: () => { profileDraft.editingId = item.id; renderProfileModal(); } }),
+      el('button', { type: 'button', class: 'profile-btn danger', text: '删除', onclick: () => mutateProfile((p) => withDeleted(p, item.id), '已删除') }),
+    ];
+  return el('div', { class: `profile-card${isPending ? ' pending' : ''}` },
+    el('div', { class: 'profile-topic', text: item.topic }),
+    meta, ...rows,
+    el('div', { class: 'profile-actions' }, ...actions));
+}
+
+/** 编辑态卡片（编辑已确认条目 / 新建一条） */
+function profileEditorCard(item, isPending) {
+  const creating = !item;
+  const topic = el('input', { class: 'profile-input', type: 'text', placeholder: '知识点，例如：残差连接', value: item?.topic || '' });
+  const level = el('input', { class: 'profile-input', type: 'text', placeholder: '理解程度，例如：理解原理，能够实现', value: item?.level || '' });
+  const boundary = el('textarea', { class: 'profile-textarea', placeholder: '具体边界：会什么、不会什么（这一栏最重要）' });
+  boundary.value = item?.boundary || '';
+  const foot = el('div', { class: 'profile-actions' },
+    el('button', {
+      type: 'button', class: 'profile-btn ok', text: creating ? '添加' : '保存',
+      onclick: async () => {
+        const name = topic.value.trim();
+        if (!name) { toast('先填知识点名称', 'err', 3000); return; }
+        if (creating) {
+          const next = withConfirmed(profileStore.data, { topic: name, level: level.value.trim(), boundary: boundary.value.trim(), source: { docId: state.doc?.docId || '', paper: state.doc?.name || '', capability: 'manual' } });
+          profileDraft.creating = false;
+          await saveProfileAndRender(next.profile, '已添加（今天确认）');
+        } else {
+          const next = withEdited(profileStore.data, item.id, { topic: name, level: level.value.trim(), boundary: boundary.value.trim() });
+          profileDraft.editingId = '';
+          await saveProfileAndRender(next, '已保存（今天确认）');
+        }
+      },
+    }),
+    el('button', {
+      type: 'button', class: 'profile-btn', text: '取消',
+      onclick: () => { profileDraft.creating = false; profileDraft.editingId = ''; renderProfileModal(); },
+    }));
+  return el('div', { class: 'profile-card editing' },
+    el('div', { class: 'profile-topic', text: creating ? '手动添加一条' : '编辑条目' }),
+    el('div', { class: 'profile-field' }, el('span', { class: 'profile-key', text: '知识点' }), topic),
+    el('div', { class: 'profile-field' }, el('span', { class: 'profile-key', text: '理解程度' }), level),
+    el('div', { class: 'profile-field' }, el('span', { class: 'profile-key', text: '具体边界' }), boundary),
+    el('div', { class: 'profile-hint', text: '编辑/保存即视为一次新的确认（会更新「最近确认时间」）。' }),
+    foot);
+}
+
+function renderProfileModal() {
+  const modal = $('#profileModal');
+  if (!modal) return;
+  const p = profileStore.data;
+  const s = profileSummary(p);
+  $('#profileTitle')?.replaceChildren(document.createTextNode('学习档案'));
+  const self = $('#profileSelfReport');
+  if (self && document.activeElement !== self) self.value = p.selfReport || '';
+  const selfAt = $('#profileSelfAt');
+  if (selfAt) selfAt.textContent = p.selfReportAt ? `上次填写：${isoDate(p.selfReportAt)}（${relativeLabel(p.selfReportAt)}）` : '还没有填写';
+  $('#profileCounts')?.replaceChildren(document.createTextNode(
+    s.isEmpty ? '还没有内容' : `已确认 ${s.confirmed} 条 · 待确认 ${s.pending} 条 · 最近确认 ${s.latest ? relativeLabel(s.latest) : '（无）'}`));
+
+  const pendingHost = $('#profilePending');
+  const pending = profileItemsForMenu(p).filter((i) => i.status === 'pending');
+  if (pendingHost) {
+    pendingHost.replaceChildren(...(pending.length
+      ? pending.map((i) => profileCard(i, true))
+      : [el('div', { class: 'profile-empty', text: '没有待确认的条目。你在阅读中确认过的内容会出现在下面。' })]));
+  }
+  const confirmedHost = $('#profileConfirmed');
+  const confirmed = profileItemsForMenu(p).filter((i) => i.status === 'confirmed');
+  const cards = confirmed.map((i) => profileCard(i, false));
+  if (profileDraft.creating) cards.unshift(profileEditorCard(null, false));
+  if (confirmedHost) {
+    confirmedHost.replaceChildren(...(cards.length ? cards : [el('div', { class: 'profile-empty', text: '还没有已确认的条目。点下面「手动添加一条」，或在回答里点「这个我懂了」。' })]));
+  }
+  const err = $('#profileError');
+  if (err) err.textContent = profileStore.error || '';
+}
+
+async function saveProfileAndRender(nextProfile, message) {
+  try {
+    await profileStore.save(nextProfile);
+  } catch (e) {
+    toast(`学习档案保存失败：${e.message}`, 'err', 4500);
+    renderProfileModal();
+    return;
+  }
+  renderProfileModal();
+  if (message) toast(message, 'ok', 2400);
+}
+
+function mutateProfile(fn, message) {
+  saveProfileAndRender(fn(profileStore.data), message);
+}
+
+async function saveSelfReport() {
+  const self = $('#profileSelfReport');
+  if (!self) return;
+  const next = withSelfReport(profileStore.data, self.value);
+  await saveProfileAndRender(next, '我的基础已保存（带填写时间）');
+}
+
+async function clearProfileAll() {
+  if (!confirm('清空整个学习档案？只删本地记录，不影响论文和会话。')) return;
+  await saveProfileAndRender(withSelfReport(emptyProfileLike(), ''), '学习档案已清空');
+}
+
+/** 清空档案时保留「已删除」的结构（revision 由 save 递增） */
+function emptyProfileLike() {
+  return { version: 1, revision: profileStore.data.revision, updatedAt: '', selfReport: '', selfReportAt: '', items: [] };
+}
+
 /* ══════════════════════════════ 设置（只有 Key + 模型名） ══════════════════════════════ */
 
 const ENDPOINT_SHORT = {
@@ -7123,6 +8046,7 @@ function initShortcuts() {
 
     if (e.key === 'Escape') {
       if (!$('#regionOverlay').classList.contains('hidden')) { state.stopRegion?.(); return; }
+      if (!$('#profileModal').classList.contains('hidden')) { closeProfile(); return; }
       if (!$('#settingsModal').classList.contains('hidden')) { closeSettings(); return; }
       if (!$('#searchBar').classList.contains('hidden')) { $('#searchClose').click(); return; }
       if (!$('#noteBox').classList.contains('hidden')) { saveNoteBox(); return; }

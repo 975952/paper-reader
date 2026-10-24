@@ -226,8 +226,26 @@ const appjs = await fetch(`${base}/js/app.js`);
 check('/js/app.js MIME 必须是 text/javascript', (appjs.headers.get('content-type') || '').includes('javascript'),
   `${appjs.status} ${appjs.headers.get('content-type')}`);
 const embeddedApp = await appjs.text();
-check('exe 内嵌了会话恢复和已完成段落增量渲染代码', embeddedApp.includes('/api/session?doc=') && embeddedApp.includes('completedMarkdownEnd(pending, scan)'));
+check('exe 内嵌了会话恢复和已完成段落增量渲染代码', embeddedApp.includes('/api/session?doc=') && /completedMarkdownEnd\(/.test(embeddedApp));
+check('exe 内嵌了「读懂论文」与学习档案代码', embeddedApp.includes('读懂论文') && embeddedApp.includes('学习档案'));
 check('搜索结果只嵌入链接入口（没有直接导入按钮）', embeddedApp.includes('打开链接') && !embeddedApp.includes('importPdf('));
+const profileJs = await fetch(`${base}/js/profile.js`);
+check('exe 内嵌了学习档案模块', profileJs.status === 200 && (await profileJs.text()).includes('buildProfileBlock'));
+const teachingJs = await fetch(`${base}/js/teaching.js`);
+check('exe 内嵌了四项教学能力提示词', teachingJs.status === 200 && (await teachingJs.text()).includes('先给我讲明白'));
+// 学习档案接口（Rust 版必须和 Node 版一致，否则 exe 里个性化是坏的）
+const profileGet = await fetch(`${base}/api/profile`);
+const profileDefault = profileGet.ok ? await profileGet.json() : {};
+check('exe 提供 GET /api/profile（默认空档案）', profileGet.ok && profileDefault.version === 1 && Array.isArray(profileDefault.items),
+  `${profileGet.status}`);
+const badProfile = await fetch(`${base}/api/profile`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ version: 1, items: [{ topic: '', status: 'confirmed' }] }),
+});
+check('exe 的 /api/profile 拒绝坏数据（400）', badProfile.status === 400, `${badProfile.status}`);
+// 会话删除（Node 版补齐的那个动词，Rust 版一直有 —— 两边行为必须一致）
+const delSession = await fetch(`${base}/api/session?doc=${encodeURIComponent('no-such-doc')}`, { method: 'DELETE' });
+check('exe 提供 DELETE /api/session', delSession.ok, `${delSession.status}`);
 const aiJs = await fetch(`${base}/js/ai.js`).then((r) => r.text());
 check('exe 内嵌了地区限制与密钥错误的区分提示', aiJs.includes('该模型在你所在地区不可用') && aiJs.includes('API Key 无效或已失效'));
 const worker = await fetch(`${base}/vendor/pdf.worker.min.mjs`);

@@ -29,7 +29,7 @@
     窗口控制（最小化/最大化/关闭）在最右边，属于标题栏，不算功能入口。
   -->
   <button class="tbtn" id="homeBtn" title="回到首页（书架）"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.6 10.4 12 3.6l8.4 6.8"/><path d="M5.6 9.6v9.2a1.6 1.6 0 0 0 1.6 1.6h9.6a1.6 1.6 0 0 0 1.6-1.6V9.6"/><path d="M10.2 20.4v-5.2h3.6v5.2"/></svg></button>
-  <button class="tbtn" id="opsBtn" title="论文摘要：一句话速览 / 方法拆解 / 实验是否支撑结论 / 局限与可疑之处"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m9.6 3.4 1.6 4.2 4.2 1.6-4.2 1.6-1.6 4.2-1.6-4.2L3.8 9.2l4.2-1.6z"/><path d="m17.4 13.4.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9z"/></svg></button>
+  <button class="tbtn" id="opsBtn" title="读懂论文：先给我讲明白 / 我需要先懂什么 / 带我一步步读 / 讲懂图表与公式"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m9.6 3.4 1.6 4.2 4.2 1.6-4.2 1.6-1.6 4.2-1.6-4.2L3.8 9.2l4.2-1.6z"/><path d="m17.4 13.4.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9z"/></svg></button>
   <button class="tbtn" id="searchBtn" title="全文搜索　Ctrl+F"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.8" cy="10.8" r="6.4"/><path d="M15.6 15.6 20.8 20.8"/></svg></button>
   <div class="topbar-side-controls" role="group" aria-label="侧栏控制">
     <button class="tbtn topbar-side-toggle" id="topbarLeftToggle" type="button" aria-label="收起左栏" aria-pressed="true"></button>
@@ -250,8 +250,33 @@
   </footer>
 </main>
 
-<!-- 论文摘要菜单：4 个文档级操作平铺（见 ops.js 的 OPS），结果进右侧问答栏 -->
+<!-- 读懂论文菜单：四项教学能力平铺（见 teaching.js）+ 头部学习档案入口 -->
 <div class="ops-menu hidden" id="opsMenu"></div>
+
+<!-- 学习档案：本机 data/learning-profile.json；AI 只能写「待确认」，确认只能用户点。
+     每条带写入时间，菜单/弹窗里按「当前时间」显示相对时间。 -->
+<div class="modal hidden" id="profileModal">
+  <div class="modal-box profile-box">
+    <div class="modal-head">学习档案<button class="tbtn" id="profileClose" title="关闭" aria-label="关闭学习档案"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6.4 6.4 17.6 17.6"/><path d="M17.6 6.4 6.4 17.6"/></svg></button></div>
+    <div class="profile-note">只存在本机 <code>data/learning-profile.json</code>；回答时只把和当前论文相关的少数条目交给模型。AI 只会写「待确认」，<b>不会自动判定你掌握了什么</b>——确认只能由你点。</div>
+    <div class="profile-counts" id="profileCounts"></div>
+    <div class="profile-section-title">我的基础（自述）</div>
+    <textarea class="profile-textarea profile-self" id="profileSelfReport" placeholder="例如：学过 PyTorch，写过 CNN；矩阵运算基本会，概率论比较薄弱。写一句就行，不用先做测试。"></textarea>
+    <div class="profile-self-foot">
+      <span class="profile-date" id="profileSelfAt"></span>
+      <button type="button" class="profile-btn ok" id="profileSelfSave">保存自述</button>
+    </div>
+    <div class="profile-section-title">待确认（AI 观察，未确认前不会用来跳过讲解）</div>
+    <div class="profile-list" id="profilePending"></div>
+    <div class="profile-section-title">已确认</div>
+    <div class="profile-list" id="profileConfirmed"></div>
+    <div class="profile-actions profile-foot">
+      <button type="button" class="profile-btn" id="profileAdd">手动添加一条</button>
+      <button type="button" class="profile-btn danger" id="profileClear">清空档案</button>
+    </div>
+    <div class="profile-error" id="profileError"></div>
+  </div>
+</div>
 
 <!-- 划词气泡：选择操作；右栏关闭时译文显示在选区旁的卡片。 -->
 <div class="bubble hidden" id="bubble">
@@ -357,6 +382,13 @@
       <label class="field field-switch"><input id="cfgUseFullText" type="checkbox" /><span>整篇论文</span></label>
       <label class="field field-switch"><input id="cfgUseWeb" type="checkbox" /><span>联网搜索</span></label>
     </div>
+    <!-- 学习档案（2026-10）：轻量个性化，不是知识库。关掉后不注入、不写待确认；
+         档案本身仍可在顶栏 ✦ → 学习档案 里查看和编辑。 -->
+    <div class="settings-section-title">学习档案</div>
+    <div class="settings-grid settings-core-grid">
+      <label class="field field-switch"><input id="cfgProfilePersonal" type="checkbox" /><span>回答参考学习档案</span></label>
+    </div>
+    <div class="modal-note"><span>记录你已确认的理解程度与具体边界，只把和当前论文相关的少数条目交给模型；AI 只能建议「待确认」，确认由你点。默认开启。</span></div>
     <!-- 样式部分只保留：主题 / 阅读字号（另有「发送范围」两个开关，见下）。
          结果密度、顶栏行为、「更多样式」里那一堆调试刻度（界面字号 / 控件大小 / 行高 /
          代码大小 / 结果最大宽度 / 结果透明度 / PDF 纸张 / 三个显示开关）全部下架：

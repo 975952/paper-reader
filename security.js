@@ -402,6 +402,8 @@ const BODY_LIMITS = {
   papers: 1 * 1024 * 1024,
   notes: 4 * 1024 * 1024,
   session: 16 * 1024 * 1024,
+  // 学习档案：全局一份，正常几 KB；给足余量但不允许被当成大数据仓库
+  profile: 512 * 1024,
   chat: 64 * 1024 * 1024,
   upload: 256 * 1024 * 1024,
 };
@@ -432,8 +434,7 @@ function checkNotes(items) {
   return null;
 }
 
-/** /api/session 的校验：历史条目数 + 总字符数 + 附件元数据大小 */
-function checkSession(payload) {
+/** /api/session 的校验：历史条目数 + 总字符数 + 附件元数据大小 */function checkSession(payload) {
   const lim = CONTENT_LIMITS.session;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return '会话必须是对象';
@@ -454,6 +455,79 @@ function checkSession(payload) {
   }
   if (bytes > lim.maxBytes) return '会话体积过大';
   return null;
+}
+
+const PROFILE_LIMITS = {
+  maxItems: 200,
+  maxTotalChars: 400000,
+  maxTopic: 120,
+  maxLevel: 300,
+  maxBoundary: 2000,
+  maxSelfReport: 4000,
+  maxNote: 2000,
+};
+
+const ISO_LIKE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:[+-]\d{2}:\d{2}|Z)$/;
+
+/**
+ * /api/profile 的校验：版本 / 条目数 / 字符串长度 / 时间格式。
+ *
+ * 与前端 `public/js/profile.js` 的 `validateProfile()`、Rust `limits::check_profile()`
+ * 保持同一口径。**校验失败绝不落盘**（旧档案原样保留），避免坏数据覆盖好数据。
+ * @returns {{ error:string } | { value:object }}
+ */
+function checkProfile(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: '学习档案必须是对象' };
+  if (Number(raw.version) !== 1) return { error: '学习档案版本不支持' };
+  if (!Array.isArray(raw.items)) return { error: '学习档案缺少 items 数组' };
+  if (raw.items.length > PROFILE_LIMITS.maxItems) return { error: `学习档案条目过多（上限 ${PROFILE_LIMITS.maxItems} 条）` };
+  const items = [];
+  for (const it of raw.items) {
+    if (!it || typeof it !== 'object' || Array.isArray(it)) return { error: '学习档案条目必须是对象' };
+    const topic = typeof it.topic === 'string' ? it.topic.trim() : '';
+    if (!topic) return { error: '学习档案条目缺少 topic' };
+    if (topic.length > PROFILE_LIMITS.maxTopic) return { error: '学习档案知识点名称过长' };
+    const status = it.status === 'pending' || it.status === 'confirmed' ? it.status : null;
+    if (!status) return { error: '学习档案条目状态不合法' };
+    const basis = ['user_confirmed', 'user_self_report', 'model_inferred'].includes(it.basis) ? it.basis : 'user_confirmed';
+    const level = typeof it.level === 'string' ? it.level.slice(0, PROFILE_LIMITS.maxLevel) : '';
+    const boundary = typeof it.boundary === 'string' ? it.boundary.slice(0, PROFILE_LIMITS.maxBoundary) : '';
+    if (level.length > PROFILE_LIMITS.maxLevel || boundary.length > PROFILE_LIMITS.maxBoundary) return { error: '学习档案条目过长' };
+    const stamp = (v) => (typeof v === 'string' && ISO_LIKE.test(v) ? v : null);
+    const createdAt = stamp(it.createdAt);
+    if (!createdAt) return { error: '学习档案条目缺少合法的 createdAt 时间' };
+    const aliases = (Array.isArray(it.aliases) ? it.aliases : []).filter((a) => typeof a === 'string' && a.trim())
+      .slice(0, 8).map((a) => a.trim().slice(0, PROFILE_LIMITS.maxTopic));
+    items.push({
+      id: typeof it.id === 'string' && it.id.trim() ? it.id.trim().slice(0, 80) : `kp-${items.length}`,
+      topic: topic.slice(0, PROFILE_LIMITS.maxTopic),
+      aliases,
+      level,
+      boundary,
+      basis,
+      status,
+      createdAt,
+      updatedAt: stamp(it.updatedAt) || createdAt,
+      lastConfirmedAt: stamp(it.lastConfirmedAt),
+      source: it.source && typeof it.source === 'object' ? {
+        docId: typeof it.source.docId === 'string' ? it.source.docId.slice(0, 120) : '',
+        paper: typeof it.source.paper === 'string' ? it.source.paper.slice(0, 300) : '',
+        capability: typeof it.source.capability === 'string' ? it.source.capability.slice(0, 40) : '',
+      } : null,
+      note: typeof it.note === 'string' ? it.note.slice(0, PROFILE_LIMITS.maxNote) : '',
+    });
+  }
+  const selfReport = typeof raw.selfReport === 'string' ? raw.selfReport.trim().slice(0, PROFILE_LIMITS.maxSelfReport) : '';
+  const value = {
+    version: 1,
+    revision: Number.isInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0,
+    updatedAt: typeof raw.updatedAt === 'string' && ISO_LIKE.test(raw.updatedAt) ? raw.updatedAt : '',
+    selfReport,
+    selfReportAt: typeof raw.selfReportAt === 'string' && ISO_LIKE.test(raw.selfReportAt) ? raw.selfReportAt : '',
+    items,
+  };
+  if (countChars(value) > PROFILE_LIMITS.maxTotalChars) return { error: '学习档案内容过大' };
+  return { value };
 }
 
 /* ============================================================== P2 脱敏 */
@@ -553,6 +627,8 @@ module.exports = {
   validUrlString,
   checkNotes,
   checkSession,
+  checkProfile,
+  PROFILE_LIMITS,
   countChars,
   diag,
   scrubText,

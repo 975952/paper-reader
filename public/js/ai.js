@@ -5,6 +5,8 @@
  * 好处：绕开浏览器 CORS；API Key 存在本机 data/config.json，不进 localStorage。
  */
 import { resolveReadingRequest, historyMessages, stripPageLabels } from './reading-context.js';
+import { nowContext } from './profile.js';
+import { CONDENSE_SYS } from './teaching.js';
 
 export const PRESETS = {
   deepseek: { baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-flash', visionModel: '' },
@@ -337,7 +339,7 @@ export function matchGlossary(text, glossaryText) {
   return entries.filter(([k]) => hay.includes(k.toLowerCase()));
 }
 
-export function askMessages({ question, selection, context, page, docTitle, fullText, webResults, history = [], reading, references = [] }) {
+export function askMessages({ question, selection, context, page, docTitle, fullText, webResults, history = [], reading, references = [], profileBlock = '', teachingBlock = '' }) {
   const request = reading || resolveReadingRequest({ question, selection, page, history });
   const sys = [
     '你是嵌在论文阅读器里的阅读助手，帮助读者读懂正在看的论文。',
@@ -350,7 +352,12 @@ export function askMessages({ question, selection, context, page, docTitle, full
     '5. 用户纠正或设定默认讲解方式时，简短确认后落实到当前阅读对象；「？」若附有新选区就解释新选区，否则围绕上一回答纠正或换个具体说法。不要凭空编造自己检索了什么、拿到了什么或内部运行原因。',
     '6. 用中文和短段落，术语首次出现保留英文；数学公式用 $...$ 或 $$...$$。不要客套、无关扩写或例行邀请用户继续提问。',
     request.guidance ? `读者持续的讲解偏好：${request.guidance}` : '',
-  ].join('\n');
+    // 用户口径（2026-10）：「现在的时间在后续过程中要交给模型」——每次回答都带上，
+    // 模型才能判断「最近 / 今年 / 几个月前」这类说法。
+    nowContext(),
+    profileBlock,
+    teachingBlock,
+  ].filter(Boolean).join('\n');
 
   const contextBlock = [];
   if (docTitle) contextBlock.push(`【论文】${docTitle}${page ? `（第 ${page} 页）` : ''}`);
@@ -405,9 +412,48 @@ export function opMessages(op, { docTitle, fullText, digest, extra, history = []
   if (extra) parts.push(extra);
   parts.push(`【本次任务】\n${op.ask}`);
   return [
-    { role: 'system', content: op.sys },
+    { role: 'system', content: `${op.sys}\n\n${nowContext()}` },
     ...history.slice(-4),
     { role: 'user', content: parts.join('\n\n') },
+  ];
+}
+
+/**
+ * 「读懂论文」四项教学能力的请求体。
+ *
+ * 和 opMessages 的区别：
+ *   · 学习档案块由调用方先按「当前论文 + 问题」筛好再传进来（不整份塞）；
+ *   · 支持 extraUser（例如图表题对象、点开的清单项）与 history（续讲时带已讲内容）；
+ *   · 「当前时间」固定注入，供模型判断档案条目新旧与「最近 / 今年」这类说法。
+ */
+export function teachMessages(op, {
+  docTitle, fullText, digest, extraUser = '', profileBlock = '', history = [], ask = '',
+} = {}) {
+  const parts = [];
+  if (docTitle) parts.push(`【论文】${docTitle}`);
+  if (fullText) {
+    parts.push(`【论文全文${fullText.length > 60000 ? '（很长，已按页给出）' : ''}】\n"""\n${fullText}\n"""`);
+  } else if (digest) {
+    parts.push(`【阅读索引】\n${digest}`);
+  }
+  if (extraUser) parts.push(extraUser);
+  parts.push(`【本次任务】\n${ask || op.ask}`);
+  const system = [op.sys, nowContext(), profileBlock].filter(Boolean).join('\n\n');
+  return [
+    { role: 'system', content: system },
+    ...history.slice(-10).map((m) => ({ role: m.role, content: String(m.content || '') })),
+    { role: 'user', content: parts.join('\n\n') },
+  ];
+}
+
+/** 「再压短」：把上一条回答压到 60% 左右，不新增内容 */
+export function condenseMessages({ answer, docTitle }) {
+  return [
+    { role: 'system', content: `${CONDENSE_SYS}\n\n${nowContext()}` },
+    {
+      role: 'user',
+      content: [`【论文】${docTitle || '未命名'}`, '【需要压缩的回答】', '"""', String(answer || '').slice(0, 20000), '"""'].join('\n'),
+    },
   ];
 }
 
