@@ -404,7 +404,8 @@ export function withPendingSuggestions(profile, suggestions, source = null) {
     const item = {
       id: uid(), topic, aliases: [], level: str(raw.level).trim().slice(0, 300),
       boundary: str(raw.boundary).trim().slice(0, 2000), basis: 'model_inferred', status: 'pending',
-      createdAt: now, updatedAt: now, lastConfirmedAt: null, source, note: 'AI 观察，等待用户确认',
+      createdAt: now, updatedAt: now, lastConfirmedAt: null, source,
+      note: str(raw.note).trim().slice(0, 2000) || 'AI 观察，等待用户确认',
     };
     next.items.push(item);
     added.push(item);
@@ -544,4 +545,109 @@ export function profileItemsForMenu(profile) {
     if (a.status !== b.status) return a.status === 'pending' ? -1 : 1;
     return String(b.lastConfirmedAt || b.createdAt).localeCompare(String(a.lastConfirmedAt || a.createdAt));
   });
+}
+
+/* ---------------------------------------------------------------- 记忆提取 */
+
+/**
+ * 「记忆提取」提示词。
+ *
+ * 为什么需要单独一步：真实模型（2026-10-24 实测 deepseek-v4.1-flash）会稳定输出
+ * prt 的 chips，但**从不输出** profile 建议——「AI 提出你似乎已经理解了某个概念」
+ * 这条设计如果只靠教学回答自觉，实际上永远不会发生。
+ * 所以教学回答收尾后，再用一次很小的、独立的调用从这轮对话里提取「待确认」条目。
+ * 它只写 pending，绝不写确认（确认只能用户点）。
+ */
+export const MEMORY_EXTRACT_SYS = [
+  '你是论文阅读器「学习档案」的提取器。给你一轮教学对话（用户的问题 + 助手刚讲完的回答），',
+  '以及学习档案里已有的条目名称。请判断：这轮对话里有没有值得记为「用户可能已经理解 / 还没弄懂」的线索？',
+  '',
+  '规则：',
+  '1. 只根据**用户的表现**判断，不要因为助手讲了什么就认定用户会了——讲过了不等于掌握。',
+  '2. 用户明确说「懂了 / 这个我懂了 / 会了」→ signal 写 "claimed"；',
+  '   用户说「没懂 / 讲简单点 / 再换个说法」或明显追问基础 → signal 写 "needs_help"；',
+  '   用户能接着追问里正确使用某个概念、或自己复述出原理 → signal 写 "inferred"（level 里引一句依据）。',
+  '3. 每条给 topic（知识点，尽量和论文里的术语一致）、level（一句理解程度）、boundary（这轮对话里能看出的具体边界，看不出来就留空）、signal。',
+  '4. 最多 3 条；没有值得记的就返回空数组 []。不要凭猜测编造。',
+  '5. 已有条目里已经有的主题不要重复（宁可少一条）。',
+  '6. 只输出一个 JSON 数组，不要解释、不要 Markdown 代码块、不要其它文字。',
+  '格式：[{"topic":"多头注意力","level":"用户说懂了","boundary":"","signal":"claimed"}]',
+].join('\n');
+
+/** 组装记忆提取请求（输入只有这一轮对话，不带论文全文，成本很小） */
+export function memoryExtractMessages({ question = '', answer = '', existingTopics = [], docTitle = '' } = {}) {
+  const topics = (Array.isArray(existingTopics) ? existingTopics : []).slice(0, 40)
+    .map((t) => `- ${String(t || '').slice(0, 120)}`).join('\n');
+  const user = [
+    `【论文】${docTitle || '未命名'}`,
+    '【已有档案条目（不要重复）】',
+    topics || '（空）',
+    '【这一轮对话】',
+    `用户：${String(question || '').slice(0, 2000)}`,
+    '助手回答：',
+    '"""',
+    String(answer || '').slice(0, 12000),
+    '"""',
+    '【输出】只输出 JSON 数组。',
+  ].join('\n');
+  return [
+    { role: 'system', content: MEMORY_EXTRACT_SYS },
+    { role: 'user', content: user },
+  ];
+}
+
+const SIGNAL_LEVEL = {
+  claimed: '用户说懂了（待确认）',
+  needs_help: '还没弄懂（对话观察）',
+  inferred: '',
+};
+
+/**
+ * 解析记忆提取结果：容忍代码块包裹、前后废话、个别字段缺失。
+ * 返回可直接交给 `withPendingSuggestions()` 的数组（最多 3 条，只含白名单字段）。
+ */
+export function parseMemorySuggestions(text, limit = MAX_PENDING_SUGGESTIONS) {
+  const raw = String(text || '').trim();
+  if (!raw) return [];
+  let body = raw;
+  const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(raw);
+  if (fence) body = fence[1].trim();
+  const start = body.indexOf('[');
+  const end = body.lastIndexOf(']');
+  if (start < 0 || end <= start) return [];
+  let arr;
+  try { arr = JSON.parse(body.slice(start, end + 1)); } catch { return []; }
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    const topic = String(item.topic || '').trim().slice(0, 120);
+    if (!topic) continue;
+    const signal = ['claimed', 'needs_help', 'inferred'].includes(item.signal) ? item.signal : 'inferred';
+    const level = String(item.level || '').trim().slice(0, 300) || SIGNAL_LEVEL[signal];
+    out.push({
+      topic,
+      level,
+      boundary: String(item.boundary || '').trim().slice(0, 2000),
+      basis: 'inferred',
+      note: `来自对话观察（${signal}）`,
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/**
+ * 用户点「这里没懂」：把相关条目标成「待确认」，不再当作已掌握。
+ * 只动用户明确表示没弄懂的那个知识点；没有对应条目就不新建（避免噪声）。
+ */
+export function withNeedsReconfirm(profile, topic) {
+  const next = clone(profile);
+  const item = findSimilarItem(next, topic);
+  if (!item) return { profile: next, changed: false };
+  const now = nowISO();
+  item.status = 'pending';
+  item.updatedAt = now;
+  item.note = `用户点了「这里没懂」（${now}），需要重新确认边界`;
+  return { profile: next, changed: true };
 }

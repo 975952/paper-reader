@@ -20,7 +20,7 @@ import {
   profileStore, buildProfileBlock, nowISO, nowContext, summary as profileSummary,
   withConfirmed, withNotKnown, withEdited, withDeleted, withPendingConfirmed, withPendingRejected,
   withPendingDeleted, withSelfReport, withPendingSuggestions, findItem, profileItemsForMenu,
-  relativeLabel, isoDate, staleness,
+  relativeLabel, isoDate, staleness, memoryExtractMessages, parseMemorySuggestions, withNeedsReconfirm,
 } from './profile.js';
 import {
   Settings, streamChat, testConnection, targetLangFor,
@@ -2007,7 +2007,7 @@ function initViewer() {
     get profileEnabled() { return profileStore.enabled; },
     profileStore, openProfile, closeProfile, renderProfileModal, PROFILE_INFO: { staleDays: 90 },
     // 学习档案的行为钩子（测试里用来验证 pending 不参与跳过、时间戳格式等）
-    markTeachingKnown, applyProfileSuggestions,
+    markTeachingKnown, applyProfileSuggestions, scheduleMemoryExtraction, parseMemorySuggestions,
     get FULL_LIMIT() { return FULL_LIMIT; },
     jumpToPageWithHistory, jumpToDestWithHistory, returnToPreviousPosition,
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
@@ -5136,6 +5136,11 @@ async function runTeaching(opId, {
     if (opId !== 'visual' && !history.length) {
       teachingCacheSet(docId, opId, { text: clean, at: Date.now(), page: viewer.current, chips: split.chips, teaching });
     }
+    // 记忆：从这一轮对话里提取「待确认」（不阻塞、不写确认）
+    scheduleMemoryExtraction({
+      question: ask || op.ask, answer: clean,
+      capability: opId + (teaching?.kind ? `:${teaching.kind}` : ''),
+    });
     state.teaching.current = teaching || null;
     scheduleSessionSave();
     return { text: clean, chips: split.chips };
@@ -5260,6 +5265,42 @@ async function applyProfileSuggestions(suggestions, teaching = null) {
   toast(`学习档案：记下 ${next.added.length} 条待确认（在菜单里点「学习档案」可确认）`, 'ok', 4200);
 }
 
+/* ── 记忆提取：从这一轮对话里判断「用户可能懂了 / 没懂」，写成待确认 ──
+ *
+ * 为什么需要独立一步（2026-10-24 实测）：真实模型会稳定输出 prt 的 chips，
+ * 但**从不输出** prt 的 profile 建议——「AI 提出你似乎已经理解了某个概念」
+ * 这条设计如果只靠教学回答自觉，实际上永远不会发生。所以回答收尾后，
+ * 再用一次很小的独立调用（只带这一轮对话，不带论文全文）来提取。
+ *
+ * 硬规则：只写 pending、不写确认；不阻塞界面；失败静默；串行执行不并发轰炸。
+ */
+let memoryQueue = Promise.resolve();
+
+function scheduleMemoryExtraction({ question = '', answer = '', capability = '' } = {}) {
+  if (!profileStore.enabled) return;
+  if (!state.doc || !Settings.ready) return;
+  const text = String(answer || '');
+  if (text.length < 300) return;   // 太短的回答没有判断依据
+  const docId = state.doc.docId;
+  const docTitle = state.doc.name;
+  const existingTopics = profileStore.data.items.map((i) => i.topic).slice(0, 40);
+  memoryQueue = memoryQueue.then(async () => {
+    if (state.doc?.docId !== docId || !profileStore.enabled) return;
+    try {
+      const out = await streamChat({
+        messages: memoryExtractMessages({ question, answer: text, existingTopics, docTitle }),
+        stream: false,
+        temperature: 0,
+        idleMs: 30000,
+      });
+      const suggestions = parseMemorySuggestions(out);
+      if (!suggestions.length) return;
+      if (state.doc?.docId !== docId) return;
+      await applyProfileSuggestions(suggestions, { kind: `memory:${capability}` });
+    } catch { /* 记忆提取失败不影响主回答 */ }
+  }).catch(() => {});
+}
+
 /** 点「这个我懂了」：写 confirmed + 更新时间；并给下一项的入口 */
 async function markTeachingKnown(teaching, entry) {
   const next = withConfirmed(profileStore.data, {
@@ -5282,6 +5323,15 @@ async function markTeachingKnown(teaching, entry) {
 /** 点「这里没懂」：立即换一种更基础的说法重讲（不推进教学进度） */
 function reexplainTeaching(teaching, entry) {
   state.teaching.current = teaching;
+  // 用户明确说没懂 → 档案里对应的条目不再当作已掌握（只降级，不新建）
+  if (profileStore.enabled && teaching?.name) {
+    const next = withNeedsReconfirm(profileStore.data, teaching.name);
+    if (next.changed) {
+      profileStore.save(next.profile)
+        .then(() => toast(`学习档案：已把「${teaching.name}」标为待确认`, 'ok', 3200))
+        .catch(() => { /* 写失败不影响重讲 */ });
+    }
+  }
   const prompt = `这里没懂：「${teaching.name}」没听懂。请先不往下推进，换一种更基础的说法，从我可能缺的最基础的一步讲起，并给一个最小例子。`;
   sendTeachingPrompt(prompt);
 }
@@ -5387,6 +5437,7 @@ async function continueWalk(kind, entry) {
     scheduleSessionSave();
     renderTeachingExtras(newEntry, { opId: 'walk', chips: split.chips, teaching: null });
     if (profileStore.enabled) applyProfileSuggestions(split.profile, { kind: 'walk' }).catch(() => {});
+    scheduleMemoryExtraction({ question: instruction, answer: clean, capability: `walk:${kind}` });
   } catch (e) {
     if (isAbort(e)) {
       target.done(received);
