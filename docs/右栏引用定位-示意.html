@@ -1,0 +1,62 @@
+<html style="margin:0;padding:0;">
+<title>右栏引用定位交互示意</title>
+<style>
+  * { box-sizing: border-box; }
+  body, html { margin: 0; padding: 0; }
+  .wrap { width: 100%; max-width: 980px; margin: 0 auto; padding: 16px; font-family: system-ui, "Microsoft YaHei", sans-serif; color: #1f2328; }
+  .h { font-size: 16px; font-weight: 700; margin: 0 0 2px; }
+  .sub { font-size: 12px; color: #8a6d3b; background: #fff8e6; border: 1px solid #f0d9a8; border-radius: 6px; padding: 3px 8px; display: inline-block; margin: 0 0 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 14px; align-items: stretch; }
+  .card { flex: 1 1 260px; min-width: 240px; border: 1px solid #d9dee3; border-radius: 10px; padding: 12px 14px; background: #fff; }
+  .card h3 { margin: 0 0 8px; font-size: 13px; color: #57606a; font-weight: 600; }
+  .card h3 b { color: #1f2328; }
+  .arrow { align-self: center; font-size: 20px; color: #9aa4af; padding: 0 2px; }
+  .msg { border: 1px solid #e2e6ea; border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.7; background: #f8f9fa; }
+  .msg .q { color: #444c56; }
+  .msg .a { color: #1f2328; margin-top: 6px; }
+  .pr { display: inline-block; border: 1px solid #b6bdc6; border-radius: 5px; padding: 0 5px; margin: 0 2px; font-size: 11.5px; color: #0969da; background: #fff; cursor: pointer; }
+  .pr .t { color: #6e7681; font-weight: 400; }
+  .page { border: 1px solid #d0d7de; border-radius: 8px; background: #fff; padding: 10px 12px; font-size: 12px; line-height: 1.9; color: #444c56; position: relative; }
+  .page .ph { color: #9aa4af; font-size: 11px; margin-bottom: 4px; }
+  .hl { background: rgba(255, 176, 32, .38); border-bottom: 2px solid #f0a020; border-radius: 2px; padding: 0 1px; }
+  .pin { position: absolute; right: 8px; top: 8px; font-size: 10.5px; color: #b76a00; background: #fff3d6; border: 1px solid #f0d9a8; border-radius: 5px; padding: 1px 6px; }
+  .clear { margin-top: 12px; border-top: 1px dashed #d0d7de; padding-top: 9px; font-size: 12.5px; color: #444c56; display: grid; gap: 5px; }
+  .clear b { color: #1f2328; }
+  .clear .k { display: inline-block; border: 1px solid #b6bdc6; border-radius: 4px; padding: 0 5px; font-size: 11px; background: #f6f8fa; color: #444c56; }
+  .clear .sel { background: #fff8c5; border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+  <p class="h">右栏引用定位 · 点击引用 → 跳句 + 高亮</p>
+  <div><span class="sub">示意：交互流程演示，非真实对话内容</span></div>
+  <div class="row">
+    <div class="card">
+      <h3><b>右栏</b> · 问答回答</h3>
+      <div class="msg">
+        <div class="q">问：这篇论文的核心方法是什么？</div>
+        <div class="a">本文提出基于自注意力的编码器结构，核心是"多头注意力"<span class="pr">p.3<span class="t">‖</span></span>…（按钮带原文片段，hover 可见全文，点击跳转定位）</div>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card">
+      <h3><b>正文</b> · 跳到第 3 页并高亮对应句</h3>
+      <div class="page">
+        <div class="ph">第 3 页 · 文本层定位</div>
+        <span class="pin">临时高亮 · 非笔记</span>
+        3.1 Self-Attention<br/>
+        An attention function can be described as mapping a query and a set of key-value pairs to an output…<br/>
+        <span class="hl">We propose the Multi-Head Attention, which allows the model to jointly attend to information from different representation subspaces.</span><br/>
+        在本段文字中，高亮块由「片段前缀匹配」在文本层定位，与搜索命中同一套渲染路径，翻页后自动清除。
+      </div>
+    </div>
+    <div class="card">
+      <h3><b>取消高亮</b> · 推荐方案</h3>
+      <div class="clear">
+        <div><span class="sel">点击正文任意处</span> → 清除（与取消选区的肌肉记忆一致）</div>
+        <div>按 <span class="k">Esc</span> → 清除</div>
+        <div>再次点击<span class="sel">同一个引用按钮</span> → toggle 开/关</div>
+        <div>翻页 / 切换文档 → 自动清除；<b>不做自动淡出</b>（可能正在细读对照）</div>
+      </div>
+    </div>
+  </div>
+</div>
+</html>

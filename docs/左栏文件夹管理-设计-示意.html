@@ -1,0 +1,84 @@
+<html style="margin:0;padding:0;">
+<title>左栏文件夹管理设计示意</title>
+<style>
+  * { box-sizing: border-box; }
+  body, html { margin: 0; padding: 0; }
+  .wrap { width: 100%; max-width: 1000px; margin: 0 auto; padding: 18px 16px 24px; font-family: system-ui, "Microsoft YaHei", sans-serif; color: #1f2328; }
+  .h { font-size: 17px; font-weight: 700; margin: 0 0 2px; }
+  .sub { font-size: 12.5px; color: #8a6d3b; background: #fff8e6; border: 1px solid #f0d9a8; border-radius: 6px; padding: 4px 8px; display: inline-block; margin: 0 0 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 14px; align-items: stretch; }
+  .card { flex: 1 1 280px; min-width: 260px; border: 1px solid #d9dee3; border-radius: 10px; padding: 12px 14px; background: #fff; }
+  .card h3 { margin: 0 0 8px; font-size: 13.5px; color: #57606a; font-weight: 600; }
+  .card h3 b { color: #1f2328; }
+  .arrow { align-self: center; font-size: 22px; color: #9aa4af; padding: 0 2px; }
+  .filter { display: flex; align-items: center; gap: 6px; border: 1px solid #d0d7de; border-radius: 6px; padding: 4px 8px; color: #9aa4af; font-size: 12px; margin-bottom: 8px; background: #f6f8fa; }
+  .dropz { border: 1px dashed #b6bdc6; border-radius: 6px; padding: 5px 8px; font-size: 12px; color: #57606a; text-align: center; margin-bottom: 8px; background: #fafbfc; }
+  .tree { font-size: 12.5px; line-height: 1.9; }
+  .tree .fld { display: flex; align-items: center; gap: 5px; color: #1f2328; font-weight: 600; }
+  .tree .fld .cnt { color: #9aa4af; font-weight: 400; font-size: 11px; }
+  .tree .file { display: flex; align-items: center; gap: 5px; color: #444c56; padding-left: 22px; }
+  .tree .file .nm { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .x { color: #6e7681; opacity: 0; font-weight: 700; padding: 0 4px; border-radius: 4px; transition: opacity .12s; }
+  .file:hover .x { opacity: 1; color: #1f2328; }
+  .ops { display: grid; gap: 7px; margin-top: 2px; }
+  .op { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; line-height: 1.5; }
+  .op .tag { flex: 0 0 auto; min-width: 44px; text-align: center; font-size: 11px; font-weight: 600; border-radius: 5px; padding: 2px 5px; margin-top: 1px; }
+  .t-drag { background: #e7f1ff; color: #0969da; }
+  .t-ctx { background: #dafbe1; color: #1a7f37; }
+  .t-dbl { background: #fff1e5; color: #bc4c00; }
+  .t-sel { background: #fbefff; color: #8250df; }
+  .foot { margin-top: 14px; border-top: 1px dashed #d0d7de; padding-top: 10px; font-size: 12.5px; color: #57606a; display: grid; gap: 4px; }
+  .foot b { color: #1f2328; }
+  .foot .hl { background: #fff8c5; border-radius: 4px; padding: 0 4px; }
+</style>
+<div class="wrap">
+  <p class="h">左栏文件夹管理 · 现状 → 目标</p>
+  <div><span class="sub">示意：设计稿演示，非真实书架数据</span></div>
+  <div class="row">
+    <div class="card">
+      <h3><b>现状</b> · 平铺 PDF 列表</h3>
+      <div class="filter">⌕ 筛选文件…</div>
+      <div class="dropz">拖入 PDF（可多选）　选文件</div>
+      <div class="tree">
+        <div class="file"><svg width="11" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg><span class="nm">attention.pdf</span><span class="x">×</span></div>
+        <div class="file"><svg width="11" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg><span class="nm">transformer.pdf</span><span class="x">×</span></div>
+        <div class="file"><svg width="11" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg><span class="nm">级数.pdf</span><span class="x">×</span></div>
+        <div class="file"><svg width="11" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg><span class="nm">根目录散文件.pdf</span><span class="x">×</span></div>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card">
+      <h3><b>目标</b> · 文件夹树（papers/ 真实子目录）</h3>
+      <div style="display:flex; gap:6px; margin-bottom:8px;">
+        <div class="filter" style="flex:1; margin-bottom:0;">⌕ 筛选：输入时变扁平结果</div>
+        <div style="border:1px solid #d0d7de; border-radius:6px; padding:3px 8px; font-size:12px; color:#1a7f37; background:#f6f8fa; white-space:nowrap;">+ 新建文件夹</div>
+      </div>
+      <div class="tree">
+        <div class="fld"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3.6h4.2l2 2.4H18a2.4 2.4 0 0 1 2.4 2.4v10a2.4 2.4 0 0 1-2.4 2.4H6A2.4 2.4 0 0 1 3.6 18V6A2.4 2.4 0 0 1 6 3.6z"/></svg><span>深度学习</span><span class="cnt">2</span></div>
+        <div class="file"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3.6h4.2l2 2.4H18a2.4 2.4 0 0 1 2.4 2.4v10a2.4 2.4 0 0 1-2.4 2.4H6A2.4 2.4 0 0 1 3.6 18V6A2.4 2.4 0 0 1 6 3.6z" opacity=".45"/></svg><svg width="11" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg><span class="nm">attention.pdf</span><span class="x">×</span></div>
+        <div class="file"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3.6h4.2l2 2.4H18a2.4 2.4 0 0 1 2.4 2.4v10a2.4 2.4 0 0 1-2.4 2.4H6A2.4 2.4 0 0 1 3.6 18V6A2.4 2.4 0 0 1 6 3.6z" opacity=".45"/></svg><svg width="11" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg><span class="nm">transformer.pdf</span><span class="x">×</span></div>
+        <div class="fld"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3.6h4.2l2 2.4H18a2.4 2.4 0 0 1 2.4 2.4v10a2.4 2.4 0 0 1-2.4 2.4H6A2.4 2.4 0 0 1 3.6 18V6A2.4 2.4 0 0 1 6 3.6z"/></svg><span>课程/复变函数</span><span class="cnt">1</span></div>
+        <div class="file"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3.6h4.2l2 2.4H18a2.4 2.4 0 0 1 2.4 2.4v10a2.4 2.4 0 0 1-2.4 2.4H6A2.4 2.4 0 0 1 3.6 18V6A2.4 2.4 0 0 1 6 3.6z" opacity=".45"/></svg><svg width="11" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg><span class="nm">级数.pdf</span><span class="x">×</span></div>
+        <div class="fld"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3.6h4.2l2 2.4H18a2.4 2.4 0 0 1 2.4 2.4v10a2.4 2.4 0 0 1-2.4 2.4H6A2.4 2.4 0 0 1 3.6 18V6A2.4 2.4 0 0 1 6 3.6z" opacity=".6"/></svg><span>待读</span><span class="cnt">0</span></div>
+        <div class="file"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3.6h4.2l2 2.4H18a2.4 2.4 0 0 1 2.4 2.4v10a2.4 2.4 0 0 1-2.4 2.4H6A2.4 2.4 0 0 1 3.6 18V6A2.4 2.4 0 0 1 6 3.6z" opacity=".45"/></svg><svg width="11" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg><span class="nm">根目录散文件.pdf</span><span class="x">×</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3><b>关键操作</b></h3>
+      <div class="ops">
+        <div class="op"><span class="tag t-drag">拖拽</span><span>PDF 拖到文件夹行 = 移动到该夹；夹内拖拽 = 调顺序；从资源管理器拖文件夹 = 建同名夹并导入</span></div>
+        <div class="op"><span class="tag t-ctx">右键</span><span>文件夹：新建子夹 / 重命名 / 删除（非空可选「PDF 移到根再删」）；PDF：移动到文件夹</span></div>
+        <div class="op"><span class="tag t-dbl">双击</span><span>双击文件夹名直接重命名（内联改名，改磁盘真实目录）</span></div>
+        <div class="op"><span class="tag t-sel">筛选</span><span>输入关键词 → 树变扁平结果，前缀显示所在文件夹；清空恢复树</span></div>
+        <div class="op"><span class="tag">×</span><span>行尾删除按钮：只删 PDF 文件，笔记 / 会话 / 进度保留</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="foot">
+    <div><b>存储</b>：文件夹 = <span class="hl">papers/ 下的真实子目录</span>，资源管理器里直接可见可改；顺序写 <span class="hl">data/papers-order.json</span>（升级为相对路径数组，旧数据自动兼容）。</div>
+    <div><b>数据安全</b>：docId 只依赖文件名 → <span class="hl">移动文件不丢笔记 / 会话 / 阅读进度</span>；同名自动加 (2)，保证一个 docId 对应一份数据。</div>
+    <div><b>删除按钮</b>：× 默认隐藏，鼠标移到该行才显示；中性灰（非红色），hover 加深。文件夹行不设 ×，删除走右键菜单。</div>
+    <div><b>后端</b>：Node <span class="hl">server.js</span> 与 Rust <span class="hl">desktop/src/api.rs</span> 同步实现；旧 <code>?name=</code> URL 全库回退，旧最近记录不断。</div>
+  </div>
+</div>
+</html>
