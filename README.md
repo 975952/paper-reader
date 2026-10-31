@@ -1,22 +1,15 @@
 # 论文阅读器
 
-> 面向研究阅读的本地优先 PDF 阅读器，配合可配置的 OpenAI 兼容模型提供 AI 辅助。
-
 Windows 桌面端的 PDF 阅读器，带 AI 辅助：划词翻译/解释、整篇论文问答、框选图表交给模型、
 参考文献检索。PDF 和会话都留在本机，AI 请求发给你自己配置的 OpenAI 兼容接口。
-
-## 项目状态
-
-项目目前以 Windows 桌面版为主要交付形态，同时保留浏览器模式用于开发与调试。
-功能细节、已知限制和验证记录以仓库中的文档为准。
 
 ## 下载
 
 - 发布页：<https://github.com/975952/paper-reader/releases>
 - 应用（Windows 10/11，免安装）：`paper-reader.exe`，双击运行。
 
-如果发布页需要权限，请使用具有仓库访问权限的 GitHub 账号。第一次打开后在设置里填
-API Key 和模型名（任何 OpenAI 兼容接口都行，例如 DeepSeek）。
+仓库是 private，下载需要登录有权限的 GitHub 账号。第一次打开后在设置里填 API Key 和
+模型名（任何 OpenAI 兼容接口都行，例如 DeepSeek）。
 
 ## 功能
 
@@ -28,6 +21,7 @@ API Key 和模型名（任何 OpenAI 兼容接口都行，例如 DeepSeek）。
 - 多会话：每篇论文可建多个问答会话，支持恢复、重试（含截图）。
 - 文献：正文里的 [12] 可点，跳到参考文献；可查开放版本 PDF。
 - 阅读：目录、全文搜索、笔记书签、缩放 / 适应宽度。
+- 左栏文件树：新建 / 重命名 / 删除文件夹，文件与文件夹都能拖拽排序、拖进文件夹，支持批量导入。
 - 后台学习记忆：问答后自动提取讲解偏好和用户自述，后续回答参考；可在设置里关闭。
 
 ## 运行
@@ -38,7 +32,7 @@ API Key 和模型名（任何 OpenAI 兼容接口都行，例如 DeepSeek）。
 node server.js        # 需要 Node 18+，然后打开 http://127.0.0.1:8787
 ```
 
-Windows 用户也可以双击根目录的 `start.bat` 启动浏览器模式。
+Windows 也可以双击根目录的 `start.bat`（会检查 Node 并启动同一个服务）。
 
 桌面版：
 
@@ -49,13 +43,6 @@ build.bat             # 需要 Rust 工具链
 
 前端是零依赖的原生 ES module，没有打包步骤；`server.js` 只用 Node 内置模块。
 桌面外壳用 wry + tao + tiny_http + ureq，前端资源编译期内嵌进 exe。
-
-## 开发约定
-
-- `data/` 和 `papers/` 是本机运行时目录，不能提交，也不能放入发布压缩包。
-- 修改 `public/` 后，桌面版必须重新编译，资源才会重新内嵌到 exe。
-- `.bat` 文件保持纯 ASCII，避免 Windows 命令行按本地代码页误解析。
-- 测试使用合成论文和假模型，不依赖真实 API Key。
 
 ## 测试
 
@@ -92,8 +79,6 @@ node ux.mjs           # 各套件会自己起隔离服务，不碰 data/ 和 pap
 
 ## 文档
 
-- [`CONTRIBUTING.md`](CONTRIBUTING.md)（开发、测试与提交约定）
-- [`SECURITY.md`](SECURITY.md)（安全问题报告）
 - [`docs/使用说明书.md`](docs/使用说明书.md)
 - [`docs/PROGRESS.md`](docs/PROGRESS.md)（逐轮改动与验收）
 - [`docs/读懂论文-设计.md`](docs/读懂论文-设计.md)
