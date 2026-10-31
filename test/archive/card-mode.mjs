@@ -30,7 +30,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const ROOT = 'C:\\Users\\Wang Wenbo\\Desktop\\prt';
+// 归档套件也走相对路径（本文件在 test/archive/，所以往上两层才是仓库根）
+const ROOT = path.resolve(import.meta.dirname, '..', '..');
 const PORT = 8919;
 const CDP_PORT = 9453;
 const BASE = `http://127.0.0.1:${PORT}`;

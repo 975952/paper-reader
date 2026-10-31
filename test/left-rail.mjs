@@ -27,7 +27,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const ROOT = 'C:\\Users\\Wang Wenbo\\Desktop\\prt';
+// 仓库根目录：不再写死本机路径 —— 换台电脑 clone 下来也能直接跑
+const ROOT = path.resolve(import.meta.dirname, '..');
 const PORT = 8923;
 const CDP_PORT = 9453;
 const BASE = `http://127.0.0.1:${PORT}`;

@@ -21,7 +21,7 @@ import path from 'node:path';
 import { staticAudit } from './artifacts/right-cols/static-audit.mjs';
 
 /* ══════════════════════════ 配置 ══════════════════════════ */
-const ROOT = 'C:\\Users\\Wang Wenbo\\Desktop\\prt';
+const ROOT = path.resolve(import.meta.dirname, '..', '..');
 const PORT = 8917;
 const BASE = `http://127.0.0.1:${PORT}`;
 const APP = path.join(ROOT, 'public', 'js', 'app.js');

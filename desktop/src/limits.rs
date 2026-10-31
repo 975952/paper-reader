@@ -669,9 +669,9 @@ fn redact_after(s: &str, needle: &str, min_len: usize) -> String {
 
 /// 本机绝对路径 → `<path>`。
 ///
-/// 难点：同一个路径在日志里可能是原样的（`C:\Users\Wang Wenbo\…`），也可能被 JSON
-/// 转义过（`C:\\Users\\Wang Wenbo\\…`）。所以分隔符统一按「一个或多个 `\` / `/`」处理，
-/// 段内允许空格 —— 否则 `Wang Wenbo` 会把路径截成两半。
+/// 难点：同一个路径在日志里可能是原样的（`C:\Users\John Doe\…`），也可能被 JSON
+/// 转义过（`C:\\Users\\John Doe\\…`）。所以分隔符统一按「一个或多个 `\` / `/`」处理，
+/// 段内允许空格 —— 否则 `John Doe` 会把路径截成两半。
 fn redact_paths(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
@@ -823,11 +823,11 @@ mod tests {
     #[test]
     fn scrub_hides_keys_and_paths() {
         // 真实形态一：Windows 路径被 JSON 转义了一遍
-        let s = scrub_text(r"connect C:\\Users\\Wang Wenbo\\Desktop\\prt\\data\\config.json failed");
+        let s = scrub_text(r"connect C:\\Users\\John Doe\\Desktop\\prt\\data\\config.json failed");
         assert!(!s.contains("Users"), "转义路径没打码: {}", s);
         assert!(s.contains("<path>"), "{}", s);
         // 真实形态二：未转义的裸路径
-        let s = scrub_text(r"写入 C:\Users\Wang Wenbo\Desktop\prt\data\a.json 失败");
+        let s = scrub_text(r"写入 C:\Users\John Doe\Desktop\prt\data\a.json 失败");
         assert!(!s.contains("Users"), "裸路径没打码: {}", s);
         // 密钥：完整 JSON / 等号形式 / 被截断的 JSON 都要打码
         for raw in [

@@ -574,7 +574,7 @@ function scrubText(s) {
   // "apiKey": "xxx" / apiKey=xxx / Authorization: Bearer（截断的 JSON 也要打码）
   t = t.replace(/(["']?(?:apiKey|api_key|authorization|token|x-prt-token)["']?\s*[:=]\s*["']?)([^"'\s,}]{6,})/gi, '$1***');
   // 本机绝对路径：分隔符按「一个或多个 \ 或 /」处理，段内允许空格
-  // （`C:\Users\Wang Wenbo\…` 与 JSON 转义过的 `C:\\Users\\Wang Wenbo\\…` 都能整段吃掉）
+  // （`C:\Users\John Doe\…` 与 JSON 转义过的 `C:\\Users\\John Doe\\…` 都能整段吃掉）
   t = t.replace(/[A-Za-z]:[\\/](?:[^"',;)\]}]+|[ ][^\\/"',;)\]}\s])*/g, '<path>');
   t = t.replace(/\\\\[A-Za-z0-9_][^"',;)\]}]*/g, '<path>');
   t = t.replace(/\/(?:Users|home|root|var|tmp|opt|private)\/[^\s"',;)]*/g, '<path>');
