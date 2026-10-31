@@ -16,7 +16,12 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const listen = server => new Promise(r => server.listen(0, '127.0.0.1', r));
 let hits = 0;
 const mock = http.createServer(async (req, res) => {
-  for await (const chunk of req) { /* drain */ }
+  const chunks = []; for await (const chunk of req) chunks.push(chunk);
+  const body = JSON.parse(Buffer.concat(chunks));
+  if (String(body.messages[0]?.content).includes('后台学习记忆提取器')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: '[]' } }] })); return;
+  }
   hits++;
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
   for (const content of ['mock ', 'answer']) {

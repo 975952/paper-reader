@@ -246,6 +246,63 @@ check('exe 的 /api/profile 拒绝坏数据（400）', badProfile.status === 400
 // 会话删除（Node 版补齐的那个动词，Rust 版一直有 —— 两边行为必须一致）
 const delSession = await fetch(`${base}/api/session?doc=${encodeURIComponent('no-such-doc')}`, { method: 'DELETE' });
 check('exe 提供 DELETE /api/session', delSession.ok, `${delSession.status}`);
+
+/**
+ * 截图附件单独存（2026-10 用户口径「图片单独存」）：
+ * Rust 版必须和 Node 版行为一致 —— 收原始图片字节、按会话键落 `data/attachments/<键>/<id>.<ext>`、
+ * 会话保存时按引用 GC、删除会话时整目录删。任一条缺失，exe 里截图就会「重开论文后没了」。
+ */
+console.log('\n▶ 截图附件单独存…');
+const PNG_BYTES = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+const attachDoc = 'desktop-attach-check';
+let ah = 5381;
+for (const c of attachDoc) ah = ((ah * 33) ^ c.charCodeAt(0)) >>> 0;
+const attachKey = `${attachDoc.replace(/[^\w\u4e00-\u9fa5-]+/g, '_').slice(0, 48)}-${ah.toString(16)}`;
+const attachDir = path.join(DATA, 'attachments', attachKey);
+const postAttachment = (bytes, sid = '') => fetch(
+  `${base}/api/attachment?doc=${encodeURIComponent(attachDoc)}${sid ? `&sid=${sid}` : ''}`,
+  { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: bytes },
+);
+const up = await postAttachment(PNG_BYTES);
+const upJson = up.ok ? await up.json() : {};
+check('exe 提供 POST /api/attachment（原始图片字节 → 32 位 id）',
+  up.ok && /^[0-9a-f]{32}$/.test(upJson.id || ''), `${up.status} ${upJson.id || ''}`);
+check('图片单独落成文件（data/attachments/<会话键>/<id>.png）',
+  !!upJson.id && fs.existsSync(path.join(attachDir, `${upJson.id}.png`)),
+  fs.existsSync(attachDir) ? fs.readdirSync(attachDir).join(', ') : '(目录不存在)');
+const got = await fetch(`${base}/api/attachment?doc=${encodeURIComponent(attachDoc)}&id=${upJson.id}`);
+const gotBytes = Buffer.from(await got.arrayBuffer());
+check('exe 提供 GET /api/attachment（字节与 Content-Type 一致）',
+  got.ok && (got.headers.get('content-type') || '').includes('image/png')
+  && Buffer.compare(gotBytes, PNG_BYTES) === 0,
+  `${got.status} ${got.headers.get('content-type')} ${gotBytes.length}B`);
+const badAttId = await fetch(`${base}/api/attachment?doc=${encodeURIComponent(attachDoc)}&id=${encodeURIComponent('../../server.js')}`);
+check('非法附件 id 被拒（400）', badAttId.status === 400, `${badAttId.status}`);
+const badAttType = await postAttachment(Buffer.from('not an image at all'));
+check('非图片内容被拒（400）', badAttType.status === 400, `${badAttType.status}`);
+const attachFiles = () => (fs.existsSync(attachDir) ? fs.readdirSync(attachDir) : []);
+// 先传一张「孤儿图」，再用会话保存触发 GC：被引用的保留、没人引用的删掉
+const orphan = await postAttachment(PNG_BYTES).then((r) => r.json());
+await fetch(`${base}/api/session?doc=${encodeURIComponent(attachDoc)}`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    entries: [{ block: 'chat', kind: 'user', text: '带图提问', screenshot: true, status: 'user', shots: [{ id: upJson.id, w: 1, h: 1, label: '截图' }] }],
+    history: [], ops: [], updatedAt: Date.now(),
+  }),
+});
+check('exe 会话保存后 GC：被引用的图保留', attachFiles().includes(`${upJson.id}.png`), attachFiles().join(', '));
+check('exe 会话保存后 GC：没有引用的孤儿图被删掉',
+  !!orphan.id && !attachFiles().includes(`${orphan.id}.png`), attachFiles().join(', '));
+await fetch(`${base}/api/session?doc=${encodeURIComponent(attachDoc)}`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ entries: [], history: [], ops: [], updatedAt: Date.now() }),
+});
+check('exe 清空会话后附件与空目录一起收掉', !fs.existsSync(attachDir));
+await fetch(`${base}/api/session?doc=${encodeURIComponent(attachDoc)}`, { method: 'DELETE' });
+check('exe 删除会话后整个附件目录一起删掉', !fs.existsSync(attachDir));
 const aiJs = await fetch(`${base}/js/ai.js`).then((r) => r.text());
 check('exe 内嵌了地区限制与密钥错误的区分提示', aiJs.includes('该模型在你所在地区不可用') && aiJs.includes('API Key 无效或已失效'));
 const worker = await fetch(`${base}/vendor/pdf.worker.min.mjs`);

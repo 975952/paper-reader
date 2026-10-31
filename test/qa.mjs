@@ -84,7 +84,12 @@ const bodies = [];
 let failNext = false;
 const mock = http.createServer(async (req, res) => {
   const chunks = []; for await (const c of req) chunks.push(c);
-  const body = JSON.parse(Buffer.concat(chunks)); bodies.push(body);
+  const body = JSON.parse(Buffer.concat(chunks));
+  if (String(body.messages[0]?.content).includes('后台学习记忆提取器')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: '[]' } }] })); return;
+  }
+  bodies.push(body);
   if (failNext) { failNext = false; res.writeHead(503, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"controlled failure"}}'); return; }
   const last = String(body.messages.at(-1).content);
   const hasSources = last.includes('[来源2]');
@@ -161,6 +166,12 @@ try {
     return r.continue();
   });
   const open = async (filename = name) => {
+    // 原生窗口刚创建时可能还在加载首屏资源，先等它完成，再执行测试主动重载。
+    // 保留 requestfailed 断言，避免把启动竞态造成的 KaTeX 取消误记为发送失败。
+    if (page.url().startsWith(base)) {
+      await page.waitForFunction(() => document.readyState === 'complete', { timeout: 10000 });
+      await page.evaluate(() => window.__ctx?.memoryIdle?.());
+    }
     navigating = true;
     await page.goto(`${base}/?open=${encodeURIComponent(filename)}`);
     await page.waitForFunction((filename) => window.__viewer?.pdf && window.__state?.doc?.name === filename

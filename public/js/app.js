@@ -16,12 +16,8 @@ import {
   PREREQ_ONE_SYS, splitPrtBlock, hideStreamTail, parsePrereqItems, detectPageObjects,
   pageTextOf, collectDocObjects, sanitiseChips,
 } from './teaching.js';
-import {
-  profileStore, buildProfileBlock, nowISO, nowContext, summary as profileSummary,
-  withConfirmed, withNotKnown, withEdited, withDeleted, withPendingConfirmed, withPendingRejected,
-  withPendingDeleted, withSelfReport, withPendingSuggestions, findItem, profileItemsForMenu,
-  relativeLabel, isoDate, staleness, memoryExtractMessages, parseMemorySuggestions, withNeedsReconfirm,
-} from './profile.js';
+import { profileStore, buildProfileBlock, nowISO, nowContext, findItem } from './profile.js';
+import { createLearningMemory, parseMemorySuggestions } from './learning-memory.js';
 import {
   Settings, streamChat, testConnection, targetLangFor,
   translateMessages, askMessages, explainMessages, regionMessages,
@@ -847,6 +843,28 @@ const DEFAULT_UI_STYLE = Object.freeze({
 });
 let uiStyle = { ...DEFAULT_UI_STYLE };
 
+/**
+ * 阅读字号（结果正文 --ai-fs）的范围：12–30px。
+ *
+ * 2026-10 用户口径：「阅读字号要能够更大，到 30」—— 原来是 12–19，19 封顶在大屏上偏小。
+ * 上限定成常量是因为**三处必须一致**：设置页滑杆的 max（`public/index.html` 的 #uiFontSize，
+ * 那里写的是字面量 30，改这里要同步改）、applyUiStyle 的兜底夹取、Ctrl +/- 与设置页保存的夹取。
+ * 下限 12 不动：再小中文就糊了。
+ */
+const READ_FS_MIN = 12;
+const READ_FS_MAX = 30;
+
+/**
+ * 右栏结果区「文字列」的可拖宽度范围（px），见 initTextEdgeHandle()。
+ *
+ * 原先 `.msg` 的 `--ai-max-width` 是固定 480–920（对应已下架的「结果最大宽度」设置）；
+ * 现在用户可以直接拖文字列左右边沿调宽（2026-10 口径），范围放宽到 320–1600：
+ * 下限 320 在 30px 字号下每行还能读十来个字，上限 1600 足够宽屏自由拖。
+ * ⚠️ 拖动时写的就是 uiStyle.maxWidth 这一份值，所以 applyUiStyle 里的夹取必须用同一组常量。
+ */
+const TEXT_COL_MIN = 320;
+const TEXT_COL_MAX = 1600;
+
 /** 界面字号：老存档（localStorage reader.ui）里没有这个字段时回落默认值，不能变 NaN */
 const uiFontSizePx = (v) => clamp(Number(v) || DEFAULT_UI_STYLE.uiFontSize, 12, 17);
 /** 控件大小：存档里是百分比（80–130），CSS 里是缩放系数（0.8–1.3） */
@@ -981,6 +999,7 @@ let serverState = {};
   initNoteBox();
   initCiteBox();
   initAiArea();
+  initTextEdgeHandle();
   initComposer();
   initRegion();
   initSearch();
@@ -993,11 +1012,9 @@ let serverState = {};
   initDraggableCards();
   initRelations();
   initOps();
-  initProfile();
   initPageRefs();
 
   await profileStore.load();
-  renderProfileMenuHint();
   await loadServerState();
   // 服务端记住的「上次打开哪篇」这时才拿到：如果刚才的 reader.ai 迁移还没能认出当前论文，
   // 这里补一次 byDoc 覆盖（只在「刚迁移过」时发生，之后用户怎么摆就怎么算）
@@ -1022,6 +1039,26 @@ const SPLIT_W = 5;
 
 /** 拖动松手时的「收起阈值」：最终宽度比它小，就把这一侧直接收起来 */
 const COLLAPSE_BELOW = { left: 140, right: 200 };
+
+/** 右栏的历史最宽值（拖动 / 键盘微调共用的默认上限，见 rightSideMaxW 的说明） */
+const RIGHT_MAX_CLASSIC = 720;
+
+/**
+ * 右栏最宽能拖到多少（2026-10 用户口径：
+ *   「大屏幕的时候，右侧的侧栏应该能够往左拉伸的多一点，可以拉到一半的位置」）。
+ *
+ *   · 窗口宽 ≤ 1440px：维持原来的 720px —— 小屏上「半屏」比 720 还窄，不能反过来把
+ *     用户现有的拖动手感改小；
+ *   · 更大的屏幕：上限提到**窗口宽的一半** —— 分隔条可以一路拖到屏幕中线，
+ *     右栏最多占半屏（再宽正文就没地方了）。
+ *
+ * 写成函数而不是常量：窗口尺寸一变，上限自动跟着变，不需要在 resize 里维护任何状态。
+ * ⚠️ 拖动（bindSplitter）、键盘微调、读存档这三处都必须用它，否则会出现
+ * 「拖到一半松手又被夹回 720」「存档里 1280 的宽度在 1440 窗口上装不下」这类不一致。
+ */
+function rightSideMaxW() {
+  return Math.max(RIGHT_MAX_CLASSIC, Math.round(window.innerWidth / 2));
+}
 
 /** 宽度带 .14s 过渡，量正文宽度要等它走完（键盘微调这种宽度真的在变的路径用） */
 const REFIT_AFTER_MS = 200;
@@ -1192,6 +1229,19 @@ function applyResponsiveLayout() {
       if (innerW - chrome(sideIntent.noLeft, false, leftApplied, rightApplied) < VIEWER_HARD_MIN) {
         rightApplied = Math.max(SIDE_MIN, innerW - chrome(sideIntent.noLeft, false, leftApplied, SIDE_MIN) - VIEWER_HARD_MIN + SIDE_MIN);
       }
+    }
+  }
+  /**
+   * 右栏「最多半屏」这个上限对**自动让宽**同样有效：窗口从大屏缩小之后，存档里拖出来的
+   * 1280 不应该在 1920 的窗口上继续占掉 62%（见 rightSideMaxW）。
+   * 只有夹完还能保住正文最小宽度时才夹 —— 否则交给下面的自动收起 / 压窄逻辑处理，
+   * 别为了守「半屏」把正文挤成一条缝。
+   */
+  {
+    const cap = Math.max(SIDE_MIN, rightSideMaxW());
+    if (rightApplied > cap
+      && innerW - chrome(sideIntent.noLeft, false, leftApplied, cap) >= viewerMin) {
+      rightApplied = cap;
     }
   }
   const fits = (noLeft, noRight) => innerW - chrome(noLeft, noRight, leftApplied, rightApplied) >= Math.min(viewerMin, VIEWER_HARD_MIN);
@@ -1390,7 +1440,16 @@ function initLayout() {
   uiStyle = { ...DEFAULT_UI_STYLE, ...(saved.style || {}) };
   applyUiStyle();
   if (saved.leftW) { sideBaseW.left = saved.leftW; document.documentElement.style.setProperty('--left-w', `${saved.leftW}px`); }
-  if (saved.rightW) { sideBaseW.right = saved.rightW; document.documentElement.style.setProperty('--right-w', `${saved.rightW}px`); }
+  if (saved.rightW) {
+    /**
+     * 存档里的宽度先按**当前窗口**的上限夹一下：右栏的上限随窗口变（大屏最多半屏，
+     * 见 rightSideMaxW）。比如在 2560 宽的窗口上拖过 1280，换到 1920 的窗口打开时
+     * 不该一上来就占掉 2/3 —— 夹到 960，本次打开按这个宽度算，存档里的原值不动。
+     */
+    const rightW = Math.min(saved.rightW, rightSideMaxW());
+    sideBaseW.right = rightW;
+    document.documentElement.style.setProperty('--right-w', `${rightW}px`);
+  }
   // 只恢复「用户意图」；自动收起由 applyResponsiveLayout() 按当前窗口宽度当场算
   sideIntent.noLeft = !!saved.noLeft;
   sideIntent.noRight = !!saved.noRight;
@@ -1416,7 +1475,8 @@ function initLayout() {
   syncSideToggleButtons();
 
   bindSplitter($('#splitLeft'), '--left-w', 150, 520, COLLAPSE_BELOW.left);
-  bindSplitter($('#splitRight'), '--right-w', 240, 720, COLLAPSE_BELOW.right);
+  // 右栏上限是函数：大屏幕上跟着窗口变宽（最多到窗口一半），见 rightSideMaxW
+  bindSplitter($('#splitRight'), '--right-w', 240, rightSideMaxW, COLLAPSE_BELOW.right);
   initRails();
 
   // 窗口尺寸变化：先让「明确展开」的豁免作废（自动规则重新生效），再重算
@@ -1724,6 +1784,12 @@ function bindSplitter(node, cssVar, min, max, collapseBelow) {
   if (!node) return;
   const isLeft = cssVar === '--left-w';
   const side = isLeft ? 'left' : 'right';
+  /**
+   * 上限允许传**函数**：右栏的上限跟着窗口宽度变（大屏最多半屏，见 rightSideMaxW），
+   * 左栏还是常量。函数每次用到的那一刻才求值 —— 拖动途中窗口尺寸变了，
+   * 也不会拿着旧上限把宽度夹回去。
+   */
+  const maxOf = () => (typeof max === 'function' ? max() : max);
   // 拖动 / 键盘微调 = 用户在改**宽度意图**，同步记进 sideBaseW。
   // （布局自动让宽走的是 document.documentElement.style.setProperty，不经过这里，
   //   所以「用户的宽度」和「这一刻生效的宽度」不会被搅在一起。）
@@ -1747,7 +1813,7 @@ function bindSplitter(node, cssVar, min, max, collapseBelow) {
     e.preventDefault();
     const current = parseInt(getComputedStyle(document.documentElement).getPropertyValue(cssVar), 10) || min;
     const delta = (isLeft ? (e.key === 'ArrowRight' ? 16 : -16) : (e.key === 'ArrowLeft' ? 16 : -16));
-    setW(clamp(current + delta, min, max));
+    setW(clamp(current + delta, min, maxOf()));
     saveUi();
     refitViewer(REFIT_AFTER_MS);   // 宽度带过渡，等它走完再量正文
   });
@@ -1772,7 +1838,7 @@ function bindSplitter(node, cssVar, min, max, collapseBelow) {
     const dx = e.clientX - startX;
     if (Math.abs(dx) > 4) lastDownAt = 0;   // 这是一次真拖动，别让下一次 pointerdown 被当成双击
     // 左栏往右拖变宽；右栏往左拖才是变宽
-    const w = clamp(isLeft ? startW + dx : startW - dx, dragFloor, max);
+    const w = clamp(isLeft ? startW + dx : startW - dx, dragFloor, maxOf());
     pendingW = w;
     if (!dragFrame) dragFrame = requestAnimationFrame(() => {
       dragFrame = 0;
@@ -1796,7 +1862,7 @@ function bindSplitter(node, cssVar, min, max, collapseBelow) {
       setSideCollapsed(side, true);
       return;
     }
-    const settled = clamp(finalW, min, max);
+    const settled = clamp(finalW, min, maxOf());
     setW(settled);
     applyResponsiveLayout();
     saveUi();
@@ -1894,10 +1960,12 @@ function applyUiStyle() {
   if (style.theme === 'system') delete root.dataset.theme;
   else root.dataset.theme = style.theme === 'dark' ? 'dark' : 'light';
   document.body.dataset.density = ['compact', 'standard', 'comfortable'].includes(style.density) ? style.density : 'standard';
-  root.style.setProperty('--ai-fs', `${clamp(Number(style.fontSize) || 14, 12, 19)}px`);
+  root.style.setProperty('--ai-fs', `${clamp(Number(style.fontSize) || 14, READ_FS_MIN, READ_FS_MAX)}px`);
   root.style.setProperty('--ai-lh', `${clamp(Number(style.lineHeight) || 1.72, 1.45, 2.05)}`);
   root.style.setProperty('--ai-code-fs', `${clamp(Number(style.codeSize) || 12, 10, 15)}px`);
-  root.style.setProperty('--ai-max-width', `${clamp(Number(style.maxWidth) || 760, 480, 920)}px`);
+  // 文字列宽：可以直接拖右栏里文字块的左右边沿改（见 initTextEdgeHandle），
+  // 写的就是 uiStyle.maxWidth —— 夹取范围与拖动那边共用常量，不会出现「拖到 1200 却只生效 920」。
+  root.style.setProperty('--ai-max-width', `${clamp(Number(style.maxWidth) || 760, TEXT_COL_MIN, TEXT_COL_MAX)}px`);
   root.style.setProperty('--ai-opacity', `${clamp(Number(style.opacity) || 1, .82, 1)}`);
   root.style.setProperty('--surface-opacity', `${clamp(Number(style.opacity) || 1, .82, 1)}`);
   // 界面尺度：--ui-fs 只带界面文字（不碰 --ai-fs，也不影响控件高度），
@@ -1947,7 +2015,6 @@ function initViewer() {
       $('#pageCount').textContent = String(total || 0);
       syncFootPage(cur, total);
       saveProgress();
-      checkScannedPage(cur);
     },
     /**
      * 状态栏已删除（2026-10，PDF 下面那条只有「就绪」三个字的空条）。
@@ -2005,9 +2072,8 @@ function initViewer() {
     get teaching() { return state.teaching; },
     get profile() { return profileStore.data; },
     get profileEnabled() { return profileStore.enabled; },
-    profileStore, openProfile, closeProfile, renderProfileModal, PROFILE_INFO: { staleDays: 90 },
-    // 学习档案的行为钩子（测试里用来验证 pending 不参与跳过、时间戳格式等）
-    markTeachingKnown, applyProfileSuggestions, scheduleMemoryExtraction, parseMemorySuggestions,
+    profileStore, scheduleMemoryExtraction, parseMemorySuggestions,
+    memoryIdle: () => learningMemory.idle(),
     get FULL_LIMIT() { return FULL_LIMIT; },
     jumpToPageWithHistory, jumpToDestWithHistory, returnToPreviousPosition,
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
@@ -2176,20 +2242,6 @@ function syncZoom(scale) {
   if (lbl) lbl.textContent = `${pct}%`;
   const r = $('#zoomRange');
   if (r && document.activeElement !== r) r.value = String(clamp(pct, Number(r.min), Number(r.max)));
-}
-
-function checkScannedPage(page) {
-  if (!viewer?.pdf) return;
-  const myDoc = state.doc?.docId;
-  const myGen = viewer._gen;
-  if (state.scannedHintShown === page) return;
-  viewer.getPageText(page).then((t) => {
-    if (state.doc?.docId !== myDoc || viewer?._gen !== myGen || !viewer?.pdf) return;
-    if (t && t.replace(/\s/g, '').length > 40) return;
-    if (state.scannedHintShown === page) return;
-    state.scannedHintShown = page;
-    toast(`第 ${page} 页没有文本层（扫描版？）→ 用顶部「⎚」框选交给视觉模型`, '', 5000);
-  });
 }
 
 /* ══════════════════════════════ 文件 ══════════════════════════════ */
@@ -2728,7 +2780,6 @@ async function openDoc({ name, url, docId }) {
   const superseded = () => myOpen !== state.openSeq;
   hideTranslationCard();
   state.selection = null;
-  state.scannedHintShown = null;
   state.doc = { name, url, docId };
   // 面板布局不再按论文分叉（阶段 2.2a）：换论文不重载 state.panels
   state.viewerDocId = null;
@@ -3663,6 +3714,174 @@ function initAiArea() {
   window.addEventListener('resize', debounce(() => fitBlockSizes(), 150));
 }
 
+/* ══════════════ 文字列左右边沿：平时隐藏的拖动条 ══════════════
+
+   2026-10 用户口径（两句）：
+     「文字边沿的位置需要能通过一个栏直接拉着调整，这个栏平时隐藏，鼠标放上去的时候
+       只在鼠标的那一个小的区域显示，而且上下都是那种渐变」
+     「左右两边都要有」
+
+   对象是右栏结果区那条已经居中的**文字列**（`.ai-body > .msg`，两侧留白相等）：
+   · 左右边沿各配一条**平时完全看不见**的拖动条（opacity:0 + pointer-events:none，不占地方）；
+   · 鼠标进到边沿附近（±TEXT_EDGE_HIT）才出现，而且只出现一小段（TEXT_EDGE_BAR_H 高），
+     以光标 y 为中心、上下两端渐变淡出 —— 不是一条贯穿整栏的实线；
+   · 拖动任意一条边沿都会**对称**改文字列宽度（另一条边镜像跟着走），所以两侧留白始终相等；
+   · 宽度写进 uiStyle.maxWidth，刷新 / 重开论文都还在。
+
+   手感：被拖的那条边沿严格跟着光标 —— 宽度 = 2 × 光标到列中心的距离，
+   于是右边缘 = 中心 + 宽度/2 = 光标 x 本身，左边缘自动镜像；不是"边缘以两倍速度甩开鼠标"。 */
+const TEXT_EDGE_HIT = 10;        // 离边沿多近算"放到那个栏上"（px）
+const TEXT_EDGE_BAR_H = 110;     // 悬停提示条的高度（只要一小段，不要整栏）
+
+function initTextEdgeHandle() {
+  const side = $('#rightSide');
+  const area = $('#aiArea');
+  if (!side || !area) return;
+  const bar = el('div', { class: 'text-edge-hint', 'aria-hidden': 'true' });
+  side.append(bar);
+
+  let drag = null;     // 拖动中的快照：{ edge, width, startX, moved }
+  let raf = 0;
+  let lastX = 0;
+  let lastY = 0;
+
+  /** 这一刻文字列的几何；没有消息 / 侧栏没显示 → null */
+  const geo = () => {
+    const sr = side.getBoundingClientRect();
+    if (sr.width < 20) return null;
+    const body = area.querySelector('.ai-block:not(.hidden) > .ai-body');
+    const msg = body?.querySelector('.msg');
+    if (!body || !msg) return null;
+    const br = body.getBoundingClientRect();
+    const mr = msg.getBoundingClientRect();
+    if (mr.width < 20 || br.height < 40) return null;
+    const cs = getComputedStyle(body);
+    const padL = parseFloat(cs.paddingLeft) || 0;
+    const padR = parseFloat(cs.paddingRight) || 0;
+    // 可拖到的最宽 = .ai-body 的内容宽度（拖满就两侧留白为 0）
+    const contentW = Math.max(1, body.clientWidth - padL - padR);
+    return {
+      sr, br, contentW,
+      left: mr.left, right: mr.right,
+      center: (mr.left + mr.right) / 2,
+    };
+  };
+
+  /** 光标贴在哪条边沿上（不在 .ai-body 的纵向范围内就不算） */
+  const edgeAt = (m, x, y) => {
+    if (y < m.br.top || y > m.br.bottom) return null;
+    const dl = Math.abs(x - m.left);
+    const dr = Math.abs(x - m.right);
+    if (Math.min(dl, dr) > TEXT_EDGE_HIT) return null;
+    return dl <= dr ? 'left' : 'right';
+  };
+
+  /** 把那一小段渐变提示条放到某条边沿的某个高度上（相对 #rightSide 定位） */
+  const placeBar = (edgeX, clientY, { on = true, dragging = false } = {}) => {
+    const sr = side.getBoundingClientRect();
+    const x = edgeX - sr.left - side.clientLeft;
+    const top = clamp(clientY - sr.top - side.clientTop - TEXT_EDGE_BAR_H / 2,
+      4, Math.max(4, sr.height - TEXT_EDGE_BAR_H - 4));
+    bar.style.left = `${Math.round(x)}px`;
+    bar.style.top = `${Math.round(top)}px`;
+    bar.classList.toggle('on', !!on);
+    bar.classList.toggle('dragging', !!dragging);
+  };
+  const hideBar = () => {
+    bar.classList.remove('on', 'dragging');
+    side.classList.remove('text-edge-hot');
+  };
+
+  const paint = () => {
+    raf = 0;
+    const m = geo();
+    if (!m) { hideBar(); return; }
+    if (drag) {
+      // 宽度 = 2 × 光标到列中心的距离；夹在 [下限, min(内容宽, 上限)] 之间
+      const half = drag.edge === 'right' ? (lastX - m.center) : (m.center - lastX);
+      const lo = Math.min(TEXT_COL_MIN, m.contentW);
+      const hi = Math.max(lo, Math.min(m.contentW, TEXT_COL_MAX));
+      drag.width = Math.round(clamp(2 * half, lo, hi));
+      if (drag.moved) {
+        // 拖动途中直接写 CSS 变量（不走 applyUiStyle，避免每帧重算整套样式）；
+        // 松手时再落到 uiStyle.maxWidth / localStorage。
+        document.documentElement.style.setProperty('--ai-max-width', `${drag.width}px`);
+      }
+      const edgeX = drag.edge === 'right' ? m.center + drag.width / 2 : m.center - drag.width / 2;
+      placeBar(edgeX, lastY, { on: true, dragging: true });
+      return;
+    }
+    const edge = edgeAt(m, lastX, lastY);
+    if (!edge) { hideBar(); return; }
+    side.classList.add('text-edge-hot');
+    placeBar(edge === 'left' ? m.left : m.right, lastY);
+  };
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(paint); };
+
+  const moveDuringDrag = (e) => {
+    if (!drag) return;
+    if (Math.abs(e.clientX - drag.startX) > 2) drag.moved = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    schedule();
+  };
+
+  const endDrag = () => {
+    if (!drag) return;
+    // 收尾时先按当前位置算最后一次：不能让"最后一帧还没跑"导致宽度停在上一帧
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    paint();
+    const changed = drag.moved && Number.isFinite(drag.width);
+    const width = drag.width;
+    drag = null;
+    window.removeEventListener('pointermove', moveDuringDrag);
+    window.removeEventListener('pointerup', endDrag);
+    window.removeEventListener('pointercancel', endDrag);
+    document.body.classList.remove('text-edge-dragging');
+    side.classList.remove('text-edge-dragging');
+    if (changed) {
+      // 走同一条样式出口：uiStyle → --ai-max-width，顺手持久化（刷新 / 重开论文还在）
+      uiStyle = { ...uiStyle, maxWidth: width };
+      applyUiStyle();
+      saveUi();
+    }
+    hideBar();
+  };
+
+  const startIfNear = (e) => {
+    if (drag || e.button !== 0 || e.pointerType === 'touch') return;
+    const m = geo();
+    if (!m) return;
+    const edge = edgeAt(m, e.clientX, e.clientY);
+    if (!edge) return;
+    // 贴边按下 = 拉边沿：别让它变成选字，也别触发消息里的按钮
+    e.preventDefault();
+    e.stopPropagation();
+    lastX = e.clientX;
+    lastY = e.clientY;
+    drag = { edge, width: Math.round(m.right - m.left), startX: e.clientX, moved: false };
+    document.body.classList.add('text-edge-dragging');
+    side.classList.add('text-edge-dragging');
+    window.addEventListener('pointermove', moveDuringDrag);
+    window.addEventListener('pointerup', endDrag);
+    window.addEventListener('pointercancel', endDrag);
+    paint();
+  };
+
+  // ⚠️ pointerdown 用**捕获**阶段：要比文本选择 / 消息里的按钮更早拿到按下事件，
+  // 只在真的贴边时才拦（e.preventDefault + stopPropagation），其余点击照旧。
+  side.addEventListener('pointerdown', startIfNear, true);
+  side.addEventListener('pointermove', (e) => {
+    if (drag) return;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    schedule();
+  }, { passive: true });
+  side.addEventListener('pointerleave', () => { if (!drag) hideBar(); });
+  // 面板滚走 / 切窗口 / 失焦：别把一条渐变条孤零零留在屏幕上
+  window.addEventListener('blur', () => { if (!drag) hideBar(); });
+}
+
 function clearAllBlocks() {
   for (const meta of Object.values(state.blockMeta)) meta.body.innerHTML = '';
   refreshCounts();
@@ -4162,8 +4381,9 @@ function addFailureRetry(entry, message, onRetry) {
 }
 
 /**
- * 可恢复请求的最小持久化描述。截图只记「有过截图」及页码，永远不把 data URL 写进会话；
- * 这样跨重启仍能恢复问题、文字附件和范围开关，同时明确提示用户重新添加截图。
+ * 可恢复请求的最小持久化描述。截图**不存图片本体**（那是单独存的，见 uploadAttachment），
+ * 只记附件 id + 尺寸 + 名称 —— 跨重启恢复时按 id 把原图取回来；老会话没有 id 的，
+ * 退化成「截图未保存」提示。这样会话 JSON 不会被 base64 图片撑爆。
  */
 function serialiseRetryPayload(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -4180,7 +4400,13 @@ function serialiseRetryPayload(raw) {
       attachments: (Array.isArray(raw.attachments) ? raw.attachments : []).slice(0, 12).map((a) => {
         const kind0 = a?.kind === 'image' ? 'image' : 'text';
         return kind0 === 'image'
-          ? { kind: 'image', page: a?.page || null, label: String(a?.label || '截图').slice(0, 120), screenshot: true }
+          ? {
+            kind: 'image', page: a?.page || null, label: String(a?.label || '截图').slice(0, 120),
+            w: Number(a?.w) || 0, h: Number(a?.h) || 0,
+            // 图片单独存：只记 id（32 位十六进制）；取不到 id 的旧附件保留 screenshot 标记走旧提示
+            id: validAttachmentId(a?.ref) ? a.ref : '',
+            screenshot: true,
+          }
           : { kind: 'text', page: a?.page || null, text: String(a?.text || '').slice(0, 3000) };
       }),
     };
@@ -4252,6 +4478,93 @@ function sessionQuery(docId, sid) {
   return sid ? `${base}&sid=${encodeURIComponent(sid)}` : base;
 }
 
+/* ═════════════════ 截图附件：图片单独存（不进会话 JSON） ═════════════════
+
+   2026-10 用户口径：「图片单独存」，删除时机自己定。于是：
+     · 上传时机：**真正点发送**带图提问时才传 —— 只是放进输入框又删掉的草稿不会产生文件；
+     · 存哪：服务端 `data/attachments/<会话键>/<id>.<ext>`，会话 JSON 里只留 32 位 id 引用；
+     · 怎么读回来：恢复会话 / 跨重启重试时按 id 取回原图（本机 HTTP，带 token 的 fetch）；
+     · 何时删（服务端负责，见 server.js / api.rs 的 pruneAttachments）：
+         ① 每次会话保存成功后按「这次 payload 里还引用着的 id」清理本会话目录
+            （清空会话 = 引用为空 → 图全删）；
+         ② 删除会话 → 整个会话的附件目录一起删；
+         ③ 发送失败 / 保存失败留下的孤儿图，在下一次保存时被 ① 清掉。
+   上传失败不挡提问：这次照发，只是重开论文后这条消息没有可恢复的图
+   （老逻辑的「截图附件未保存」提示兜底）。 */
+const ATTACHMENT_ID_RE = /^[0-9a-f]{32}$/;
+const validAttachmentId = (v) => ATTACHMENT_ID_RE.test(String(v || ''));
+
+/** dataURL → Blob（上传用；本机服务只收原始图片字节，不收 base64） */
+function dataUrlToBlob(dataUrl) {
+  const m = /^data:([^;,]+)?(;base64)?,/i.exec(String(dataUrl || ''));
+  if (!m) return null;
+  try {
+    const mime = m[1] || 'image/png';
+    const body = String(dataUrl).slice(m[0].length);
+    if (m[2]) {
+      const bin = atob(body);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: mime });
+    }
+    return new Blob([new TextEncoder().encode(decodeURIComponent(body))], { type: mime });
+  } catch { return null; }
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** 把一张截图单独存到服务端；失败返回 ''（不挡提问） */
+async function uploadAttachment(dataUrl, docId, sid) {
+  const blob = dataUrlToBlob(dataUrl);
+  if (!blob) return '';
+  try {
+    const r = await fetch(`/api/attachment?${sessionQuery(docId, sid)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': blob.type || 'image/png' },
+      body: blob,
+    });
+    if (!r.ok) return '';
+    const out = await r.json();
+    return validAttachmentId(out?.id) ? out.id : '';
+  } catch { return ''; }
+}
+
+/** 按附件 id 取回原图（dataURL）；失败返回 '' */
+async function fetchAttachmentDataUrl(ref, docId, sid) {
+  if (!validAttachmentId(ref)) return '';
+  try {
+    const r = await fetch(`/api/attachment?${sessionQuery(docId, sid)}&id=${encodeURIComponent(ref)}`);
+    if (!r.ok) return '';
+    return await blobToDataUrl(await r.blob());
+  } catch { return ''; }
+}
+
+/** 按会话条目里的 shots[] 取回图片；返回 { thumbs, missing } */
+async function hydrateShotThumbs(shots, docId, sid) {
+  const rows = (Array.isArray(shots) ? shots : []).filter((s) => s && validAttachmentId(s.id));
+  const urls = await Promise.all(rows.map((s) => fetchAttachmentDataUrl(s.id, docId, sid)));
+  const thumbs = urls.filter(Boolean);
+  return { thumbs, missing: urls.length > thumbs.length };
+}
+
+/** 一张附件图片 → 会话里存的最小描述 { id, w, h, label } */
+function shotRefOf(im) {
+  if (!im || !validAttachmentId(im.ref)) return null;
+  return {
+    id: im.ref,
+    w: Number(im.w) || 0,
+    h: Number(im.h) || 0,
+    label: String(im.label || '截图').slice(0, 120),
+  };
+}
+
 /** 教学状态存档：只存当前论文当前会话的「带我一步步读」进度与续讲历史 */
 function serializeTeachingState() {
   const walk = activeWalk();
@@ -4276,6 +4589,11 @@ function sessionPayload() {
     block: String(x.block || 'chat'), tag: String(x.tag || '').slice(0, 120), page: x.page || null,
     quote: String(x.quote || '').slice(0, 3000), kind: x.kind === 'user' ? 'user' : 'assistant',
     text: String(x.text || '').slice(0, 12000), screenshot: !!x.screenshot,
+    // 截图附件单独存：这里只留 id 引用（几十字节），恢复会话时按 id 取回原图
+    shots: (Array.isArray(x.shots) ? x.shots : [])
+      .filter((s) => s && validAttachmentId(s.id))
+      .slice(0, 6)
+      .map((s) => ({ id: s.id, w: Number(s.w) || 0, h: Number(s.h) || 0, label: String(s.label || '截图').slice(0, 120) })),
     status: ['pending', 'complete', 'stopped', 'failed', 'user'].includes(x.status) ? x.status : (x.kind === 'user' ? 'user' : 'complete'),
     sources: (Array.isArray(x.sources) ? x.sources : []).slice(0, 8).map((s) => ({ title: String(s.title || '').slice(0, 500), url: String(s.url || '').slice(0, 2000), number: s.number || null })),
     meta: String(x.meta || '').slice(0, 500),
@@ -4355,7 +4673,7 @@ function restoreRetryCallback(row, entry, priorUser) {
       toast('已恢复问题到输入框；旧会话没有保存可自动重试的范围。', 'ok', 4200);
     };
   }
-  return () => {
+  return async () => {
     if (payload.docId && payload.docId !== state.doc?.docId) {
       toast('这条请求属于另一篇论文，请切回原论文后重试', 'err', 3200);
       return;
@@ -4380,26 +4698,49 @@ function restoreRetryCallback(row, entry, priorUser) {
       return;
     }
     const rawAttachments = Array.isArray(payload.attachments) ? payload.attachments : [];
-    const lostShots = rawAttachments.some((a) => a?.kind === 'image' || a?.screenshot);
-    if (lostShots) {
+    /** 截图附件单独存：有 id 的可以取回原图；只有 screenshot 标记的老会话才真的丢了 */
+    const imageRows = rawAttachments.filter((a) => a?.kind === 'image' || a?.screenshot);
+    const recoverable = imageRows.filter((a) => validAttachmentId(a?.id));
+    const lostShots = imageRows.length > recoverable.length;
+    const docId = state.doc?.docId || payload.docId || null;
+    const sid = activeSidFor(docId);
+    let imageAttachments = [];
+    if (recoverable.length) {
+      const urls = await Promise.all(recoverable.map((a) => fetchAttachmentDataUrl(a.id, docId, sid)));
+      if (urls.some((u) => !u)) {
+        // 图片文件被清掉了（比如另一个会话清空时 GC 掉了）：退回「重新添加」的老路
+        restoreComposerFallback(payload.question || fallbackQuestion, payload);
+        toast('截图文件已不在，问题和文字附件已恢复；请重新添加截图后再发送。', 'ok', 5200);
+        return;
+      }
+      imageAttachments = recoverable.map((a, i) => ({
+        id: uid(), kind: 'image', page: a.page || null, dataUrl: urls[i],
+        w: Number(a.w) || 0, h: Number(a.h) || 0,
+        label: String(a.label || '截图').slice(0, 120), ref: a.id,
+      }));
+    }
+    if (lostShots && !imageAttachments.length) {
       restoreComposerFallback(payload.question || fallbackQuestion, payload);
-      toast('问题和文字附件已恢复；截图跨重启未保存，请重新添加截图后再发送。', 'ok', 5200);
+      toast('问题和文字附件已恢复；截图未保存，请重新添加截图后再发送。', 'ok', 5200);
       return;
     }
-    const attachments = rawAttachments
-      .filter((a) => a?.kind === 'text' && String(a.text || '').trim())
-      .map((a) => ({ id: uid(), kind: 'text', page: a.page || null, text: String(a.text).slice(0, 3000) }));
+    const attachments = [
+      ...rawAttachments
+        .filter((a) => a?.kind === 'text' && String(a.text || '').trim())
+        .map((a) => ({ id: uid(), kind: 'text', page: a.page || null, text: String(a.text).slice(0, 3000) })),
+      ...imageAttachments,
+    ];
     const pending = {
       inputValue: String(payload.inputValue || payload.question || ''),
       question: String(payload.question || fallbackQuestion || '请解释我加进来的这段内容。'),
       attachments,
-      quoteText: String(payload.quoteText || attachments.map((a) => (a.page ? `[第${a.page}页] ` : '') + a.text).join('\n\n')),
+      quoteText: String(payload.quoteText || attachments.map((a) => (a.page ? `[第${a.page}页] ` : '') + (a.text || '')).join('\n\n')),
       firstPage: payload.firstPage || attachments[0]?.page || entry.root.dataset.page || null,
-      docId: state.doc?.docId || payload.docId || null,
+      docId,
       docTitle: state.doc?.name || payload.docTitle || '',
       history: snapshotHistory(payload.history || state.history),
       reading: snapshotReadingRequest(payload.reading),
-      openSeq: state.openSeq, sid: activeSidFor(state.doc?.docId),
+      openSeq: state.openSeq, sid,
       useFullText: !!payload.useFullText,
       useWeb: !!payload.useWeb,
       scopeRange: payload.scopeRange || Object.values(SCOPE_RANGES).find((r) => r.full === !!payload.useFullText && r.web === !!payload.useWeb)?.key,
@@ -4471,8 +4812,24 @@ async function restoreSession(docId, { only = 'all' } = {}) {
         row = { ...row, block: safeBlock };
         state.sessionEntries[rowIndex] = row;
       }
-      const text = `${String(row.text || '').slice(0, 12000)}${row.screenshot ? '\n\n【截图附件未保存，请重新添加截图】' : ''}`;
-      const entry = addEntry({ ...row, text, restore: true });
+      /**
+       * 截图附件单独存：会话里只记了 id，这里按 id 把原图取回来（本机 HTTP）再渲染；
+       * 取不到（图片被清掉 / 老会话没有 id）才退回原来的「截图附件未保存」提示。
+       */
+      const shotRefs = (Array.isArray(row.shots) ? row.shots : []).filter((s) => s && validAttachmentId(s.id));
+      let thumbs = [];
+      let shotsLost = false;
+      if (row.screenshot || shotRefs.length) {
+        if (shotRefs.length) {
+          const hydrated = await hydrateShotThumbs(shotRefs, docId, sid);
+          thumbs = hydrated.thumbs;
+          shotsLost = !thumbs.length;
+        } else {
+          shotsLost = true;   // 老会话：只存了「有过截图」的标记，没有图片本体
+        }
+      }
+      const text = `${String(row.text || '').slice(0, 12000)}${shotsLost ? '\n\n【截图附件未保存，请重新添加截图】' : ''}`;
+      const entry = addEntry({ ...row, text, thumbs, restore: true });
       entry.root.__sessionRecord = row;
       const priorUser = [...state.sessionEntries.slice(0, rowIndex)].reverse().find((x) => x?.kind === 'user');
       // 恢复出来的回答也要能存笔记：标题默认用上一条用户消息（重放时补上 __question）
@@ -4484,16 +4841,16 @@ async function restoreSession(docId, { only = 'all' } = {}) {
         onRetry: row.status === 'stopped' ? retry : null,
       });
       else if (row.kind !== 'user' && row.status === 'failed') {
-        entry.body.textContent = '上次发送失败。问题和文字附件保留在上一条消息中；截图没有保存。';
+        entry.body.textContent = '上次发送失败。问题、文字附件和截图都保留在这次请求里，点「重试这次发送」即可。';
         entry.root.classList.add('err');
         entry.acts.replaceChildren(el('button', { text: '重试这次发送', onclick: retry }));
         entry.acts.classList.remove('hidden');
-        entry.root.append(el('div', { class: 'entry-meta failed', text: '发送失败 · 问题和文字附件仍保留；截图需重新添加' }));
+        entry.root.append(el('div', { class: 'entry-meta failed', text: '发送失败 · 问题和附件仍保留在请求里' }));
       } else if (row.kind !== 'user' && row.status === 'pending') {
         entry.body.textContent = '上次回答尚未完成。';
         entry.acts.replaceChildren(el('button', { text: '恢复并重试', onclick: retry }));
         entry.acts.classList.remove('hidden');
-        entry.root.append(el('div', { class: 'entry-meta stopped', text: '未完成 · 问题和文字附件仍保留；截图需重新添加' }));
+        entry.root.append(el('div', { class: 'entry-meta stopped', text: '未完成 · 点「恢复并重试」继续' }));
       }
       // 教学类条目：补回「继续下一步 / 讲第 N 项 / 这个我懂了」等按钮
       if (row.kind !== 'user' && row.status !== 'pending' && row.status !== 'failed') restoreTeachingEntry(entry, row);
@@ -4893,7 +5250,7 @@ function applyCardPos(el, left, top) {
 /* ══════════════════════════ 读懂论文（顶栏 ✦ 菜单 + 教学式回答） ══════════════════════════ */
 
 /**
- * 顶栏菜单：只剩四项教学能力（`teaching.js` 的 TEACHING_OPS）+ 头部学习档案入口。
+ * 顶栏菜单：四项教学能力（`teaching.js` 的 TEACHING_OPS）。学习记忆在后台维护。
  *
  * 旧的「实验够不够支撑结论 / 局限与可疑之处」不再占菜单：它们降级成「先给我讲明白」
  * 等回答末尾的深入按钮（见 teachingDeepButtons），提示词仍保留在 ops.js。
@@ -4905,29 +5262,10 @@ function initOps() {
 
   const build = () => {
     menu.replaceChildren();
-    const s = profileSummary();
-    const profileRow = el('button', {
-      type: 'button',
-      class: `ops-profile${s.isEmpty ? ' empty' : ''}`,
-      title: '打开学习档案：记录你已确认的理解程度和具体边界（只存在本机）',
-      onclick: () => { hideOpsMenu(); openProfile(); },
-    },
-    el('span', { class: 'ops-profile-icon' }, iconEl('graduation')),
-    el('span', { class: 'ops-profile-text' },
-      el('span', {
-        class: 'ops-profile-title',
-        text: s.isEmpty ? '学习档案 · 还没有' : `学习档案 · 已确认 ${s.confirmed} 条${s.pending ? ` · ${s.pending} 条待确认` : ''}`,
-      }),
-      el('span', {
-        class: 'ops-profile-note',
-        text: s.isEmpty ? '花 30 秒写一下基础，回答会更贴合你' : (s.latest ? `最近确认 ${relativeLabel(s.latest)} · 点开编辑` : '点开查看 / 编辑'),
-      })));
-
     menu.append(
       el('div', { class: 'ops-head' },
         el('div', { class: 'ops-head-title', text: `读懂论文${state.doc ? '' : '（先打开一篇）'}` }),
         el('div', { class: 'ops-head-note', text: '结果会进右侧问答栏；每一项都能接着追问' })),
-      profileRow,
     );
 
     const opButton = (op) => {
@@ -4967,9 +5305,6 @@ function initOps() {
 }
 
 function hideOpsMenu() { $('#opsMenu')?.classList.add('hidden'); }
-
-/** 菜单每次打开都重建，学习档案变化后不需要常驻刷新（保留函数名给 boot 调用） */
-function renderProfileMenuHint() { /* no-op：menu 打开时按最新档案重建 */ }
 
 /* ── 教学状态小工具 ──────────────────────────────────────────────── */
 
@@ -5018,7 +5353,7 @@ function profileSelectionText(question = '') {
 /** 组一份「教学类回答」的档案块（调用前确保 state.docText 已按需加载） */
 function teachingProfileBlock(question = '') {
   const { docText } = profileSelectionText(question);
-  return buildProfileBlock(profileStore.data, docText, question);
+  return buildProfileBlock(profileStore.data, docText, question, { docId: state.doc?.docId });
 }
 
 /* ── 教学类回答的缓存 ────────────────────────────────────────────── */
@@ -5041,8 +5376,8 @@ function teachingCacheSet(docId, opId, value) {
  * 跑一项「读懂论文」能力。和 runOperation 同一套骨架（流式、停止、失败重试、缓存、会话存档），
  * 区别只在三处：
  *   1. 材料用 teachMessages（带当前时间 + 学习档案块），而不是 opMessages；
- *   2. 回答里可能有 prt 隐藏块 → 收尾时解析成按钮与「待确认」档案建议；
- *   3. 不同能力有各自的后续按钮（继续下一步 / 讲第 N 项 / 这个我懂了 / 换一个对象…）。
+ *   2. 回答里可能有 prt 隐藏块 → 收尾时只解析后续操作按钮；
+ *   3. 不同能力有各自的后续按钮（继续下一步 / 讲第 N 项 / 这里没懂 / 换一个对象…）。
  *
  * @param {string} opId  intro | prereq | walk | visual
  * @param {object} opts
@@ -5131,16 +5466,11 @@ async function runTeaching(opId, {
       page: viewer.current, retryLabel: '重新生成',
       onRetry: () => runTeaching(opId, { force: true, retryEntry: entry, extraUser, ask, tag, teaching }),
     });
-    renderTeachingExtras(entry, { opId, chips: split.chips, teaching, profileSuggestions: split.profile });
+    renderTeachingExtras(entry, { opId, chips: split.chips, teaching });
     if (opId === 'walk' && !history.length) startWalkSession(clean, entry);
     if (opId !== 'visual' && !history.length) {
       teachingCacheSet(docId, opId, { text: clean, at: Date.now(), page: viewer.current, chips: split.chips, teaching });
     }
-    // 记忆：从这一轮对话里提取「待确认」（不阻塞、不写确认）
-    scheduleMemoryExtraction({
-      question: ask || op.ask, answer: clean,
-      capability: opId + (teaching?.kind ? `:${teaching.kind}` : ''),
-    });
     state.teaching.current = teaching || null;
     scheduleSessionSave();
     return { text: clean, chips: split.chips };
@@ -5192,10 +5522,10 @@ function sendTeachingPrompt(prompt) {
 }
 
 /**
- * 画「能力相关」的后续按钮 + 处理学习档案建议。
+ * 画「能力相关」的后续按钮；不在渲染阶段写入学习记忆。
  * 各能力的按钮都是**静态兜底**：即使模型没输出 prt 块，这里也一定有可用操作。
  */
-function renderTeachingExtras(entry, { opId, chips = [], teaching = null, profileSuggestions = [] } = {}) {
+function renderTeachingExtras(entry, { opId, chips = [], teaching = null } = {}) {
   const record = entry.root.__sessionRecord;
   if (record) {
     record.chips = sanitiseChips(chips);
@@ -5242,98 +5572,31 @@ function renderTeachingExtras(entry, { opId, chips = [], teaching = null, profil
     renderChips(entry, chips);
   }
 
-  // 有明确教学对象时给「这个我懂了 / 这里没懂」
-  if (teaching?.name) {
-    add('这个我懂了', () => markTeachingKnown(teaching, entry), 'know');
-    add('这里没懂', () => reexplainTeaching(teaching, entry), 'dunno');
-  }
-
-  // AI 观察 → 只写「待确认」，不确认
-  if (profileSuggestions.length && profileStore.enabled) {
-    applyProfileSuggestions(profileSuggestions, teaching).catch((e) => toast(`学习档案写入失败：${e.message}`, 'err', 4000));
-  }
+  if (teaching?.name) add('这里没懂', () => reexplainTeaching(teaching), 'dunno');
 }
 
-/** 把模型建议写成待确认条目（去重、最多 3 条、失败只 toast） */
-async function applyProfileSuggestions(suggestions, teaching = null) {
-  if (!suggestions.length) return;
-  const next = withPendingSuggestions(profileStore.data, suggestions, {
-    docId: state.doc?.docId || '', paper: state.doc?.name || '', capability: teaching?.kind || '',
-  });
-  if (!next.added.length) return;
-  await profileStore.save(next.profile);
-  toast(`学习档案：记下 ${next.added.length} 条待确认（在菜单里点「学习档案」可确认）`, 'ok', 4200);
-}
-
-/* ── 记忆提取：从这一轮对话里判断「用户可能懂了 / 没懂」，写成待确认 ──
- *
- * 为什么需要独立一步（2026-10-24 实测）：真实模型会稳定输出 prt 的 chips，
- * 但**从不输出** prt 的 profile 建议——「AI 提出你似乎已经理解了某个概念」
- * 这条设计如果只靠教学回答自觉，实际上永远不会发生。所以回答收尾后，
- * 再用一次很小的独立调用（只带这一轮对话，不带论文全文）来提取。
- *
- * 硬规则：只写 pending、不写确认；不阻塞界面；失败静默；串行执行不并发轰炸。
- */
-let memoryQueue = Promise.resolve();
-
-function scheduleMemoryExtraction({ question = '', answer = '', capability = '' } = {}) {
-  if (!profileStore.enabled) return;
-  if (!state.doc || !Settings.ready) return;
-  const text = String(answer || '');
-  if (text.length < 300) return;   // 太短的回答没有判断依据
-  const docId = state.doc.docId;
-  const docTitle = state.doc.name;
-  const existingTopics = profileStore.data.items.map((i) => i.topic).slice(0, 40);
-  memoryQueue = memoryQueue.then(async () => {
-    if (state.doc?.docId !== docId || !profileStore.enabled) return;
+/* 后台任务不占用前台 busy/stop 状态；失败静默，绝不污染回答或主动确认。 */
+const learningMemory = createLearningMemory({
+  store: profileStore,
+  extract: async (messages) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
     try {
-      const out = await streamChat({
-        messages: memoryExtractMessages({ question, answer: text, existingTopics, docTitle }),
-        stream: false,
-        temperature: 0,
-        idleMs: 30000,
-      });
-      const suggestions = parseMemorySuggestions(out);
-      if (!suggestions.length) return;
-      if (state.doc?.docId !== docId) return;
-      await applyProfileSuggestions(suggestions, { kind: `memory:${capability}` });
-    } catch { /* 记忆提取失败不影响主回答 */ }
-  }).catch(() => {});
+      return await streamChat({ messages, stream: false, temperature: 0, signal: controller.signal, idleMs: 25000 });
+    } finally { clearTimeout(timeout); }
+  },
+});
+
+function scheduleMemoryExtraction({ question = '', answer = '', history = [], topic = '', source = null, capability = 'chat' } = {}) {
+  if (!Settings.ready || !profileStore.enabled) return Promise.resolve();
+  return learningMemory.observe({ question, answer, history, topic,
+    source: source || { docId: state.doc?.docId || '', paper: state.doc?.name || '', capability } });
 }
 
-/** 点「这个我懂了」：写 confirmed + 更新时间；并给下一项的入口 */
-async function markTeachingKnown(teaching, entry) {
-  const next = withConfirmed(profileStore.data, {
-    topic: teaching.name,
-    level: teaching.level || '本文所需层面已理解',
-    boundary: teaching.boundary || '',
-    source: { docId: state.doc?.docId || '', paper: state.doc?.name || '', capability: teaching.kind || '' },
-  });
-  try {
-    await profileStore.save(next.profile);
-    toast(`已记入学习档案（${isoDate(nowISO())}）：${teaching.name}`, 'ok', 3200);
-  } catch (e) {
-    toast(`学习档案写入失败：${e.message}`, 'err', 4000);
-    return;
-  }
-  // 按钮变成「已记入」避免重复点
-  entry.acts.querySelectorAll('.act-chip.know').forEach((b) => { b.disabled = true; b.textContent = '已记入学习档案'; });
-}
-
-/** 点「这里没懂」：立即换一种更基础的说法重讲（不推进教学进度） */
-function reexplainTeaching(teaching, entry) {
+/** 反馈直接走正常追问，由后台从用户的明确原话更新理解边界。 */
+function reexplainTeaching(teaching) {
   state.teaching.current = teaching;
-  // 用户明确说没懂 → 档案里对应的条目不再当作已掌握（只降级，不新建）
-  if (profileStore.enabled && teaching?.name) {
-    const next = withNeedsReconfirm(profileStore.data, teaching.name);
-    if (next.changed) {
-      profileStore.save(next.profile)
-        .then(() => toast(`学习档案：已把「${teaching.name}」标为待确认`, 'ok', 3200))
-        .catch(() => { /* 写失败不影响重讲 */ });
-    }
-  }
-  const prompt = `这里没懂：「${teaching.name}」没听懂。请先不往下推进，换一种更基础的说法，从我可能缺的最基础的一步讲起，并给一个最小例子。`;
-  sendTeachingPrompt(prompt);
+  sendTeachingPrompt('这里没懂：「' + teaching.name + '」没听懂。请先不往下推进，换一种更基础的说法，从我可能缺的最基础的一步讲起，并给一个最小例子。');
 }
 
 /** 点列表里的某一项：单独讲这一项前置知识 */
@@ -5436,8 +5699,9 @@ async function continueWalk(kind, entry) {
     walk.updatedAt = nowISO();
     scheduleSessionSave();
     renderTeachingExtras(newEntry, { opId: 'walk', chips: split.chips, teaching: null });
-    if (profileStore.enabled) applyProfileSuggestions(split.profile, { kind: 'walk' }).catch(() => {});
-    scheduleMemoryExtraction({ question: instruction, answer: clean, capability: `walk:${kind}` });
+    if (kind !== 'continue') scheduleMemoryExtraction({ question: instruction, answer: clean,
+      history, topic: String(walk.route?.[walk.step - 1]?.title || ''),
+      source: { docId: walk.docId, paper: state.doc?.name || '', capability: 'walk:' + kind } });
   } catch (e) {
     if (isAbort(e)) {
       target.done(received);
@@ -5654,6 +5918,7 @@ async function runOperation(opId, { force = false, block = 'chat', retryEntry = 
       docTitle: state.doc?.name,
       fullText: ctx?.text,
       digest: state.docDigest,
+      profileBlock: teachingProfileBlock(op.ask),
     });
     const full = await chat({
       messages,
@@ -6623,7 +6888,8 @@ async function doExplain(sel) {
     if (!readingRequestCurrent({ docId, openSeq, sid })) return;
     if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
     const full = await chat({
-      messages: explainMessages({ selection: text, context, page: sel.page, docTitle: state.doc?.name, history, reading, references }),
+      messages: explainMessages({ selection: text, context, page: sel.page, docTitle: state.doc?.name, history, reading, references,
+        profileBlock: buildProfileBlock(profileStore.data, text + "\n" + context, reading.question, { docId }) }),
       signal: ctl.signal,
       onDelta: (piece, all) => { received = all; target.push(all); },
       onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
@@ -6687,6 +6953,31 @@ function takeAttachments() {
   state.attachments = [];
   renderAttachments();
   return list;
+}
+
+/**
+ * 发送那一刻就把这条请求带走的附件从输入区收掉（2026-10 用户口径：带图片提问时，
+ * 点发送之后图片要马上消失，不能等答案整个流完才消失）。
+ *
+ * 附件快照在 `pending.attachments` 里，所以收走不等于丢掉：
+ *   · 发送失败 → `restoreSentAttachments()` 原样放回输入区，改改问题就能再发；
+ *   · 点「重试 / 重新生成」→ `send(pending)` 直接复用快照，图会照常发给模型；
+ *   · 用户消息气泡里也已经有缩略图，收走后仍看得见刚才发的是哪张图。
+ */
+function dropSentAttachments(pending) {
+  const ids = new Set((pending?.attachments || []).map((a) => a && a.id).filter(Boolean));
+  if (!ids.size || !state.attachments.some((a) => ids.has(a.id))) return;
+  state.attachments = state.attachments.filter((a) => !ids.has(a.id));
+  renderAttachments();
+}
+
+/** 发送失败：把这条请求的附件放回输入区（截图不丢，改完问题可以直接再发）。 */
+function restoreSentAttachments(pending) {
+  const ids = new Set(state.attachments.map((a) => a.id));
+  const back = (pending?.attachments || []).filter((a) => a && a.id && !ids.has(a.id));
+  if (!back.length) return;
+  state.attachments = [...back, ...state.attachments];
+  renderAttachments();
 }
 
 function renderAttachments() {
@@ -7172,6 +7463,18 @@ async function send(retryPending = null) {
       useWeb: SCOPE_RANGES[currentRange()].web,
       scopeRange: currentRange(),
     };
+    // 截图附件单独存：**点发送才上传**（只放进输入框又删掉的草稿不会产生服务端文件）。
+    // 上传是并行的、本机 HTTP，几毫秒级；返回的 id 记在图片附件对象上（im.ref），
+    // 之后写进会话的是 id 引用而不是 base64，恢复会话时再按 id 取回。
+    const unuploaded = images.filter((im) => im.dataUrl && !validAttachmentId(im.ref));
+    if (unuploaded.length) {
+      pending.uploadShots = Promise.all(unuploaded.map(async (im) => {
+        const ref = await uploadAttachment(im.dataUrl, pending.docId, pending.sid);
+        if (!ref) return null;
+        im.ref = ref;                 // 同一个对象也在 pending.attachments 里，重试/失败回填都能复用
+        return shotRefOf(im);
+      })).then((rows) => rows.filter(Boolean));
+    }
     // 提交后立即清空输入框；问题已经写入右侧会话记录，等待模型返回时不再把旧问题留在编辑区。
     ta.value = '';
     ta.style.height = 'auto';
@@ -7210,6 +7513,12 @@ async function send(retryPending = null) {
 
   const ctl = makeController();
   if (!ctl) return;
+  /**
+   * 附件在这里就离开输入区 —— 新发和重试走同一条路径。用户口径（2026-10）：
+   * 「有图片输入的时候，点发送之后，图片就直接消失，不要等答案完全出来了再消失」。
+   * 失败时 catch 里把附件放回输入区（见 restoreSentAttachments）。
+   */
+  dropSentAttachments(pending);
   // 这条待发记录的范围固定下来：state 的两个标记跟着它走（重试时 pending 原样复用，不会串范围）
   applyRangeForSend(pending.scopeRange || currentRange());
   const images = pending.attachments.filter((a) => a.kind === 'image');
@@ -7230,6 +7539,23 @@ async function send(retryPending = null) {
   let meta = '';
   let docCtx = null;
   try {
+    /**
+     * 截图附件单独存：等上传完再发请求（本机 HTTP，几毫秒），把返回的 id 写进**这条用户消息**
+     * 的会话记录（shots[]）。会话 JSON 因此只增加几十字节的 id 引用，重开论文时按 id 取回原图。
+     * 上传失败照发 —— 只是这条消息没有可恢复的图（老提示兜底），不挡提问。
+     */
+    if (pending.uploadShots) {
+      try { await pending.uploadShots; } catch { /* 上传失败不挡提问 */ }
+    }
+    if (pending.userEntry) {
+      const shots = pending.attachments.filter((a) => a.kind === 'image').map(shotRefOf).filter(Boolean);
+      const rec = pending.userEntry.root?.__sessionRecord;
+      if (rec) {
+        if (shots.length) rec.shots = shots;
+        else delete rec.shots;
+      }
+      scheduleSessionSave();     // 让 shots 引用跟着会话一起落盘
+    }
     const reading = pending.reading || resolveReadingRequest({ question: pending.question,
       selection: pending.quoteText, page: pending.firstPage, history: pending.history });
     pending.reading = reading;
@@ -7294,7 +7620,7 @@ async function send(retryPending = null) {
     // 学习档案：只把和当前问题/所在页相关的少数条目交给模型；当前时间由 ai.js 固定注入。
     // 教学进度（「带我一步步读」）也在这里带上，避免自由追问时模型擅自推进下一步。
     const profileForAsk = buildProfileBlock(profileStore.data,
-      state.docText || context || '', pending.question);
+      state.docText || context || '', pending.question, { docId: pending.docId });
     const messages = askMessages({
       question: pending.question,
       selection: reading.selection,
@@ -7328,9 +7654,10 @@ async function send(retryPending = null) {
     target.done(full);
     state.history = snapshotHistory([...state.history, ...readingTurn(reading, full)]);
     finishEntry(pending.entry, full, { page: pending.firstPage, sources: citedSources(full, sources), meta, status: 'complete' });
-    const sentIds = new Set(pending.attachments.map((a) => a.id));
-    state.attachments = state.attachments.filter((a) => !sentIds.has(a.id));
-    renderAttachments();
+    scheduleMemoryExtraction({ question: pending.inputValue, answer: full, history: pending.history,
+      topic: reading.selection || reading.focus?.text || '',
+      source: { docId: pending.docId || '', paper: pending.docTitle || '', capability: 'chat' } });
+    // 附件在发送那一刻就已从输入区清掉（dropSentAttachments），成功时无需再处理。
     scheduleSessionSave();
   } catch (e) {
     if (!readingRequestCurrent(pending)) return;
@@ -7343,6 +7670,8 @@ async function send(retryPending = null) {
     } else {
       target.fail(errText(e));
       addFailureRetry(pending.entry, errText(e), () => send(pending));
+      // 失败时把这次请求的附件放回输入区：截图不丢，改完问题可以直接再发。
+      restoreSentAttachments(pending);
     }
   } finally {
     setHint('');
@@ -7655,189 +7984,6 @@ function stepHit(dir) {
   showSearchHit((idx + dir + hits.length) % hits.length, true);
 }
 
-/* ══════════════════════ 学习档案（可查看 / 可编辑 / 带时间戳） ══════════════════════ */
-
-/**
- * 用户口径（2026-10）：
- *   · 值得做，但第一版只做「学习档案」，不做自动判定掌握的知识库；
- *   · 记录知识点 + 理解程度 + **具体边界** + 依据 + 时间；
- *   · AI 只能写「待确认」，确认只能由用户点；「讲过了 / 继续」都不算掌握。
- * 时间：每条写入都带时间；打开弹窗时按「当前时间」重新算相对时间（不存相对值）。
- */
-
-const BASIS_LABEL = { user_confirmed: '用户确认', user_self_report: '自述', model_inferred: 'AI 观察' };
-
-function initProfile() {
-  const modal = $('#profileModal');
-  if (!modal) return;
-  $('#profileClose')?.addEventListener('click', closeProfile);
-  modal.addEventListener('mousedown', (e) => { if (e.target === modal) closeProfile(); });
-  $('#profileSelfSave')?.addEventListener('click', saveSelfReport);
-  $('#profileAdd')?.addEventListener('click', () => { profileDraft.creating = true; renderProfileModal(); });
-  $('#profileClear')?.addEventListener('click', clearProfileAll);
-  const personal = $('#cfgProfilePersonal');
-  if (personal) {
-    personal.checked = profileStore.enabled;
-    personal.addEventListener('change', () => {
-      profileStore.setEnabled(personal.checked);
-      toast(personal.checked ? '已开启：回答会参考学习档案' : '已关闭：回答不再参考学习档案（档案保留）', 'ok', 3000);
-    });
-  }
-}
-
-/** 弹窗里的临时编辑状态（不落盘） */
-const profileDraft = { creating: false, editingId: '' };
-
-function openProfile() {
-  renderProfileModal();
-  $('#profileModal')?.classList.remove('hidden');
-}
-
-function closeProfile() {
-  profileDraft.creating = false;
-  profileDraft.editingId = '';
-  $('#profileModal')?.classList.add('hidden');
-}
-
-const profileDateText = (item) => {
-  const bits = [];
-  if (item.lastConfirmedAt) bits.push(`${isoDate(item.lastConfirmedAt)} 确认（${relativeLabel(item.lastConfirmedAt)}）`);
-  else bits.push(`${isoDate(item.createdAt)} 记录（待确认）`);
-  if (item.updatedAt && isoDate(item.updatedAt) !== isoDate(item.lastConfirmedAt)) bits.push(`${isoDate(item.updatedAt)} 修改`);
-  return bits.join(' · ');
-};
-
-/** 一条档案卡片：查看态 / 编辑态 */
-function profileCard(item, isPending) {
-  if (profileDraft.editingId === item.id) return profileEditorCard(item, isPending);
-  const st = staleness(item);
-  const meta = el('div', { class: 'profile-meta' },
-    el('span', { class: `profile-chip ${item.status}`, text: isPending ? '待确认' : '已确认' }),
-    st.days !== null && item.status === 'confirmed' ? el('span', { class: `profile-chip ${st.tier}`, text: st.tier === 'stale' ? '可能生疏' : st.tier === 'aging' ? '有一阵没确认' : '较新' }) : null,
-    el('span', { class: 'profile-date', text: profileDateText(item) }),
-    el('span', { class: 'profile-basis', text: BASIS_LABEL[item.basis] || '' }),
-  );
-  const rows = [
-    item.level ? el('div', { class: 'profile-row' }, el('span', { class: 'profile-key', text: '理解程度' }), el('span', { text: item.level })) : null,
-    item.boundary ? el('div', { class: 'profile-row' }, el('span', { class: 'profile-key', text: '具体边界' }), el('span', { text: item.boundary })) : null,
-  ];
-  const actions = isPending
-    ? [
-      el('button', { type: 'button', class: 'profile-btn ok', text: '确认掌握', onclick: () => mutateProfile((p) => withPendingConfirmed(p, item.id), '已确认') }),
-      el('button', { type: 'button', class: 'profile-btn', text: '还不会', onclick: () => mutateProfile((p) => withPendingRejected(p, item.id), '已记为还不会') }),
-      el('button', { type: 'button', class: 'profile-btn danger', text: '删除', onclick: () => mutateProfile((p) => withPendingDeleted(p, item.id), '已删除') }),
-    ]
-    : [
-      el('button', { type: 'button', class: 'profile-btn', text: '编辑', onclick: () => { profileDraft.editingId = item.id; renderProfileModal(); } }),
-      el('button', { type: 'button', class: 'profile-btn danger', text: '删除', onclick: () => mutateProfile((p) => withDeleted(p, item.id), '已删除') }),
-    ];
-  return el('div', { class: `profile-card${isPending ? ' pending' : ''}` },
-    el('div', { class: 'profile-topic', text: item.topic }),
-    meta, ...rows,
-    el('div', { class: 'profile-actions' }, ...actions));
-}
-
-/** 编辑态卡片（编辑已确认条目 / 新建一条） */
-function profileEditorCard(item, isPending) {
-  const creating = !item;
-  const topic = el('input', { class: 'profile-input', type: 'text', placeholder: '知识点，例如：残差连接', value: item?.topic || '' });
-  const level = el('input', { class: 'profile-input', type: 'text', placeholder: '理解程度，例如：理解原理，能够实现', value: item?.level || '' });
-  const boundary = el('textarea', { class: 'profile-textarea', placeholder: '具体边界：会什么、不会什么（这一栏最重要）' });
-  boundary.value = item?.boundary || '';
-  const foot = el('div', { class: 'profile-actions' },
-    el('button', {
-      type: 'button', class: 'profile-btn ok', text: creating ? '添加' : '保存',
-      onclick: async () => {
-        const name = topic.value.trim();
-        if (!name) { toast('先填知识点名称', 'err', 3000); return; }
-        if (creating) {
-          const next = withConfirmed(profileStore.data, { topic: name, level: level.value.trim(), boundary: boundary.value.trim(), source: { docId: state.doc?.docId || '', paper: state.doc?.name || '', capability: 'manual' } });
-          profileDraft.creating = false;
-          await saveProfileAndRender(next.profile, '已添加（今天确认）');
-        } else {
-          const next = withEdited(profileStore.data, item.id, { topic: name, level: level.value.trim(), boundary: boundary.value.trim() });
-          profileDraft.editingId = '';
-          await saveProfileAndRender(next, '已保存（今天确认）');
-        }
-      },
-    }),
-    el('button', {
-      type: 'button', class: 'profile-btn', text: '取消',
-      onclick: () => { profileDraft.creating = false; profileDraft.editingId = ''; renderProfileModal(); },
-    }));
-  return el('div', { class: 'profile-card editing' },
-    el('div', { class: 'profile-topic', text: creating ? '手动添加一条' : '编辑条目' }),
-    el('div', { class: 'profile-field' }, el('span', { class: 'profile-key', text: '知识点' }), topic),
-    el('div', { class: 'profile-field' }, el('span', { class: 'profile-key', text: '理解程度' }), level),
-    el('div', { class: 'profile-field' }, el('span', { class: 'profile-key', text: '具体边界' }), boundary),
-    el('div', { class: 'profile-hint', text: '编辑/保存即视为一次新的确认（会更新「最近确认时间」）。' }),
-    foot);
-}
-
-function renderProfileModal() {
-  const modal = $('#profileModal');
-  if (!modal) return;
-  const p = profileStore.data;
-  const s = profileSummary(p);
-  $('#profileTitle')?.replaceChildren(document.createTextNode('学习档案'));
-  const self = $('#profileSelfReport');
-  if (self && document.activeElement !== self) self.value = p.selfReport || '';
-  const selfAt = $('#profileSelfAt');
-  if (selfAt) selfAt.textContent = p.selfReportAt ? `上次填写：${isoDate(p.selfReportAt)}（${relativeLabel(p.selfReportAt)}）` : '还没有填写';
-  $('#profileCounts')?.replaceChildren(document.createTextNode(
-    s.isEmpty ? '还没有内容' : `已确认 ${s.confirmed} 条 · 待确认 ${s.pending} 条 · 最近确认 ${s.latest ? relativeLabel(s.latest) : '（无）'}`));
-
-  const pendingHost = $('#profilePending');
-  const pending = profileItemsForMenu(p).filter((i) => i.status === 'pending');
-  if (pendingHost) {
-    pendingHost.replaceChildren(...(pending.length
-      ? pending.map((i) => profileCard(i, true))
-      : [el('div', { class: 'profile-empty', text: '没有待确认的条目。你在阅读中确认过的内容会出现在下面。' })]));
-  }
-  const confirmedHost = $('#profileConfirmed');
-  const confirmed = profileItemsForMenu(p).filter((i) => i.status === 'confirmed');
-  const cards = confirmed.map((i) => profileCard(i, false));
-  if (profileDraft.creating) cards.unshift(profileEditorCard(null, false));
-  if (confirmedHost) {
-    confirmedHost.replaceChildren(...(cards.length ? cards : [el('div', { class: 'profile-empty', text: '还没有已确认的条目。点下面「手动添加一条」，或在回答里点「这个我懂了」。' })]));
-  }
-  const err = $('#profileError');
-  if (err) err.textContent = profileStore.error || '';
-}
-
-async function saveProfileAndRender(nextProfile, message) {
-  try {
-    await profileStore.save(nextProfile);
-  } catch (e) {
-    toast(`学习档案保存失败：${e.message}`, 'err', 4500);
-    renderProfileModal();
-    return;
-  }
-  renderProfileModal();
-  if (message) toast(message, 'ok', 2400);
-}
-
-function mutateProfile(fn, message) {
-  saveProfileAndRender(fn(profileStore.data), message);
-}
-
-async function saveSelfReport() {
-  const self = $('#profileSelfReport');
-  if (!self) return;
-  const next = withSelfReport(profileStore.data, self.value);
-  await saveProfileAndRender(next, '我的基础已保存（带填写时间）');
-}
-
-async function clearProfileAll() {
-  if (!confirm('清空整个学习档案？只删本地记录，不影响论文和会话。')) return;
-  await saveProfileAndRender(withSelfReport(emptyProfileLike(), ''), '学习档案已清空');
-}
-
-/** 清空档案时保留「已删除」的结构（revision 由 save 递增） */
-function emptyProfileLike() {
-  return { version: 1, revision: profileStore.data.revision, updatedAt: '', selfReport: '', selfReportAt: '', items: [] };
-}
-
 /* ══════════════════════════════ 设置（只有 Key + 模型名） ══════════════════════════════ */
 
 const ENDPOINT_SHORT = {
@@ -7904,10 +8050,10 @@ function updateUiRangeLabels() {
 
 /**
  * Ctrl/⌘ + =（+）/ - 的落点：只改「阅读字号」（结果正文 --ai-fs），
- * 不动界面字号、不动控件大小；范围与设置里的滑杆一致（12–19），并同步面板与 toast。
+ * 不动界面字号、不动控件大小；范围与设置里的滑杆一致（12–30），并同步面板与 toast。
  */
 function setReadingFontSize(px) {
-  const next = clamp(Math.round(Number(px) || DEFAULT_UI_STYLE.fontSize), 12, 19);
+  const next = clamp(Math.round(Number(px) || DEFAULT_UI_STYLE.fontSize), READ_FS_MIN, READ_FS_MAX);
   uiStyle = { ...uiStyle, fontSize: next };
   applyUiStyle();
   saveUi();
@@ -7931,7 +8077,7 @@ function applyUiSettingsFromControls() {
   uiStyle = {
     ...uiStyle,
     ...(theme ? { theme: theme.value } : {}),
-    ...(size ? { fontSize: clamp(Number(size.value), 12, 19) } : {}),
+    ...(size ? { fontSize: clamp(Number(size.value), READ_FS_MIN, READ_FS_MAX) } : {}),
     ...(full ? { useFullText: !!full.checked } : {}),
     ...(web ? { useWeb: !!web.checked } : {}),
     ...(zoom ? { zoomSpeed: clampZoomSpeed(zoom.value) } : {}),
@@ -8097,7 +8243,6 @@ function initShortcuts() {
 
     if (e.key === 'Escape') {
       if (!$('#regionOverlay').classList.contains('hidden')) { state.stopRegion?.(); return; }
-      if (!$('#profileModal').classList.contains('hidden')) { closeProfile(); return; }
       if (!$('#settingsModal').classList.contains('hidden')) { closeSettings(); return; }
       if (!$('#searchBar').classList.contains('hidden')) { $('#searchClose').click(); return; }
       if (!$('#noteBox').classList.contains('hidden')) { saveNoteBox(); return; }

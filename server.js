@@ -16,6 +16,7 @@ const http = require('http');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
+const crypto = require('crypto');
 const { Readable } = require('stream');
 const sec = require('./security');
 const modelProfiles = require('./model-profiles');
@@ -34,6 +35,12 @@ const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
 /** 导入 PDF 的大小上限 */
 const MAX_UPLOAD = 256 * 1024 * 1024;
+/**
+ * 单张截图附件的上限（POST /api/attachment）。
+ * 与 security.js 的 BODY_LIMITS.attachment、Rust 的 limits::BODY_ATTACHMENT 三处一致。
+ * 图片是**单独存**的（data/attachments/），不进会话 JSON，所以这个上限只约束单张图。
+ */
+const ATTACHMENT_LIMIT = 8 * 1024 * 1024;
 /**
  * 诊断模式（审计 §P2）：只有显式 `PRT_DIAGNOSTICS=1` 才在接口里返回本机绝对路径。
  * 默认关闭 —— `/api/papers` 从前无条件返回 `dir: PAPERS_DIR`，等于把用户的
@@ -212,6 +219,7 @@ async function readDataFile(name, fallback) {
 }
 
 let writeChain = Promise.resolve();
+let profileWriteChain = Promise.resolve();
 /** 串行化写盘，避免并发请求交叉写坏 JSON */
 function writeDataFile(name, obj) {
   // 注意先 catch：否则一次写失败会让整条 Promise 链永久处于 rejected 状态，
@@ -224,6 +232,138 @@ function writeDataFile(name, obj) {
   });
   return writeChain;
 }
+
+/* --------------------------------------------------- 图片附件（单独存） */
+
+/**
+ * 截图等图片附件**不进会话 JSON**，单独存成文件：`data/attachments/<会话键>/<id>.<ext>`。
+ *
+ * 为什么单独存（用户口径：「图片单独存」）：
+ *   · 截图是 base64 图片本体，写进会话 JSON 会让每个会话文件膨胀到几 MB
+ *     （前端整个会话还有 350KB 上限，见 app.js 的 sessionPayload）—— 会话保存会开始丢历史；
+ *   · 单独存之后会话 JSON 里只留一个 32 位 id 引用（几十字节），恢复会话时按 id 取回原图。
+ *
+ * 目录键与会话文件同一套（docIdOf(doc) + '-' + sid）：GC 只动当前会话自己的图。
+ * 删除时机（设计口径）：
+ *   ① 每次会话保存成功后，按「这次 payload 里还引用着的 id」清理本会话目录
+ *      （清空会话 = 没有引用 → 图片全删）；
+ *   ② DELETE /api/session 时把整个会话的附件目录一起删；
+ *   ③ 「传了但最终没写进会话」的孤儿图（发送失败 / 保存失败）会在下一次保存时被 ① 清掉。
+ */
+const ATTACHMENT_EXTS = ['png', 'jpg', 'webp'];
+const ATTACHMENT_ID_RE = /^[0-9a-f]{32}$/;
+
+/** 会话键：与会话文件名共用 docIdOf(doc)（+ sid），不许带路径分隔符 */
+function attachmentSessionKey(doc, sid) {
+  const key = docIdOf(doc);
+  const safeSid = String(sid || '').replace(/[^\w-]/g, '').slice(0, 40);
+  return safeSid ? `${key}-${safeSid}` : key;
+}
+function attachmentDir(doc, sid) {
+  return path.join(DATA_DIR, 'attachments', attachmentSessionKey(doc, sid));
+}
+
+/** 只看文件头判断图片类型（扩展名/Content-Type 都不可信；只接受截图会用的三种） */
+function sniffImageExt(buf) {
+  if (!buf || buf.length < 12) return '';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47
+    && buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a) return 'png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.subarray(0, 4).toString('latin1') === 'RIFF'
+    && buf.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
+  return '';
+}
+
+/** 从会话 payload 里收集所有还被引用的附件 id（用户条目的 shots[] + retry 里的图片附件） */
+function collectAttachmentIds(payload) {
+  const ids = new Set();
+  const take = (v) => { if (typeof v === 'string' && ATTACHMENT_ID_RE.test(v)) ids.add(v); };
+  const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+  for (const e of entries) {
+    if (Array.isArray(e?.shots)) for (const s of e.shots) take(s?.id);
+    const atts = e?.retry?.attachments;
+    if (Array.isArray(atts)) for (const a of atts) if (a?.kind === 'image') take(a?.id);
+  }
+  return ids;
+}
+
+/** 会话保存成功之后的 GC：删掉本会话目录里不再被 payload 引用的图（失败不报错，下次再清） */
+async function pruneAttachments(doc, sid, payload) {
+  const dir = attachmentDir(doc, sid);
+  let names = [];
+  try { names = await fsp.readdir(dir); } catch { return; }
+  const alive = collectAttachmentIds(payload);
+  await Promise.all(names.map(async (name) => {
+    const m = /^([0-9a-f]{32})\.(png|jpg|webp)$/.exec(name);
+    if (!m || alive.has(m[1])) return;
+    try { await fsp.rm(path.join(dir, name), { force: true }); } catch { /* 下次保存再清 */ }
+  }));
+  // 空目录也收掉：清空会话之后 data/attachments/ 下不留一堆空文件夹
+  try {
+    const left = await fsp.readdir(dir);
+    if (!left.length) await fsp.rmdir(dir);
+  } catch { /* 忽略（目录可能已经不在了） */ }
+}
+
+/** 删掉一个会话的整个附件目录（删除会话时用） */
+async function removeAttachmentDir(doc, sid) {
+  try { await fsp.rm(attachmentDir(doc, sid), { recursive: true, force: true }); } catch { /* 忽略 */ }
+}
+
+/**
+ * /api/attachment —— 截图附件的单独存储（不进会话 JSON）。
+ *   POST ?doc=&sid=   body = 原始图片字节（Content-Type 随意，按文件头识别）
+ *                     → { ok, id, mime }
+ *   GET  ?doc=&sid=&id=<32位十六进制>  → 原始图片字节
+ * 鉴权走全局的 /api/* 令牌（前端 fetch 会自动带 X-PRT-Token），不额外开例外。
+ */
+async function handleAttachment(req, res, url) {
+  const doc = url.searchParams.get('doc') || 'default';
+  const sid = url.searchParams.get('sid') || '';
+  if (req.method === 'POST') {
+    let body;
+    try {
+      body = await readBody(req, ATTACHMENT_LIMIT);
+    } catch (e) {
+      if (e && e.code === 'PAYLOAD_TOO_LARGE') {
+        return sendJson(res, 413, { error: { message: `图片过大（上限 ${Math.round(ATTACHMENT_LIMIT / 1048576)}MB）` } });
+      }
+      return sendJson(res, 400, { error: { message: '图片读取失败' } });
+    }
+    const ext = sniffImageExt(body);
+    if (!ext) return sendJson(res, 400, { error: { message: '只支持 PNG / JPEG / WebP 截图' } });
+    const id = crypto.randomBytes(16).toString('hex');
+    try {
+      const dir = attachmentDir(doc, sid);
+      await fsp.mkdir(dir, { recursive: true });
+      await fsp.writeFile(path.join(dir, `${id}.${ext}`), body);
+    } catch (e) {
+      sec.diag(`保存截图附件失败: ${e && e.message}`);
+      return sendJson(res, 500, { error: { message: '保存截图失败（磁盘空间或目录权限）' } });
+    }
+    return sendJson(res, 200, { ok: true, id, mime: MIME[`.${ext}`] || 'application/octet-stream' });
+  }
+  if (req.method === 'GET') {
+    const id = String(url.searchParams.get('id') || '');
+    if (!ATTACHMENT_ID_RE.test(id)) return sendJson(res, 400, { error: { message: '附件 id 不合法' } });
+    const dir = attachmentDir(doc, sid);
+    for (const ext of ATTACHMENT_EXTS) {
+      const abs = path.join(dir, `${id}.${ext}`);
+      let st;
+      try { st = await fsp.stat(abs); } catch { continue; }
+      if (!st.isFile()) continue;
+      try {
+        const bytes = await fsp.readFile(abs);
+        return send(res, 200, bytes, { 'Content-Type': MIME[`.${ext}`] || 'application/octet-stream', 'Content-Length': String(bytes.length) });
+      } catch {
+        return sendJson(res, 500, { error: { message: '读取截图片失败' } });
+      }
+    }
+    return sendJson(res, 404, { error: { message: '附件不存在（可能已被清理）' } });
+  }
+  return send(res, 405, 'Method Not Allowed');
+}
+
 
 const DEFAULT_CONFIG = {
   baseURL: 'https://api.deepseek.com/v1',
@@ -1539,13 +1679,24 @@ async function handle(req, res) {
       if (raw === null) return undefined;
       const checked = sec.checkProfile(raw);
       if (checked.error) return sendJson(res, 400, { error: { message: checked.error } });
-      try {
-        await writeDataFile('learning-profile.json', checked.value);
-      } catch (e) {
-        sec.diag(`保存学习档案失败: ${e && e.message}`);
-        return sendJson(res, 500, { error: { message: '保存学习档案失败，请重试' } });
-      }
-      return sendJson(res, 200, { ok: true, revision: checked.value.revision });
+      profileWriteChain = profileWriteChain.catch(() => {}).then(async () => {
+        try {
+          const expected = req.headers['if-match'];
+          if (expected !== undefined) {
+            const current = await readDataFile('learning-profile.json', {});
+            const revision = current?.revision || 0;
+            if (!/^\d+$/.test(expected) || Number(expected) !== revision || checked.value.revision !== revision + 1) {
+              return sendJson(res, 409, { error: { message: '学习记忆已更新，请重新读取' } });
+            }
+          }
+          await writeDataFile('learning-profile.json', checked.value);
+          return sendJson(res, 200, { ok: true, revision: checked.value.revision });
+        } catch (e) {
+          sec.diag(`保存学习档案失败: ${e && e.message}`);
+          return sendJson(res, 500, { error: { message: '保存学习档案失败，请重试' } });
+        }
+      });
+      return profileWriteChain;
     }
     return send(res, 405, 'Method Not Allowed');
   }
@@ -1647,6 +1798,9 @@ async function handle(req, res) {
         sec.diag(`保存阅读会话失败: ${e && e.message}`);
         return sendJson(res, 500, { error: { message: '保存阅读会话失败，请重试' } });
       }
+      // 图片单独存：会话写成功之后按「还引用着的 id」清理本会话的附件目录
+      // （清空会话 = 没有引用 → 图全删；发送失败留下的孤儿图也在这里被清掉）
+      await pruneAttachments(doc, sid, payload);
       return sendJson(res, 200, { ok: true });
     }
     /**
@@ -1661,10 +1815,18 @@ async function handle(req, res) {
         sec.diag(`删除阅读会话失败: ${e && e.message}`);
         return sendJson(res, 500, { error: { message: '删除阅读会话失败，请重试' } });
       }
+      // 会话没了，它单独存的截图附件也一起删（否则会变成永远没人引用的垃圾文件）
+      await removeAttachmentDir(doc, sid);
       return sendJson(res, 200, { ok: true });
     }
     return send(res, 405, 'Method Not Allowed');
   }
+
+  /**
+   * /api/attachment —— 截图附件的单独存储（不进会话 JSON），详见 handleAttachment 的注释。
+   * 必须在下面的静态文件回落之前拦住，否则会被 SPA 回落到 index.html。
+   */
+  if (pathname === '/api/attachment') return handleAttachment(req, res, url);
 
   /**
    * GET /api/sessions?doc=<doc> —— 这篇论文的会话列表（2026-10 多会话）。

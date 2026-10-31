@@ -402,6 +402,9 @@ const BODY_LIMITS = {
   papers: 1 * 1024 * 1024,
   notes: 4 * 1024 * 1024,
   session: 16 * 1024 * 1024,
+  // 图片附件（/api/attachment 的 POST）：单张截图的上限，与 server.js 的 ATTACHMENT_LIMIT 一致。
+  // 图片单独存成文件，不进会话 JSON —— 所以这里给的是「单张图」的上限，不是整个会话的。
+  attachment: 8 * 1024 * 1024,
   // 学习档案：全局一份，正常几 KB；给足余量但不允许被当成大数据仓库
   profile: 512 * 1024,
   chat: 64 * 1024 * 1024,
@@ -515,6 +518,13 @@ function checkProfile(raw) {
         capability: typeof it.source.capability === 'string' ? it.source.capability.slice(0, 40) : '',
       } : null,
       note: typeof it.note === 'string' ? it.note.slice(0, PROFILE_LIMITS.maxNote) : '',
+      memory: it.memory && ['knowledge', 'preference'].includes(it.memory.kind)
+        && ['self_report', 'needs_help', 'demonstrated', 'inferred', 'preference'].includes(it.memory.signal) ? {
+          kind: it.memory.kind,
+          scope: it.memory.scope === 'paper' ? 'paper' : 'global',
+          signal: it.memory.signal,
+          evidence: typeof it.memory.evidence === 'string' ? it.memory.evidence.trim().slice(0, 500) : '',
+        } : null,
     });
   }
   const selfReport = typeof raw.selfReport === 'string' ? raw.selfReport.trim().slice(0, PROFILE_LIMITS.maxSelfReport) : '';

@@ -32,6 +32,8 @@ fn body_limit(path: &str) -> usize {
         "/api/papers" => limits::BODY_STATE,
         "/api/notes" => limits::BODY_NOTES,
         "/api/session" => limits::BODY_SESSION,
+        // 截图附件（单独存，不进会话 JSON）：与 server.js 的 ATTACHMENT_LIMIT 一致
+        "/api/attachment" => limits::BODY_ATTACHMENT,
         // 学习档案（2026-10）：正常几 KB，上限与 server.js 的 BODY_LIMITS.profile 一致
         "/api/profile" => limits::BODY_PROFILE,
         _ => MAX_BODY,
@@ -183,6 +185,9 @@ fn handle(mut rq: Request, ctx: &Ctx) {
         "/api/profile" => return api::profile(rq, &method, &body),
         "/api/notes" => return api::notes(rq, &method, &raw_query, &body),
         "/api/session" => return api::session(rq, &method, &raw_query, &body),
+        // 截图附件单独存（2026-10 用户口径：「图片单独存」）——
+        // 会话 JSON 里只留 32 位 id 引用，图片本体在这里 POST / GET。
+        "/api/attachment" => return api::attachment(rq, &method, &raw_query, &body),
         // 会话列表（2026-10 多会话）。Node 版与 Rust 版必须同时有 —— 少一边就会出现
         // 「开发时能用、exe 里新建会话后列表是空的」（实测踩过：请求落到 SPA 回落，
         // 返回的是 index.html，前端 JSON.parse 失败后当成"没有会话"）。

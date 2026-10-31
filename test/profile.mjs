@@ -1,235 +1,175 @@
-/**
- * 学习档案验收：/api/profile 的校验与落盘 + 弹窗编辑 + 时间戳 + 待确认 + 个性化注入。
- *
- *   BASE=http://127.0.0.1:8787 node test/profile.mjs
- *
- * 时间口径（用户要求）：
- *   · 写入档案时带当时时间（客户端 ISO 8601 带本地时区）；
- *   · 每次 AI 调用把「当前时间」交给模型；
- *   · 档案条目进 prompt 时带「约 N 天前确认」和「超过 90 天 → 可能生疏」的代码标签。
- */
+/** 后台记忆验收。自建隔离数据与假模型；MEMORY_BACKEND=exe 验收根目录交付物。 */
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import http from 'node:http';
+import { spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
-import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
+import { ROOT, SANDBOX, assertIsolatedDataDir } from './_env.mjs';
 
-const BASE = process.env.BASE || 'http://127.0.0.1:8787';
-const CHROME = process.env.CHROME || 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe';
-const results = [];
-const check = (name, ok, detail = '') => {
-  results.push({ name, ok, detail });
-  console.log(`${ok ? '  [OK]' : '  [XX]'} ${name}${detail ? `  -- ${detail}` : ''}`);
+const backend = process.env.MEMORY_BACKEND || 'node';
+fs.mkdirSync(SANDBOX, { recursive: true });
+const scratch = fs.mkdtempSync(path.join(SANDBOX, `memory-${backend}-`));
+const data = assertIsolatedDataDir(path.join(scratch, 'data')), papers = path.join(scratch, 'papers');
+fs.mkdirSync(data); fs.mkdirSync(papers);
+for (const name of ['memory-fixture.pdf', 'memory-other.pdf']) fs.copyFileSync(path.join(ROOT, 'test/fixtures/cn-sample.pdf'), path.join(papers, name));
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const listen = (s) => new Promise((r) => s.listen(0, '127.0.0.1', r));
+const freePort = async () => { const s = http.createServer(); await listen(s); const p = s.address().port; await new Promise((r) => s.close(r)); return p; };
+const until = async (predicate, ms = 20000) => {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) { if (await predicate()) return; await wait(50); }
+  throw new Error('timed out waiting for memory test condition');
 };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const postJson = (url, obj) => fetch(`${BASE}${url}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
-const getJson = async (url) => (await fetch(`${BASE}${url}`)).json();
-const profile = () => getJson('/api/profile');
-
-const pad2 = (n) => String(n).padStart(2, '0');
-const isoLocal = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
-  + `T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}+08:00`;
-const daysAgoISO = (n) => isoLocal(new Date(Date.now() - n * 86400000));
-const ISO_TZ = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
-
-/* ── 准备 ── */
-const papers = await (await fetch(`${BASE}/api/papers`)).json().catch(() => ({ papers: [] }));
-const first = (papers.papers || [])[0] || {};
-check('服务端有可用的 PDF', !!first.name, first.name || '(无)');
-assertIsolatedDataDir(resolveDataDir(papers.dir));
-await postJson('/api/state', { lastDoc: null, lastName: null, lastUrl: null, docs: {} });
-await postJson('/api/config', { apiKey: 'sk-profile-test', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-flash' });
-{
-  const list = await (await fetch(`${BASE}/api/sessions?doc=${encodeURIComponent(first.docId)}`)).json().catch(() => ({}));
-  for (const s of list.sessions || []) {
-    await fetch(`${BASE}/api/session?doc=${encodeURIComponent(first.docId)}${s.sid ? `&sid=${encodeURIComponent(s.sid)}` : ''}`, { method: 'DELETE' }).catch(() => {});
-  }
+let count = 0;
+const check = (name, ok) => { assert.ok(ok, name); count++; console.log(`  [OK] ${name}`); };
+const mainBodies = [], memoryBodies = [], errors = [], failures = [];
+let failExtraction = false, heldExtraction = null, holdNext = false;
+const record = (topic, evidence, signal, extra = {}) => ({ topic, evidence, signal,
+  aliases: topic === '矩阵乘法' ? ['matrix multiplication'] : [], kind: 'knowledge', scope: 'global',
+  level: signal === 'needs_help' ? '还需要从基础解释' : '用户自述会计算', boundary: '仅记录本次表达，未验证独立实现', ...extra });
+const mock = http.createServer(async (req, res) => {
+  try {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks));
+    if (String(body.messages[0]?.content).includes('后台学习记忆提取器')) {
+      memoryBodies.push(body);
+      if (failExtraction) { failExtraction = false; res.writeHead(503); res.end('controlled memory failure'); return; }
+      if (holdNext) { holdNext = false; await new Promise((r) => { heldExtraction = r; }); }
+      const input = JSON.parse(body.messages.at(-1).content), q = input.本轮用户原话;
+      let output = [];
+      if (q === '我会矩阵乘法，但反向传播还不会') output = [record('矩阵乘法', '我会矩阵乘法', 'self_report'), record('反向传播', '反向传播还不会', 'needs_help')];
+      if (q === '你记错了，矩阵乘法我还没懂') output = [record('矩阵乘法', '矩阵乘法我还没懂', 'needs_help')];
+      if (q === '以后请先给例子再解释公式') output = [record('讲解顺序', q, 'preference', { kind: 'preference', level: '先给例子，再解释公式' })];
+      if (q === '这篇论文的投影公式我没懂') output = [record('投影公式', q, 'needs_help', { scope: 'paper' })];
+      if (q === '请忘记我会矩阵乘法这条记录') output = [record('矩阵乘法', q, 'self_report', { action: 'forget', id: input.已有相关记忆.find((i) => i.topic === '矩阵乘法')?.id })];
+      if (q === '矩阵乘法的梯度该怎么算') output = [record('梯度计算', '我已经掌握所有梯度计算', 'demonstrated')];
+      if (q === '我会卷积') output = [record('卷积', q, 'self_report')];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] })); return;
+    }
+    mainBodies.push(body);
+    const answer = String(body.messages.at(-1)?.content).includes('【本次任务】')
+      ? '矩阵乘法用于组合输入，反向传播用于计算梯度。〔p.1〕\n```prt\n{"profile":[{"topic":"伪造的掌握记录","level":"已经完全掌握"}]}\n```'
+      : '先用一个具体例子解释，再说明计算过程。';
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: answer } }] })}\n\ndata: [DONE]\n\n`);
+  } catch (error) { res.writeHead(500); res.end(error.message); }
+});
+let reader, browser, page, base, failProfileWrites = false;
+async function stop() {
+  if (browser) { if (backend === 'exe') browser.disconnect(); else await browser.close(); browser = null; }
+  if (reader) { const stopped = new Promise((r) => reader.once('exit', r)); reader.kill(); await Promise.race([stopped, wait(5000)]); reader = null; }
 }
-
-/* ── 一、接口校验（Node 侧直接打 /api/profile） ── */
-console.log('\n-- /api/profile 校验');
-await postJson('/api/profile', { version: 1, revision: 0, updatedAt: '', selfReport: '', selfReportAt: '', items: [] });
-const empty = await profile();
-check('默认返回空档案结构', empty.version === 1 && Array.isArray(empty.items) && empty.items.length === 0);
-const staleAt = daysAgoISO(120);
-const pendingAt = daysAgoISO(1);
-const validProfile = {
-  version: 1, revision: 3, updatedAt: isoLocal(),
-  selfReport: '学过 PyTorch，写过 CNN；矩阵运算基本会，概率论比较薄弱',
-  selfReportAt: daysAgoISO(4),
-  items: [
-    {
-      id: 'kp-stale', topic: '残差连接', aliases: ['residual connection'], level: '理解基本原理，能够实现',
-      boundary: '维度一致时的相加能解释；维度变化时的投影不熟', basis: 'user_confirmed', status: 'confirmed',
-      createdAt: daysAgoISO(200), updatedAt: staleAt, lastConfirmedAt: staleAt, source: null, note: '',
-    },
-    {
-      id: 'kp-pending', topic: '多头注意力', aliases: [], level: '能说清原理',
-      boundary: '知道并行多组投影再拼接；W^O 的形状没算过', basis: 'model_inferred', status: 'pending',
-      createdAt: pendingAt, updatedAt: pendingAt, lastConfirmedAt: null, source: null, note: 'AI 观察',
-    },
-  ],
-};
-let r = await postJson('/api/profile', validProfile);
-check('合法档案能保存（200）', r.status === 200, `${r.status}`);
-const saved = await profile();
-check('时间戳按客户端写入的原样保存', saved.items[0].lastConfirmedAt === staleAt && saved.items[0].createdAt === daysAgoISO(200));
-check('自述也带填写时间', saved.selfReportAt === daysAgoISO(4) && /PyTorch/.test(saved.selfReport));
-
-const invalidCases = [
-  ['版本不对', { ...validProfile, version: 2 }],
-  ['缺少 items', { version: 1, revision: 1 }],
-  ['条目缺 topic', { ...validProfile, items: [{ ...validProfile.items[0], topic: '' }] }],
-  ['状态不合法', { ...validProfile, items: [{ ...validProfile.items[0], status: 'mastered' }] }],
-  ['createdAt 不是合法时间', { ...validProfile, items: [{ ...validProfile.items[0], createdAt: '昨天' }] }],
-  ['不是对象', [1, 2, 3]],
-];
-for (const [name, payload] of invalidCases) {
-  const rr = await postJson('/api/profile', payload);
-  check(`拒绝${name}（400）`, rr.status === 400, `${rr.status}`);
-}
-const afterInvalid = await profile();
-check('校验失败不覆盖旧档案', afterInvalid.items.length === 2 && afterInvalid.items[0].lastConfirmedAt === staleAt);
-const many = { ...validProfile, items: Array.from({ length: 201 }, (_, i) => ({ ...validProfile.items[0], id: `kp-${i}`, topic: `知识点 ${i}` })) };
-const rrMany = await postJson('/api/profile', many);
-check('条目数超上限（201 条）被拒', rrMany.status === 400, `${rrMany.status}`);
-const msTime = isoLocal().replace(/(\+\d{2}:\d{2})$/, '.123$1');
-const rrMs = await postJson('/api/profile', { ...validProfile, items: [{ ...validProfile.items[0], updatedAt: msTime }] });
-check('带毫秒的 ISO 时间也接受', rrMs.status === 200, `${rrMs.status}`);
-await postJson('/api/profile', validProfile);
-
-/* ── 二、Prompt 注入与「当前时间」（教学请求 system） ── */
-console.log('\n-- 注入 prompt');
-const chatBodies = [];
-const browser = await puppeteer.launch({
-  executablePath: CHROME, headless: 'shell',
-  args: ['--no-sandbox', '--disable-gpu', '--window-size=1500,950'],
-  defaultViewport: { width: 1500, height: 950 },
-});
-const page = await browser.newPage();
-const pageErrors = [];
-page.on('pageerror', (e) => pageErrors.push(String(e)));
-await page.setRequestInterception(true);
-page.on('request', (req) => {
-  if (req.url().endsWith('/api/chat')) {
-    chatBodies.push(JSON.parse(req.postData() || '{}'));
-    const sse = 'data: ' + JSON.stringify({ choices: [{ delta: { content: '桩回答。' } }] }) + '\n\ndata: [DONE]\n\n';
-    return req.respond({ status: 200, contentType: 'text/event-stream; charset=utf-8', body: sse });
+async function start() {
+  base = null;
+  const port = await freePort(), debugPort = await freePort();
+  const env = { ...process.env, PORT: String(port), PRT_DATA_DIR: data, PRT_PAPERS_DIR: papers,
+    PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1', NO_OPEN: '1', WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort}` };
+  reader = backend === 'exe' ? spawn(path.join(ROOT, '论文阅读器.exe'), [], { env, stdio: 'ignore', windowsHide: true })
+    : spawn(process.execPath, [path.join(ROOT, 'server.js')], { env, stdio: 'ignore', windowsHide: true });
+  const ports = backend === 'exe' ? Array.from({ length: 64 }, (_, i) => i + 8787) : [port];
+  await until(async () => {
+    for (const p of ports) {
+      try { const origin = `http://127.0.0.1:${p}`; const r = await fetch(origin + '/api/papers', { signal: AbortSignal.timeout(120) });
+        if (r.ok && path.resolve((await r.json()).dir) === path.resolve(papers)) { base = origin; return true; }
+      } catch { /* only accept this test's isolated service */ }
+    } return false;
+  }, 30000);
+  if (backend === 'exe') {
+    let ws;
+    await until(async () => { try { ws = (await (await fetch(`http://127.0.0.1:${debugPort}/json/version`)).json()).webSocketDebuggerUrl; return !!ws; } catch { return false; } });
+    browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null });
+    page = (await browser.pages()).find((p) => p.url().startsWith(base)) || (await browser.pages())[0];
+  } else {
+    browser = await puppeteer.launch({ executablePath: process.env.CHROME || 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe', headless: true,
+      args: ['--no-sandbox'], defaultViewport: { width: 1400, height: 900 } }); page = await browser.newPage();
   }
-  return req.continue();
-});
-const open = async () => {
-  await page.goto(`${BASE}/?open=${encodeURIComponent(first.name)}`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => window.__viewer?.pdf && window.__ctx, { timeout: 40000 });
-  await sleep(1200);
+  page.on('pageerror', (e) => errors.push(String(e)));
+  page.on('requestfailed', (r) => { if (r.failure()?.errorText !== 'net::ERR_ABORTED') failures.push(`${r.url()} ${r.failure()?.errorText}`); });
+  await page.setRequestInterception(true);
+  page.on('request', (r) => {
+    if (new URL(r.url()).pathname === '/api/profile' && r.method() === 'POST' && failProfileWrites) {
+      return r.respond({ status: 500, contentType: 'application/json', body: '{"error":{"message":"controlled profile write failure"}}' });
+    } return r.continue();
+  });
+  check(`${backend} 启动新进程并连接自身页面`, !!reader.pid && !!page);
+}
+const json = async (route) => (await fetch(base + route)).json();
+const post = (route, payload, headers = {}) => fetch(base + route, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(payload) });
+const open = async (name = 'memory-fixture.pdf') => {
+  await page.goto(`${base}/?open=${encodeURIComponent(name)}`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction((name) => window.__viewer?.pdf && window.__ctx && window.__state.doc?.name === name
+    && window.__state.viewerDocId === window.__state.doc.docId, { timeout: 40000 }, name);
 };
-await open();
-await page.evaluate(() => window.__ctx.runTeaching('prereq', { force: true }));
-await page.waitForFunction(() => !window.__state.busy, { timeout: 20000 });
-await sleep(300);
-const sys = chatBodies.at(-1).messages[0].content;
-check('system 里注入学习档案规则', /学习档案 · 只影响讲解深度/.test(sys));
-check('system 里注入当前时间', /【当前时间】\d{4}-\d{2}-\d{2} \d{2}:\d{2}（周[一二三四五六日]，UTC[+-]\d{2}:\d{2}）/.test(sys));
-check('超过 90 天的条目带「可能生疏」标签', /超过 90 天未确认|可能生疏/.test(sys), (sys.match(/残差连接[^\n]*/) || [''])[0].slice(0, 80));
-check('待确认条目标了「不能当作已掌握」', /待确认[^\n]*不能当作已掌握/.test(sys), (sys.match(/多头注意力[^\n]*/) || [''])[0].slice(0, 80));
-check('档案里带「约 N 天前确认」的代码计算值', /约 120 天前/.test(sys));
-check('档案块不会超过 1200 字', sys.length < 20000);
+const system = () => mainBodies.at(-1).messages[0].content;
+const send = async (question, waitForMemory = true) => {
+  const before = mainBodies.length;
+  await page.evaluate((q) => { window.__ctx.setScopeRange('current'); const input = document.getElementById('chatInput');
+    input.value = q; input.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('sendBtn').click(); }, question);
+  await until(async () => mainBodies.length > before && await page.evaluate(() => !window.__state.busy));
+  if (waitForMemory) await page.evaluate(() => window.__ctx.memoryIdle());
+};
 
-/* ── 三、弹窗：查看 / 编辑 / 待确认 / 时间显示 ── */
-console.log('\n-- 学习档案弹窗');
-await page.evaluate(() => window.__ctx.openProfile());
-await sleep(300);
-const modal = await page.evaluate(() => {
-  const m = document.getElementById('profileModal');
-  return {
-    open: !m.classList.contains('hidden'),
-    counts: m.querySelector('#profileCounts')?.textContent || '',
-    selfValue: m.querySelector('#profileSelfReport')?.value || '',
-    selfAt: m.querySelector('#profileSelfAt')?.textContent || '',
-    pending: m.querySelectorAll('#profilePending .profile-card').length,
-    confirmed: m.querySelectorAll('#profileConfirmed .profile-card').length,
-    staleChip: [...m.querySelectorAll('#profileConfirmed .profile-chip')].some((c) => c.textContent === '可能生疏'),
-    dates: [...m.querySelectorAll('.profile-date')].map((x) => x.textContent),
-  };
-});
-check('弹窗显示自述与填写时间', /PyTorch/.test(modal.selfValue) && /\d{4}-\d{2}-\d{2}/.test(modal.selfAt), modal.selfAt);
-check('弹窗区分待确认 / 已确认', modal.pending === 1 && modal.confirmed === 1, `pending=${modal.pending} confirmed=${modal.confirmed}`);
-check('超过 90 天的已确认条目显示「可能生疏」', modal.staleChip);
-check('条目显示确认日期与相对时间', modal.dates.some((d) => /确认（(?:\d+ 天前|\d+ 个月前)）/.test(d)), modal.dates.join(' | '));
-
-// 待确认 → 还不会
-await page.evaluate(() => {
-  const card = document.querySelector('#profilePending .profile-card');
-  [...card.querySelectorAll('.profile-btn')].find((b) => b.textContent === '还不会').click();
-});
-await sleep(800);
-const afterReject = await profile();
-const multi = afterReject.items.find((i) => i.topic === '多头注意力');
-check('待确认条目标「还不会」后变成已确认记录', multi?.status === 'confirmed' && /还不会/.test(multi.level) && !!multi.lastConfirmedAt, multi?.level);
-
-// 手动添加一条
-await page.evaluate(() => document.getElementById('profileAdd').click());
-await sleep(200);
-await page.evaluate(() => {
-  const card = document.querySelector('#profileConfirmed .profile-card.editing');
-  const inputs = card.querySelectorAll('input');
-  inputs[0].value = '位置编码';
-  inputs[1].value = '只听过名字';
-  card.querySelector('textarea').value = '知道它补词序，但公式没记住';
-  [...card.querySelectorAll('.profile-btn')].find((b) => b.textContent === '添加').click();
-});
-await sleep(800);
-const afterAdd = await profile();
-const pos = afterAdd.items.find((i) => i.topic === '位置编码');
-check('手动添加的条目带合法时间戳', !!pos && ISO_TZ.test(pos.createdAt) && ISO_TZ.test(pos.lastConfirmedAt), pos?.createdAt || '(没有)');
-
-// 编辑已确认条目（编辑即一次新确认）
-const beforeEdit = pos.lastConfirmedAt;
-await page.evaluate(() => {
-  const cards = [...document.querySelectorAll('#profileConfirmed .profile-card')];
-  const card = cards.find((c) => /位置编码/.test(c.textContent));
-  [...card.querySelectorAll('.profile-btn')].find((b) => b.textContent === '编辑').click();
-});
-await sleep(200);
-await page.evaluate(() => {
-  const card = document.querySelector('#profileConfirmed .profile-card.editing');
-  card.querySelector('textarea').value = '公式也没记住，需要从位置编码公式讲起';
-  [...card.querySelectorAll('.profile-btn')].find((b) => b.textContent === '保存').click();
-});
-await sleep(800);
-const afterEdit = await profile();
-const pos2 = afterEdit.items.find((i) => i.topic === '位置编码');
-check('编辑后边界更新且 lastConfirmedAt 刷新', /公式也没记住/.test(pos2?.boundary || '') && pos2.lastConfirmedAt >= beforeEdit, `${pos2?.lastConfirmedAt}`);
-
-// 自述保存
-await page.evaluate(() => {
-  const ta = document.querySelector('#profileSelfReport');
-  ta.value = '学过 PyTorch，写过 CNN；矩阵运算基本会，概率论比较薄弱';
-  document.getElementById('profileSelfSave').click();
-});
-await sleep(800);
-const afterSelf = await profile();
-check('自述保存带填写时间', /PyTorch/.test(afterSelf.selfReport) && ISO_TZ.test(afterSelf.selfReportAt), afterSelf.selfReportAt);
-
-// 删除一条
-const countBeforeDelete = (await profile()).items.length;
-await page.evaluate(() => {
-  const cards = [...document.querySelectorAll('#profileConfirmed .profile-card')];
-  const card = cards.find((c) => /残差连接/.test(c.textContent));
-  [...card.querySelectorAll('.profile-btn')].find((b) => b.textContent === '删除').click();
-});
-await sleep(800);
-check('删除条目生效', (await profile()).items.length === countBeforeDelete - 1);
-await page.evaluate(() => window.__ctx.closeProfile());
-
-/* ── 四、设置页开关持久化 ── */
-console.log('\n-- 个性化开关');
-await page.evaluate(() => window.__ctx.profileStore.setEnabled(false));
-await open();
-const disabled = await page.evaluate(() => window.__ctx.profileEnabled);
-check('关闭个性化后状态持久（localStorage）', disabled === false);
-await page.evaluate(() => window.__ctx.profileStore.setEnabled(true));
-
-check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
-await browser.close();
-const passed = results.filter((r) => r.ok).length;
-console.log(`\n结果：${passed}/${results.length} 通过`);
-await sleep(250);
-process.exit(passed === results.length ? 0 : 1);
+try {
+  await listen(mock); await start();
+  const empty = await json('/api/profile');
+  check('新用户返回空的兼容存储结构', empty.version === 1 && empty.items.length === 0);
+  check('只向隔离实例写入假模型配置', (await post('/api/config', { apiKey: 'memory-fake-key', model: 'memory-mock', baseURL: `http://127.0.0.1:${mock.address().port}/v1` })).ok);
+  await open(); await page.click('#opsBtn');
+  check('顶栏保留四项教学功能，没有档案编辑入口', await page.evaluate(() => document.querySelectorAll('#opsMenu .ops-item').length === 4
+    && !document.querySelector('.ops-profile') && !document.getElementById('profileModal') && !document.getElementById('cfgProfilePersonal')));
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => window.__ctx.runTeaching('intro', { force: true }));
+  await until(() => page.evaluate(() => !window.__state.busy));
+  check('讲过不等于掌握，旧 prt 建议也不能写记忆', (await json('/api/profile')).items.length === 0 && memoryBodies.length === 0);
+  holdNext = true; await send('我会矩阵乘法，但反向传播还不会', false); await until(() => !!heldExtraction);
+  check('后台未完成时前台已结束且可以继续操作', await page.evaluate(() => !window.__state.busy && !document.getElementById('sendBtn').disabled));
+  heldExtraction(); heldExtraction = null; await page.evaluate(() => window.__ctx.memoryIdle());
+  let saved = await json('/api/profile');
+  check('普通问答自动记下会与不会，保留原话与时间', saved.items.length === 2 && saved.items.every((i) => i.memory?.evidence && /T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(i.updatedAt)));
+  const matrixId = saved.items.find((i) => i.topic === '矩阵乘法').id;
+  await send('矩阵乘法的梯度该怎么算');
+  check('下一次普通问答收到相关理解边界', system().includes('后台学习记忆') && system().includes('矩阵乘法') && system().includes('未独立验证'));
+  check('伪造的用户掌握证据不能落盘', !(await json('/api/profile')).items.some((i) => i.topic === '梯度计算'));
+  await send('你记错了，矩阵乘法我还没懂'); saved = await json('/api/profile');
+  check('自然纠正更新同一条记忆，不重复添加', saved.items.length === 2 && saved.items.find((i) => i.id === matrixId)?.memory.signal === 'needs_help');
+  await send('请解释矩阵乘法');
+  check('纠正后下一次请求按仍需讲解处理', system().includes('用户表示仍需讲解') && system().includes('矩阵乘法我还没懂'));
+  await send('以后请先给例子再解释公式');
+  check('持续讲解偏好自动保存', (await json('/api/profile')).items.some((i) => i.memory?.kind === 'preference'));
+  const n = memoryBodies.length; await send('继续');
+  check('继续不触发提取或掌握升级', memoryBodies.length === n);
+  await send('这篇论文的投影公式我没懂'); await page.evaluate(() => window.__ctx.saveSessionNow());
+  const firstDoc = await page.evaluate(() => window.__state.doc.docId);
+  await open('memory-other.pdf'); await send('投影公式是什么意思');
+  check('通用偏好跨论文使用，本文专属困难不串到另一篇', system().includes('先给例子，再解释公式') && !system().includes('这篇论文的投影公式我没懂'));
+  const oldPid = reader.pid; await stop(); await start(); await open(); saved = await json('/api/profile');
+  check('重启整个程序后仍保留后台记忆', reader.pid !== oldPid && saved.items.length === 4);
+  await send('请再解释矩阵乘法');
+  check('重启后的请求使用持久化记忆', system().includes('矩阵乘法我还没懂') && system().includes('先给例子，再解释公式'));
+  await page.evaluate(() => window.__ctx.doExplain({ text: '投影公式', cleanText: '投影公式', page: 1 })); await until(() => page.evaluate(() => !window.__state.busy));
+  check('划词解释也按当前论文使用记忆', system().includes('这篇论文的投影公式我没懂'));
+  await send('请忘记我会矩阵乘法这条记录');
+  check('忘记指定条目并保留其他记忆', (await json('/api/profile')).items.length === 3 && !(await json('/api/profile')).items.some((i) => i.id === matrixId));
+  await send('矩阵乘法是什么意思'); check('删除后新请求不再注入该记录', !system().includes('矩阵乘法我还没懂'));
+  failExtraction = true; await send('我会卷积');
+  check('提取失败不影响回答，也不保存虚构记忆', !(await json('/api/profile')).items.some((i) => i.topic === '卷积') && await page.evaluate(() => !window.__state.busy));
+  failProfileWrites = true; await send('我会卷积');
+  check('写盘失败时内存和磁盘都不假装记住', !(await json('/api/profile')).items.some((i) => i.topic === '卷积') && await page.evaluate(() => !window.__ctx.profile.items.some((i) => i.topic === '卷积')));
+  failProfileWrites = false; await send('我会卷积'); check('失败后后续提取与保存能够恢复', (await json('/api/profile')).items.some((i) => i.topic === '卷积'));
+  const current = await json('/api/profile');
+  const concurrent = await Promise.all([1, 2].map(() => post('/api/profile', { ...current, revision: current.revision + 1 }, { 'If-Match': String(current.revision) })));
+  check('并发写同一版本时只允许一个成功', concurrent.map((r) => r.status).sort().join(',') === '200,409');
+  const beforeInvalid = await json('/api/profile');
+  for (const payload of [{ ...beforeInvalid, version: 2 }, { version: 1 }, { ...beforeInvalid, items: [{ ...beforeInvalid.items[0], status: 'mastered' }] }]) {
+    check('非法结构被服务端拒绝', (await post('/api/profile', payload)).status === 400);
+  }
+  check('非法保存没有破坏已有数据', (await json('/api/profile')).revision === beforeInvalid.revision);
+  check('没有页面脚本错误或意外请求失败', errors.length === 0 && failures.length === 0);
+  check('后台记忆没有切换当前论文', await page.evaluate((id) => window.__state.doc.docId === id, firstDoc));
+  await page.screenshot({ path: path.join(scratch, 'reader.png') });
+  fs.writeFileSync(path.join(scratch, 'evidence.json'), JSON.stringify({ backend, count, pid: reader.pid, mainRequests: mainBodies,
+    memoryRequests: memoryBodies, profile: await json('/api/profile'), errors, failures }, null, 2), 'utf8');
+  console.log(`MEMORY ${backend}: ${count}/${count} passed; evidence: ${scratch}`);
+} finally { heldExtraction?.(); await stop(); mock.closeAllConnections(); await new Promise((r) => mock.close(r)); }

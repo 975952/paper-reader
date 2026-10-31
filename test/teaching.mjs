@@ -1,11 +1,11 @@
 /**
- * 「读懂论文」验收：顶栏菜单 4 项教学能力 + 学习档案 + prt 隐藏块 + 页码跳转 +
+ * 「读懂论文」验收：顶栏菜单 4 项教学能力 + 后台记忆 + prt 隐藏块 + 页码跳转 +
  * 教学进度续讲 + 图表对象选择 + 深入阅读按钮。
  *
  *   BASE=http://127.0.0.1:8787 node test/teaching.mjs
  *
  * 服务用桩（`/api/chat` 由本套件拦截返回），不读真实 Key、不花钱。
- * 学习档案走真实的 `/api/profile` 接口（隔离数据目录），断言它的时间戳与状态流转。
+ * 后台记忆另由 profile.mjs 验收；本套件验证教学与记忆不互相干扰。
  */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
@@ -23,6 +23,9 @@ const postJson = (url, obj, method = 'POST') => fetch(`${BASE}${url}`, {
   method, headers: { 'Content-Type': 'application/json' }, body: obj === undefined ? undefined : JSON.stringify(obj),
 });
 
+// 所有写操作前先证明服务使用隔离目录。
+const initialListing = await (await fetch(BASE + '/api/papers')).json();
+assertIsolatedDataDir(resolveDataDir(initialListing.dir));
 /* 先清空档案 */
 await postJson('/api/profile', { version: 1, revision: 0, updatedAt: '', selfReport: '', selfReportAt: '', items: [] });
 /* 假模型配置：避免 ensureReady() 弹设置（请求会被下面的拦截替换成桩） */
@@ -91,6 +94,9 @@ page.on('request', (req) => {
   const url = req.url();
   if (url.endsWith('/api/chat')) {
     const body = JSON.parse(req.postData() || '{}');
+    if (String(body.messages[0]?.content).includes('后台学习记忆提取器')) {
+      return req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: '[]' } }] }) });
+    }
     bodies.push(body);
     const answer = mode === 'intro' ? ANSWER_INTRO
       : mode === 'prereq' ? ANSWER_PREREQ
@@ -121,7 +127,7 @@ const menu = await page.evaluate(() => {
 });
 check('菜单标题是「读懂论文」', menu.head.includes('读懂论文'), menu.head);
 check('菜单正好 4 项教学能力', menu.items.length === 4 && menu.items.join('|').includes('先给我讲明白') && menu.items.join('|').includes('讲懂图表与公式'), menu.items.join(' / '));
-check('菜单头部有学习档案入口', /学习档案/.test(menu.profile), menu.profile.slice(0, 40));
+check('菜单没有档案编辑入口', menu.profile === '');
 
 /* 2. 先给我讲明白 */
 let before = bodies.length;
@@ -131,7 +137,7 @@ await sleep(400);
 check('点「先给我讲明白」发出一次请求', bodies.length === before + 1, `${bodies.length - before}`);
 const req0 = bodies.at(-1);
 check('system 里有当前时间', /【当前时间】\d{4}-\d{2}-\d{2}/.test(req0.messages[0].content));
-check('system 里有学习档案规则', /学习档案/.test(req0.messages[0].content));
+check('空记忆不伪造用户背景', !/【后台学习记忆/.test(req0.messages[0].content));
 check('user 里带论文全文与本次任务', /【论文全文】/.test(req0.messages.at(-1).content) && /【本次任务】/.test(req0.messages.at(-1).content));
 const introUi = await page.evaluate(() => {
   const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')];
@@ -155,13 +161,9 @@ await sleep(700);
 const cur = await page.evaluate(() => window.__viewer.current);
 check('点页码会跳到对应页', cur === 3, `当前第 ${cur} 页`);
 
-/* 4. AI 观察写成待确认（带时间戳） */
-await sleep(600);
-const profileAfter = await (await fetch(`${BASE}/api/profile`)).json();
-const pending = (profileAfter.items || []).find((i) => i.status === 'pending' && i.topic === '注意力机制');
-check('AI 观察写入待确认条目', !!pending, pending ? pending.topic : '(没有)');
-check('待确认条目带写入时间（ISO 带时区）', !!pending && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(pending.createdAt), pending?.createdAt || '');
-check('待确认条目没有 lastConfirmedAt', !!pending && pending.lastConfirmedAt === null);
+/* 4. 助手讲过的内容不能成为用户已掌握的依据。 */
+const profileAfter = await (await fetch(BASE + '/api/profile')).json();
+check('旧格式 prt 的掌握建议不写入记忆', profileAfter.items.length === 0);
 
 /* 5. 缓存：再点一次不再花钱 */
 await page.click('#opsBtn');
@@ -189,12 +191,8 @@ await sleep(400);
 check('点开一项会单独发请求', bodies.length === before + 1);
 check('单讲请求带「用户点开的前置知识」', /【用户点开的前置知识】/.test(bodies.at(-1).messages.at(-1).content));
 const oneActs = await page.evaluate(() => [...[...document.querySelectorAll('#aiArea .msg.assistant')].at(-1).querySelectorAll('.acts button')].map((b) => b.textContent));
-check('单项讲解后有「这个我懂了 / 这里没懂」', oneActs.includes('这个我懂了') && oneActs.includes('这里没懂'), oneActs.join(' / '));
-await page.evaluate(() => { [...[...document.querySelectorAll('#aiArea .msg.assistant')].at(-1).querySelectorAll('.acts button')].find((b) => b.textContent === '这个我懂了').click(); });
-await sleep(900);
-const profileConfirmed = await (await fetch(`${BASE}/api/profile`)).json();
-const confirmed = (profileConfirmed.items || []).find((i) => i.status === 'confirmed' && /注意力/.test(i.topic));
-check('点「这个我懂了」写入确认（带 lastConfirmedAt）', !!confirmed && confirmed.status === 'confirmed' && !!confirmed.lastConfirmedAt, confirmed ? confirmed.status : '(没有)');
+check('单项讲解可以反馈没懂，不要求编辑或确认记忆', oneActs.includes('这里没懂') && !oneActs.includes('这个我懂了'), oneActs.join(' / '));
+check('仅听完单项讲解不升级掌握状态', (await (await fetch(BASE + '/api/profile')).json()).items.length === 0);
 
 /* 7. 带我一步步读：继续下一步 */
 mode = 'walk';
@@ -230,40 +228,8 @@ await page.waitForFunction(() => !window.__state.busy && [...window.__state.sess
 await sleep(300);
 check('讲公式请求带当前页与对象', /【当前页】p\.4/.test(bodies.at(-1).messages.at(-1).content) && /公式 \(1\)/.test(bodies.at(-1).messages.at(-1).content));
 
-/* 9. 学习档案弹窗：先补一条 pending（模拟 AI 观察），再从弹窗确认 */
-const nowIso = new Date().toISOString();
-const prof = await (await fetch(`${BASE}/api/profile`)).json();
-prof.items.push({
-  id: 'kp-smoke-pending', topic: '残差连接', aliases: [], level: '理解原理',
-  boundary: '维度一致时的相加能解释；维度变化时的投影不熟', basis: 'model_inferred', status: 'pending',
-  createdAt: nowIso, updatedAt: nowIso, lastConfirmedAt: null, source: null, note: 'smoke',
-});
-await postJson('/api/profile', prof);
-await page.evaluate(async () => { await window.__ctx.profileStore.load(); window.__ctx.openProfile(); });
-await sleep(300);
-const modal = await page.evaluate(() => {
-  const m = document.getElementById('profileModal');
-  return {
-    open: !m.classList.contains('hidden'),
-    counts: m.querySelector('#profileCounts')?.textContent || '',
-    pending: m.querySelectorAll('#profilePending .profile-card').length,
-    confirmed: m.querySelectorAll('#profileConfirmed .profile-card').length,
-    dates: [...m.querySelectorAll('.profile-date')].map((x) => x.textContent),
-  };
-});
-check('学习档案弹窗能打开并显示待确认/已确认', modal.open && modal.pending >= 1 && modal.confirmed >= 1, `pending=${modal.pending} confirmed=${modal.confirmed}`);
-check('弹窗里显示确认时间', modal.dates.some((d) => /\d{4}-\d{2}-\d{2}/.test(d)), modal.dates.join(' | '));
-const pendingTopic = await page.evaluate(() => document.querySelector('#profilePending .profile-topic')?.textContent || '');
-check('待确认区列出 AI 观察条目', /残差连接/.test(pendingTopic), pendingTopic);
-await page.evaluate(() => {
-  const card = document.querySelector('#profilePending .profile-card');
-  [...card.querySelectorAll('.profile-btn')].find((b) => b.textContent === '确认掌握').click();
-});
-await sleep(900);
-const afterConfirm = await (await fetch(`${BASE}/api/profile`)).json();
-const residual = (afterConfirm.items || []).find((i) => /残差连接/.test(i.topic));
-check('弹窗里确认后写入 lastConfirmedAt', residual?.status === 'confirmed' && !!residual.lastConfirmedAt, residual?.status || '(没有)');
-await page.evaluate(() => window.__ctx.closeProfile());
+/* 9. 内部记忆后台维护，无编辑弹窗或表单。 */
+check('教学页面没有记忆编辑弹窗', await page.evaluate(() => !document.getElementById('profileModal') && !document.getElementById('cfgProfilePersonal')));
 
 /* 10. 再压短：把上一条回答压缩（发一次请求，新条目叫「精简版」） */
 mode = 'condense';
@@ -277,16 +243,7 @@ await page.waitForFunction(() => !window.__state.busy && [...window.__state.sess
 await sleep(300);
 check('「再压短」发出压缩请求', bodies.length === before + 1 && /压缩成原来的/.test(bodies.at(-1).messages[0].content));
 
-/* 11. 关闭个性化后，教学请求不再带学习档案（但仍带当前时间） */
-await page.evaluate(() => window.__ctx.profileStore.setEnabled(false));
-mode = 'prereq';
-before = bodies.length;
-await page.evaluate(() => window.__ctx.runTeaching('prereq', { force: true }));
-await page.waitForFunction(() => !window.__state.busy, { timeout: 20000 });
-await sleep(400);
-check('关闭个性化后不再注入学习档案', bodies.length === before + 1 && !/学习档案 · 只影响讲解深度/.test(bodies.at(-1).messages[0].content));
-check('关闭个性化后仍注入当前时间', /【当前时间】/.test(bodies.at(-1).messages.at(-1).content) || /【当前时间】/.test(bodies.at(-1).messages[0].content));
-await page.evaluate(() => window.__ctx.profileStore.setEnabled(true));
+/* 11. 后台记忆测试见 profile.mjs，教学无需额外设置。 */
 
 /* 12. 重新打开页面：会话里的教学进度和「已生成」都要恢复 */
 const errorsBeforeReload = pageErrors.length;
@@ -306,7 +263,7 @@ const restored = await page.evaluate(() => ({
 }));
 check('重开后教学进度恢复（第 2 步）', restored.walk?.step === 2, `step=${restored.walk?.step}`);
 check('重开后会话条目恢复', restored.entries.includes('先给我讲明白') && restored.entries.includes('我需要先懂什么'), restored.entries.join(' / '));
-check('学习档案跨重启保留', restored.profileConfirmed >= 1, `${restored.profileConfirmed} 条已确认`);
+check('重开后仍不会把讲过的概念当成已掌握', restored.profileConfirmed === 0);
 const reqBeforeCached = bodies.length;
 await page.click('#opsBtn');
 await sleep(300);
@@ -315,7 +272,7 @@ const restoredMenu = await page.evaluate(() => ({
   profile: document.querySelector('#opsMenu .ops-profile-title')?.textContent || '',
 }));
 check('恢复后菜单标出「已生成」与步行进度', /已生成/.test(restoredMenu.titles.join('|')) && /进行到第 2 步/.test(restoredMenu.titles.join('|')), restoredMenu.titles.join(' / '));
-check('恢复后菜单头部显示学习档案条数', /已确认 \d+ 条/.test(restoredMenu.profile), restoredMenu.profile);
+check('恢复后菜单仍不展示记忆条目和数量', restoredMenu.profile === '');
 await page.keyboard.press('Escape');
 await page.evaluate(() => { [...document.querySelectorAll('#opsMenu .ops-item')].find((b) => /先给我讲明白/.test(b.textContent))?.click(); });
 await sleep(900);

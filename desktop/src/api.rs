@@ -3,8 +3,11 @@
 //! 每个处理函数的返回体、状态码、字段名都和 server.js 一一对应，
 //! 因为前端 public/js/*.js 已经按那个契约写死了。
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{empty, Read, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Map, Value};
@@ -549,6 +552,7 @@ pub fn state(rq: Request, method: &Method, body: &[u8]) {
  * 校验失败返回 400 且**不落盘**，旧档案原样保留（与 server.js 一致）。
  */
 pub fn profile(rq: Request, method: &Method, body: &[u8]) {
+    static PROFILE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     match method {
         Method::Get => {
             let cur = store::read_json("learning-profile.json", Value::Null);
@@ -570,6 +574,15 @@ pub fn profile(rq: Request, method: &Method, body: &[u8]) {
             match limits::check_profile(&payload) {
                 Err(msg) => send_json(rq, 400, &err_json(&msg)),
                 Ok(value) => {
+                    let _guard = PROFILE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(header) = rq.headers().iter().find(|h| h.field.equiv("If-Match")) {
+                        let cur = store::read_json("learning-profile.json", json!({}));
+                        let revision = cur.get("revision").and_then(Value::as_u64).unwrap_or(0);
+                        if header.value.as_str().parse::<u64>().ok() != Some(revision)
+                            || value.get("revision").and_then(Value::as_u64) != Some(revision + 1) {
+                            return send_json(rq, 409, &err_json("学习记忆已更新，请重新读取"));
+                        }
+                    }
                     if !store::write_json("learning-profile.json", &value) {
                         return send_json(rq, 500, &err_json("保存学习档案失败，请重试"));
                     }
@@ -674,6 +687,199 @@ fn doc_key_candidates(doc: &str) -> Vec<String> {
     out
 }
 
+/* ------------------------------------------------- 图片附件（单独存） */
+
+/**
+ * 截图等图片附件**不进会话 JSON**，单独存成文件：`data/attachments/<会话键>/<id>.<ext>`。
+ *
+ * 与 Node 版（server.js 的 handleAttachment / pruneAttachments）逐条对齐：
+ *   ① 会话 JSON 里只留 32 位十六进制 id 引用（几十字节），恢复会话时按 id 取回原图；
+ *   ② 每次会话保存成功后，按「payload 里还引用着的 id」清理本会话目录
+ *      （清空会话 = 没有引用 → 图全删）；
+ *   ③ DELETE /api/session 时把整个会话的附件目录一起删；
+ *   ④ 发送失败 / 保存失败留下的「传了但没写进会话」的孤儿图，会在下一次保存时被 ② 清掉。
+ */
+const ATTACHMENT_EXTS: [&str; 3] = ["png", "jpg", "webp"];
+static ATTACHMENT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 会话键：与会话文件名共用 doc_id_of(doc)（+ sid），不许带路径分隔符
+fn attachment_session_key(doc: &str, sid: &str) -> String {
+    let key = doc_id_of(doc);
+    if sid.is_empty() {
+        key
+    } else {
+        format!("{}-{}", key, sid)
+    }
+}
+
+fn attachment_dir(doc: &str, sid: &str) -> PathBuf {
+    store::data_path("attachments").join(attachment_session_key(doc, sid))
+}
+
+/// 只看文件头判断图片类型（Content-Type / 扩展名都不可信；只接受截图会用的三种）
+fn sniff_image_ext(buf: &[u8]) -> Option<&'static str> {
+    if buf.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("png");
+    }
+    if buf.len() >= 3 && buf[0] == 0xff && buf[1] == 0xd8 && buf[2] == 0xff {
+        return Some("jpg");
+    }
+    if buf.len() >= 12 && buf.starts_with(b"RIFF") && buf[8..12] == *b"WEBP" {
+        return Some("webp");
+    }
+    None
+}
+
+fn valid_attachment_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// 32 位十六进制 id：时间纳秒 + 进程内自增序号（不需要密码学随机，只要不撞名）
+fn new_attachment_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let seq = ATTACHMENT_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{:016x}{:016x}", nanos, seq)
+}
+
+/// 从会话 payload 里收集所有还被引用的附件 id（用户条目的 shots[] + retry 里的图片附件）
+fn collect_attachment_ids(payload: &Value, out: &mut HashSet<String>) {
+    let Some(entries) = payload.get("entries").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for e in entries {
+        if let Some(shots) = e.get("shots").and_then(|v| v.as_array()) {
+            for s in shots {
+                if let Some(id) = s.get("id").and_then(|v| v.as_str()) {
+                    if valid_attachment_id(id) {
+                        out.insert(id.to_string());
+                    }
+                }
+            }
+        }
+        let atts = e
+            .get("retry")
+            .and_then(|r| r.get("attachments"))
+            .and_then(|v| v.as_array());
+        if let Some(atts) = atts {
+            for a in atts {
+                if a.get("kind").and_then(|v| v.as_str()) != Some("image") {
+                    continue;
+                }
+                if let Some(id) = a.get("id").and_then(|v| v.as_str()) {
+                    if valid_attachment_id(id) {
+                        out.insert(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 会话保存成功之后调用：删掉本会话目录里不再被 payload 引用的图
+fn prune_attachments(doc: &str, sid: &str, payload: &Value) {
+    let dir = attachment_dir(doc, sid);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut alive: HashSet<String> = HashSet::new();
+    collect_attachment_ids(payload, &mut alive);
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Some((stem, ext)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if !ATTACHMENT_EXTS.contains(&ext) || !valid_attachment_id(stem) {
+            continue;
+        }
+        if alive.contains(stem) {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
+    // 空目录也收掉：清空会话之后 data/attachments/ 下不留一堆空文件夹
+    if let Ok(mut left) = std::fs::read_dir(&dir) {
+        if left.next().is_none() {
+            let _ = std::fs::remove_dir(&dir);
+        }
+    }
+}
+
+/// 删掉一个会话的整个附件目录（删除会话时用）
+fn remove_attachment_dir(doc: &str, sid: &str) {
+    let _ = std::fs::remove_dir_all(attachment_dir(doc, sid));
+}
+
+/**
+ * `/api/attachment` —— 截图附件的单独存储（与 server.js 的 handleAttachment 行为一致）。
+ *   POST ?doc=&sid=  body = 原始图片字节（按文件头识别类型）→ { ok, id, mime }
+ *   GET  ?doc=&sid=&id=<32位十六进制> → 原始图片字节
+ * 鉴权走全局的 API 令牌（前端 fetch 会自动带 X-PRT-Token），不额外开例外。
+ */
+pub fn attachment(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
+    let doc = query_get(raw_query, "doc").unwrap_or_else(|| "default".to_string());
+    let sid: String = query_get(raw_query, "sid")
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(40)
+        .collect();
+    let dir = attachment_dir(&doc, &sid);
+    match method {
+        Method::Post => {
+            if body.is_empty() {
+                return send_json(rq, 400, &err_json("空图片"));
+            }
+            let ext = match sniff_image_ext(body) {
+                Some(e) => e,
+                None => return send_json(rq, 400, &err_json("只支持 PNG / JPEG / WebP 截图")),
+            };
+            let id = new_attachment_id();
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                store::log_line(&format!("[attachment] 建目录失败: {}", e));
+                return send_json(rq, 500, &err_json("保存截图失败（磁盘空间或目录权限）"));
+            }
+            let path = dir.join(format!("{}.{}", id, ext));
+            if let Err(e) = std::fs::write(&path, body) {
+                store::log_line(&format!("[attachment] 写文件失败: {}", e));
+                return send_json(rq, 500, &err_json("保存截图失败（磁盘空间或目录权限）"));
+            }
+            send_json(
+                rq,
+                200,
+                &json!({ "ok": true, "id": id, "mime": mime_of(&format!(".{}", ext)) }),
+            );
+        }
+        Method::Get => {
+            let id = query_get(raw_query, "id").unwrap_or_default();
+            if !valid_attachment_id(&id) {
+                return send_json(rq, 400, &err_json("附件 id 不合法"));
+            }
+            for ext in ATTACHMENT_EXTS {
+                let path = dir.join(format!("{}.{}", id, ext));
+                if !path.is_file() {
+                    continue;
+                }
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        return send_raw(rq, 200, Some(mime_of(&format!(".{}", ext))), bytes, &[])
+                    }
+                    Err(e) => {
+                        store::log_line(&format!("[attachment] 读文件失败: {}", e));
+                        return send_json(rq, 500, &err_json("读取截图失败"));
+                    }
+                }
+            }
+            send_json(rq, 404, &err_json("附件不存在（可能已被清理）"));
+        }
+        _ => send_text(rq, 405, "Method Not Allowed"),
+    }
+}
+
 /**
  * `/api/session` —— 一篇论文的对话。
  *
@@ -706,12 +912,17 @@ pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
             if !store::write_json(&file, &payload) {
                 return send_json(rq, 500, &err_json("保存阅读会话失败，请重试"));
             }
+            // 图片单独存：会话写成功之后按「还引用着的 id」清理本会话的附件目录
+            // （清空会话 = 没有引用 → 图全删；发送失败留下的孤儿图也在这里被清掉）
+            prune_attachments(&doc, &sid, &payload);
             send_json(rq, 200, &json!({"ok":true}));
         }
         // 删掉一个会话文件（不碰论文本身）。与 Node 版一致：文件本来就不在也算成功（幂等）。
         Method::Delete => {
             let existed = store::data_path(&file).exists();
             if !existed || store::remove_file(&file) {
+                // 会话没了，它单独存的截图附件也一起删（否则会变成永远没人引用的垃圾文件）
+                remove_attachment_dir(&doc, &sid);
                 send_json(rq, 200, &json!({"ok":true}))
             } else {
                 send_json(rq, 500, &err_json("删除会话失败"))

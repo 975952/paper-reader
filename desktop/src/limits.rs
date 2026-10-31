@@ -45,6 +45,9 @@ pub const BODY_CONFIG: usize = 1024 * 1024;
 pub const BODY_STATE: usize = 1024 * 1024;
 pub const BODY_NOTES: usize = 4 * 1024 * 1024;
 pub const BODY_SESSION: usize = 16 * 1024 * 1024;
+// 图片附件（单张）：与 security.js 的 BODY_LIMITS.attachment / server.js 的 ATTACHMENT_LIMIT 一致。
+// 图片单独存成文件，不进会话 JSON，所以这是「单张图」的上限。
+pub const BODY_ATTACHMENT: usize = 8 * 1024 * 1024;
 // 学习档案：全局一份，正常几 KB；与 security.js 的 BODY_LIMITS.profile 一致
 pub const BODY_PROFILE: usize = 512 * 1024;
 #[allow(dead_code)]
@@ -436,6 +439,17 @@ pub fn check_profile(raw: &Value) -> Result<Value, String> {
             Some(s) if !s.trim().is_empty() => clip(s.trim(), 80),
             _ => format!("kp-{}", idx),
         };
+        let memory = match io.get("memory").and_then(Value::as_object) {
+            Some(m) if matches!(m.get("kind").and_then(Value::as_str), Some("knowledge" | "preference"))
+                && matches!(m.get("signal").and_then(Value::as_str),
+                    Some("self_report" | "needs_help" | "demonstrated" | "inferred" | "preference")) => json!({
+                "kind": m["kind"],
+                "scope": if m.get("scope").and_then(Value::as_str) == Some("paper") { "paper" } else { "global" },
+                "signal": m["signal"],
+                "evidence": clip(m.get("evidence").and_then(Value::as_str).unwrap_or("").trim(), 500),
+            }),
+            _ => Value::Null,
+        };
         out_items.push(json!({
             "id": id,
             "topic": clip(topic.trim(), PROFILE_MAX_TOPIC),
@@ -449,6 +463,7 @@ pub fn check_profile(raw: &Value) -> Result<Value, String> {
             "lastConfirmedAt": last_confirmed,
             "source": source,
             "note": clip(io.get("note").and_then(Value::as_str).unwrap_or(""), PROFILE_MAX_NOTE),
+            "memory": memory,
         }));
     }
     let revision = obj.get("revision").and_then(Value::as_u64).unwrap_or(0);

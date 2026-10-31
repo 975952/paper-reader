@@ -5,7 +5,7 @@
  * 好处：绕开浏览器 CORS；API Key 存在本机 data/config.json，不进 localStorage。
  */
 import { resolveReadingRequest, historyMessages, stripPageLabels } from './reading-context.js';
-import { nowContext } from './profile.js';
+import { nowContext, buildProfileBlock } from './profile.js';
 import { CONDENSE_SYS } from './teaching.js';
 
 export const PRESETS = {
@@ -339,7 +339,7 @@ export function matchGlossary(text, glossaryText) {
   return entries.filter(([k]) => hay.includes(k.toLowerCase()));
 }
 
-export function askMessages({ question, selection, context, page, docTitle, fullText, webResults, history = [], reading, references = [], profileBlock = '', teachingBlock = '' }) {
+export function askMessages({ question, selection, context, page, docTitle, fullText, webResults, history = [], reading, references = [], profileBlock = null, teachingBlock = '' }) {
   const request = reading || resolveReadingRequest({ question, selection, page, history });
   const sys = [
     '你是嵌在论文阅读器里的阅读助手，帮助读者读懂正在看的论文。',
@@ -355,7 +355,7 @@ export function askMessages({ question, selection, context, page, docTitle, full
     // 用户口径（2026-10）：「现在的时间在后续过程中要交给模型」——每次回答都带上，
     // 模型才能判断「最近 / 今年 / 几个月前」这类说法。
     nowContext(),
-    profileBlock,
+    profileBlock ?? buildProfileBlock(undefined, `${docTitle || ''}\n${selection || ''}\n${context || ''}`, question),
     teachingBlock,
   ].filter(Boolean).join('\n');
 
@@ -401,7 +401,7 @@ export function digestMessages({ text, docTitle }) {
  * 文档上下文沿用和提问完全一样的格式（【论文全文】带页码标记 / 【阅读索引】），
  * 这样操作和问答看到的是同一份材料，也共用同一套抽取、降级与缓存逻辑。
  */
-export function opMessages(op, { docTitle, fullText, digest, extra, history = [] } = {}) {
+export function opMessages(op, { docTitle, fullText, digest, extra, history = [], profileBlock = null } = {}) {
   const parts = [];
   if (docTitle) parts.push(`【论文】${docTitle}`);
   if (fullText) {
@@ -412,7 +412,7 @@ export function opMessages(op, { docTitle, fullText, digest, extra, history = []
   if (extra) parts.push(extra);
   parts.push(`【本次任务】\n${op.ask}`);
   return [
-    { role: 'system', content: `${op.sys}\n\n${nowContext()}` },
+    { role: 'system', content: [op.sys, nowContext(), profileBlock ?? buildProfileBlock(undefined, fullText || digest || docTitle, op.ask)].filter(Boolean).join('\n\n') },
     ...history.slice(-4),
     { role: 'user', content: parts.join('\n\n') },
   ];
@@ -559,9 +559,9 @@ export function filterWebResults(query, results = []) {
 }
 
 /** 「释」：不提问，直接把这段讲明白 */
-export function explainMessages({ selection, context, page, docTitle, history = [], reading, references = [] }) {
+export function explainMessages({ selection, context, page, docTitle, history = [], reading, references = [], profileBlock = null }) {
   return askMessages({ question: '请解释这段内容涉及的知识。', selection, context, page, docTitle,
-    history, reading, references });
+    history, reading, references, profileBlock });
 }
 
 export function regionMessages({ question, targetLang, page, docTitle }) {
