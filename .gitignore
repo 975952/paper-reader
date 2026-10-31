@@ -45,6 +45,12 @@ VPS使用说明.md
 给同学的说明.md
 vps-run.ps1
 
+# 本机专属 / 与本项目无关的文件（2026-10-31 仓库整理时补上）
+#   ClashMeta手机配置.yaml  代理配置（私人网络资料，绝不能进仓库）
+#   InstallationLog.txt     msys2 安装器的日志（装工具时顺手落在仓库根的，不是项目文件）
+ClashMeta手机配置.yaml
+InstallationLog.txt
+
 # 本地快照与临时目录（体积大、且不是源码）——2026-10-04 推 GitHub 前补上
 backup/
 .tmp-vps/
