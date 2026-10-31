@@ -173,6 +173,18 @@ fn handle(mut rq: Request, ctx: &Ctx) {
             return chat::handle(rq, &body, ctx);
         }
         "/api/papers" => return api::papers(rq, &method, &raw_query, &body),
+        "/api/folders" => match method {
+            Method::Post => return api::folders_create(rq, &raw_query),
+            Method::Patch => return api::folders_rename(rq, &body),
+            Method::Delete => return api::folders_delete(rq, &raw_query),
+            _ => return send_text(rq, 405, "Method Not Allowed"),
+        },
+        "/api/move" => {
+            if method != Method::Post {
+                return send_text(rq, 405, "Method Not Allowed");
+            }
+            return api::move_item(rq, &body);
+        }
         "/api/pdf" => return api::pdf(rq, &raw_query, &method),
         "/api/upload" => return api::upload(rq, &method, &raw_query, &body),
         "/api/config" => return api::config(rq, &method, &body),

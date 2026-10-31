@@ -94,10 +94,14 @@ data/paper-reader.log  运行日志（超过 512KB 就不再追加）
 | --- | --- | --- |
 | GET/HEAD | `/`、`/<静态路径>` | 返回内嵌的 public/ 资源；MIME 按扩展名（`.mjs`/`.js` → `text/javascript; charset=utf-8`）。未知路径且无扩展名 → 回落 `index.html` |
 | GET | `/api/health` | `{"ok":true,"port":<port>}` |
-| GET | `/api/papers` | `{"papers":[{name,size,mtime,docId,url}],"dir":"<papers 绝对路径>"}`，只列 `.pdf`；顺序 = `data/papers-order.json` 里排过的按数组顺序，**没排过的排最前（mtime 倒序）** |
-| POST | `/api/papers` | body `{"order":["a.pdf","b.pdf"]}` 保存文件列表顺序（只写 `data/papers-order.json`，不改文件名）；回 `{ok,count}` |
-| DELETE | `/api/papers?name=<name>` | 删除 `papers/` 里的这篇 PDF，并把它从顺序文件里摘掉；文件不存在 404、非法名 400。**不删** `data/` 里按 docId 存的笔记 / 会话 / 进度 |
-| GET/HEAD | `/api/pdf?name=<name>` | 支持 Range：`bytes=a-b`、`bytes=a-`、`bytes=-N`；206 + `Content-Range`，越界 416 + `bytes */<total>`，无 Range 200 + `Content-Length`；总是带 `Accept-Ranges: bytes` |
+| GET | `/api/papers` | `{"folders":[{name,path,count}],"papers":[{name,folder,path,size,mtime,docId,url}],"dir":"<papers 绝对路径>"}`，递归列出 `papers/` 下的文件夹树；`folder` 为父路径（根=`""`）、`path` 为相对路径（`/` 分隔）；顺序 = `data/papers-order.json`（相对路径数组）里排过的按数组顺序，**没排过的排最前（mtime 倒序）**；旧纯文件名 order 数据兼容（视为根目录项） |
+| POST | `/api/papers` | body `{"order":["a.pdf","ML/b.pdf"]}` 保存文件列表顺序（相对路径数组，只写 `data/papers-order.json`，不改文件名）；回 `{ok,count}` |
+| DELETE | `/api/papers?path=<rel>` | 删除这篇 PDF（兼容旧 `?name=`，根目录直接命中，否则按 basename 全库回退），并把它从顺序文件里摘掉；文件不存在 404、非法名 400。**不删** `data/` 里按 docId 存的笔记 / 会话 / 进度 |
+| POST | `/api/folders?name=<name>` | 根下新建文件夹（重名自动加 `(2)`，非法字符清洗）；回 `{ok,name,path}` |
+| PATCH | `/api/folders` | body `{"from":"<rel>","to":"<新名>"}` 同级重命名文件夹（`to` 只允许名字、不带路径），order 前缀同步；回 `{ok,from,to}` |
+| DELETE | `/api/folders?path=<rel>&mode=to-root\|recursive` | 删除文件夹。`to-root`（默认）：夹内 PDF 递归移到根再删空夹；`recursive`：连同 PDF 一起删（data/ 按 docId 的笔记/会话/进度保留）；回 `{ok,path,mode,moved}` |
+| POST | `/api/move` | body `{"from":"<rel>","to":"<目标夹 rel 或空=根>"}` 移动 PDF 或文件夹；同名冲突自动加 `(2)`、同名同 size 去重、文件夹禁移入自身子孙；order 前缀同步；回 `{ok,from,to,name,moved}` |
+| GET/HEAD | `/api/pdf?path=<rel>` | 支持 Range：`bytes=a-b`、`bytes=a-`、`bytes=-N`；206 + `Content-Range`，越界 416 + `bytes */<total>`，无 Range 200 + `Content-Length`；总是带 `Accept-Ranges: bytes`。兼容旧 `?name=`：根目录命中优先，否则按 basename 全库递归回退 |
 | GET | `/api/config` | `{baseURL,apiKey:"",model,visionModel,targetLang,temperature,theme,fontSize,autoTranslate,stream,glossary,idleMs,hasApiKey}` —— **apiKey 永远回传空串** |
 | POST | `/api/config` | 合并写入 `data/config.json`；body 里 apiKey 为空串/缺失时保留原 key，回 `{ok,hasApiKey}` |
 | GET | `/api/state` | 原样返回 `data/state.json`（默认 `{}`） |

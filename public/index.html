@@ -65,12 +65,15 @@
          ensurePanel 补上）。筛选框 + 拖入区 + 文件列表三块一起收起，见 style.css 的相邻兄弟规则 -->
     <div class="side-head" hidden>
       <input id="fileFilter" class="filter" placeholder="筛选文件…" />
+      <button type="button" class="tbtn folder-new" id="folderNew" title="新建文件夹" aria-label="新建文件夹"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg></button>
     </div>
     <div class="dropzone" id="dropzone">
       拖入 PDF（可多选）　<label class="link" for="fileInput">选文件</label>
       <input type="file" id="fileInput" accept="application/pdf,.pdf" multiple hidden />
     </div>
     <ul class="filelist" id="fileList"></ul>
+    <!-- 文件面板右键菜单：fixed 定位，由 app.js 的 initFileContextMenu 驱动 -->
+    <div class="ctx-menu" id="fileCtx" hidden></div>
 
     <section class="sec">
       <div class="sec-head">目录 <span class="cnt" id="outlineCount"></span></div>

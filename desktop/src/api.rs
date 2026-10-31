@@ -57,7 +57,8 @@ fn write_paper_order(order: &[String]) -> bool {
     store::write_json("papers-order.json", &json!({ "order": order }))
 }
 
-/// 校验前端传来的顺序：只收合法 PDF 文件名（对齐 server.js 的 sanitizePaperOrder）
+/// 校验前端传来的顺序：收 papers/ 里合法相对路径（根 PDF、文件夹、夹内 PDF）。
+/// 允许 '/'（文件夹层级），拒绝 \、控制符、..、隐藏路径段（对齐 server.js 的 sanitizePaperOrder）
 fn sanitize_paper_order(body: &[u8]) -> Option<Vec<String>> {
     let payload = parse_json(body).ok()?;
     let arr = payload.get("order")?.as_array()?;
@@ -70,10 +71,10 @@ fn sanitize_paper_order(body: &[u8]) -> Option<Vec<String>> {
         if raw.is_empty() || raw.len() > 200 {
             continue;
         }
-        if raw.contains('/') || raw.contains('\\') || raw.contains('\0') {
+        if raw.contains('\\') || raw.contains('\0') || raw.contains("..") {
             continue;
         }
-        if !raw.to_ascii_lowercase().ends_with(".pdf") {
+        if raw.starts_with('/') || raw.ends_with('/') || raw.split('/').any(|s| s.starts_with('.')) {
             continue;
         }
         if out.iter().any(|x| x == raw) {
@@ -85,6 +86,103 @@ fn sanitize_paper_order(body: &[u8]) -> Option<Vec<String>> {
         }
     }
     Some(out)
+}
+
+/// 用户传来的相对路径规范化：\ 归一为 /、去前导 /、去首尾空白
+fn normalize_rel(p: &str) -> String {
+    let s = p.replace('\\', "/");
+    s.trim_start_matches('/').trim().to_string()
+}
+
+/// 文件夹名清洗：去掉路径分隔符与控制符，返回干净 basename
+fn sanitize_folder_name(name: &str) -> Option<String> {
+    let mut n: String = name
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if (c as u32) < 0x20 => '_',
+            c => c,
+        })
+        .collect();
+    n = n.trim_start_matches(['.', ' ', '\t']).trim_end_matches(['.', ' ', '\t']).to_string();
+    if n.is_empty() || n == "." || n == ".." {
+        return None;
+    }
+    n = n.chars().take(80).collect();
+    Some(n)
+}
+
+/// 在指定目录里找不重名的文件夹名（重名加 (2)(3)）
+fn unique_folder_name(dir: &std::path::Path, base: &str) -> String {
+    for i in 1..200u32 {
+        let candidate = if i == 1 { base.to_string() } else { format!("{} ({})", base, i) };
+        if std::fs::metadata(dir.join(&candidate)).is_err() {
+            return candidate;
+        }
+    }
+    format!("{}-{}", base, now_millis())
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 在指定目录里找不重名的 PDF 文件名（重名加 (2)(3)）；size 同则视为同一份直接复用
+fn unique_pdf_name_in_dir(dir: &std::path::Path, base: &str, size: u64) -> String {
+    let stem = base
+        .strip_suffix(".pdf")
+        .or_else(|| base.strip_suffix(".PDF"))
+        .unwrap_or(base);
+    for i in 1..200u32 {
+        let candidate = if i == 1 {
+            base.to_string()
+        } else {
+            format!("{} ({}).pdf", stem, i)
+        };
+        let abs = dir.join(&candidate);
+        match std::fs::metadata(&abs) {
+            Ok(m) if m.len() == size => return candidate, // 同一份文件，不重复存
+            Ok(_) => continue,                            // 同名不同大小，换个名字
+            Err(_) => return candidate,                   // 不存在，就用它
+        }
+    }
+    format!("{}-{}.pdf", stem, now_millis())
+}
+
+/// 解析目标文件夹：''=根；非空必须是存在的文件夹（不存在则尝试创建，供导入用）
+fn resolve_target_dir(folder_rel: &str) -> Option<std::path::PathBuf> {
+    if folder_rel.is_empty() {
+        return Some(dirs().papers.clone());
+    }
+    let abs = safe_join(&dirs().papers, folder_rel)?;
+    match std::fs::metadata(&abs) {
+        Ok(m) if m.is_dir() => Some(abs),
+        Ok(_) => None,
+        Err(_) => {
+            let _ = std::fs::create_dir_all(&abs);
+            std::fs::metadata(&abs).map(|_| abs).ok()
+        }
+    }
+}
+
+/// 全库按 basename 找 PDF（旧 ?name= 链接回退用），取第一个命中的绝对路径
+fn find_pdf_by_basename(dir: &std::path::Path, base: &str) -> Option<std::path::PathBuf> {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Some(hit) = find_pdf_by_basename(&p, base) {
+                    return Some(hit);
+                }
+            } else if entry.file_name().to_string_lossy() == base {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// /api/papers：GET 列表 / POST 保存顺序 / DELETE 删除
@@ -107,58 +205,106 @@ pub fn papers(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
 
 fn papers_list(rq: Request) {
     let dir = &dirs().papers;
-    let mut out: Vec<Value> = Vec::new();
+    let order = paper_order();
+    let rank: std::collections::HashMap<String, usize> =
+        order.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
 
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.to_ascii_lowercase().ends_with(".pdf") {
-                continue;
+    // 扫描一层目录：返回直接子项（文件夹 + PDF），已按 order / mtime 排序
+    fn scan_dir(dir: &std::path::Path, rel: &str, rank: &std::collections::HashMap<String, usize>) -> Vec<(bool, String, String, u64, u64)> {
+        // (is_folder, name, rel, mtime, size)
+        let mut items: Vec<(bool, String, String, u64, u64)> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.contains('\\') || name.contains('/') || name.contains('\0') {
+                    continue;
+                }
+                let child_rel = if rel.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", rel, name)
+                };
+                let md = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if md.is_dir() {
+                    let mtime = md
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    items.push((true, name, child_rel, mtime, 0));
+                } else if md.is_file() && name.to_ascii_lowercase().ends_with(".pdf") {
+                    let mtime = md
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    items.push((false, name, child_rel, mtime, md.len()));
+                }
             }
-            let md = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if !md.is_file() {
-                continue;
+        }
+        items.sort_by(|a, b| {
+            let ra = rank.get(&a.2);
+            let rb = rank.get(&b.2);
+            match (ra, rb) {
+                (None, None) => b.3.cmp(&a.3),
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(x), Some(y)) => x.cmp(y),
             }
-            let mtime = md
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            out.push(json!({
-                "name": name,
-                "size": md.len(),
-                "mtime": mtime,
-                "docId": doc_id_of(&name),
-                "url": format!("/api/pdf?name={}", encode_uri_component(&name)),
-            }));
+        });
+        items
+    }
+
+    // 递归收集文件夹树
+    fn collect_tree(
+        dir: &std::path::Path,
+        rel: &str,
+        rank: &std::collections::HashMap<String, usize>,
+        folders: &mut Vec<Value>,
+        papers: &mut Vec<Value>,
+    ) {
+        for (is_folder, name, child_rel, mtime, size) in scan_dir(dir, rel, rank) {
+            if is_folder {
+                folders.push(json!({ "name": name, "path": child_rel }));
+                collect_tree(&dir.join(&name), &child_rel, rank, folders, papers);
+            } else {
+                papers.push(json!({
+                    "name": name,
+                    "folder": rel,
+                    "path": child_rel,
+                    "size": size,
+                    "mtime": mtime,
+                    "docId": doc_id_of(&name),
+                    "url": format!("/api/pdf?path={}", encode_uri_component(&child_rel)),
+                }));
+            }
         }
     }
 
-    // 排序规则与 server.js 一致：没进 order 的排最前（mtime 倒序），
-    // 进过 order 的按数组顺序排 —— 新导入的 PDF 永远出现在最上面。
-    let order = paper_order();
-    let rank: std::collections::HashMap<&str, usize> =
-        order.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
-    out.sort_by(|a, b| {
-        let an = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let bn = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let am = a.get("mtime").and_then(|v| v.as_u64()).unwrap_or(0);
-        let bm = b.get("mtime").and_then(|v| v.as_u64()).unwrap_or(0);
-        match (rank.get(an), rank.get(bn)) {
-            (None, None) => bm.cmp(&am),
-            (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(_), None) => std::cmp::Ordering::Greater,
-            (Some(ra), Some(rb)) => ra.cmp(rb),
-        }
-    });
+    let mut folders: Vec<Value> = Vec::new();
+    let mut papers: Vec<Value> = Vec::new();
+    collect_tree(dir, "", &rank, &mut folders, &mut papers);
+
+    // count = 直接子 PDF 数（不含子文件夹里的）
+    let mut by_dir: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    for p in &papers {
+        let f = p.get("folder").and_then(|v| v.as_str()).unwrap_or("");
+        *by_dir.entry(f).or_insert(0) += 1;
+    }
+    for f in &mut folders {
+        let key = f.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        f.as_object_mut().map(|o| o.insert("count".to_string(), json!(by_dir.get(key.as_str()).copied().unwrap_or(0))));
+    }
 
     // 审计 §P2：默认不返回本机绝对路径；只有显式开启诊断才给
     let mut payload = Map::new();
-    payload.insert("papers".to_string(), Value::Array(out));
+    payload.insert("folders".to_string(), Value::Array(folders));
+    payload.insert("papers".to_string(), Value::Array(papers));
     if diagnostics() {
         payload.insert(
             "dir".to_string(),
@@ -168,11 +314,11 @@ fn papers_list(rq: Request) {
     send_json(rq, 200, &Value::Object(payload));
 }
 
-/// DELETE /api/papers?name=xxx.pdf —— 删除篇论文文件，并把它从顺序里摘掉。
+/// DELETE /api/papers?path=rel.pdf（兼容 ?name=）—— 删除篇论文文件，并把它从顺序里摘掉。
 /// 只删 papers/ 里的 PDF，data/ 里按 docId 存的笔记 / 会话 / 进度保留。
 fn papers_delete(rq: Request, raw_query: &str) {
-    let raw = query_get(raw_query, "name").unwrap_or_default();
-    let abs = match safe_join(&dirs().papers, &raw) {
+    let rel = normalize_rel(&query_get(raw_query, "path").or_else(|| query_get(raw_query, "name")).unwrap_or_default());
+    let abs = match safe_join(&dirs().papers, &rel) {
         Some(p) => p,
         None => return send_json(rq, 400, &err_json("非法文件名")),
     };
@@ -181,10 +327,7 @@ fn papers_delete(rq: Request, raw_query: &str) {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string();
-    if !raw.to_ascii_lowercase().ends_with(".pdf")
-        || name.is_empty()
-        || abs.parent() != Some(dirs().papers.as_path())
-    {
+    if !name.to_ascii_lowercase().ends_with(".pdf") || name.is_empty() {
         return send_json(rq, 400, &err_json("非法文件名"));
     }
     match std::fs::metadata(&abs) {
@@ -192,14 +335,294 @@ fn papers_delete(rq: Request, raw_query: &str) {
         _ => return send_json(rq, 404, &err_json("文件不存在（可能已被手动删除）")),
     }
     if let Err(e) = std::fs::remove_file(&abs) {
-        store::log_line(&format!("[delete] {} 失败: {}", name, e));
+        store::log_line(&format!("[delete] {} 失败: {}", rel, e));
         return send_json(rq, 500, &err_json("删除失败：文件可能正被其它程序占用"));
     }
     let mut order = paper_order();
-    order.retain(|n| n != &name);
+    order.retain(|n| n != &rel);
     let _ = write_paper_order(&order);
-    store::log_line(&format!("[delete] {}", name));
-    send_json(rq, 200, &json!({ "ok": true, "name": name }));
+    store::log_line(&format!("[delete] {}", rel));
+    send_json(rq, 200, &json!({ "ok": true, "name": rel }));
+}
+
+/* ----------------------------------------------------------- 文件夹管理 */
+
+/// POST /api/folders?name=xxx —— 根下新建文件夹（重名自动加 (2)）
+pub fn folders_create(rq: Request, raw_query: &str) {
+    let name = match sanitize_folder_name(&query_get(raw_query, "name").unwrap_or_default()) {
+        Some(n) => n,
+        None => return send_json(rq, 400, &err_json("文件夹名不合法")),
+    };
+    let parent = normalize_rel(&query_get(raw_query, "parent").unwrap_or_default()); // '' = 根
+    let abs_parent = if parent.is_empty() {
+        dirs().papers.clone()
+    } else {
+        match safe_join(&dirs().papers, &parent) {
+            Some(p) if p != dirs().papers.as_path() => p,
+            _ => return send_json(rq, 400, &err_json("父文件夹路径不合法")),
+        }
+    };
+    match std::fs::metadata(&abs_parent) {
+        Ok(m) if m.is_dir() => {}
+        _ => return send_json(rq, 404, &err_json("父文件夹不存在")),
+    }
+    let final_name = unique_folder_name(&abs_parent, &name);
+    match std::fs::create_dir(abs_parent.join(&final_name)) {
+        Ok(()) => {
+            let rel = if parent.is_empty() {
+                final_name.clone()
+            } else {
+                format!("{}/{}", parent, final_name)
+            };
+            store::log_line(&format!("[mkdir] {}", rel));
+            send_json(rq, 200, &json!({ "ok": true, "name": final_name, "path": rel }))
+        }
+        Err(e) => {
+            store::log_line(&format!("[mkdir] {} 失败: {}", final_name, e));
+            send_json(rq, 500, &err_json("创建文件夹失败：请检查磁盘空间与目录权限"))
+        }
+    }
+}
+
+/// PATCH /api/folders {from,to} —— 同级重命名文件夹（order 前缀同步）
+pub fn folders_rename(rq: Request, body: &[u8]) {
+    let payload = match parse_json(body) {
+        Ok(p) => p,
+        Err(_) => return send_json(rq, 400, &err_json("请求体不是合法 JSON")),
+    };
+    let from = payload
+        .get("from")
+        .and_then(|v| v.as_str())
+        .map(normalize_rel)
+        .unwrap_or_default();
+    let to = match payload.get("to").and_then(|v| v.as_str()).and_then(sanitize_folder_name) {
+        Some(t) => t,
+        None => return send_json(rq, 400, &err_json("参数不合法")),
+    };
+    if from.is_empty() {
+        return send_json(rq, 400, &err_json("参数不合法"));
+    }
+    let abs_from = match safe_join(&dirs().papers, &from) {
+        Some(p) if p != dirs().papers.as_path() => p,
+        _ => return send_json(rq, 400, &err_json("非法路径")),
+    };
+    match std::fs::metadata(&abs_from) {
+        Ok(m) if m.is_dir() => {}
+        _ => return send_json(rq, 404, &err_json("文件夹不存在")),
+    }
+    let abs_to = abs_from.parent().unwrap_or(&dirs().papers).join(&to);
+    if std::fs::metadata(&abs_to).is_ok() {
+        return send_json(rq, 409, &err_json(&format!("已存在同名文件夹「{}」", to)));
+    }
+    if let Err(e) = std::fs::rename(&abs_from, &abs_to) {
+        store::log_line(&format!("[rename] {} -> {} 失败: {}", from, to, e));
+        return send_json(rq, 500, &err_json("重命名失败：文件夹可能正被其它程序占用"));
+    }
+    let to_rel = match from.rfind('/') {
+        Some(i) => format!("{}/{}", &from[..i], to),
+        None => to.clone(),
+    };
+    let order: Vec<String> = paper_order()
+        .into_iter()
+        .map(|n| {
+            if n == from {
+                to_rel.clone()
+            } else if let Some(rest) = n.strip_prefix(&format!("{}/", from)) {
+                format!("{}/{}", to_rel, rest)
+            } else {
+                n
+            }
+        })
+        .collect();
+    let _ = write_paper_order(&order);
+    store::log_line(&format!("[rename] {} -> {}", from, to_rel));
+    send_json(rq, 200, &json!({ "ok": true, "from": from, "to": to_rel }));
+}
+
+/// DELETE /api/folders?path=folder&mode=to-root|recursive —— 删除文件夹
+pub fn folders_delete(rq: Request, raw_query: &str) {
+    let rel = normalize_rel(&query_get(raw_query, "path").unwrap_or_default());
+    let mode = match query_get(raw_query, "mode").as_deref() {
+        Some("recursive") => "recursive",
+        _ => "to-root",
+    };
+    if rel.is_empty() {
+        return send_json(rq, 400, &err_json("缺少 path"));
+    }
+    let abs = match safe_join(&dirs().papers, &rel) {
+        Some(p) if p != dirs().papers.as_path() => p,
+        _ => return send_json(rq, 400, &err_json("非法路径")),
+    };
+    match std::fs::metadata(&abs) {
+        Ok(m) if m.is_dir() => {}
+        _ => return send_json(rq, 404, &err_json("文件夹不存在")),
+    }
+    // 收集该文件夹树下的所有 PDF
+    let mut pdfs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    fn collect_pdfs(dir: &std::path::Path, rel: &str, out: &mut Vec<(String, std::path::PathBuf)>) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.contains('\\') || name.contains('/') || name.contains('\0') {
+                    continue;
+                }
+                let child_rel = if rel.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", rel, name)
+                };
+                let p = entry.path();
+                if p.is_dir() {
+                    collect_pdfs(&p, &child_rel, out);
+                } else if p.is_file() && name.to_ascii_lowercase().ends_with(".pdf") {
+                    out.push((child_rel, p));
+                }
+            }
+        }
+    }
+    collect_pdfs(&abs, &rel, &mut pdfs);
+
+    let n = pdfs.len();
+    if mode == "to-root" {
+        // PDF 移到根（同名自动加后缀），再删空文件夹树
+        for (_, p) in &pdfs {
+            let base = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let final_name = unique_pdf_name_in_dir(&dirs().papers, &base, u64::MAX);
+            let _ = std::fs::rename(p, dirs().papers.join(final_name));
+        }
+    } else {
+        // recursive：连同 PDF 一起删（data/ 里按 docId 的笔记/会话/进度保留）
+        for (_, p) in &pdfs {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    if let Err(e) = std::fs::remove_dir_all(&abs) {
+        store::log_line(&format!("[rmdir] {} 失败: {}", rel, e));
+        return send_json(rq, 500, &err_json("删除文件夹失败：文件夹可能正被其它程序占用"));
+    }
+    let order: Vec<String> = paper_order()
+        .into_iter()
+        .filter(|n| n != &rel && !n.starts_with(&format!("{}/", rel)))
+        .collect();
+    let _ = write_paper_order(&order);
+    store::log_line(&format!("[rmdir] {} mode={} pdfs={}", rel, mode, n));
+    send_json(rq, 200, &json!({ "ok": true, "path": rel, "mode": mode, "moved": n }));
+}
+
+/// POST /api/move {from,to} —— 移动 PDF / 文件夹（含拖出拖入）；to='' 表示根
+pub fn move_item(rq: Request, body: &[u8]) {
+    let payload = match parse_json(body) {
+        Ok(p) => p,
+        Err(_) => return send_json(rq, 400, &err_json("请求体不是合法 JSON")),
+    };
+    let from = payload
+        .get("from")
+        .and_then(|v| v.as_str())
+        .map(normalize_rel)
+        .unwrap_or_default();
+    let to = payload
+        .get("to")
+        .and_then(|v| v.as_str())
+        .map(normalize_rel)
+        .unwrap_or_default();
+    if from.is_empty() {
+        return send_json(rq, 400, &err_json("缺少 from"));
+    }
+    let abs_from = match safe_join(&dirs().papers, &from) {
+        Some(p) => p,
+        None => return send_json(rq, 400, &err_json("非法路径")),
+    };
+    let md = match std::fs::metadata(&abs_from) {
+        Ok(m) => m,
+        Err(_) => return send_json(rq, 404, &err_json("源不存在（可能已被删除）")),
+    };
+    let is_folder = md.is_dir();
+
+    let abs_to_dir = if to.is_empty() {
+        dirs().papers.clone()
+    } else {
+        match safe_join(&dirs().papers, &to) {
+            Some(p) => match std::fs::metadata(&p) {
+                Ok(m) if m.is_dir() => p,
+                Ok(_) => return send_json(rq, 400, &err_json("目标不是文件夹")),
+                Err(_) => return send_json(rq, 404, &err_json("目标文件夹不存在")),
+            },
+            None => return send_json(rq, 400, &err_json("非法目标路径")),
+        }
+    };
+    // 文件夹移动禁区：不能移到自己或自己的子孙目录里
+    if is_folder && (to == from || to.starts_with(&format!("{}/", from))) {
+        return send_json(rq, 400, &err_json("不能把文件夹移到自己的子目录里"));
+    }
+
+    // 移到自身所在目录：无操作（排序交给 /api/papers；绝不能走「同名同 size 去重」把源文件删了）
+    let src_dir = abs_from.parent().map(|p| p.to_path_buf());
+    if let Some(sd) = src_dir {
+        if sd == abs_to_dir {
+            let base = abs_from
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            return send_json(rq, 200, &json!({ "ok": true, "from": from, "to": to, "name": base, "moved": false }));
+        }
+    }
+
+    let base = abs_from
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let target_abs = abs_to_dir.join(&base);
+    let final_name = match std::fs::metadata(&target_abs) {
+        Ok(_) if is_folder => unique_folder_name(&abs_to_dir, &base),
+        Ok(tm) if tm.len() == md.len() => {
+            // 目标已有同一份文件（同名同 size）→ 直接删源，等效移动完成
+            let _ = std::fs::remove_file(&abs_from);
+            let new_rel = if to.is_empty() { base.clone() } else { format!("{}/{}", to, base) };
+            let order: Vec<String> = paper_order().into_iter().filter(|n| n != &from).collect();
+            let _ = write_paper_order(&order);
+            store::log_line(&format!("[move] {} -> {} (去重)", from, new_rel));
+            return send_json(rq, 200, &json!({ "ok": true, "from": from, "to": new_rel, "name": base, "moved": true }));
+        }
+        Ok(_) => unique_pdf_name_in_dir(&abs_to_dir, &base, md.len()),
+        Err(_) => base.clone(),
+    };
+    let abs_new = abs_to_dir.join(&final_name);
+    if let Err(e) = std::fs::rename(&abs_from, &abs_new) {
+        store::log_line(&format!("[move] {} -> {} 失败: {}", from, final_name, e));
+        return send_json(rq, 500, &err_json("移动失败：文件可能正被其它程序占用"));
+    }
+    let new_rel = if to.is_empty() {
+        final_name.clone()
+    } else {
+        format!("{}/{}", to, final_name)
+    };
+    // order 前缀替换 + 去重
+    let mut seen: HashSet<String> = HashSet::new();
+    let order: Vec<String> = paper_order()
+        .into_iter()
+        .filter_map(|n| {
+            let v = if n == from {
+                new_rel.clone()
+            } else if is_folder {
+                match n.strip_prefix(&format!("{}/", from)) {
+                    Some(rest) => format!("{}/{}", new_rel, rest),
+                    None => n.clone(),
+                }
+            } else {
+                n.clone()
+            };
+            if seen.insert(v.clone()) {
+                Some(v)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let _ = write_paper_order(&order);
+    store::log_line(&format!("[move] {} -> {}", from, new_rel));
+    send_json(rq, 200, &json!({ "ok": true, "from": from, "to": new_rel, "name": final_name, "moved": true }));
 }
 
 /* ------------------------------------------------------------------ pdf */
@@ -287,10 +710,27 @@ fn header_of(rq: &Request, name: &'static str) -> Option<String> {
 }
 
 pub fn pdf(rq: Request, raw_query: &str, method: &Method) {
-    let name = query_get(raw_query, "name").unwrap_or_default();
-    let abs = match safe_join(&dirs().papers, &name) {
+    let has_path = query_get(raw_query, "path").is_some();
+    let rel = normalize_rel(
+        &query_get(raw_query, "path")
+            .or_else(|| query_get(raw_query, "name"))
+            .unwrap_or_default(),
+    );
+    let abs = match safe_join(&dirs().papers, &rel) {
         Some(p) => p,
         None => return send_text(rq, 400, "非法文件名"),
+    };
+    // ?name= 兼容：根目录找不到时按 basename 全库回退（旧链接）
+    let abs = if !has_path {
+        match std::fs::metadata(&abs) {
+            Ok(m) if m.is_file() => abs,
+            _ => match find_pdf_by_basename(&dirs().papers, &rel) {
+                Some(hit) => hit,
+                None => abs, // 404 由下面 metadata 处理
+            },
+        }
+    } else {
+        abs
     };
 
     let md = match std::fs::metadata(&abs) {
@@ -981,23 +1421,7 @@ fn sanitize_pdf_name(name: &str) -> Option<String> {
     Some(n)
 }
 
-/// 同名同大小 → 认为已经导入过，直接复用；否则加 (2)(3) 后缀
-fn unique_pdf_name(base: &str, size: u64) -> String {
-    let dir = &dirs().papers;
-    let stem = base.strip_suffix(".pdf").or_else(|| base.strip_suffix(".PDF")).unwrap_or(base);
-    for i in 1..200u32 {
-        let candidate = if i == 1 { base.to_string() } else { format!("{} ({}).pdf", stem, i) };
-        let abs = dir.join(&candidate);
-        match std::fs::metadata(&abs) {
-            Ok(m) if m.len() == size => return candidate,   // 同一份文件，不重复存
-            Ok(_) => continue,                               // 同名不同大小，换个名字
-            Err(_) => return candidate,                      // 不存在，就用它
-        }
-    }
-    format!("{}-{}.pdf", stem, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0))
-}
-
-/// POST /api/upload?name=xxx.pdf  —— 原始字节就是 PDF 内容
+/// POST /api/upload?name=xxx.pdf[&folder=rel]  —— 原始字节就是 PDF 内容
 pub fn upload(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
     if *method != Method::Post {
         return send_text(rq, 405, "Method Not Allowed");
@@ -1007,6 +1431,11 @@ pub fn upload(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
         Some(n) => n,
         None => return send_json(rq, 400, &err_json("文件名不合法")),
     };
+    let folder_rel = normalize_rel(&query_get(raw_query, "folder").unwrap_or_default());
+    let abs_dir = match resolve_target_dir(&folder_rel) {
+        Some(d) => d,
+        None => return send_json(rq, 400, &err_json("目标文件夹不存在或不可写")),
+    };
     if body.is_empty() {
         return send_json(rq, 400, &err_json("空文件"));
     }
@@ -1014,13 +1443,18 @@ pub fn upload(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
         return send_json(rq, 400, &err_json("这不是一个 PDF 文件"));
     }
 
-    let final_name = unique_pdf_name(&name, body.len() as u64);
-    let abs = dirs().papers.join(&final_name);
+    let final_name = unique_pdf_name_in_dir(&abs_dir, &name, body.len() as u64);
+    let abs = abs_dir.join(&final_name);
     if let Err(e) = std::fs::write(&abs, body) {
         return send_json(rq, 500, &err_json(&format!("写入 papers/ 失败：{}", e)));
     }
     let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(body.len() as u64);
-    store::log_line(&format!("[upload] {} ({}KB)", final_name, body.len() / 1024));
+    let rel = if folder_rel.is_empty() {
+        final_name.clone()
+    } else {
+        format!("{}/{}", folder_rel, final_name)
+    };
+    store::log_line(&format!("[upload] {} ({}KB)", rel, body.len() / 1024));
 
     send_json(
         rq,
@@ -1028,9 +1462,11 @@ pub fn upload(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
         &json!({
             "ok": true,
             "name": final_name,
+            "folder": folder_rel,
+            "path": rel,
             "size": size,
             "docId": doc_id_of(&final_name),
-            "url": format!("/api/pdf?name={}", encode_uri_component(&final_name)),
+            "url": format!("/api/pdf?path={}", encode_uri_component(&rel)),
         }),
     );
 }
@@ -1846,17 +2282,27 @@ pub fn import_pdf(rq: Request, raw_query: &str) {
         Some(n) => n,
         None => "imported.pdf".to_string(),
     };
+    let folder_rel = normalize_rel(&query_get(raw_query, "folder").unwrap_or_default());
+    let abs_dir = match resolve_target_dir(&folder_rel) {
+        Some(d) => d,
+        None => return send_json(rq, 400, &err_json("目标文件夹不存在或不可写")),
+    };
     let size = body.len() as u64;
-    let final_name = unique_pdf_name(&name, size);
-    let abs = crate::util::dirs().papers.join(&final_name);
+    let final_name = unique_pdf_name_in_dir(&abs_dir, &name, size);
+    let abs = abs_dir.join(&final_name);
     if std::fs::write(&abs, &body).is_err() {
         return send_json(rq, 500, &err_json("写入 papers/ 失败：请检查磁盘空间与目录权限"));
     }
     let real = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(size);
+    let rel = if folder_rel.is_empty() {
+        final_name.clone()
+    } else {
+        format!("{}/{}", folder_rel, final_name)
+    };
     // 日志里不打印完整 URL 的查询串（可能带 token / 签名），只留主机名
     store::log_line(&format!(
         "[import] {} ({}KB) <- {}",
-        final_name,
+        rel,
         body.len() / 1024,
         host_of(&final_url)
     ));
@@ -1867,9 +2313,11 @@ pub fn import_pdf(rq: Request, raw_query: &str) {
         &json!({
             "ok": true,
             "name": final_name,
+            "folder": folder_rel,
+            "path": rel,
             "size": real,
             "docId": doc_id_of(&final_name),
-            "url": format!("/api/pdf?name={}", encode_uri_component(&final_name)),
+            "url": format!("/api/pdf?path={}", encode_uri_component(&rel)),
         }),
     );
 }

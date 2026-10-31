@@ -644,6 +644,8 @@ const state = {
   //（reader.ui.noLeft/noRight 是用户意图，两者混在一起会导致「窄窗用过一次就永久收起」）
   autoCollapse: { left: false, right: false },
   papers: [],
+  folders: [],          // 文件夹树：{name,path,count}（服务端返回）
+  folderOpen: new Set(), // 展开的文件夹 path 集合（localStorage 持久化）
   selection: null,
   quote: null,          // 对话引用 {page, text}
   _dragSelecting: false,   // 正在正文里拖选（用于「松手在窗口外」的兜底）
@@ -755,6 +757,7 @@ let serverState = {};
 
   await profileStore.load();
   await loadServerState();
+  state.folderOpen = loadFolderOpen();
   // 服务端记住的「上次打开哪篇」这时才拿到：如果刚才的 reader.ai 迁移还没能认出当前论文，
   // 这里补一次 byDoc 覆盖（只在「刚迁移过」时发生，之后用户怎么摆就怎么算）
   const migrated = applyPanelMigration();
@@ -1851,52 +1854,140 @@ function renderHome() {
   }
 }
 
+const FOLDER_OPEN_KEY = 'prt.folderOpen.v1';
+function loadFolderOpen() {
+  try { return new Set(JSON.parse(localStorage.getItem(FOLDER_OPEN_KEY) || '[]')); }
+  catch { return new Set(); }
+}
+function saveFolderOpen() {
+  try { localStorage.setItem(FOLDER_OPEN_KEY, JSON.stringify([...state.folderOpen])); } catch { /* 忽略 */ }
+}
+
 async function refreshPaperList() {
   try {
     const r = await fetch('/api/papers');
-    if (r.ok) state.papers = (await r.json()).papers || [];
-  } catch { state.papers = []; }
+    if (r.ok) {
+      const j = await r.json();
+      state.papers = j.papers || [];
+      state.folders = j.folders || [];
+    } else { state.papers = []; state.folders = []; }
+  } catch { state.papers = []; state.folders = []; }
   renderPaperList();
 }
 
 const PAPER_GRIP_SVG = '<svg viewBox="0 0 24 24" width="10" height="16" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>';
 const PAPER_X_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6.5 6.5 17.5 17.5"/><path d="M17.5 6.5 6.5 17.5"/></svg>';
+/* 文件夹行图标：线性风格与全站 SVG 一致（stroke 1.8，currentColor） */
+const FOLDER_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M3.4 6.6a1.7 1.7 0 0 1 1.7-1.7h4.1l2.2 2.5h7.5a1.7 1.7 0 0 1 1.7 1.7v8.1a1.7 1.7 0 0 1-1.7 1.7H5.1a1.7 1.7 0 0 1-1.7-1.7Z"/></svg>';
+const FOLDER_ARROW_OPEN_SVG = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6.5 9.2 5.5 5.6 5.5-5.6"/></svg>';
+const FOLDER_ARROW_CLOSED_SVG = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9.2 6.5 14.8 12 9.2 17.5"/></svg>';
+
+/** 一个 PDF 行；flat=true 表示筛选扁平视图（名称前缀所在文件夹） */
+function paperRow(p, flat) {
+  const display = (flat && p.folder ? `${p.folder}/${p.name}` : p.name).replace(/\.pdf$/i, '');
+  const li = el('li', {
+    title: `${flat && p.folder ? p.folder + '/' : ''}${p.name}\n${fmtSize(p.size)}\n按住拖动：同目录调整顺序，拖到文件夹行移入`,
+    dataset: { id: p.docId, name: p.name, path: p.path || p.name },
+    draggable: 'true',
+    onclick: (e) => {
+      if (e.target.closest?.('.file-row-x, .file-grip')) return;
+      openDoc({ name: p.name, url: p.url, docId: p.docId, path: p.path || p.name });
+    },
+  },
+    el('span', { class: 'file-grip', title: '按住拖动', 'aria-hidden': 'true', html: PAPER_GRIP_SVG }),
+    el('span', { class: 'file-name', text: display }),
+    el('button', {
+      type: 'button', class: 'file-row-x', html: PAPER_X_SVG,
+      title: `删除「${p.name}」（只删 papers/ 里的这个文件）`,
+      'aria-label': `删除「${p.name}」`,
+      onclick: (e) => { e.stopPropagation(); deletePaper(p); },
+    }));
+  if (state.doc?.docId === p.docId) li.classList.add('active');
+  return li;
+}
+
+/**
+ * 渲染某一层的子项（文件夹按名称序在前 + PDF 按服务端顺序在后）。
+ * 返回 DocumentFragment；无任何子项返回 null。
+ */
+function renderTreeLevel(folderPath, depth) {
+  const prefix = folderPath ? `${folderPath}/` : '';
+  const subs = (state.folders || [])
+    .filter((f) => {
+      if (folderPath === '') return !f.path.includes('/');
+      return f.path.startsWith(prefix) && !f.path.slice(prefix.length).includes('/');
+    })
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  const pdfs = (state.papers || []).filter((p) => p.folder === folderPath);
+  if (!subs.length && !pdfs.length) return null;
+
+  const frag = document.createDocumentFragment();
+  for (const f of subs) {
+    const open = state.folderOpen.has(f.path);
+    const li = el('li', {
+      class: 'folder',
+      dataset: { folder: f.name, path: f.path },
+      draggable: 'true',
+    },
+      el('span', {
+        class: 'folder-arrow', 'aria-hidden': 'true',
+        html: open ? FOLDER_ARROW_OPEN_SVG : FOLDER_ARROW_CLOSED_SVG,
+        onclick: (e) => { e.stopPropagation(); toggleFolder(f.path); },
+      }),
+      el('span', { class: 'folder-ico', 'aria-hidden': 'true', html: FOLDER_ICON_SVG }),
+      el('span', {
+        class: 'folder-name', text: f.name,
+        title: `${f.path}（${f.count} 篇 PDF）`,
+        ondblclick: (e) => { e.stopPropagation(); startInlineRename(f.path, f.name); },
+      }),
+      el('span', { class: 'folder-count', text: f.count ? String(f.count) : '' }));
+    frag.append(li);
+    if (open) {
+      const sub = renderTreeLevel(f.path, depth + 1);
+      if (sub) {
+        const ul = el('ul', { class: 'folder-children', dataset: { parent: f.path } });
+        ul.append(sub);
+        frag.append(ul);
+      }
+    }
+  }
+  for (const p of pdfs) frag.append(paperRow(p, false));
+  return frag;
+}
+
+function toggleFolder(path) {
+  if (state.folderOpen.has(path)) state.folderOpen.delete(path);
+  else state.folderOpen.add(path);
+  saveFolderOpen();
+  renderPaperList();
+}
 
 function renderPaperList() {
   const list = $('#fileList');
   if (!list) return;
   const filter = ($('#fileFilter').value || '').trim().toLowerCase();
   list.innerHTML = '';
-  const items = state.papers.filter((p) => !filter || p.name.toLowerCase().includes(filter));
-  if (!items.length) {
-    list.append(el('li', {
-      class: 'empty',
-      text: state.papers.length ? '没有匹配的文件' : 'papers/ 里还没有 PDF',
-    }));
+
+  if (filter) {
+    // 筛选激活：扁平过滤结果（每行前缀显示所在文件夹），库内拖拽由 bindPaperDrag 禁用
+    const hits = (state.papers || []).filter((p) => p.name.toLowerCase().includes(filter));
+    if (!hits.length) {
+      list.append(el('li', {
+        class: 'empty',
+        text: state.papers.length ? '没有匹配的文件' : 'papers/ 里还没有 PDF',
+      }));
+      return;
+    }
+    for (const p of hits) list.append(paperRow(p, true));
     return;
   }
-  for (const p of items) {
-    const li = el('li', {
-      title: `${p.name}\n${fmtSize(p.size)}\n按住拖动可调整顺序`,
-      dataset: { id: p.docId, name: p.name },
-      draggable: 'true',
-      onclick: (e) => {
-        // 抓手与删除按钮各自处理，点它们不打开论文
-        if (e.target.closest?.('.file-row-x, .file-grip')) return;
-        openDoc({ name: p.name, url: p.url, docId: p.docId });
-      },
-    },
-      el('span', { class: 'file-grip', title: '按住拖动调整顺序', 'aria-hidden': 'true', html: PAPER_GRIP_SVG }),
-      el('span', { class: 'file-name', text: p.name.replace(/\.pdf$/i, '') }),
-      el('button', {
-        type: 'button', class: 'file-row-x', html: PAPER_X_SVG,
-        title: `删除「${p.name}」（只删 papers/ 里的这个文件）`,
-        'aria-label': `删除「${p.name}」`,
-        onclick: (e) => { e.stopPropagation(); deletePaper(p); },
-      }));
-    if (state.doc?.url === p.url) li.classList.add('active');
-    list.append(li);
+
+  const frag = renderTreeLevel('', 0);
+  if (!frag) {
+    list.append(el('li', { class: 'empty', text: 'papers/ 里还没有 PDF' }));
+    return;
   }
+  list.append(frag);
 }
 
 /* ───────────────── 文件列表：批量导入 / 拖拽排序 / 删除（2026-10） ───────────────── */
@@ -1906,18 +1997,11 @@ function pdfFilesFrom(files) {
   return Array.from(files || []).filter((f) => f && /\.pdf$/i.test(f.name));
 }
 
-/** 是不是「从资源管理器拖文件进来」——内部拖动排序不算 */
-function isExternalFileDrag(e) {
-  try {
-    return Array.from(e.dataTransfer?.types || []).includes('Files');
-  } catch {
-    return false;
-  }
-}
-
 function initFiles() {
+  document.body.dataset.jsVer = '20261031-dnd';
   const dz = $('#dropzone');
   $('#fileFilter').addEventListener('input', debounce(renderPaperList, 150));
+  $('#folderNew')?.addEventListener('click', () => startInlineCreate(''));
   // 多选：一次选多个 PDF 一起导入（原来只取 files[0]）
   $('#fileInput').addEventListener('change', (e) => {
     const pdfs = pdfFilesFrom(e.target.files);
@@ -1935,15 +2019,35 @@ function initFiles() {
   dz.addEventListener('drop', (e) => {
     if (!isExternalFileDrag(e)) return;   // 内部拖动排序：交给文件列表自己处理
     e.preventDefault();
-    const pdfs = pdfFilesFrom(e.dataTransfer?.files);
-    if (pdfs.length) importLocalFiles(pdfs);
+    importExternalDrop(e.dataTransfer, '');
   });
-  window.addEventListener('dragover', (e) => e.preventDefault());
-  window.addEventListener('drop', (e) => {
+  /**
+   * 全页面拖拽接管（document 捕获阶段）。
+   *
+   * 只拦 dragover 是不够的：光标**刚进入**一个新元素时浏览器先派发 dragenter，
+   * 如果 dragenter 没被 preventDefault，Chrome 在那一帧会显示「禁止圆环」，
+   * 紧接着下一帧 dragover 被接管又变回 move —— 拖动经过一行行文件/文件夹时看起来就是一直闪。
+   * 这里在捕获阶段同时接管 dragenter 和 dragover（捕获阶段先于任何 stopPropagation），
+   * 任何位置、任何拖拽类型都 preventDefault 并显式设置 dropEffect，代码层面不留 no-drop 帧。
+   */
+  const acceptAnyDrag = (e) => {
     e.preventDefault();
-    if (!isExternalFileDrag(e)) return;
-    const pdfs = pdfFilesFrom(e.dataTransfer?.files);
-    if (pdfs.length) importLocalFiles(pdfs);
+    try {
+      const dt = e.dataTransfer;
+      if (!dt) return;
+      // 内部移动 move；外部文件 copy；其他类型（拖文字等）也给 move，避免落到 none
+      dt.dropEffect = isInternalPrtDrag(e) ? 'move' : (isExternalFileDrag(e) ? 'copy' : 'move');
+    } catch { /* dropEffect 在个别环境只读，忽略 */ }
+  };
+  for (const type of ['dragenter', 'dragover']) document.addEventListener(type, acceptAnyDrag, true);
+  window.addEventListener('drop', (e) => {
+    if (e.defaultPrevented) return; // 已被文件列表 / 拖入区 / 左栏兜底处理，避免重复
+    e.preventDefault();
+    // 内部拖拽 drop 到左栏外（右栏/顶部/任意位置）→ 移到根目录；外部 PDF → 导入根。
+    if (isExternalFileDrag(e)) { importExternalDrop(e.dataTransfer, ''); return; }
+    let payload = null;
+    try { payload = JSON.parse(e.dataTransfer?.getData(PRT_DRAG_MIME) || 'null'); } catch { /* 忽略 */ }
+    if (payload) moveItem(payload.path, '');
   });
 
   $('#homeOpen')?.addEventListener('click', () => $('#fileInput')?.click());
@@ -1961,76 +2065,232 @@ function initFiles() {
     // 「打开 PDF」是唯一的点击选文件入口，两个入口保持明确分工。
   }
 
-  bindPaperReorder($('#fileList'));
+  bindPaperDrag($('#fileList'));
+  initFileContextMenu();
+
+  // 左栏拖拽接管（与 #fileList 处理「完全连起来」）：内部拖拽经过左栏任意位置
+  // 都 preventDefault + move 光标，彻底消除 no-drop 圆环闪现。
+  // #fileList 内的高亮/排序/移入由 bindPaperDrag 自己处理（子元素事件先到，已 preventDefault，
+  // 冒泡到这里再防一次无害）；列表之外（拖入区/面板头/目录笔记等）落到 drop 统一视为移到根。
+  $('#leftSide').addEventListener('dragover', (e) => {
+    if (!isInternalPrtDrag(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
+  $('#leftSide').addEventListener('drop', (e) => {
+    if (e.target.closest?.('#fileList')) return; // 列表内的 drop 已由 bindPaperDrag 处理
+    let payload = null;
+    try { payload = JSON.parse(e.dataTransfer?.getData(PRT_DRAG_MIME) || 'null'); } catch { /* 忽略 */ }
+    if (!payload) return;
+    e.preventDefault();
+    moveItem(payload.path, '');
+  });
 }
 
-function bindPaperReorder(list) {
+/** 内部拖拽数据 MIME：与外部文件拖入（Files）严格区分 */
+const PRT_DRAG_MIME = 'application/x-prt-paper';
+
+/** 是否为项目内部拖拽（左栏文件/文件夹之间的移动/排序） */
+function isInternalPrtDrag(e) {
+  try { return Array.from(e.dataTransfer?.types || []).includes(PRT_DRAG_MIME); } catch { return false; }
+}
+
+function dragPayload(e) {
+  try {
+    const raw = e.dataTransfer?.getData(PRT_DRAG_MIME);
+    if (raw) return JSON.parse(raw);
+  } catch { /* 忽略 */ }
+  return null;
+}
+
+/** 是不是「从资源管理器拖文件/文件夹进来」——内部拖拽（PRT_DRAG_MIME）不算 */
+function isExternalFileDrag(e) {
+  try {
+    const types = Array.from(e.dataTransfer?.types || []);
+    return types.includes('Files') && !types.includes(PRT_DRAG_MIME);
+  } catch {
+    return false;
+  }
+}
+
+/** 相对路径里取所在文件夹（''=根） */
+function folderOf(relPath) {
+  const i = String(relPath || '').lastIndexOf('/');
+  return i >= 0 ? relPath.slice(0, i) : '';
+}
+
+/** 拖放落点：命中展开文件夹的子区 → 移入该文件夹；否则根 */
+function dropTargetFolder(e) {
+  const ul = e.target.closest?.('ul.folder-children[data-parent]');
+  return ul ? ul.dataset.parent : '';
+}
+
+function bindPaperDrag(list) {
   if (!list) return;
-  let from = '';
+  let from = null; // { path, kind }
   const clearMarks = () => {
-    for (const n of list.querySelectorAll('li')) n.classList.remove('dragging', 'drop-before', 'drop-after');
-  };
-  const markAt = (e) => {
-    const li = e.target.closest?.('li[data-name]');
-    if (!li) return null;
-    const r = li.getBoundingClientRect();
-    const after = e.clientY > r.top + r.height / 2;
-    for (const n of list.querySelectorAll('li')) n.classList.remove('drop-before', 'drop-after');
-    li.classList.add(after ? 'drop-after' : 'drop-before');
-    return { li, after };
+    for (const n of list.querySelectorAll('li')) {
+      n.classList.remove('dragging', 'drop-before', 'drop-after', 'folder-target', 'drag-no');
+    }
+    list.classList.remove('root-target');
   };
 
   list.addEventListener('dragstart', (e) => {
-    const li = e.target.closest?.('li[data-name]');
+    const li = e.target.closest?.('li[data-path], li[data-name]');
     if (!li) return;
     if (e.target.closest?.('.file-row-x')) { e.preventDefault(); return; }
-    from = li.dataset.name || '';
-    if (!from) return;
+    const filterActive = ($('#fileFilter').value || '').trim() !== '';
+    if (filterActive) {
+      e.preventDefault();
+      toast('请先清空筛选，再进行拖拽排序/移动', 'err', 3600);
+      return;
+    }
+    const path = li.dataset.path || li.dataset.name || '';
+    if (!path) return;
+    const kind = li.classList.contains('folder') ? 'folder' : 'file';
+    from = { path, kind };
     li.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
-    try { e.dataTransfer.setData('text/plain', from); } catch { /* 忽略 */ }
+    try {
+      e.dataTransfer.setData(PRT_DRAG_MIME, JSON.stringify({ path, kind }));
+      e.dataTransfer.setData('text/plain', path);
+    } catch { /* 忽略 */ }
   });
-  list.addEventListener('dragend', () => { from = ''; clearMarks(); });
+  list.addEventListener('dragend', () => { from = null; clearMarks(); });
+
   list.addEventListener('dragover', (e) => {
-    if (!from) return;
+    // 无条件 preventDefault + 显式 dropEffect：fileList 内部任何位置都不弹 no-drop。
+    // （与左栏兜底、window 兜底三级连成一片，整个页面任意坐标都不会出现禁止圆环）
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    markAt(e);
-  });
-  list.addEventListener('dragleave', (e) => {
-    if (!list.contains(e.relatedTarget)) {
-      for (const n of list.querySelectorAll('li')) n.classList.remove('drop-before', 'drop-after');
-    }
-  });
-  list.addEventListener('drop', (e) => {
-    if (!from) return;
-    e.preventDefault();
-    const hit = markAt(e);
-    const moved = from;
+    const internal = isInternalPrtDrag(e);
+    e.dataTransfer.dropEffect = (internal || from) ? 'move' : 'copy';
+    if (!internal && !from && !isExternalFileDrag(e)) return; // 无关拖拽：仅 preventDefault，不渲染高亮
     clearMarks();
-    if (!hit || !hit.li.dataset.name || hit.li.dataset.name === moved) return;
-    applyPaperOrder(moved, hit.li.dataset.name, hit.after);
+    // 1. 文件夹行 → 移入该文件夹
+    const folderLi = e.target.closest?.('li.folder[data-path]');
+    if (folderLi) {
+      if (from?.kind === 'folder'
+        && (from.path === folderLi.dataset.path || folderLi.dataset.path.startsWith(`${from.path}/`))) {
+        folderLi.classList.add('drag-no'); // 禁区：自身/子孙
+      } else {
+        folderLi.classList.add('folder-target');
+      }
+      return;
+    }
+    // 2. PDF 行
+    const li = e.target.closest?.('li[data-path]:not(.folder)');
+    if (li) {
+      if (from?.kind === 'file') {
+        if (folderOf(from.path) === folderOf(li.dataset.path)) {
+          // 同目录 → 排序插入线
+          const r = li.getBoundingClientRect();
+          li.classList.add(e.clientY > r.top + r.height / 2 ? 'drop-after' : 'drop-before');
+        } else {
+          li.classList.add('folder-target'); // 跨目录 → 移入该行所在文件夹
+        }
+      } else {
+        li.classList.add('folder-target');
+      }
+      return;
+    }
+    // 3. 根区域空白
+    list.classList.add('root-target');
+  });
+
+  list.addEventListener('dragleave', (e) => {
+    if (!list.contains(e.relatedTarget)) clearMarks();
+  });
+
+  list.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    const payload = dragPayload(e);
+    clearMarks();
+    if (!payload && !isExternalFileDrag(e)) return;
+    const filterActive = ($('#fileFilter').value || '').trim() !== '';
+    if (filterActive) { toast('请先清空筛选，再进行拖拽排序/移动', 'err', 3600); return; }
+
+    // 外部拖入（资源管理器）
+    if (!payload) {
+      const target = dropTargetFolder(e);
+      return importExternalDrop(e.dataTransfer, target);
+    }
+
+    // 内部拖拽
+    const folderLi = e.target.closest?.('li.folder[data-path]');
+    const targetFolder = folderLi ? folderLi.dataset.path : dropTargetFolder(e);
+    if (payload.kind === 'file') {
+      const li = e.target.closest?.('li[data-path]:not(.folder)');
+      // 拖到「自己所在的文件夹」行：无操作（服务端也会 no-op，前端先拦省一次请求）
+      if (targetFolder && targetFolder === folderOf(payload.path)) return;
+      // 同目录 + 落在 PDF 行上 → 排序；其余一律移动
+      if (!targetFolder && li && folderOf(li.dataset.path) === folderOf(payload.path)) {
+        const r = li.getBoundingClientRect();
+        applyPaperOrder(payload.path, li.dataset.path, e.clientY > r.top + r.height / 2);
+        return;
+      }
+      await moveItem(payload.path, targetFolder || '');
+      return;
+    }
+    // 文件夹拖拽：改变层级（禁区前端先拦，服务端二次校验）
+    if (payload.kind === 'folder') {
+      const to = targetFolder || '';
+      if (to === payload.path || to.startsWith(`${payload.path}/`)) {
+        toast('不能把文件夹移到自己的子目录里', 'err', 3600);
+        return;
+      }
+      await moveItem(payload.path, to);
+    }
   });
 }
 
+/** POST /api/move 移动 PDF / 文件夹；成功后刷新列表并同步打开中文件的内部路径 */
+async function moveItem(from, to) {
+  try {
+    const r = await fetch('/api/move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to: to || '' }),
+    });
+    let j = {};
+    try { j = await r.json(); } catch { /* 非 JSON */ }
+    if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
+    const label = from.split('/').pop();
+    const finalName = j.name || label;
+    const renamed = finalName !== label ? `（${finalName}）` : '';
+    toast(`已移动 ${label} → ${to || '根目录'}${renamed}`, 'ok', 3000);
+    // 正在打开的文件被移动：不打断阅读，只更新内部 url / path（active 按 docId 判定，不受影响）
+    if (from === (state.doc?.path || state.doc?.name)) {
+      const newPath = to ? `${to}/${finalName}` : finalName;
+      state.doc.url = `/api/pdf?path=${encodeURIComponent(newPath)}`;
+      state.doc.path = newPath;
+      state.doc.name = finalName;
+    }
+    await refreshPaperList();
+  } catch (e) {
+    toast(`移动失败：${e.message}`, 'err', 5000);
+    await refreshPaperList();
+  }
+}
+
 let paperOrderSave = Promise.resolve();
+/** 同目录排序：order 升级为相对路径数组，未排序项按 mtime 倒序排最前（服务端行为） */
 function applyPaperOrder(from, target, after) {
-  const names = state.papers.map((p) => p.name);
-  const i = names.indexOf(from);
+  const paths = (state.papers || []).map((p) => p.path || p.name);
+  const i = paths.indexOf(from);
   if (i < 0) return;
-  names.splice(i, 1);
-  const t = names.indexOf(target);
-  if (t < 0) names.push(from);
-  else names.splice(after ? t + 1 : t, 0, from);
-  const by = new Map(state.papers.map((p) => [p.name, p]));
-  state.papers = names.map((n) => by.get(n)).filter(Boolean);
+  paths.splice(i, 1);
+  const t = paths.indexOf(target);
+  if (t < 0) paths.push(from);
+  else paths.splice(after ? t + 1 : t, 0, from);
+  const by = new Map((state.papers || []).map((p) => [p.path || p.name, p]));
+  state.papers = paths.map((n) => by.get(n)).filter(Boolean);
   renderPaperList();
   paperOrderSave = paperOrderSave.catch(() => {}).then(async () => {
     try {
       const r = await fetch('/api/papers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ order: names }),
+        body: JSON.stringify({ order: paths }),
       });
       let j = {};
       try { j = await r.json(); } catch { /* 非 JSON */ }
@@ -2042,19 +2302,229 @@ function applyPaperOrder(from, target, after) {
   });
 }
 
+/* ───────────────── 文件面板：右键菜单 / 内联新建 / 重命名 / 删除 ───────────────── */
+
+/** 文件名/夹名前端清洗（服务端会再洗一遍） */
+function sanitizeClientFolderName(name) {
+  const n = String(name || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim();
+  return n ? n.slice(0, 80) : null;
+}
+
+function initFileContextMenu() {
+  const menu = $('#fileCtx');
+  if (!menu) return;
+  const close = () => { menu.hidden = true; menu.innerHTML = ''; };
+  document.addEventListener('click', (e) => { if (!menu.hidden && !menu.contains(e.target)) close(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+  window.addEventListener('blur', close);
+  // 只接管文件列表 / 拖入区 / 筛选框的右键
+  document.addEventListener('contextmenu', (e) => {
+    if (!e.target.closest?.('#fileList, #dropzone, #fileFilter')) return;
+    e.preventDefault();
+    const folderLi = e.target.closest?.('li.folder[data-path]');
+    const fileLi = e.target.closest?.('li[data-path]:not(.folder)');
+    const target = folderLi
+      ? { kind: 'folder', path: folderLi.dataset.path, name: folderLi.dataset.folder }
+      : fileLi
+        ? { kind: 'file', path: fileLi.dataset.path, name: fileLi.dataset.name }
+        : { kind: 'blank' };
+    showFileCtx(e.clientX, e.clientY, target);
+  });
+}
+
+function showFileCtx(x, y, target) {
+  const menu = $('#fileCtx');
+  if (!menu) return;
+  menu.hidden = false;
+  menu.innerHTML = '';
+  const item = (label, fn, danger) => el('button', {
+    type: 'button',
+    class: `ctx-item${danger ? ' danger' : ''}`,
+    text: label,
+    onclick: (e) => { e.stopPropagation(); menu.hidden = true; fn(); },
+  });
+  if (target.kind === 'blank') {
+    menu.append(item('新建文件夹', () => startInlineCreate('')));
+  } else if (target.kind === 'folder') {
+    menu.append(item('新建文件夹', () => startInlineCreate('')));
+    menu.append(item('重命名', () => startInlineRename(target.path, target.name)));
+    menu.append(item('删除文件夹', () => deleteFolder(target.path, target.name), true));
+    menu.append(item('移动到…', () => showMoveTargets(menu, target)));
+  } else {
+    menu.append(item('移动到…', () => showMoveTargets(menu, target)));
+    menu.append(item('删除', () => {
+      const p = (state.papers || []).find((pp) => (pp.path || pp.name) === target.path);
+      if (p) deletePaper(p);
+    }, true));
+  }
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+}
+
+/** 「移动到…」：菜单原地换成目标列表（根 + 各文件夹；文件夹移动跳过自身/子孙） */
+function showMoveTargets(menu, target) {
+  menu.innerHTML = '';
+  menu.append(el('div', { class: 'ctx-title', text: `移动「${target.name}」到` }));
+  const pick = (to) => { menu.hidden = true; moveItem(target.path, to); };
+  menu.append(el('button', { type: 'button', class: 'ctx-item', text: '根目录', onclick: () => pick('') }));
+  for (const f of state.folders || []) {
+    if (target.kind === 'folder' && (f.path === target.path || f.path.startsWith(`${target.path}/`))) continue;
+    menu.append(el('button', { type: 'button', class: 'ctx-item', text: f.path, onclick: () => pick(f.path) }));
+  }
+  const r = menu.getBoundingClientRect();
+  menu.style.top = `${Math.min(parseFloat(menu.style.top) || 0, window.innerHeight - r.height - 8)}px`;
+}
+
+/** 内联新建文件夹（根下或指定父夹下） */
+function startInlineCreate(parentPath) {
+  if (parentPath && !state.folderOpen.has(parentPath)) {
+    state.folderOpen.add(parentPath);
+    saveFolderOpen();
+  }
+  renderPaperList();
+  const list = $('#fileList');
+  if (!list) return;
+  const input = el('input', { class: 'inline-name', placeholder: '新文件夹名，Enter 确认' });
+  const li = el('li', { class: 'folder inline-create' }, input);
+  if (!parentPath) {
+    list.prepend(li);
+  } else {
+    const ul = [...$$('#fileList ul.folder-children')].find((u) => u.dataset.parent === parentPath);
+    (ul || list).prepend(li);
+  }
+  input.focus();
+  let done = false;
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const name = input.value.trim();
+    if (!name) { renderPaperList(); return; }
+    try {
+      const q = new URLSearchParams({ name });
+      if (parentPath) q.set('parent', parentPath);
+      const r = await fetch(`/api/folders?${q}`, { method: 'POST' });
+      let j = {};
+      try { j = await r.json(); } catch { /* 非 JSON */ }
+      if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
+      if (parentPath && !state.folderOpen.has(parentPath)) { state.folderOpen.add(parentPath); saveFolderOpen(); }
+      await refreshPaperList();
+      toast(`已创建文件夹「${j.path || j.name}」`, 'ok', 2400);
+    } catch (e) {
+      toast(`创建文件夹失败：${e.message}`, 'err', 4200);
+      renderPaperList();
+    }
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') commit();
+    else if (e.key === 'Escape') { done = true; renderPaperList(); }
+  });
+  input.addEventListener('blur', commit);
+}
+
+/** 内联重命名文件夹（改磁盘真实目录名；内部 PDF 的 docId / 笔记 / 会话不受影响） */
+function startInlineRename(folderPath, name) {
+  const li = [...$$('#fileList li.folder')].find((x) => x.dataset.path === folderPath);
+  if (!li) return;
+  const input = el('input', { class: 'inline-name', value: name });
+  li.classList.add('renaming');
+  li.replaceChildren(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const to = input.value.trim();
+    if (!to || to === name) { renderPaperList(); return; }
+    try {
+      const r = await fetch('/api/folders', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: folderPath, to }),
+      });
+      let j = {};
+      try { j = await r.json(); } catch { /* 非 JSON */ }
+      if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
+      // 打开中文件在旧夹里：url 换成 name 回退形式，不打断阅读
+      if (state.doc && (state.doc.path || '').startsWith(`${folderPath}/`)) {
+        const base = (state.doc.path || '').split('/').pop();
+        state.doc.url = `/api/pdf?name=${encodeURIComponent(base)}`;
+        state.doc.path = base;
+      }
+      await refreshPaperList();
+      toast(`已重命名「${name}」→「${to}」`, 'ok', 2600);
+    } catch (e) {
+      toast(`重命名失败：${e.message}`, 'err', 4200);
+      renderPaperList();
+    }
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') commit();
+    else if (e.key === 'Escape') { done = true; renderPaperList(); }
+  });
+  input.addEventListener('blur', commit);
+}
+
+async function deleteFolder(folderPath, name) {
+  const f = (state.folders || []).find((x) => x.path === folderPath);
+  const count = f?.count || 0;
+  if (!count) {
+    if (!confirm(`删除文件夹「${name}」？`)) return;
+    return doDeleteFolder(folderPath, 'recursive');
+  }
+  // 非空：默认推荐「PDF 移到根再删」；取消则问是否彻底删
+  if (confirm(`删除文件夹「${name}」？\n\n里面有 ${count} 篇 PDF。\n确定 = PDF 移到根目录再删（推荐，不丢文件）\n取消 = 改为彻底删除`)) {
+    return doDeleteFolder(folderPath, 'to-root');
+  }
+  if (confirm(`彻底删除「${name}」？\n\n连同里面 ${count} 篇 PDF 一起删除，不可恢复。`)) {
+    return doDeleteFolder(folderPath, 'recursive');
+  }
+}
+
+async function doDeleteFolder(folderPath, mode) {
+  try {
+    const r = await fetch(`/api/folders?path=${encodeURIComponent(folderPath)}&mode=${mode}`, { method: 'DELETE' });
+    let j = {};
+    try { j = await r.json(); } catch { /* 非 JSON */ }
+    if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
+    const label = folderPath.split('/').pop();
+    toast(mode === 'to-root'
+      ? `已删除文件夹「${label}」，其中 ${j.moved || 0} 篇 PDF 移到根目录`
+      : `已删除文件夹「${label}」`, 'ok', 3200);
+    state.folderOpen.delete(folderPath);
+    saveFolderOpen();
+    // 正在读的文件受影响：to-root 换 name 回退 url；recursive 收掉阅读态
+    if (state.doc && (state.doc.path || '').startsWith(`${folderPath}/`)) {
+      if (mode === 'to-root') {
+        const base = (state.doc.path || '').split('/').pop();
+        state.doc.url = `/api/pdf?name=${encodeURIComponent(base)}`;
+        state.doc.path = base;
+      } else {
+        closeDeletedDoc();
+      }
+    }
+    await refreshPaperList();
+    renderHome();
+  } catch (e) {
+    toast(`删除文件夹失败：${e.message}`, 'err', 5000);
+  }
+}
+
 /** 删除一篇 PDF（只删文件；笔记 / 会话 / 进度留在 data/，重新导入还能看到） */
 async function deletePaper(p) {
-  const opened = !!state.doc && (state.doc.name === p.name || state.doc.url === p.url);
+  const opened = !!state.doc && (state.doc.docId === p.docId || state.doc.url === p.url);
   const ok = confirm(`删除「${p.name}」？\n\n只删除 papers/ 里的这个 PDF 文件`
     + `${opened ? '（这篇正在阅读，删除后会回到首页）' : ''}。\n`
     + '笔记、问答会话与阅读进度会保留：重新导入同一个文件仍能看到。');
   if (!ok) return;
   try {
-    const r = await fetch(`/api/papers?name=${encodeURIComponent(p.name)}`, { method: 'DELETE' });
+    const q = new URLSearchParams({ path: p.path || p.name });
+    const r = await fetch(`/api/papers?${q}`, { method: 'DELETE' });
     let j = {};
     try { j = await r.json(); } catch { /* 非 JSON */ }
     if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
-    state.papers = state.papers.filter((x) => x.name !== p.name);
+    state.papers = state.papers.filter((x) => (x.path || x.name) !== (p.path || p.name));
     if (opened) closeDeletedDoc();
     renderPaperList();
     renderHome();
@@ -2082,10 +2552,12 @@ function closeDeletedDoc() {
 
 let localObjectUrl = null;
 
-/** 上传一个 PDF 到 papers/（返回服务端落盘信息） */
-async function uploadPdfFile(file) {
+/** 上传一个 PDF 到 papers/（folder=''=根；返回服务端落盘信息） */
+async function uploadPdfFile(file, folder = '') {
   const buf = await file.arrayBuffer();
-  const r = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, {
+  const q = new URLSearchParams({ name: file.name });
+  if (folder) q.set('folder', folder);
+  const r = await fetch(`/api/upload?${q}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/pdf' },
     body: buf,
@@ -2094,6 +2566,91 @@ async function uploadPdfFile(file) {
   try { j = await r.json(); } catch { /* 非 JSON */ }
   if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
   return j;
+}
+
+/** 外部拖入（资源管理器）：PDF 导入目标夹；文件夹建同名夹导入一层（v1 忽略子文件夹） */
+async function importExternalDrop(dt, targetFolder) {
+  const items = dt ? Array.from(dt.items || []).filter((it) => it.kind === 'file') : [];
+  if (!items.length) {
+    // 无 items（兼容老拖拽）：退回纯 PDF 处理
+    const pdfs = pdfFilesFrom(dt?.files);
+    if (pdfs.length) {
+      if (targetFolder) await importPdfsToFolder(pdfs, targetFolder);
+      else importLocalFiles(pdfs);
+    }
+    return;
+  }
+  const pdfFiles = [];
+  const dirs = [];
+  for (const it of items) {
+    const entry = it.webkitGetAsEntry?.();
+    if (!entry) continue;
+    if (entry.isDirectory) dirs.push(entry);
+    else if (entry.isFile && /\.pdf$/i.test(entry.name)) {
+      const f = it.getAsFile?.();
+      if (f) pdfFiles.push(f);
+    }
+  }
+  if (pdfFiles.length) {
+    if (targetFolder) await importPdfsToFolder(pdfFiles, targetFolder);
+    else importLocalFiles(pdfFiles);
+  }
+  for (const dirEntry of dirs) {
+    await importExternalFolder(dirEntry, targetFolder);
+  }
+  await refreshPaperList();
+}
+
+/** 外部文件夹 → papers/ 下建同名夹（重名自动 (2)），导入直接含有的 PDF（只读一层） */
+async function importExternalFolder(entry, parent) {
+  const name = sanitizeClientFolderName(entry.name);
+  if (!name) { toast(`忽略非法文件夹名「${entry.name}」`, 'err', 3600); return; }
+  let j = {};
+  try {
+    const q = new URLSearchParams({ name });
+    if (parent) q.set('parent', parent);
+    const r = await fetch(`/api/folders?${q}`, { method: 'POST' });
+    try { j = await r.json(); } catch { /* 非 JSON */ }
+    if (!r.ok) throw new Error(j?.error?.message || `HTTP ${r.status}`);
+  } catch (e) {
+    toast(`创建文件夹「${name}」失败：${e.message}`, 'err', 4200);
+    return;
+  }
+  const folderPath = j.path || j.name;
+  const reader = entry.createReader();
+  const entries = await new Promise((res) => {
+    const acc = [];
+    const readAll = () => {
+      reader.readEntries((batch) => {
+        if (!batch.length) { res(acc); return; }
+        acc.push(...batch);
+        readAll();
+      }, () => res(acc));
+    };
+    readAll();
+  });
+  const pdfs = [];
+  let subdirs = 0;
+  for (const en of entries) {
+    if (en.isFile && /\.pdf$/i.test(en.name)) {
+      const f = await new Promise((res) => en.file(res, () => res(null)));
+      if (f) pdfs.push(f);
+    } else if (en.isDirectory) {
+      subdirs += 1;
+    }
+  }
+  if (pdfs.length) await importPdfsToFolder(pdfs, folderPath);
+  if (subdirs) toast(`「${name}」里有 ${subdirs} 个子文件夹，v1 只导入一层，已忽略`, 'info', 4200);
+}
+
+async function importPdfsToFolder(pdfs, folder) {
+  for (const f of pdfs) {
+    try {
+      await uploadPdfFile(f, folder);
+    } catch (e) {
+      toast(`导入 ${f.name} 失败：${e.message}`, 'err', 4000);
+    }
+  }
 }
 
 /**
@@ -2107,7 +2664,7 @@ async function openLocalFile(file) {
   try {
     const j = await uploadPdfFile(file);
     await refreshPaperList();
-    await openDoc({ name: j.name, url: j.url, docId: j.docId });
+    await openDoc({ name: j.name, url: j.url, docId: j.docId, path: j.path || j.name });
     toast(`已存到 papers/：${j.name}`, 'ok', 2600);
   } catch (e) {
     toast(`导入失败（${e.message}），先用临时方式打开`, 'err', 5000);
@@ -2145,7 +2702,7 @@ async function importLocalFiles(files) {
   if (failed.length) console.warn('[import] 导入失败的 PDF：', failed);
 }
 
-async function openDoc({ name, url, docId }) {
+async function openDoc({ name, url, docId, path }) {
   cancelSearch({ clearInput: true, close: true, focus: false });
   abortStream('document-switch');
   if (state.doc && state.sessionEntries.length) {
@@ -2165,7 +2722,7 @@ async function openDoc({ name, url, docId }) {
   const superseded = () => myOpen !== state.openSeq;
   hideTranslationCard();
   state.selection = null;
-  state.doc = { name, url, docId };
+  state.doc = { name, url, docId, path: path || name };
   // 面板布局不再按论文分叉（阶段 2.2a）：换论文不重载 state.panels
   state.viewerDocId = null;
   refreshReturnButton();

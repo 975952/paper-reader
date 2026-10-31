@@ -312,6 +312,17 @@ body.dragging .viewer { pointer-events: none; }
 
 
 .side-head { padding: var(--panel-pad) var(--panel-pad) calc(var(--panel-pad) - 4px); }
+/* 面板头：筛选框 + 「新建文件夹」按钮并排 */
+.side-head { display: flex; align-items: center; gap: calc(6px * var(--ctl-scale)); }
+.side-head .filter { flex: 1 1 auto; min-width: 0; }
+.side-head .folder-new {
+  flex: 0 0 auto; width: calc(26px * var(--ctl-scale)); height: calc(26px * var(--ctl-scale));
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--fg-dim); cursor: pointer;
+  transition: border-color .12s, color .12s, background .12s;
+}
+.side-head .folder-new:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .filter {
   width: 100%; border: 1px solid var(--border); background: var(--bg);
   border-radius: 7px; padding: calc(5px * var(--ctl-scale)) calc(9px * var(--ctl-scale)); color: var(--fg); font: inherit; font-size: calc(12px * var(--ctl-scale));
@@ -384,10 +395,72 @@ body.dragging .viewer { pointer-events: none; }
 }
 .filelist li:hover .file-row-x { opacity: 1; }
 .filelist li .file-row-x:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: -1px; }
-.filelist li .file-row-x:hover { color: var(--err-text); background: var(--bg); }
+/* × 中性灰（非红色）：平时隐藏、鼠标移到该行才显现；hover 只加深灰色 */
+.filelist li .file-row-x:hover { color: var(--fg); background: var(--bg); }
 .filelist li.dragging { opacity: .4; }
 .filelist li.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .filelist li.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+/* 禁区（拖文件夹到自身/子孙）：不弹红框不显示 no-drop，drop 时 toast 拒绝 */
+.filelist li.drag-no { cursor: default; }
+
+/* ── 文件夹树（2026-10）：文件夹行 + 子列表缩进 + 拖拽高亮 ── */
+.filelist li.folder {
+  display: flex; align-items: center; gap: calc(3px * var(--ctl-scale));
+  color: var(--fg-dim);
+}
+.filelist li.folder:hover { background: var(--bg-sunken); color: var(--fg); }
+.filelist li.folder .folder-arrow {
+  flex: 0 0 auto; width: calc(14px * var(--ctl-scale));
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--fg-faint); cursor: pointer; user-select: none;
+}
+.filelist li.folder:hover .folder-arrow { color: var(--fg-dim); }
+.filelist li.folder .folder-ico {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  color: var(--accent); opacity: .9;
+}
+.filelist li.folder .folder-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filelist li.folder .folder-count {
+  flex: 0 0 auto; font-size: calc(11px * var(--ctl-scale)); color: var(--fg-faint);
+  padding: 0 calc(5px * var(--ctl-scale)); border-radius: 8px; background: var(--bg-sunken);
+}
+/* 子列表：嵌套 ul 自然累计缩进 */
+.filelist .folder-children { list-style: none; margin: 0; padding: 0 0 0 calc(13px * var(--ctl-scale)); }
+/* 拖拽目标高亮（克制版）：淡绿 tint + 图标/名称着 accent，不加粗描边
+   注意 .filelist li.folder:hover 特异性 (0,3,1)，这里必须用 li.folder.folder-target 才压得住 */
+.filelist li.folder.folder-target { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.filelist li.folder.folder-target .folder-ico { color: var(--accent); }
+.filelist li.folder.folder-target .folder-name { color: var(--accent); font-weight: 600; }
+.filelist.root-target { outline: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -2px; border-radius: 6px; }
+/* 内联重命名 / 新建输入框 */
+.filelist .inline-name {
+  width: 100%; min-width: 0; border: 1px solid var(--accent); border-radius: 5px;
+  padding: calc(2px * var(--ctl-scale)) calc(6px * var(--ctl-scale));
+  background: var(--bg); color: var(--fg); font: inherit; font-size: var(--ui-fs-md);
+}
+.filelist li.folder.renaming { background: transparent; box-shadow: none; }
+.filelist li.folder.inline-create { cursor: default; }
+
+/* ── 文件面板右键菜单 ── */
+.ctx-menu {
+  position: fixed; z-index: 900; min-width: calc(168px * var(--ctl-scale));
+  background: var(--bg); border: 1px solid var(--border); border-radius: 9px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .18); padding: calc(4px * var(--ctl-scale));
+  display: flex; flex-direction: column; gap: 1px;
+}
+.ctx-menu[hidden] { display: none; }
+.ctx-menu .ctx-item {
+  text-align: left; border: 0; background: transparent; color: var(--fg);
+  font: inherit; font-size: var(--ui-fs-md); padding: calc(6px * var(--ctl-scale)) calc(10px * var(--ctl-scale));
+  border-radius: 6px; cursor: pointer; white-space: nowrap;
+}
+.ctx-menu .ctx-item:hover { background: var(--accent-soft); color: var(--accent); }
+.ctx-menu .ctx-item.danger { color: var(--err-text); }
+.ctx-menu .ctx-item.danger:hover { background: color-mix(in srgb, var(--err-text) 12%, transparent); }
+.ctx-menu .ctx-title {
+  font-size: calc(11px * var(--ctl-scale)); color: var(--fg-faint);
+  padding: calc(4px * var(--ctl-scale)) calc(10px * var(--ctl-scale)); white-space: nowrap;
+}
 @media (hover: none) {
   .filelist li .file-grip, .filelist li .file-row-x { opacity: .75; }
 }

@@ -318,64 +318,200 @@ async function writePaperOrder(order) {
   await writeDataFile(PAPER_ORDER_FILE, { order });
 }
 
-/** 校验前端传来的顺序数组：只收 papers/ 里合法 PDF 文件名 */
+/** 校验前端传来的顺序数组：收 papers/ 里合法相对路径（根 PDF、文件夹、夹内 PDF）。
+ *  允许 '/'（文件夹层级），拒绝 \、控制符、..、隐藏路径段。 */
 function sanitizePaperOrder(raw) {
   if (!raw || !Array.isArray(raw.order)) return null;
   const out = [];
   const seen = new Set();
   for (const v of raw.order) {
     if (typeof v !== 'string') continue;
-    const name = v.trim();
-    if (!name || name.length > 200) continue;
-    if (/[\\/\u0000]/.test(name)) continue;
-    if (!/\.pdf$/i.test(name)) continue;
-    if (seen.has(name)) continue;
-    seen.add(name);
-    out.push(name);
+    const p = v.trim();
+    if (!p || p.length > 200) continue;
+    if (/\\|\u0000|\.\.|(^|\/)\./.test(p)) continue;
+    if (p.includes('/') && (p.startsWith('/') || p.endsWith('/'))) continue;
+    if (seen.has(p)) continue;
+    seen.add(p);
+    out.push(p);
     if (out.length >= 5000) break;
   }
   return out;
 }
 
+/** 用户传来的相对路径规范化：\ 归一为 /、去前导 /、去首尾空白（安全边界由 safeJoin 兜底） */
+function normalizeRel(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/^\/+/, '').trim();
+}
+
+/** 递归收集 papers/ 的文件夹树。rel 统一用 '/' 分隔，根目录 rel = ''。
+ *  返回 { folders: [{name,path,count}], papers: [{name,folder,path,size,mtime,docId,url}] }
+ *  排序：每个目录内，进过 order 的按数组顺序，未进过的按 mtime 倒序排最前（沿用旧规则）。 */
 async function listPapers() {
-  let entries = [];
-  try {
-    entries = await fsp.readdir(PAPERS_DIR, { withFileTypes: true });
-  } catch {
-    return [];
-  }
+  const folders = [];
+  const papers = [];
   const order = await readPaperOrder();
-  const rank = new Map(order.map((name, i) => [name, i]));
-  const out = [];
-  for (const e of entries) {
-    if (!e.isFile()) continue;
-    if (!/\.pdf$/i.test(e.name)) continue;
-    const st = await fsp.stat(path.join(PAPERS_DIR, e.name)).catch(() => null);
-    if (!st) continue;
-    out.push({
-      name: e.name,
-      size: st.size,
-      mtime: st.mtimeMs,
-      docId: docIdOf(e.name),
-      url: `/api/pdf?name=${encodeURIComponent(e.name)}`,
+  const rank = new Map(order.map((p, i) => [p, i]));
+
+  /** 扫描一层目录，返回直接子项（含文件夹与 PDF），已按 order 排序 */
+  async function scanDir(absDir, rel) {
+    let entries = [];
+    try {
+      entries = await fsp.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const items = [];
+    for (const e of entries) {
+      if (/[\\/\u0000]/.test(e.name)) continue;
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      const st = await fsp.stat(path.join(absDir, e.name)).catch(() => null);
+      if (!st) continue;
+      if (e.isDirectory()) {
+        items.push({ kind: 'folder', name: e.name, rel: childRel, mtime: st.mtimeMs });
+      } else if (e.isFile() && /\.pdf$/i.test(e.name)) {
+        items.push({ kind: 'file', name: e.name, rel: childRel, mtime: st.mtimeMs, size: st.size });
+      }
+    }
+    items.sort((a, b) => {
+      const ra = rank.has(a.rel) ? rank.get(a.rel) : -1;
+      const rb = rank.has(b.rel) ? rank.get(b.rel) : -1;
+      if (ra === -1 && rb === -1) return b.mtime - a.mtime;
+      if (ra === -1) return -1;
+      if (rb === -1) return 1;
+      return ra - rb;
     });
+    return items;
   }
-  // 未排序（=-1）的在最前，且内部按 mtime 倒序；已排序的按 order 下标
-  out.sort((a, b) => {
-    const ra = rank.has(a.name) ? rank.get(a.name) : -1;
-    const rb = rank.has(b.name) ? rank.get(b.name) : -1;
-    if (ra === -1 && rb === -1) return b.mtime - a.mtime;
-    if (ra === -1) return -1;
-    if (rb === -1) return 1;
-    return ra - rb;
-  });
-  return out;
+
+  async function walk(absDir, rel) {
+    const items = await scanDir(absDir, rel);
+    for (const it of items) {
+      if (it.kind === 'folder') {
+        folders.push({ name: it.name, path: it.rel });
+        await walk(path.join(absDir, it.name), it.rel);
+      } else {
+        papers.push({
+          name: it.name,
+          folder: rel,
+          path: it.rel,
+          size: it.size,
+          mtime: it.mtime,
+          docId: docIdOf(it.name),
+          url: `/api/pdf?path=${encodeURIComponent(it.rel)}`,
+        });
+      }
+    }
+  }
+
+  await walk(PAPERS_DIR, '');
+  // count = 直接子 PDF 数（不含子文件夹里的）
+  const byDir = new Map();
+  for (const p of papers) byDir.set(p.folder, (byDir.get(p.folder) || 0) + 1);
+  for (const f of folders) f.count = byDir.get(f.path) || 0;
+  return { folders, papers };
+}
+
+/** 在指定目录里找不重名的 PDF 文件名（重名加 (2)(3)）；size 同则视为同一份直接复用 */
+async function uniquePdfNameInDir(absDir, base, size) {
+  const ext = path.extname(base);
+  const stem = base.slice(0, base.length - ext.length);
+  for (let i = 1; i < 200; i++) {
+    const candidate = i === 1 ? base : `${stem} (${i})${ext}`;
+    const abs = path.join(absDir, candidate);
+    try {
+      const st = await fsp.stat(abs);
+      if (size != null && st.size === size) return candidate;
+    } catch {
+      return candidate;
+    }
+  }
+  return `${stem}-${Date.now()}${ext}`;
+}
+
+/** 在指定目录里找不重名的文件夹名（重名加 (2)(3)） */
+async function uniqueFolderName(absDir, base) {
+  for (let i = 1; i < 200; i++) {
+    const candidate = i === 1 ? base : `${base} (${i})`;
+    try {
+      await fsp.stat(path.join(absDir, candidate));
+    } catch {
+      return candidate;
+    }
+  }
+  return `${base}-${Date.now()}`;
+}
+
+/** 文件夹名清洗：去掉路径分隔符与控制符，返回干净的 basename 或 null */
+function sanitizeFolderName(name) {
+  const n = String(name || '')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .replace(/^[.\s]+/, '')
+    .replace(/[.\s]+$/, '')
+    .trim();
+  if (!n || n === '.' || n === '..') return null;
+  return n.slice(0, 80);
+}
+
+/** 解析目标文件夹：''=根；非空必须是存在的文件夹（不存在则尝试创建，供导入用） */
+async function resolveTargetDir(folderRel) {
+  if (!folderRel) return PAPERS_DIR;
+  const abs = safeJoin(PAPERS_DIR, folderRel);
+  if (!abs) return null;
+  try {
+    const st = await fsp.stat(abs);
+    if (!st.isDirectory()) return null;
+    return abs;
+  } catch {
+    try {
+      await fsp.mkdir(abs, { recursive: true });
+      return abs;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** 全库按 basename 找 PDF（旧 ?name= 链接回退用），取第一个命中的绝对路径 */
+async function findPdfByBasename(base) {
+  let hit = null;
+  async function walk(dir) {
+    if (hit) return;
+    let entries = [];
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (hit) return;
+      if (e.isDirectory()) await walk(path.join(dir, e.name));
+      else if (e.isFile() && e.name === base) {
+        hit = path.join(dir, e.name);
+        return;
+      }
+    }
+  }
+  await walk(PAPERS_DIR);
+  return hit;
+}
+
+/** 解析 PDF 请求路径：?path= 直接定位；?name= 先看根目录，找不到按 basename 全库回退 */
+async function resolvePdfPath(rel, isNameFallback) {
+  if (!rel) return null;
+  const abs = safeJoin(PAPERS_DIR, rel);
+  if (!abs) return null;
+  if (!isNameFallback) return abs;
+  try {
+    const st = await fsp.stat(abs);
+    if (st.isFile()) return abs;
+  } catch { /* 落到全库回退 */ }
+  return findPdfByBasename(path.basename(rel));
 }
 
 async function handleDeletePaper(req, res, url) {
-  const base = path.basename(String(url.searchParams.get('name') || ''));
-  const abs = safeJoin(PAPERS_DIR, base);
-  if (!abs || base !== path.basename(abs) || !/\.pdf$/i.test(abs)) {
+  const rel = normalizeRel(url.searchParams.get('path') ?? url.searchParams.get('name'));
+  const abs = safeJoin(PAPERS_DIR, rel);
+  if (!abs || !/\.pdf$/i.test(path.basename(abs))) {
     return sendJson(res, 400, { error: { message: '非法文件名' } });
   }
   try {
@@ -391,10 +527,212 @@ async function handleDeletePaper(req, res, url) {
     sec.diag(`删除 papers/ 文件失败: ${e && e.message}`);
     return sendJson(res, 500, { error: { message: '删除失败：文件可能正被其它程序占用' } });
   }
-  const order = (await readPaperOrder()).filter((n) => n !== base);
+  const order = (await readPaperOrder()).filter((n) => n !== rel);
   await writePaperOrder(order);
-  console.log(`[delete] ${base}`);
-  return sendJson(res, 200, { ok: true, name: base });
+  console.log(`[delete] ${rel}`);
+  return sendJson(res, 200, { ok: true, name: rel });
+}
+
+/* ----------------------------------------------------------- 文件夹管理 */
+
+async function handleCreateFolder(req, res, url) {
+  const name = sanitizeFolderName(url.searchParams.get('name'));
+  const parent = normalizeRel(url.searchParams.get('parent')); // '' = 根
+  if (!name) return sendJson(res, 400, { error: { message: '文件夹名不合法' } });
+  const absParent = parent ? safeJoin(PAPERS_DIR, parent) : PAPERS_DIR;
+  if (!absParent || absParent === PAPERS_DIR && parent) {
+    return sendJson(res, 400, { error: { message: '父文件夹路径不合法' } });
+  }
+  try {
+    const st = await fsp.stat(absParent);
+    if (!st.isDirectory()) return sendJson(res, 400, { error: { message: '父文件夹不存在' } });
+  } catch {
+    return sendJson(res, 404, { error: { message: '父文件夹不存在' } });
+  }
+  try {
+    const final = await uniqueFolderName(absParent, name);
+    await fsp.mkdir(path.join(absParent, final));
+    const rel = parent ? `${parent}/${final}` : final;
+    console.log(`[mkdir] ${rel}`);
+    return sendJson(res, 200, { ok: true, name: final, path: rel });
+  } catch (e) {
+    sec.diag(`创建文件夹失败: ${e && e.message}`);
+    return sendJson(res, 500, { error: { message: '创建文件夹失败：请检查磁盘空间与目录权限' } });
+  }
+}
+
+async function handleRenameFolder(req, res, url) {
+  const raw = await readJsonBodyOrReq(req, res, sec.BODY_LIMITS.papers);
+  if (raw === null) return undefined;
+  const from = normalizeRel(raw.from);
+  const to = sanitizeFolderName(raw.to);
+  if (!from || !to) return sendJson(res, 400, { error: { message: '参数不合法' } });
+  const absFrom = safeJoin(PAPERS_DIR, from);
+  if (!absFrom || absFrom === PAPERS_DIR) return sendJson(res, 400, { error: { message: '非法路径' } });
+  try {
+    const st = await fsp.stat(absFrom);
+    if (!st.isDirectory()) return sendJson(res, 400, { error: { message: '目标不是文件夹' } });
+  } catch {
+    return sendJson(res, 404, { error: { message: '文件夹不存在' } });
+  }
+  const absTo = path.join(path.dirname(absFrom), to);
+  try {
+    await fsp.stat(absTo);
+    return sendJson(res, 409, { error: { message: `已存在同名文件夹「${to}」` } });
+  } catch { /* 无冲突，可用 */ }
+  try {
+    await fsp.rename(absFrom, absTo);
+  } catch (e) {
+    sec.diag(`重命名文件夹失败: ${e && e.message}`);
+    return sendJson(res, 500, { error: { message: '重命名失败：文件夹可能正被其它程序占用' } });
+  }
+  const idx = from.lastIndexOf('/');
+  const toRel = idx >= 0 ? `${from.slice(0, idx)}/${to}` : to;
+  const order = (await readPaperOrder()).map((n) => {
+    if (n === from) return toRel;
+    if (n.startsWith(`${from}/`)) return `${toRel}${n.slice(from.length)}`;
+    return n;
+  });
+  await writePaperOrder(order);
+  console.log(`[rename] ${from} -> ${toRel}`);
+  return sendJson(res, 200, { ok: true, from, to: toRel });
+}
+
+async function handleDeleteFolder(req, res, url) {
+  const rel = normalizeRel(url.searchParams.get('path'));
+  const mode = url.searchParams.get('mode') === 'recursive' ? 'recursive' : 'to-root';
+  if (!rel) return sendJson(res, 400, { error: { message: '缺少 path' } });
+  const abs = safeJoin(PAPERS_DIR, rel);
+  if (!abs || abs === PAPERS_DIR) return sendJson(res, 400, { error: { message: '非法路径' } });
+  try {
+    const st = await fsp.stat(abs);
+    if (!st.isDirectory()) return sendJson(res, 400, { error: { message: '目标不是文件夹' } });
+  } catch {
+    return sendJson(res, 404, { error: { message: '文件夹不存在' } });
+  }
+  // 收集该文件夹树下的所有 PDF
+  const pdfs = [];
+  async function collect(dirAbs, dirRel) {
+    let entries = [];
+    try {
+      entries = await fsp.readdir(dirAbs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (/[\\/\u0000]/.test(e.name)) continue;
+      const childRel = dirRel ? `${dirRel}/${e.name}` : e.name;
+      const childAbs = path.join(dirAbs, e.name);
+      if (e.isDirectory()) await collect(childAbs, childRel);
+      else if (e.isFile() && /\.pdf$/i.test(e.name)) pdfs.push({ rel: childRel, abs: childAbs });
+    }
+  }
+  await collect(abs, rel);
+  try {
+    if (mode === 'to-root') {
+      // PDF 移到根（同名自动加后缀），再删空文件夹树
+      for (const p of pdfs) {
+        const final = await uniquePdfNameInDir(PAPERS_DIR, path.basename(p.abs));
+        await fsp.rename(p.abs, path.join(PAPERS_DIR, final)).catch(() => {});
+      }
+    } else {
+      // recursive：连同 PDF 一起删（data/ 里按 docId 的笔记/会话/进度保留）
+      for (const p of pdfs) {
+        await fsp.unlink(p.abs).catch(() => {});
+      }
+    }
+    await fsp.rm(abs, { recursive: true, force: true });
+  } catch (e) {
+    sec.diag(`删除文件夹失败: ${e && e.message}`);
+    return sendJson(res, 500, { error: { message: '删除文件夹失败：文件夹可能正被其它程序占用' } });
+  }
+  const next = (await readPaperOrder()).filter((n) => n !== rel && !n.startsWith(`${rel}/`));
+  await writePaperOrder(next);
+  console.log(`[rmdir] ${rel} mode=${mode} pdfs=${pdfs.length}`);
+  return sendJson(res, 200, { ok: true, path: rel, mode, moved: pdfs.length });
+}
+
+async function handleMove(req, res, url) {
+  const raw = await readJsonBodyOrReq(req, res, sec.BODY_LIMITS.papers);
+  if (raw === null) return undefined;
+  const from = normalizeRel(raw.from);
+  const to = normalizeRel(raw.to); // '' = 根
+  if (!from) return sendJson(res, 400, { error: { message: '缺少 from' } });
+  const absFrom = safeJoin(PAPERS_DIR, from);
+  if (!absFrom) return sendJson(res, 400, { error: { message: '非法路径' } });
+  let st;
+  try {
+    st = await fsp.stat(absFrom);
+  } catch {
+    return sendJson(res, 404, { error: { message: '源不存在（可能已被删除）' } });
+  }
+  const isFolder = st.isDirectory();
+
+  let absToDir = PAPERS_DIR;
+  if (to) {
+    const absTo = safeJoin(PAPERS_DIR, to);
+    if (!absTo) return sendJson(res, 400, { error: { message: '非法目标路径' } });
+    try {
+      const tst = await fsp.stat(absTo);
+      if (!tst.isDirectory()) return sendJson(res, 400, { error: { message: '目标不是文件夹' } });
+    } catch {
+      return sendJson(res, 404, { error: { message: '目标文件夹不存在' } });
+    }
+    absToDir = absTo;
+  }
+  // 文件夹移动禁区：不能移到自己或自己的子孙目录里
+  if (isFolder && (to === from || to.startsWith(`${from}/`))) {
+    return sendJson(res, 400, { error: { message: '不能把文件夹移到自己的子目录里' } });
+  }
+
+  // 移到自身所在目录：无操作（排序交给 /api/papers；绝不能走「同名同 size 去重」把源文件删了）
+  if (absToDir === path.dirname(absFrom)) {
+    return sendJson(res, 200, { ok: true, from, to, name: path.basename(absFrom), moved: false });
+  }
+
+  let finalName = path.basename(absFrom);
+  const targetAbs = path.join(absToDir, finalName);
+  try {
+    const tst = await fsp.stat(targetAbs);
+    if (isFolder) {
+      finalName = await uniqueFolderName(absToDir, finalName);
+    } else if (tst.size === st.size) {
+      // 目标已有同一份文件（同名同 size）→ 直接删源，等效移动完成
+      await fsp.unlink(absFrom);
+      const newRel = to ? `${to}/${finalName}` : finalName;
+      const order = (await readPaperOrder()).filter((n) => n !== from);
+      await writePaperOrder(order);
+      console.log(`[move] ${from} -> ${newRel} (去重)`);
+      return sendJson(res, 200, { ok: true, from, to: newRel, name: finalName, moved: true });
+    } else {
+      finalName = await uniquePdfNameInDir(absToDir, finalName);
+    }
+  } catch { /* 目标无同名文件，直接用原名 */ }
+
+  const absNew = path.join(absToDir, finalName);
+  try {
+    await fsp.rename(absFrom, absNew);
+  } catch (e) {
+    sec.diag(`移动失败: ${e && e.message}`);
+    return sendJson(res, 500, { error: { message: '移动失败：文件可能正被其它程序占用' } });
+  }
+  // order 前缀替换 + 去重
+  const newRel = to ? `${to}/${finalName}` : finalName;
+  const order = await readPaperOrder();
+  const next = [];
+  const seen = new Set();
+  for (const n of order) {
+    let v = n;
+    if (n === from) v = newRel;
+    else if (isFolder && n.startsWith(`${from}/`)) v = `${newRel}${n.slice(from.length)}`;
+    if (!seen.has(v)) {
+      seen.add(v);
+      next.push(v);
+    }
+  }
+  await writePaperOrder(next);
+  console.log(`[move] ${from} -> ${newRel}`);
+  return sendJson(res, 200, { ok: true, from, to: newRel, name: finalName, moved: true });
 }
 
 function streamFile(res, absPath, opts) {
@@ -1239,20 +1577,26 @@ async function handleImportPdf(res, url) {
 
   const wanted = sanitizePdfName(url.searchParams.get('name') || guessPdfName(resp.url || got.finalUrl || target, resp.headers.get('content-disposition')));
   const name = sanitizePdfName(wanted) || 'imported.pdf';
+  const folderRel = normalizeRel(url.searchParams.get('folder'));
+  const absDir = await resolveTargetDir(folderRel);
+  if (!absDir) return sendJson(res, 400, { error: { message: '目标文件夹不存在或不可写' } });
 
   try {
-    const final = await uniquePdfName(name, body.length);
-    await fsp.writeFile(path.join(PAPERS_DIR, final), body);
-    const st = await fsp.stat(path.join(PAPERS_DIR, final));
+    const final = await uniquePdfNameInDir(absDir, name, body.length);
+    await fsp.writeFile(path.join(absDir, final), body);
+    const st = await fsp.stat(path.join(absDir, final));
+    const rel = folderRel ? `${folderRel}/${final}` : final;
     // 日志里不打印完整 URL 的查询串（可能带 token / 签名），只留主机 + 文件名
-    console.log(`[import] ${final} (${Math.round(body.length / 1024)}KB) <- ${hostLabel(got.finalUrl || target)}`);
+    console.log(`[import] ${rel} (${Math.round(body.length / 1024)}KB) <- ${hostLabel(got.finalUrl || target)}`);
     return sendJson(res, 200, {
       ok: true,
       name: final,
+      folder: folderRel,
+      path: rel,
       size: st.size,
       mtime: st.mtimeMs,
       docId: docIdOf(final),
-      url: `/api/pdf?name=${encodeURIComponent(final)}`,
+      url: `/api/pdf?path=${encodeURIComponent(rel)}`,
     });
   } catch (e) {
     sec.diag(`写入 papers/ 失败: ${e && e.message}`);
@@ -1284,26 +1628,17 @@ function sanitizePdfName(name) {
   return `${stem || 'uploaded'}${ext}`;
 }
 
-/** 同名同大小 → 认为已经导入过，直接复用；否则加 (2)(3) 后缀 */
+/** 同名同大小 → 认为已经导入过，直接复用；否则加 (2)(3) 后缀（根目录版，兼容旧调用） */
 async function uniquePdfName(base, size) {
-  const ext = path.extname(base);
-  const stem = base.slice(0, base.length - ext.length);
-  for (let i = 1; i < 200; i++) {
-    const candidate = i === 1 ? base : `${stem} (${i})${ext}`;
-    const abs = path.join(PAPERS_DIR, candidate);
-    try {
-      const st = await fsp.stat(abs);
-      if (st.size === size) return candidate;      // 同一份文件，不重复存
-    } catch {
-      return candidate;                            // 不存在，就用这个名字
-    }
-  }
-  return `${stem}-${Date.now()}${ext}`;
+  return uniquePdfNameInDir(PAPERS_DIR, base, size);
 }
 
 async function handleUpload(req, res, url) {
   const name = sanitizePdfName(url.searchParams.get('name'));
   if (!name) return sendJson(res, 400, { error: { message: '文件名不合法' } });
+  const folderRel = normalizeRel(url.searchParams.get('folder'));
+  const absDir = await resolveTargetDir(folderRel);
+  if (!absDir) return sendJson(res, 400, { error: { message: '目标文件夹不存在或不可写' } });
 
   let body;
   try {
@@ -1320,17 +1655,20 @@ async function handleUpload(req, res, url) {
   }
 
   try {
-    const final = await uniquePdfName(name, body.length);
-    await fsp.writeFile(path.join(PAPERS_DIR, final), body);
-    const st = await fsp.stat(path.join(PAPERS_DIR, final));
-    console.log(`[upload] ${final} (${Math.round(body.length / 1024)}KB)`);
+    const final = await uniquePdfNameInDir(absDir, name, body.length);
+    await fsp.writeFile(path.join(absDir, final), body);
+    const st = await fsp.stat(path.join(absDir, final));
+    const rel = folderRel ? `${folderRel}/${final}` : final;
+    console.log(`[upload] ${rel} (${Math.round(body.length / 1024)}KB)`);
     return sendJson(res, 200, {
       ok: true,
       name: final,
+      folder: folderRel,
+      path: rel,
       size: st.size,
       mtime: st.mtimeMs,
       docId: docIdOf(final),
-      url: `/api/pdf?name=${encodeURIComponent(final)}`,
+      url: `/api/pdf?path=${encodeURIComponent(rel)}`,
     });
   } catch (e) {
     // 审计 §P2：磁盘错误里带完整路径，只进本地诊断日志
@@ -1362,10 +1700,10 @@ async function handle(req, res) {
     return handleChat(req, res);
   }
 
-  // ---- 论文目录 / 排序 / 删除
+  // ---- 论文目录 / 文件夹 / 排序 / 删除 / 移动
   if (pathname === '/api/papers') {
     if (req.method === 'GET') {
-      const body = { papers: await listPapers() };
+      const body = await listPapers();
       // 审计 §P2：默认不返回本机绝对路径；只有显式开启诊断才给
       if (DIAGNOSTICS) body.dir = PAPERS_DIR;
       return sendJson(res, 200, body);
@@ -1388,6 +1726,20 @@ async function handle(req, res) {
     return send(res, 405, 'Method Not Allowed');
   }
 
+  // ---- 文件夹管理：POST 新建 / PATCH 重命名 / DELETE 删除
+  if (pathname === '/api/folders') {
+    if (req.method === 'POST') return handleCreateFolder(req, res, url);
+    if (req.method === 'PATCH') return handleRenameFolder(req, res, url);
+    if (req.method === 'DELETE') return handleDeleteFolder(req, res, url);
+    return send(res, 405, 'Method Not Allowed');
+  }
+
+  // ---- 移动 PDF / 文件夹（含拖出拖入）
+  if (pathname === '/api/move') {
+    if (req.method !== 'POST') return send(res, 405, 'Method Not Allowed');
+    return handleMove(req, res, url);
+  }
+
   /**
    * GET /api/open-url?url=<http(s) 链接>
    * 页面里的外链统一走这里交给系统默认浏览器。
@@ -1405,7 +1757,9 @@ async function handle(req, res) {
   }
 
   if (pathname === '/api/pdf') {
-    const abs = safeJoin(PAPERS_DIR, url.searchParams.get('name'));
+    const hasPath = url.searchParams.has('path');
+    const rel = normalizeRel(hasPath ? url.searchParams.get('path') : url.searchParams.get('name'));
+    const abs = await resolvePdfPath(rel, !hasPath);
     if (!abs) return send(res, 400, '非法文件名');
     return servePdf(req, res, abs);
   }
