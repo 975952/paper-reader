@@ -1,14 +1,3 @@
-/**
- * 会话条（多对话）版式与显示条件
- *   node test/session-bar.mjs
- *
- * 用户口径（2026-10）：「问答和翻译都有那个多对话的标」—— 要修的就是这块：
- *   ① 会话条**只在问答块开着时**出现（会话 = 一篇论文的对话，跟译文无关）
- *   ② 去掉不承载信息的绿色圆点，换成一个细线「会话」图标
- *   ③ 不再是一个占满整行的带边框块，而是右上角一个很轻的小胶囊
- *      （文字用次级灰，悬停/展开才变强调色），面板顶部不再压一条绿边
- *   ④ 胶囊与菜单都不跑出右栏、不盖住输入框；菜单里能看出哪条会话是当前
- */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -206,10 +195,6 @@ try {
       js: window.__ctx.SPLIT_W,
     };
   });
-  /* 滚动条加宽（2026-10 用户口径：「PDF 上下滚动的那个栏稍微做宽一点」）。
-     无头 Chrome 用**覆盖式**滚动条（不占布局宽度，offsetWidth-clientWidth 恒为 0），
-     所以这里验的是**伪元素的计算样式** —— 它证明规则确实命中了那个滚动容器。
-     要验的主容器：PDF 正文区 .viewer、右栏结果区 #aiArea（.ai）。 */
   const sb = await page.evaluate(() => {
     const read = (sel) => {
       const el = document.querySelector(sel);

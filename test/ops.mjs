@@ -1,13 +1,3 @@
-/**
- * 「读懂论文」深入阅读（不进菜单）验收：
- *   · ops.js 只剩 evidence / limits 两个操作，旧四件套彻底取不到；
- *   · 顶栏菜单不再出现它们（由教学回答末尾的按钮触发）；
- *   · 点「先给我讲明白」结果里的「看实验够不够」会真的跑 evidence 并缓存。
- *
- *   BASE=http://127.0.0.1:8787 node test/ops.mjs
- *
- * /api/chat 用桩：模型请求由本地桩返回，不读取或消耗真实 API Key。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 

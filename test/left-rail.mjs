@@ -1,25 +1,3 @@
-/**
- * 左栏「一次只开一个 / 活动栏选中态 / 点选中的收成活动栏」回归套件。
- *
- *   cd test && node left-rail.mjs
- *
- * 用户口径（2026-10-03，原话）：
- *   「左侧的栏收起和打开的逻辑不对，需要优化，左侧应该也做成一次只能打开一个。
- *     而且再次点击选中的就直接收起收成小的侧边栏。
- *     然后点击侧边栏应该出来的就是点击的哪一个。」
- *
- * 拆成可判定的规则：
- *   R1 左栏**同时只能显示一块**（开目录 → 文件自动收起；四块两两组合都要成立）
- *   R2 活动栏（40px，body.no-left 时出现）里的图标，点哪个就展开**哪一个**
- *   R3 点「当前正显示的那一块」的图标 → 整条左栏收成活动栏，且**块本身不隐藏**
- *     （收起来是为了腾地方，不是把内容关掉；再点同一个图标要原样回来）
- *   R4 活动栏里被选中的图标有可见的选中态，且只有**一个**（aria-current / .active）
- *   R5 选中项跟着「此刻真正显示的是哪一块」走 —— 显示谁就高亮谁，界面不许骗人
- *   R6 收起 → 展开 回来的是同一块（不会被换成默认的文件块）
- *   R7 刷新之后仍然记得上次选的是哪一块（reader.ui.leftActive）
- *   R8 一次只开一个这条规则不能把 p.collapsed（块内部折叠）一起改掉
- *   R9 全程零 JS 报错
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -158,13 +136,6 @@ const PROBE = () => {
     /** 点活动栏里的某个图标（走真实 click） */
     clickRail(key) { document.querySelector(`#railLeft .rail-btn[data-rail="${key}"]`).click(); },
     /** 点左栏底部的图标坞（左栏四块的另一个入口） */
-    /**
-     * 2026-10：左栏底部那个图标坞（`#panelDock`）已按用户要求删除 ——
-     * 「A 只留最左边那条窄活动栏」+「那几个点不动……直接删掉就行」。
-     * 所以这里改成点**最左边活动栏**上对应的图标（它现在是左栏唯一的面板入口）。
-     * 注意：点已经开着的那一块是 **no-op**（用户口径「点击已开的图标……不做反应」），
-     * 所以「切到另一块」必须点的是**没开**的那一个。
-     */
     clickDock(id) {
       const name = { files: 'files', outline: 'outline', notes: 'notes', relations: 'rel' }[id] || id;
       document.querySelector(`#railLeft .rail-btn[data-rail="${name}"]`).click();
@@ -180,10 +151,6 @@ try {
   if (!browserPath) throw new Error('找不到 Edge / Chrome');
   server = spawnLogged(process.execPath, ['server.js'], {
     cwd: ROOT,
-    // 2026-10 安全加固：所有 /api/* 都要令牌（只有 /api/health 豁免）。
-    // 本套件自己 spawn 隔离服务并轮询 /api/state 判就绪，所以必须**显式**给子进程
-    // 关掉强制校验（审计允许测试显式注入，不允许生产留后门）。
-    // PRT_DIAGNOSTICS=1 是为了让 /api/papers 返回绝对 dir，喂给 _env 的隔离闸门。
     env: {
       ...process.env,
       PORT: String(PORT), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1',
@@ -276,26 +243,6 @@ try {
     await page.evaluate(() => window.__L.clickRail('rel'));
     await sleep(450);
     const collapsed = await page.evaluate(() => window.__L.snapshot());
-    /**
-     * R3a：再点同一块 = 整条左栏收起来。
-     *
-     * ⚠️ 2026-10-04 契约微调（用户口径「翻译的内容应该是要记录在右侧那个里面的，不管打不打开」）：
-     * 收起来**不等于宽度必须为 0** —— 只要这一侧还有可见面板，JS 会保底给它 ≥60px
-     * （`body.side-squeezed`，防止窄窗下整条侧栏消失）。所以判据改成
-     * 「左栏被压到最小（≤80px）且要么活动栏出现、要么栏本身只剩一条」，
-     * 关键是「不能还是展开态（>150px）」。
-     */
-    /**
-     * ⚠️ **契约已反转**（2026-10 用户口径，用户原话：
-     *   「点击已开的图标也不会关闭侧栏，**而是不做反应**」）。
-     *
-     * 旧契约（上面 R3a 原本写的）是「再点同一个 → 收成活动栏」。
-     * 新契约是「再点同一块什么都不该发生」：左栏仍然展开、那一块仍然显示。
-     * 收起左栏改成**另一个明确动作** —— 顶栏的「收起左栏」按钮，或拖动分隔条。
-     *
-     * 所以这两条改成验新语义（不是删断言）：no-op + 块没被隐藏。
-     * 「收成活动栏」这条路本身仍然存在，只是不再挂在「点已开图标」上。
-     */
     check('R3a 再点同一块是 no-op（新契约：不再收成活动栏）',
       collapsed.leftW > 100 && collapsed.shown.includes('relations'),
       `noLeft=${collapsed.noLeft} leftW=${collapsed.leftW} shown=[${collapsed.shown.join(',')}]`);

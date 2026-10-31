@@ -1,6 +1,6 @@
 //! 原生窗口（tao + wry/WebView2）。
 //!
-//! 窗口**无边框**：系统那行标题栏（最小化 / 关闭按钮那一行）由页面自己画，
+//! 窗口无边框：系统那行标题栏（最小化 / 关闭按钮那一行）由页面自己画，
 //! 几何与悬停反馈 1:1 照 VS Code 的自定义标题栏（见 public/index.html 的
 //! `.window-controls` 与 public/js/app.js 的 `initWindowChrome()`）。
 //! 页面上的按钮 / 拖动 / 八向缩放都通过 wry 的 IPC 发到这里，由 tao 执行系统动作。
@@ -65,21 +65,6 @@ fn parse_action(msg: &str) -> Option<WindowAction> {
     }
 }
 
-/// IPC 只接受**应用自己页面**发来的窗口动作。
-///
-/// 背景（外部评审指出的 P0）：这两个动作集直接落到操作系统 —— `close` 会退出进程，
-/// `minimize`/`maximize` 会改窗口状态。而 wry 的 `with_ipc_handler` 默认对**任何**
-/// 能在 WebView 里执行脚本的页面开放。应用自己的页面本来就在同一信任域，但
-/// `data:` / `blob:` / `about:` 这类导航页面、以及将来任何漏网的同 WebView 文档，
-/// 都不该有资格触发系统动作。所以按「同源才放行」收紧一格 —— 代价是零：
-/// 自家页面恒满足。
-///
-/// 判据（任一不满足即拒绝）：
-///   ① 来源非空 —— wry 把「发消息那一帧的 URL」放在 `Request.uri()`；拿不到就不放行，
-///      宁可不响应也不猜（**注意**：若 wry 某次不再填这个字段，表现为按钮失效，
-///      所以必须有「合法路径仍可用」的端到端回归，见 test/artifacts/phase1/shell-dom.mjs）
-///   ② 必须是 http(s) —— `data:` / `blob:` / `about:` / `file:` 一律拒
-///   ③ 必须与应用同源（沿用 `is_local_target` 的口径：origin 本身、或 origin + `/ ? #`）
 fn ipc_sender_allowed(origin: &str, sender: &str) -> bool {
     if sender.is_empty() || origin.is_empty() { return false; }
     let lower = sender.to_ascii_lowercase();
@@ -234,10 +219,6 @@ pub fn run(url: String) -> ! {
         .with_window_icon(app_icon(64))
         .with_inner_size(LogicalSize::new(w, h))
         .with_min_inner_size(LogicalSize::new(MIN_W, MIN_H))
-        /* 无边框：系统那行标题栏（最小化 / 关闭按钮那一行）不要了，改由页面画。
-           用户口径 2026-10-04：「把最上面那一栏做成应用内部的，完全模仿 VS Code」。
-           随之而来的三件事都在页面侧补齐（见 js/app.js 的 initWindowChrome()）：
-          拖动（tao drag_window）、八向缩放（tao drag_resize_window）、三个按钮（IPC）。 */
         .with_decorations(false)
         .with_resizable(true)
         .with_maximizable(true)
@@ -257,25 +238,6 @@ pub fn run(url: String) -> ! {
 
     // 页面里的外链交给系统浏览器；面板 URL 由前端应用内卡片处理，不创建新的顶层窗口。
     let webview = decorate_builder(
-        /* 缩放相关的取舍（2026-10-08 读 wry 0.55.1 源码 + WebView2 文档后重写；旧注释「Wry
-           disables WebView2 pinch gestures by default」是错的，会误导下一个人）：
-
-           `with_hotkeys_zoom(b)` 在 Windows 上只映射两个 WebView2 开关
-           （wry-0.55.1/src/webview2/mod.rs:572 与 :593）：
-             · SetIsZoomControlEnabled(b)
-             · SetIsPinchZoomEnabled(b)   ← 触摸屏双指捏合 = 整页 "Page Scale" 缩放
-           两者在 wry 里默认都是关的（`zoom_hotkeys_enabled: false`）。
-           这里传 true，是为了**让触摸板捏合能到达页面**：Windows 把触摸板 pinch 合成成
-           带 CONTROL 的 WM_MOUSEWHEEL，Chromium 再以 `wheel`(ctrlKey=true) 投给 JS
-           （见 public/js/app.js 的 pinch 分支）。
-
-           代价是触摸屏捏合同时被打开成整页缩放 —— 但那个**不在这里关**：
-           wry 把两个开关绑死，传 false 会连 IsZoomControlEnabled 一起关，
-           而「关掉之后触摸板 ctrl+wheel 还投不投递给 JS」没有实测依据，
-           赌错就是触摸板捏合直接失效。
-           所以改成前端拿回手势：`html { touch-action: pan-x pan-y }`
-           + public/js/pdfview.js 的 `_bindTouchZoom()`，把触摸屏捏合变成 PDF 缩放。
-           两条路径（触摸板 ctrl+wheel / 触摸屏双指）于是都只缩放 PDF，不缩放界面。 */
         WebViewBuilder::new_with_web_context(&mut web_context)
             .with_hotkeys_zoom(true)
             .with_url(url.clone()),
@@ -378,13 +340,6 @@ pub fn run(url: String) -> ! {
 
 /* ------------------------------------------------------------ 单元测试 */
 
-/**
- * 这两组用例是 P0（IPC 来源限制）的**可复现证据**：桌面行为没法在当前环境自动化，
- * 但"谁能触发窗口动作"这条判据是纯函数，必须钉死 —— 判错一边就是安全洞
- * （放行了外站/非 http 页面），判错另一边就是功能坏（自家页面被拒 → 三个按钮全失效）。
- *
- * 跑法：`cd desktop && cargo test`（不依赖 GUI，也不需要 WebView2）。
- */
 #[cfg(test)]
 mod tests {
     use super::*;

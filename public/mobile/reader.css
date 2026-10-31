@@ -1,22 +1,3 @@
-/* ══════════════════════════════════════════════════════════════════════════
-   手机版阅读器样式（public/mobile/reader.css）
-   ══════════════════════════════════════════════════════════════════════════
-
-   设计口径（用户 2026-10-03）：
-     「阅读的时候要只显示 pdf 本身。pdf 字体如果能放大就很好，图片的大小不变。
-       图片长按可以单独放大查看。然后也是长按选词。然后界面就不要做伸缩了，
-       字体在设置调节。」
-
-   三条落地规则：
-     ① **阅读态只有 PDF**：顶栏和底栏都是覆盖层（fixed），不占布局高度，
-        正文区域永远是整屏 —— 所以不存在「面板伸缩」这件事。
-     ② **只有字号可调**（设置里的「正文字号」）：改的是 PDF 文本层的字号
-        （--m-text-boost），canvas 位图不变，所以图片/表格/公式的尺寸一个像素都不动。
-     ③ 所有尺寸用视口单位与固定值，不做断点伸缩；窄屏上按钮变小靠 flex 收缩，
-        不靠媒体查询改布局。
-
-   颜色全部走 style.css 里的主题 token（米白/暖灰/橄榄绿），这里不重复定义色板。
-   ══════════════════════════════════════════════════════════════════════════ */
 
 :root {
   /* PDF 文本层的字号倍率：由设置面板写。canvas 不受它影响（图片尺寸不变）。 */
@@ -196,19 +177,6 @@ html, body.m-body {
 }
 .hidden { display: none !important; }
 
-/* ── PDF 文本层：只放大文字的字形，不动 canvas 位图 ──
-   用户口径：「pdf 字体如果能放大就很好，图片的大小不变。」
-   实现：style.css 里每个 span 的字号是
-       font-size: calc(var(--text-scale-factor) * var(--font-height))
-   其中 --font-height 是 pdf.js 内联写在每个 span 上的。手机版只把 **font-size 再乘一个倍率**：
-     · 字形变大 → 更好读；行内 letter-spacing 由 pdfview.js 的 _normalizeTextScale 保留，
-       所以文字之间的相对位置不变；
-     · canvas 位图一个像素都不动 → 图片 / 表格 / 公式**尺寸完全不变**（这正是要的效果）。
-   为什么不改 --scale-factor / --total-scale-factor：那两个会同时改变文本层里每个 span 的
-   定位，文字会整体跑位、和底图错开。只改字形大小不会动定位。
-
-   代价（诚实写在设置面板里）：字号调大后，同一行文字会比原来宽一些，密集排版的 PDF 上
-   相邻文字可能轻微重叠。默认 100% 时与桌面版完全一致。 */
 .m-viewer .textLayer > :not(.markedContent),
 .m-viewer .textLayer .markedContent span:not(.markedContent) {
   font-size: calc(var(--text-scale-factor) * var(--font-height) * var(--m-text-boost));
@@ -226,7 +194,7 @@ html, body.m-body {
 .m-viewer .hl-layer { pointer-events: none; }
 
 /* ── 图片查看器：长按图片（或点放大镜）后全屏看这一块 ──
-   说明：PDF 里的图是画在 canvas 位图里的，**不是 DOM 图片**，所以没有 <img> 可以点。
+   说明：PDF 里的图是画在 canvas 位图里的，不是 DOM 图片，所以没有 <img> 可以点。
    做法：把长按位置那一块从 canvas 上裁出来（viewer.captureRegion），放进这个查看器里，
    可以双指缩放/拖动。这样用户拿到的是「这一块图放大了看」。 */
 .m-imgview {

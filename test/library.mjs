@@ -1,19 +1,3 @@
-/**
- * 书架：批量导入 / 拖动排序 / 删除（2026-10 用户口径：
- * 「要有一次性导入或者拖入多个 pdf 文件的功能，而且要能够移动 pdf 的顺序和删除 pdf 的功能」）。
- *
- *   BASE=http://127.0.0.1:8971 node test/library.mjs
- *
- * 覆盖：
- *   L1 文件选择器支持多选（multiple），每行有抓手与删除按钮
- *   L2 一次选多个 PDF → 全部落盘并出现在列表里，且不会自动打开其中一篇
- *   L3 删除按钮：确认后文件真的从 papers/ 与列表里消失，正在读的那篇删除后回首页
- *   L4 拖拽排序：DOM 顺序变化 + POST /api/papers 持久化
- *   L5 刷新后顺序仍然生效（data/papers-order.json 生效）
- *   L6 接口边界：非法 order → 400，重复删除 → 404
- *
- * 所有写入只发生在隔离沙箱（test/artifacts/）—— 由 _env.mjs 的 assertIsolatedDataDir 兜底。
- */
 import fs from 'node:fs';
 import path from 'node:path';
 import puppeteer from 'puppeteer-core';

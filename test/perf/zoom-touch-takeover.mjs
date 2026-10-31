@@ -1,25 +1,3 @@
-/**
- * 触摸屏捏合「谁拿手势」对照实验（调研工具，不是断言套件）。
- *
- *   node test/perf/zoom-touch-takeover.mjs
- *
- * 背景：用户反馈「触摸屏缩放不丝滑」。实测发现触摸屏两指捏合在 Chromium 里
- * **不产生** `wheel + ctrlKey`（那是触摸板的路径），而是被浏览器当成**整页 Page Scale 缩放**：
- * `visualViewport.scale` 从 1 跳到 4，JS 一次 zoomAt 都收不到。
- *
- * 本脚本把 5 种「拿回手势」的写法放在同一台机器上跑一遍，回答两个问题：
- *   ① 哪种写法能挡住浏览器原生整页缩放？
- *   ② 挡住之后，单指拖动还能不能是原生滚动？
- *
- * 结论（2026-10-08 实测）：
- *   auto + passive            → 整页缩放 1→4（就是用户看到的那个 bug）
- *   auto + preventDefault     → 不整页缩放，单指滚动正常
- *   pan-x pan-y + passive     → 不整页缩放，单指滚动正常，touchmove 照旧送达 ✅
- *   pan-x pan-y + preventDef  → 同上（产品用的就是这条：CSS 兜底 + 事件兜底）
- *   none + preventDefault     → 不整页缩放，但单指滚动也没了 ❌
- * 所以 style.css 用 `html { touch-action: pan-x pan-y }`，
- * pdfview.js 的 _bindTouchZoom() 再叠一层非 passive 的 preventDefault。
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';

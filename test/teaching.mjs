@@ -1,12 +1,3 @@
-/**
- * 「读懂论文」验收：顶栏菜单 4 项教学能力 + 后台记忆 + prt 隐藏块 + 页码跳转 +
- * 教学进度续讲 + 图表对象选择 + 深入阅读按钮。
- *
- *   BASE=http://127.0.0.1:8787 node test/teaching.mjs
- *
- * 服务用桩（`/api/chat` 由本套件拦截返回），不读真实 Key、不花钱。
- * 后台记忆另由 profile.mjs 验收；本套件验证教学与记忆不互相干扰。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 

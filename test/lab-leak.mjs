@@ -1,17 +1,3 @@
-/**
- * 受控实验：给**一个** span 加不同大小的 padding，
- * 看 Range.getClientRects() 里属于它的矩形会不会跟着变大（会不会污染画出来的方块）。
- *
- *   BASE=http://127.0.0.1:8787 node test/lab-leak.mjs
- *
- * ⚠️ 这不是验收套件（没有断言、不改文件），是 `pdfview.js` 里
- * `_tileTextHitBoxes()` / `HIT_PAD_MAX` 那条**硬约束**的证据来源：
- *   · 横向 padding 一加，跨 span 的选区内该 span 会被浏览器整盒返回
- *     （300/953 边框盒，而不是 52/434 行盒）→ 选中方块横贯整页；
- *   · 纵向 padding 在 158px 这个量级上也会开始被整盒返回。
- * 改文本层命中逻辑之前请先跑一遍，别凭感觉调 padding。
- * 需要先起服务：`PRT_PAPERS_DIR=... node server.js`（见 AGENTS.md 的测试说明）。
- */
 import puppeteer from 'puppeteer-core';
 const BASE = process.env.BASE || 'http://127.0.0.1:8787';
 const CHROME = 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe';

@@ -39,7 +39,7 @@ pub fn health(rq: Request, ctx: &Ctx) {
 /* --------------------------------------------------------------- papers */
 
 /// 用户手工排好的书架顺序（与 server.js 的 `papers-order.json` 同一份数据）。
-/// 顺序只写 data/，**不改 papers/ 里的文件名** —— 文件名是 docId / 笔记 / 会话的主键。
+/// 顺序只写 data/，不改 papers/ 里的文件名 —— 文件名是 docId / 笔记 / 会话的主键。
 fn paper_order() -> Vec<String> {
     let v = store::read_json("papers-order.json", json!({ "order": [] }));
     match v.get("order").and_then(|x| x.as_array()) {
@@ -138,7 +138,7 @@ fn papers_list(rq: Request) {
         }
     }
 
-    // 排序规则与 server.js 一致：**没进 order 的排最前（mtime 倒序）**，
+    // 排序规则与 server.js 一致：没进 order 的排最前（mtime 倒序），
     // 进过 order 的按数组顺序排 —— 新导入的 PDF 永远出现在最上面。
     let order = paper_order();
     let rank: std::collections::HashMap<&str, usize> =
@@ -461,7 +461,7 @@ pub fn config(rq: Request, method: &Method, body: &[u8]) {
                 ));
             }
             /*
-             * 超长字段 → 400，**绝不截断保存**（审计 §验收：「超限返回 413/400，
+             * 超长字段 → 400，绝不截断保存（审计 §验收：「超限返回 413/400，
              * 不截断后静默保存」）。从前一个 5000 字的 model 会被悄悄存成 256 字、
              * 接口还回 200 —— 用户以为保存成功了，设置其实已经被改坏。
              */
@@ -544,13 +544,6 @@ pub fn state(rq: Request, method: &Method, body: &[u8]) {
 
 /* ---------------------------------------------------------------- 学习档案 */
 
-/**
- * `/api/profile` —— 学习档案（全局一份，不属于任何论文 / 会话）。
- *
- * 用户口径（2026-10）：「知识库写入的时候应该要带有当时的时间，现在的时间在后续
- * 过程中要交给模型获得输出」。时间戳由**前端**在写入时生成，这里只校验格式、不改写；
- * 校验失败返回 400 且**不落盘**，旧档案原样保留（与 server.js 一致）。
- */
 pub fn profile(rq: Request, method: &Method, body: &[u8]) {
     static PROFILE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     match method {
@@ -641,13 +634,6 @@ fn session_file_for(key: &str, sid: &str) -> String {
     }
 }
 
-/**
- * 找这个 (doc, sid) 真正对应的文件，**优先认老键**。
- *
- * 为什么需要：修 `doc_id_of` 幂等之前，前端传 docId 时会被二次哈希，
- * 于是同一个文档存在两种键名。已经用老键写过的会话不能因为修了 bug 就"消失"：
- * 老键文件存在就继续用它，不存在才用新的正确键。
- */
 fn session_file_resolved(doc: &str, sid: &str) -> String {
     for key in doc_key_candidates(doc) {
         let f = session_file_for(&key, sid);
@@ -658,10 +644,6 @@ fn session_file_resolved(doc: &str, sid: &str) -> String {
     session_file(doc, sid)
 }
 
-/**
- * 一个 doc 参数可能对应的所有历史键（新的正确键 + 老的双哈希键 + 文件名形式）。
- * 与 Node 版 `docKeyCandidates()` 保持一致。
- */
 fn doc_key_candidates(doc: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |v: String| {
@@ -689,16 +671,6 @@ fn doc_key_candidates(doc: &str) -> Vec<String> {
 
 /* ------------------------------------------------- 图片附件（单独存） */
 
-/**
- * 截图等图片附件**不进会话 JSON**，单独存成文件：`data/attachments/<会话键>/<id>.<ext>`。
- *
- * 与 Node 版（server.js 的 handleAttachment / pruneAttachments）逐条对齐：
- *   ① 会话 JSON 里只留 32 位十六进制 id 引用（几十字节），恢复会话时按 id 取回原图；
- *   ② 每次会话保存成功后，按「payload 里还引用着的 id」清理本会话目录
- *      （清空会话 = 没有引用 → 图全删）；
- *   ③ DELETE /api/session 时把整个会话的附件目录一起删；
- *   ④ 发送失败 / 保存失败留下的「传了但没写进会话」的孤儿图，会在下一次保存时被 ② 清掉。
- */
 const ATTACHMENT_EXTS: [&str; 3] = ["png", "jpg", "webp"];
 static ATTACHMENT_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -814,12 +786,6 @@ fn remove_attachment_dir(doc: &str, sid: &str) {
     let _ = std::fs::remove_dir_all(attachment_dir(doc, sid));
 }
 
-/**
- * `/api/attachment` —— 截图附件的单独存储（与 server.js 的 handleAttachment 行为一致）。
- *   POST ?doc=&sid=  body = 原始图片字节（按文件头识别类型）→ { ok, id, mime }
- *   GET  ?doc=&sid=&id=<32位十六进制> → 原始图片字节
- * 鉴权走全局的 API 令牌（前端 fetch 会自动带 X-PRT-Token），不额外开例外。
- */
 pub fn attachment(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
     let doc = query_get(raw_query, "doc").unwrap_or_else(|| "default".to_string());
     let sid: String = query_get(raw_query, "sid")
@@ -880,14 +846,6 @@ pub fn attachment(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
     }
 }
 
-/**
- * `/api/session` —— 一篇论文的对话。
- *
- * 2026-10 起支持**多会话**（与 Node 版行为一致，用户口径「问答是不是要做多对话分对话」）：
- *   老： session-<docId>.json                ← 单会话时代的文件，仍然照读照写
- *   新： session-<docId>-<sid>.json          ← 每个会话一个文件，sid 由前端生成
- * 不传 `sid` 时行为与以前完全一致（读/写老文件），所以老存档不会读坏。
- */
 pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
     let doc = query_get(raw_query, "doc").unwrap_or_else(|| "default".to_string());
     let sid = query_get(raw_query, "sid")
@@ -932,10 +890,6 @@ pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
     }
 }
 
-/**
- * `/api/sessions?doc=<doc>` —— 会话列表（只回元信息，不回正文）。
- * 对所有历史键都扫一遍，老的单会话文件以 `sid: ""` 出现（前端当"默认会话"）。
- */
 pub fn sessions(rq: Request, _method: &Method, raw_query: &str) {
     let doc = query_get(raw_query, "doc").unwrap_or_else(|| "default".to_string());
     let keys = doc_key_candidates(&doc);
@@ -1132,7 +1086,7 @@ fn http_agent() -> ureq::Agent {
     http_agent_with(10, 15)
 }
 
-/// 带 native-tls 的 agent。**必须显式装 TLS 连接器**：ureq 用的是
+/// 带 native-tls 的 agent。必须显式装 TLS 连接器：ureq 用的是
 /// `default-features = false, features = ["native-tls"]`，不装的话
 /// 所有 https 请求都会报 "no TLS backend is configured"（联网导入就踩过这个）。
 fn http_agent_with(connect_secs: u64, read_secs: u64) -> ureq::Agent {
@@ -1157,21 +1111,6 @@ fn fetch_text(agent: &ureq::Agent, url: &str) -> Option<String> {
     }
 }
 
-/* ── 从参考文献串里猜标题（与 server.js 的 guessTitle 逐条一致） ──────────
- * 2026-10 用户报的 bug：`V. Sindhwani, T. Sainath, and S. Kumar. Structured
- * transforms …` 被猜成标题 **`V`**，于是拿单个字母 V 去 arXiv 检索，搜回来
- * 「$V$-rings versus $Σ$-$V$ Rings」「On a conjecture of V. V. Shchigolev」这类
- * 毫不相干的论文，用户完全看不懂在查什么。
- * 根因是「按 `. ` 硬切成句 + 第一段里没有逗号/and 就当标题」：作者名的缩写点
- * （`V.` `T.` `S.`）正好把作者列表切成了单字母段，第一个单字母段就被当成标题。
- *
- * 现在的口径：
- *   1. 切段时不把**缩写点**当句子边界（点号前是一个孤零零的大写字母就不切）；
- *   2. 从前往后跳过「像作者列表」的段（纯缩写段 / 逗号多 / and / et al / 带缩写的人名）；
- *   3. 取第一段「像标题」的（不是 In/Proceedings/期刊名，长度够）；
- *      都没命中就用跳完作者后的第一段兜底。
- * 猜出来的东西如果不具备可检索性（单字母、纯数字…），ref_search 会退回整条文献串
- * 去搜 —— 宁可搜不准，也不能拿一个字母去搜。 */
 
 /// 刊名 / 出版信息的前缀：以这些词开头的段不是标题（JS 里是 `REF_VENUE_RE`）
 const REF_VENUE_PREFIXES: [&str; 35] = [
@@ -1458,7 +1397,7 @@ fn title_is_searchable(t: &str) -> bool {
 }
 
 /// 归一化成一堆词（小写、只留字母数字汉字）。与 JS `normWords` 同口径：
-/// 注意这里**不能**用 `is_alphanumeric()`，那会把西里尔 / 希腊字母也算进词里。
+/// 注意这里不能用 `is_alphanumeric()`，那会把西里尔 / 希腊字母也算进词里。
 fn norm_words(x: &str) -> Vec<String> {
     let mut s = String::new();
     for c in x.to_lowercase().chars() {
@@ -1528,7 +1467,7 @@ fn score_title(a: &str, b: &str) -> f64 {
     hit as f64 / ta.len().max(tb.len()) as f64
 }
 
-/// OpenAlex 条目该给哪个链接：**有 doi 用 doi，没有就回落到落地页**。
+/// OpenAlex 条目该给哪个链接：有 doi 用 doi，没有就回落到落地页。
 /// 与 server.js:464 `w.doi || w.primary_location?.landing_page_url || ''` 等价（desktop/README.md D8）。
 /// 抽成纯函数是为了能单测 —— 原来它内联在 ref_search 里，没法离线验证。
 fn openalex_link<'a>(doi: &'a str, landing: &'a str) -> &'a str {
@@ -1582,12 +1521,6 @@ fn parse_ipv4_quad(s: &str) -> Option<[u32; 4]> {
     Some(out)
 }
 
-/// 内网地址不接（SSRF 防护）。与 server.js 的 `isPrivateHost()` 逐条一致。
-///
-/// 两个实测发现的真实绕过口子都在这里堵上：
-///   * `http://localhost./` —— 结尾的点，DNS 上等价于 localhost（解析到 ::1）；
-///   * `http://[::ffff:169.254.169.254]/` —— IPv4-mapped IPv6，会被规范化成十六进制
-///     `[::ffff:a9fe:a9fe]`，按点分四段匹配是匹配不到的。
 fn is_private_host(host: &str) -> bool {
     let mut h = host.to_ascii_lowercase();
     // IPv6 字面量可能带方括号（`URL.hostname` 就有；Node 那边同样处理）
@@ -1673,11 +1606,11 @@ fn is_private_host(host: &str) -> bool {
 const MAX_REDIRECTS: usize = 3;
 
 /// 解析一个「允许让本机去下载」的 URL：协议 + 凭证（+ 可选的内网检查）。
-/// 审计 §P1 要求**重定向的每一跳**都重新做检查。
+/// 审计 §P1 要求重定向的每一跳都重新做检查。
 ///
-/// `check_private` 之所以要能关掉：**第一跳**的内网检查由调用方用原始错误码/文案做
+/// `check_private` 之所以要能关掉：第一跳的内网检查由调用方用原始错误码/文案做
 /// （`import_pdf` 顶部的 `check_fetch_url`，回 400「内网地址不允许导入」）。
-/// 用户自己指定、且已经过检查的地址不该被查第二遍；要挡的是**重定向** ——
+/// 用户自己指定、且已经过检查的地址不该被查第二遍；要挡的是重定向 ——
 /// 所以第 2 跳起每一跳都必须做内网检查。
 fn check_fetch_url(raw: &str, check_private: bool) -> Result<String, String> {
     let s = raw.trim();
@@ -1726,17 +1659,6 @@ fn resolve_redirect(base: &str, loc: &str) -> Option<String> {
     Some(format!("{}://{}{}{}", scheme, authority, dir, loc))
 }
 
-/// 手动跟随重定向（最多 MAX_REDIRECTS 跳），**每一跳**重新做协议 + 内网检查。
-///
-/// 从前这里是 `agent.get(&target).call()` —— ureq 默认自动跟随重定向，
-/// 于是公网地址只要 302 到 http://127.0.0.1:… 或 http://169.254.169.254/
-/// 就能绕过全部内网检查（审计 §P1）。
-///
-/// `check_private_on_first_hop`：默认 true（直连地址照旧立刻被拒）。
-/// 传 false 只有一种场合 —— 调用方自己已经在顶层做过第一跳的内网判定
-/// （`import_pdf` 就是这样），避免重复判定、也让直连地址的错误码保持原样。
-///
-/// 返回最终响应，或用户可见的错误文案。
 fn fetch_following_safely(
     agent: &ureq::Agent,
     target: &str,
@@ -1844,7 +1766,7 @@ pub fn import_pdf(rq: Request, raw_query: &str) {
     if target.chars().count() > 2000 {
         return send_json(rq, 400, &err_json("url 过长"));
     }
-    // 初始 URL 先检查一次（错误码/文案与从前一致），随后**每一跳**都会再检查一次。
+    // 初始 URL 先检查一次（错误码/文案与从前一致），随后每一跳都会再检查一次。
     // 直连就已经挡掉内网地址（不发出任何请求）；重定向目标由 fetch_following_safely
     // 逐跳检查 —— 所以透传「第一跳已检查过」。
     if let Err(msg) = check_fetch_url(&target, true) {
@@ -2146,7 +2068,7 @@ fn push_tok(toks: &mut Vec<String>, t: String) {
 fn query_tokens(q: &str) -> Vec<String> {
     let lower = q.to_lowercase();
     let mut toks: Vec<String> = Vec::new();
-    // 与 server.js 的 /[a-z][a-z0-9+#._-]*/g **必须等价**：词元只能**以字母开头**。
+    // 与 server.js 的 /[a-z][a-z0-9+#._-]*/g 必须等价：词元只能以字母开头。
     //
     // 原来这里是把串按「非 [A-Za-z0-9+#._-]」切开、再裁掉首尾的 . _ -，于是
     // 纯数字/数字开头的串（`2017`、`3`）也会被当成词元 —— 相关度门槛更松，
@@ -2274,7 +2196,7 @@ pub fn web_search(rq: Request, raw_query: &str) {
         }
     }
 
-    // 这里**不能**写「反正别的引擎失败了，就把这批不相关的先给出去」。
+    // 这里不能写「反正别的引擎失败了，就把这批不相关的先给出去」。
     // 之前留过这么一个兜底，结果 Bing 退化成单字查询时，一堆「这」字的字典释义
     // 照样被当成来源返回给模型和用户。宁可不给，也别给错的。
     let msg = if dropped > 0 {
@@ -2403,7 +2325,7 @@ pub fn ref_search(rq: Request, raw_query: &str) {
                         .unwrap_or("");
                     let pdf = if oa.to_lowercase().contains(".pdf") { oa.to_string() } else { String::new() };
                     // 与 server.js:464 一致：doi 缺失时回落到 primary_location.landing_page_url。
-                    // 不回落的话，**没有 DOI 的条目在 exe 上点不开**（Node 版还能落到落地页）——
+                    // 不回落的话，没有 DOI 的条目在 exe 上点不开（Node 版还能落到落地页）——
                     // 这是用户可见差异（desktop/README.md D8）。
                     let doi = w.get("doi").and_then(|x| x.as_str()).unwrap_or("");
                     let landing = w
@@ -2549,7 +2471,7 @@ pub fn ref_search(rq: Request, raw_query: &str) {
 /* ------------------------------------------------- 契约一致性测试 */
 
 /// 这一组测试锁死「与 server.js 逐条等价」的那几处用户可见差异（desktop/README.md D5/D8/D9/D11）。
-/// 它们都是**纯函数**，所以不需要联网就能验证 —— 这正是把它们从大函数里抽出来的原因。
+/// 它们都是纯函数，所以不需要联网就能验证 —— 这正是把它们从大函数里抽出来的原因。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2656,11 +2578,6 @@ mod tests {
         assert!(doi > plain, "doi={} 应大于 plain={}", doi, plain);
     }
 
-    /* ── 参考文献标题猜测（2026-10 用户报的 bug） ─────────────────────────────
-     * 事故：`V. Sindhwani, T. Sainath, and S. Kumar. Structured transforms …`
-     * 猜出标题 `V`，于是按「标题含 V」搜回 V-rings / shchigolev 那堆无关论文。
-     * 这一组用例把口径钉死，和 server.js 的 guessTitle 表一模一样
-     * （.tmp-vps 那次的 12 条 + 相关性判据）。 */
 
     /// 用户报的那条：作者缩写点不能被当成句子边界
     #[test]
@@ -2760,10 +2677,6 @@ mod tests {
         assert!(!result_matches_title(raw, false, "$V$-rings versus $\\Sigma$-$V$ Rings"));
     }
 
-    /// 与 server.js 的 `splitRefSegments` 同口径：缩写点不切，中文句号切。
-    /// 注意 `V. Sindhwani, T.` 里的 `T` 前面有逗号 —— 那是「姓, 名首字母」这种完整
-    /// 写法，该切（`Hochreiter, S. Long short-term memory` 就靠这条才切得对）。
-    /// 切碎没关系：guess_title 会跳过所有作者段再往后找标题。
     #[test]
     fn split_ref_segments_keeps_initials() {
         let segs = split_ref_segments("V. Sindhwani, T. Sainath, and S. Kumar. Structured transforms. In NIPS, 2015.");

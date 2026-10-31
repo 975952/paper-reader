@@ -1,16 +1,3 @@
-//! 本地 API 认证（对应 `security.js`，审计 §P0）。
-//!
-//! 规则与 Node 版逐条一致：
-//!   * 启动时生成一个不可预测的 per-boot token（64 位十六进制）；
-//!   * 只注入到**本服务自己吐出的** index.html，所有 `/api/*` 必须带
-//!     `X-PRT-Token` 自定义请求头；
-//!   * 唯一例外：`/api/pdf` 的 GET/HEAD（浏览器把 PDF 当子资源加载，加不了自定义头），
-//!     允许用 HttpOnly + SameSite=Strict 的 `prt_session` cookie 代替；
-//!   * token 不进日志、不进错误信息、不进普通 DOM 文本（放进 meta + window 属性）；
-//!   * 校验失败在**任何读写之前**返回 401，不写任何用户数据。
-//!
-//! 开关：`PRT_REQUIRE_TOKEN=0` 才关闭校验（浏览器开发 / 尚未适配请求头的测试）。
-//! 没有固定 token、没有后门 token。
 
 use std::sync::OnceLock;
 
@@ -88,7 +75,7 @@ pub fn token_announcement() -> Option<String> {
     Some(format!("[prt] api-token: {}", token()))
 }
 
-/// 是否强制校验。默认**开启**，只有 `PRT_REQUIRE_TOKEN=0` 才关。
+/// 是否强制校验。默认开启，只有 `PRT_REQUIRE_TOKEN=0` 才关。
 pub fn enforced() -> bool {
     match std::env::var("PRT_REQUIRE_TOKEN") {
         Ok(v) => v.trim() != "0",
@@ -98,7 +85,7 @@ pub fn enforced() -> bool {
 
 /// 当前 token。
 ///
-/// `main()` 已经 `init()` 过；这里保留 `get_or_init` 兜底，保证**任何调用路径**下
+/// `main()` 已经 `init()` 过；这里保留 `get_or_init` 兜底，保证任何调用路径下
 /// 「注入页面的 token」和「校验用的 token」都是同一个值（per-boot 只生成一次）。
 pub fn token() -> &'static str {
     TOKEN.get_or_init(random_token).as_str()
@@ -282,7 +269,7 @@ pub fn session_cookie() -> String {
     format!("{}={}; Path=/; HttpOnly; SameSite=Strict", COOKIE, token())
 }
 
-/// 401 响应：必须在**任何写盘动作之前**调用
+/// 401 响应：必须在任何写盘动作之前调用
 pub fn unauthorized(rq: Request) {
     send_json(
         rq,
@@ -301,13 +288,6 @@ pub fn forbidden(rq: Request) {
 
 /* --------------------------------------------------------- 页面 token 注入 */
 
-/// 注入到本应用 HTML 里的片段。
-///
-/// 三样东西（与 server.js 的注入逐字对应）：
-///   1. `<meta name="prt-token">`
-///   2. 内联脚本：`window.__PRT_TOKEN__` + `window.apiFetch()`，并在 document 上装
-///      一个捕获阶段的 fetch 补丁 —— 页面里所有 `fetch('/api/...')` 自动带上自定义头
-///   3. 由 `session_cookie()` 种下的 cookie，供 `/api/pdf` 子资源加载使用
 pub fn inject_into_html(html: &str) -> String {
     let snippet = TOKEN_SNIPPET.replace("@@PRT_TOKEN@@", token());
     // 注入点：<head ...> 之后（必须早于任何 module 脚本）
@@ -326,7 +306,7 @@ pub fn inject_into_html(html: &str) -> String {
     format!("{}{}", snippet, html)
 }
 
-/// 占位符刻意用 `@@PRT_TOKEN@@` 而不是 `__PRT_TOKEN__`：后者是**属性名**的一部分
+/// 占位符刻意用 `@@PRT_TOKEN@@` 而不是 `__PRT_TOKEN__`：后者是属性名的一部分
 /// （`window.__PRT_TOKEN__`），用同一个串做全局替换会把属性名也换掉，
 /// 直接产出语法错误 —— 实测被 test/zoom.mjs 的「没有未捕获的页面异常」抓出来过。
 const TOKEN_SNIPPET: &str = r#"<!-- prt-auth: 本地 API 令牌（勿外传，刷新即失效） -->

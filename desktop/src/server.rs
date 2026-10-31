@@ -34,7 +34,7 @@ fn body_limit(path: &str) -> usize {
         "/api/session" => limits::BODY_SESSION,
         // 截图附件（单独存，不进会话 JSON）：与 server.js 的 ATTACHMENT_LIMIT 一致
         "/api/attachment" => limits::BODY_ATTACHMENT,
-        // 学习档案（2026-10）：正常几 KB，上限与 server.js 的 BODY_LIMITS.profile 一致
+        // 学习档案：正常几 KB，上限与 server.js 的 BODY_LIMITS.profile 一致
         "/api/profile" => limits::BODY_PROFILE,
         _ => MAX_BODY,
     }
@@ -134,11 +134,6 @@ fn handle(mut rq: Request, ctx: &Ctx) {
         return send_text(rq, 400, "Bad path");
     }
 
-    // 审计 §P0：所有 /api/* 必须带自定义请求头。
-    //
-    // 这一步在**读请求体之前**，也在任何读盘 / 写盘 / 出网之前 —— 401 不会写任何用户数据。
-    // 唯一例外是 `/api/pdf` 的 GET/HEAD（浏览器子资源加载加不了自定义头），
-    // 见 auth::authorized()。
     let is_get_or_head = matches!(method, Method::Get | Method::Head);
     if path.starts_with("/api/") && auth::enforced() {
         if !auth::authorized(&rq, &path, is_get_or_head) {
@@ -185,10 +180,10 @@ fn handle(mut rq: Request, ctx: &Ctx) {
         "/api/profile" => return api::profile(rq, &method, &body),
         "/api/notes" => return api::notes(rq, &method, &raw_query, &body),
         "/api/session" => return api::session(rq, &method, &raw_query, &body),
-        // 截图附件单独存（2026-10 用户口径：「图片单独存」）——
+        // 截图附件单独存——
         // 会话 JSON 里只留 32 位 id 引用，图片本体在这里 POST / GET。
         "/api/attachment" => return api::attachment(rq, &method, &raw_query, &body),
-        // 会话列表（2026-10 多会话）。Node 版与 Rust 版必须同时有 —— 少一边就会出现
+        // 会话列表。Node 版与 Rust 版必须同时有 —— 少一边就会出现
         // 「开发时能用、exe 里新建会话后列表是空的」（实测踩过：请求落到 SPA 回落，
         // 返回的是 index.html，前端 JSON.parse 失败后当成"没有会话"）。
         "/api/sessions" => return api::sessions(rq, &method, &raw_query),
@@ -209,7 +204,7 @@ fn handle(mut rq: Request, ctx: &Ctx) {
 
 /// 读请求体，超过上限返回 Err。
 ///
-/// 读失败（客户端中途断开）按**空 body** 处理（Node 的 readBody 是 rejects，
+/// 读失败（客户端中途断开）按空 body 处理（Node 的 readBody 是 rejects，
 /// 上层会当成 400 "请求体解析失败"）—— 这里折中成两者都不更坏的结果：
 /// 空 body 会让后续校验失败并返回错误，不会误写用户数据。
 pub fn read_body(rq: &mut Request, limit: usize) -> Result<Vec<u8>, ()> {
@@ -343,7 +338,7 @@ pub fn send_reader<R: Read + Send + 'static>(
 /// `Response::raw_print` 最后才 flush 一次 —— 意味着小于 1KB 的 SSE 片段会被
 /// 攒到响应结束才发出去，"流式"就变成了"整体缓冲"。
 ///
-/// 所以这里拿 `into_writer()` 自己写状态行 + 头，然后**每个片段都显式 flush**。
+/// 所以这里拿 `into_writer()` 自己写状态行 + 头，然后每个片段都显式 flush。
 /// 分块编码（chunked）由我们自己拼，保证和 Node 版行为一致。
 pub fn send_sse<R: Read>(rq: Request, extra: &[(&str, &str)], mut reader: R) {
     use std::io::Write;

@@ -1,14 +1,3 @@
-/**
- * 后台学习记忆的数据、时间与检索。保留 v1 格式，兼容已有学习档案。
- *
- *   · 用户原话是证据，助手讲过不代表用户掌握；不展示条目编辑界面；
- *   · explicit 自述与模型观察分开，pending 是依据有限，不能据此跳过基础；
- *   · 每条写入都带时间；每次 AI 调用另外注入「当前时间」；
- *   · 条目按当前论文/问题筛选后才进 prompt，整块封顶 1200 字。
- *
- * 存储：本机 `data/learning-profile.json`（GET/POST /api/profile）。
- * 本模块只做数据与提示词，不碰 DOM。
- */
 
 export const PROFILE_VERSION = 1;
 export const PROFILE_CHAR_LIMIT = 1200;
@@ -33,11 +22,6 @@ export function nowISO(date = new Date()) {
     + `T${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}${tzOffset(date)}`;
 }
 
-/**
- * 每次 AI 调用都要带的「当前时间」行。
- * 用户口径：「现在的时间在后续过程中要交给模型」——模型需要知道今天是几号，
- * 才能判断档案里「3 个月前确认过」意味着什么。
- */
 export function nowContext(date = new Date()) {
   const stamp = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
     + ` ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
@@ -83,10 +67,6 @@ const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const str = (v) => (typeof v === 'string' ? v : '');
 const isIsoLike = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:[+-]\d{2}:\d{2}|Z)$/.test(v);
 
-/**
- * 校验一份档案。返回 `{ ok, data }` 或 `{ ok:false, error }`。
- * 客户端与服务端共用同一套口径（Node / Rust 两端各实现一遍，字段一致）。
- */
 export function validateProfile(raw) {
   if (!isObject(raw)) return { ok: false, error: '档案不是对象' };
   if (Number(raw.version) !== PROFILE_VERSION) return { ok: false, error: `版本不支持：${raw.version}` };

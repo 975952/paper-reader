@@ -1,17 +1,3 @@
-/**
- * 生成「带真图」的测试 PDF：test/fixtures/image-sample.pdf
- *
- *   cd test && node fixtures/make-image-pdf.mjs
- *
- * 为什么需要它：仓库里所有合成 fixture 都是纯文字的，而手机版有一条行为
- * 「长按图片单独放大」必须用**真的含光栅图**的 PDF 才能验。
- * 用户书架里的真论文确实带图（papers/attention-is-all-you-need.pdf 有 6 张），
- * 但测试绝不能读用户的 papers/ —— 所以这里自己造一个。
- *
- * 不引入任何依赖：PDF 的最小结构手写即可。图片用一个未压缩的 DeviceRGB 图像
- * （不能压缩：压缩就要 zlib，而这是零依赖脚本），尺寸小、但足以让 pdf.js
- * 报出 paintImageXObject 算子 —— 这正是被测的那条判据。
- */
 import fs from 'node:fs';
 import path from 'node:path';
 

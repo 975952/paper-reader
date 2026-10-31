@@ -122,17 +122,6 @@ export function cleanText(raw) {
   return t.trim();
 }
 
-/**
- * 数学公式渲染：$...$、$$...$$、\(...\)、\[...\]。
- *
- * 之前这里写着「行内公式保留原样，交给用户看」，于是模型输出的一堆
- *   \text{Attention}(Q,K,V)=\text{softmax}(\frac{QK^T}{\sqrt{d_k}})V
- * 就原样显示成 LaTeX 源码 —— 用户看到的「符号渲染不了」就是这个。
- *
- * 用本地内置的 KaTeX（public/vendor/katex，不联网）。
- * 渲染失败（比如 $ 只是货币符号、或者模型写错命令）就原样返回：
- * 绝不吞内容，也绝不把 KaTeX 的红色报错塞进回答里。
- */
 const MATH_MAX_LEN = 3000;
 
 export function renderMathToString(tex, display = false) {
@@ -152,13 +141,6 @@ export function renderMathToString(tex, display = false) {
   }
 }
 
-/**
- * 表格：
- *   | 列1 | 列2 |
- *   |---|---|
- *   | a | b |
- * 判定写得宽松一些 —— 模型输出的分隔行经常长成 `|---|:--:|`，两端也可能没有竖线。
- */
 function isTableSep(line) {
   const t = String(line || '').trim();
   if (!t || !t.includes('-')) return false;
@@ -297,12 +279,6 @@ export function renderMarkdown(src) {
   text = text.replace(/<p>\s*<\/p>/g, '');
   // 独立成段的占位块（代码块 / 表格）先脱掉 <p>，再统一还原
   text = text.replace(/<p>\s*(\u0000\d+\u0000)\s*<\/p>/g, '$1');
-  /**
-   * 还原要**循环**做，不能只替换一遍：
-   * 表格这种块本身也是占位符，里面还嵌着单元格的公式占位符；
-   * String.replace 不会回头再扫一遍替换进去的内容，一遍下来内层的 \u0000N\u0000
-   * 就原样留在 HTML 里了（表现：表格里的公式不渲染）。
-   */
   for (let k = 0; k < 8 && /\u0000\d+\u0000/.test(text); k++) {
     text = text.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[Number(i)]);
   }

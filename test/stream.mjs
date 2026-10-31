@@ -73,7 +73,7 @@ page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 const papers = await fetch(`${BASE}/api/papers`).then((r) => r.json());
 /**
  * ⚠️ 不要用 `papers.papers[0]`：这个列表按 mtime 倒序，夹具里 `image-sample.pdf`
- * （纯图、**没有文字层**）恰好最新，取 [0] 会拿它去划词，直接「选不到文字」。
+ * （纯图、没有文字层）恰好最新，取 [0] 会拿它去划词，直接「选不到文字」。
  * 优先挑名字里带文字夹具的（multipage / cn 都带文字层），否则退回体积最大的一篇。
  */
 const pdfPick = (papers.papers || []).find((p) => /multipage|cn-sample/i.test(p.name))
@@ -89,14 +89,6 @@ async function loadPage() {
   await sleep(1800);
 }
 
-/**
- * 结果区里最新一条助手消息的正文。
- *
- * 2026-10 删减把「就地结果浮层」（`#popover` / `#popBody` / `#popClose`）整块去掉了 ——
- * 同一个 AI 结果不允许同时出现在两个地方，译文/解释一律只进右栏的块。
- * 所以这里改成从 `#aiArea` 里按 `dataset.seq` 取最后一条助手消息。
- * ⚠️ 判据仍然是「增量」：先记条数/文本，再只认新出现的那一条（会话恢复会把旧消息重放出来）。
- */
 const resultText = () => page.evaluate(() => {
   const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')]
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
@@ -184,7 +176,7 @@ await sleep(1600);
 const jsonText = await resultText();
 check('非流式上游也能出结果', jsonText.includes('非流式'), JSON.stringify(jsonText.slice(0, 40)));
 const rendered = await page.evaluate(() => {
-  // 取**最后一条**助手消息，不要用「第一个匹配」（恢复会话会把更早套件留下的回答一起重放出来）；
+  // 取最后一条助手消息，不要用「第一个匹配」（恢复会话会把更早套件留下的回答一起重放出来）；
   // 消息按 dataset.seq 取最大 = 最新一条（DOM 里可能有历史重放出来的更早条目）。
   // 2026-10 删减后右栏恒为单列，只剩 #aiArea 一个结果区。
   const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')]
@@ -203,10 +195,6 @@ check('生成内容最终正确渲染代码、表格和公式', rendered.code.in
 // 不必再去拼结果区选择器（右栏恒为单列，块在哪一栏已经是过去式）。
 const chatMsgCount = () => page.evaluate(() => window.__state.blockEls?.chat?.querySelectorAll('.msg').length ?? 0);
 const priorCount = await chatMsgCount();
-/**
- * 2026-10：发送范围搬进设置页（`#cfgUseFullText` / `#cfgUseWeb`），默认都开着。
- * 这一节要的是一条**干净**的问答流（不带整篇全文），所以先去设置里关掉整篇。
- */
 await setScope(page, { full: false, web: false });
 await page.evaluate(() => {
   document.querySelector('#chatInput').value = 'mock session question';
@@ -265,11 +253,6 @@ const boundedBytes = await page.evaluate(async (id) => {
   return new TextEncoder().encode(JSON.stringify(payload)).byteLength;
 }, await page.evaluate(() => window.__state.doc.docId));
 check('论文会话存储上限为 350 KB', boundedBytes <= 350000, `${boundedBytes} bytes`);
-/**
- * 2026-10 用户口径：「范围 / 选中文本 + 当前页 / 清空会话这些……都删掉」。
- * `#clearSession` 已经不在了（存盘 / 清空现在挂在会话菜单里），所以这一条改成直接验**接口**
- * ——它才是所有入口最终都走的那条路：DELETE /api/session?doc=&sid= 之后再读必须两手空。
- */
 const clearedDocId = await page.evaluate(() => window.__state.doc.docId);
 const del = await page.evaluate(async (id) => {
   const r = await fetch(`/api/session?doc=${encodeURIComponent(id)}`, { method: 'DELETE' });

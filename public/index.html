@@ -20,14 +20,6 @@
   </div>
   <span class="spacer"></span>
 
-  <!--
-    顶栏（2026-10 用户口径两次收敛后的最终形态）：
-      「最上面一栏只保留调大小，两个侧栏的开关，设置和翻页，全文搜索，还有 ai 功能，
-        其他的都删掉」→ 删掉了 `#returnPosition`（返回原位置）与 `#regionBtn`（框选截图）。
-      「底栏有的功能上面的一栏就不要了」→ **翻页与缩放整组移到底栏**，顶栏不再重复，
-        所以这里只剩：左右栏开关、首页、论文摘要、全文搜索、设置。
-    窗口控制（最小化/最大化/关闭）在最右边，属于标题栏，不算功能入口。
-  -->
   <button class="tbtn" id="homeBtn" title="回到首页（书架）"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.6 10.4 12 3.6l8.4 6.8"/><path d="M5.6 9.6v9.2a1.6 1.6 0 0 0 1.6 1.6h9.6a1.6 1.6 0 0 0 1.6-1.6V9.6"/><path d="M10.2 20.4v-5.2h3.6v5.2"/></svg></button>
   <button class="tbtn" id="opsBtn" title="读懂论文：先给我讲明白 / 我需要先懂什么 / 带我一步步读 / 讲懂图表与公式"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m9.6 3.4 1.6 4.2 4.2 1.6-4.2 1.6-1.6 4.2-1.6-4.2L3.8 9.2l4.2-1.6z"/><path d="m17.4 13.4.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9z"/></svg></button>
   <button class="tbtn" id="searchBtn" title="全文搜索　Ctrl+F"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.8" cy="10.8" r="6.4"/><path d="M15.6 15.6 20.8 20.8"/></svg></button>
@@ -57,14 +49,9 @@
 
 <main id="main">
   <!-- 左活动栏：只在左栏收起时出现（CSS 由 body.no-left 控制）。
-       位置在 #leftSide 的**左边**，不能放进左栏内部 —— 否则收起时它会跟着一起消失。
+       位置在 #leftSide 的左边，不能放进左栏内部 —— 否则收起时它会跟着一起消失。
        每个按钮一个 data-rail（files / outline / notes / rel），点它展开对应的那一块；
        图标是内联 SVG（icons.js 里同名 id 的那一套），不用图标字体。 -->
-  <!--
-    主行（2026-10）：`#main` 现在是 grid（1fr auto）——
-    这一行是第 1 行（左栏 + 分隔条 + 正文 + 右栏），底栏是第 2 行。
-    包一层是为了让 grid 的第一行有个确定的 flex 容器，行高由 `1fr` 决定。
-  -->
   <div class="main-row" id="mainRow">
   <nav class="rail" id="railLeft" aria-label="左栏图标">
     <button class="rail-btn" data-rail="files" title="展开左栏：文件" aria-label="展开左栏：文件列表"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.4 7.4a2 2 0 0 1 2-2h3.3l2 2.4h7.9a2 2 0 0 1 2 2v8.4a2 2 0 0 1-2 2H5.4a2 2 0 0 1-2-2z"/></svg></button>
@@ -95,13 +82,6 @@
       <ul class="notes" id="notesList"></ul>
     </section>
 
-    <!-- 参考文献：本文引用了哪些文献（点一行看详情、查开放 PDF、复制引用）。
-         列表**按需**整理：只有用户真的打开这一块（点标题栏展开 / 点左栏图标）时才解析，
-         打开论文本身不再在后台跑一遍全文引用抽取。
-         标题栏（.sec-head）本身就是「展开 / 收起」的入口（bindPanelHead 给它 role=button + 键盘
-         支持），所以标题文字必须**占住剩余宽度**：否则「参考文献」会被右侧操作挤成
-         0 宽，用户点在标题栏中间时命中的是右边的 ↻ 按钮 —— 于是「点标题展开」看起来是坏的。
-         标题用 .sec-title 撑开，↻ 放进 .no-drag（抓手/操作区），点击与拖动各归各位。 -->
     <section class="sec" id="relSec">
       <div class="sec-head">
         <span class="sec-title">参考文献</span> <span class="cnt" id="relCount"></span>
@@ -134,12 +114,6 @@
       <div class="search-results hidden" id="searchResults" role="listbox" aria-label="搜索结果"></div>
     </div>
 
-    <!-- 首页 / 书架页（2026-10）：只解决两件事 —— 选一篇论文、继续上次阅读。
-         它从原来的 `#welcome`（阅读区空状态）升级而来，但**移出了 #viewer**：
-         以前它挂在 viewer 里面，于是「无论文」「读完了退回」和「打开失败」三种语义
-         共用一个模糊容器；现在 #home 与 #viewer 是兄弟，互斥显示（body.reading 有无），
-         三种状态各有明确归属（见 app.js 的 setView）。
-         刻意不放的东西：AI 操作、推荐、统计、阅读时长、学习计划、关系图、装饰性空卡片。 -->
     <section class="home" id="home" aria-label="首页">
       <div class="home-head">
         <img class="logo" src="/icon.svg" alt="论文阅读器" />
@@ -176,13 +150,9 @@
   <div class="splitter" id="splitRight" title="拖动调整宽度"></div>
 
   <aside class="side right" id="rightSide">
-    <!-- 右栏**唯一**的面板切换入口，放在右栏最上面（2026-10 用户口径：
-         「译文和问答的现在的上面的那一栏可以直接去掉，然后两种状态的选择图标可以放在最上面」）。
-         以前它贴在右栏底部，每个结果块自己还带一条 .ai-head 标题栏 —— 两处重复表达同一件事。
-         现在：标题栏去掉，切换器搬到顶部，当前是哪一个由这里的选中态表达。 -->
     <div class="aibar" id="aiBar" role="tablist" aria-label="译文 / 问答切换"></div>
     <!-- 多会话（2026-10 用户口径：「问答是不是要做多对话分对话」）：
-         只在**问答块开着**时出现（会话 = 一篇论文的对话，跟译文无关）；
+         只在问答块开着时出现（会话 = 一篇论文的对话，跟译文无关）；
          一个很轻的小胶囊，显示当前会话名，点开是会话列表（切换 / 删除 / 新建）。 -->
     <div class="sessbar hidden" id="sessBar">
       <button type="button" class="sess-btn" id="sessBtn" title="会话" aria-haspopup="menu" aria-expanded="false">
@@ -202,16 +172,6 @@
         <button class="send" id="sendBtn" type="submit" title="发送"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.6 3.4 3.6 10.2l6.6 2.8 2.8 6.6z"/><path d="m10.2 13 10.4-9.6"/></svg></button>
       </div>
       <div class="composer-opts">
-        <!--
-          发送范围（2026-10-05 用户拍板第 2 步）：范围**回到发送框**，但形态与当年不同 ——
-             · 一个常驻芯片显示当前范围（图标 + 极短标签），点它 / 点芯片展开四选项上拉栏；
-             · 四个互斥选项：当前内容 / 整篇论文 / 联网搜索 / 整篇论文 + 联网搜索
-               （覆盖原来两个独立开关的全部组合，**不丢「只联网」**）；
-             · 「当前内容」由上下文自动决定：有选中文字发选中文字，没有就发当前页上下文；
-             · 范围只对下一次发送生效，之后沿用；设置页那两个偏好仍然是**默认值**（只决定初始值）。
-          面板 #sendScope 是绝对定位浮层（anchor 在 .composer-opts 上），不占布局高度。
-          这行 #composerHint 不再被清空：闲时显示「这次会发什么」，忙时显示进度。
-        -->
         <button type="button" class="scope-chip" id="composerScope" aria-haspopup="true" aria-expanded="false"
                 title="发送范围。点击可改：当前内容 / 整篇论文 / 联网搜索 / 整篇论文 + 联网搜索"></button>
         <span class="composer-hint" id="composerHint"></span>
@@ -222,13 +182,6 @@
   </div>
   </div><!-- /main-row -->
 
-  <!--
-    底栏（2026-10 用户口径）：**横着一整栏**、铺满窗口底部，不再缩在正文那一段里。
-    它是 `#main`（grid 第 2 行）的直接子项，宽度覆盖左栏 + 正文 + 右栏。
-    高度 44px（用户：「现在的太扁了」）。
-    里面放的是**阅读位置相关**的控件：翻页 + 缩放 + 适应宽度；
-    顶栏不再重复这些（用户：「底栏有的功能上面的一栏就不要了」）。
-  -->
   <footer class="viewer-foot" id="viewerFoot">
     <div class="grp foot-grp" title="翻页">
       <button class="tbtn" id="footPrevPage" aria-label="上一页" title="上一页"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 4.8 7.8 12 15 19.2"/></svg></button>
@@ -346,12 +299,6 @@
       <label class="field"><span>缩放速度 <output class="range-value" id="uiZoomSpeedValue"></output></span><input id="uiZoomSpeed" type="range" min="0.5" max="2" step="0.05" /></label>
     </div>
     <div class="modal-note"><span>触摸屏两指张开、触摸板两指捏合都按这个速度；1.0× 是默认手感，往右更快。</span></div>
-    <!--
-      发送范围（2026-10 用户口径）：「范围 / 选中文本 + 当前页 / 清空会话这些……第一个应该是
-      默认全文加联网，在设置里面调节」。
-      所以输入框那一排的范围菜单整个撤掉，「读整篇论文」「联网查资料」搬到这里，
-      **默认都是开的**，并且是全局偏好（保存进 localStorage reader.ui，跨论文 / 跨会话都算数）。
-    -->
     <div class="settings-section-title">发送范围</div>
     <div class="settings-grid settings-core-grid">
       <label class="field field-switch"><input id="cfgUseFullText" type="checkbox" /><span>整篇论文</span></label>

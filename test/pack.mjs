@@ -1,12 +1,3 @@
-/**
- * 打包成一个可以直接推到 GitHub 的 zip。
- *
- *   node test/pack.mjs
- *
- * 用**白名单**：只挑明确要发布的文件，其余一律不进包。
- * 这条规则是硬性的 —— data/ 里有用户的 API Key，papers/ 里有他的论文，
- * 一旦用「全量打包再排除」的写法，将来加了个新目录就会漏出去。
- */
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
@@ -19,18 +10,7 @@ const ZIP = path.join(import.meta.dirname, 'artifacts', 'paper-reader-src.zip');
 /** 要发布的顶层文件 / 目录（相对 ROOT） */
 const INCLUDE = [
   'server.js',
-  /**
-   * ⚠️ `security.js` 必须在这里：`server.js:20` 是 `require('./security')`。
-   * 2026-10-06 审查发现白名单漏了它 —— 打出来的源码包解开后 `node server.js`
-   * 直接 MODULE_NOT_FOUND，而这份 zip 正是 AGENTS.md 里说的"改坏了用来回退"的安全网。
-   */
   'security.js',
-  /**
-   * ⚠️ 同一个坑又踩了一次（2026-10-09 复核时发现）：`server.js:21` 新增了
-   * `require('./model-profiles')`，但白名单没跟着加 —— 打出来的源码包解开后
-   * `node server.js` 会 MODULE_NOT_FOUND。**以后 server.js 每加一个 require，
-   * 这里就要跟着加一个**；下面第 4 步的「解包自检」就是专门挡这个的。
-   */
   'model-profiles.js',
   'start.bat',
   '启动.bat',
@@ -45,12 +25,6 @@ const INCLUDE = [
   'desktop/build.rs',
   'desktop/tools',
   'docs',
-  /**
-   * 整个 `test/` 一起进包。
-   * 以前是逐个列举 30 个文件：2026-10-06 审查发现它漏了 26 个现存套件、
-   * 还留着一个早已删除的 `test/export.mjs`（列了也不存在，只会打印一行 [skip]）。
-   * 目录 + DENY 黑名单（artifacts / node_modules / profile-* / archive / dump）比白名单好维护。
-   */
   'test',
 ];
 
@@ -66,32 +40,12 @@ const DENY = [
   /\.log$/i,
   /webview2/,
   /\.desktop-port$/,
-  /**
-   * 只给自己看的东西 —— 明确不进发布包。
-   *   docs/internal/    私人说明（给同学的转发文案、挂 GPT 的网络笔记、VPS 部署笔记）。
-   *                     VPS 那份里有服务器地址与账号；docs 整个在白名单里，
-   *                     所以必须在这里挡一道，否则它会跟着源码 zip 发到 GitHub。
-   *   tools/internal/   与论文阅读器无关的个人脚本（codex / bridge / watch / 手机桥）。
-   *   test/archive/     已删功能的旧测试套件，只作参考，不进交付。
-   *   archive/          已归档的 Android 工程（无发布计划）。
-   */
   /(^|[\\/])internal([\\/]|$)/,
   /(^|[\\/])archive([\\/]|$)/,
-  /**
-   * `test/profile-*` 是 `test/left-rail.mjs` 起的 Chrome 用户目录（每次运行新建一个
-   * 时间戳目录，200+ 个文件）。它们不该进包，也**不该进 git**（2026-10-06 审查发现
-   * 曾经有 623 个这样的文件被 `git add -A` 提交进仓库，约 61MB）。
-   */
   /(^|[\\/])profile-[^\\/]*([\\/]|$)/,
   /(^|[\\/])dump([\\/]|$)/,
 ];
 
-/**
- * 唯一允许进包的 `.pdf`：`test/fixtures/` 下的**合成**夹具。
- * e2e / ux / cjk / context / outline 都要拿它铺隔离书架，不带它，打出来的源码包
- * 连 `node test/e2e.mjs` 都跑不起来（缺夹具）。
- * 前缀写死在正则里：`papers/`、`data/` 或任何别处的 pdf 都匹配不到这条豁免。
- */
 const isFixturePdf = (rel) => /^test[\\/]fixtures[\\/][^\\/]+\.pdf$/i.test(rel);
 
 const walk = (abs, rel, out) => {
@@ -154,13 +108,6 @@ for (const f of files) {
 
 /* ── 4. 打 zip ── */
 fs.rmSync(ZIP, { force: true });
-/**
- * ⚠️ 不要用 PowerShell 的 `Compress-Archive`：PS 5.1（Windows 自带的那个）走 .NET
- * Framework 的 ZipFile，条目名写的是**反斜杠**（实测 323/328 个条目），
- * Linux / macOS 解开就是一堆带反斜杠的怪文件名。
- * `tar -a -c -f x.zip`（Windows 10 1803+ 自带 bsdtar）产出的是标准 zip：正斜杠、可跨平台。
- * 万一没有 tar 再退回 Compress-Archive，并且在输出里明确警告。
- */
 let zipTool = 'tar';
 try {
   execFileSync('tar', ['-a', '-c', '-f', ZIP, '-C', STAGE, '.'], { stdio: 'inherit' });
@@ -173,15 +120,6 @@ try {
 }
 fs.rmSync(STAGE, { recursive: true, force: true });
 
-/* ── 5. 解包自检：这份 zip 真的能跑起来吗 ──
- *
- * 为什么必须做（这个坑踩过两次）：zip 是白名单打的，白名单漏一个 `require` 的模块，
- * 包解开后 `node server.js` 直接 MODULE_NOT_FOUND —— 而这份 zip 正是「改坏了用来回退」
- * 的安全网，安全网自己坏了最要命。
- *   · 2026-10-06：漏了 `security.js`（见上面白名单里的注释）；
- *   · 2026-10-09：`server.js` 新增 `require('./model-profiles')`，白名单又漏了一次。
- * 所以这里把包真的解开、真的起一次服务、真的打一次 /api/health。
- */
 const VERIFY = path.join(STAGE_ROOT, 'pkg-verify');
 let verifyNote = '';
 try {

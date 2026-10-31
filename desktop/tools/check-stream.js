@@ -1,10 +1,4 @@
 #!/usr/bin/env node
-/**
- * 验证 /api/chat 是"真流式"：记录每个 chunk 到达的时刻。
- * 如果服务端把上游整体缓冲后再发，所有 chunk 会在同一毫秒到达 —— 那就是失败的。
- *
- *   node check-stream.js <appPort> <mockPort>
- */
 'use strict';
 
 const appPort = Number(process.argv[2] || 8788);

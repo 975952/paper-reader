@@ -1,9 +1,3 @@
-/**
- * 专项验证：中文 PDF（CID 字体 / cMap 路径）+ 文本层与画布的对齐
- *   node test/cjk.mjs
- *
- * 上传只写入 desktop.mjs 创建的隔离测试 papers/，退出时删除该测试文件。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import path from 'node:path';

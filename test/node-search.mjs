@@ -1,19 +1,3 @@
-/**
- * Node 后端的联网搜索验收 —— 专门回答两个问题：
- *   1. server.js（不是 exe）的 /api/web-search 也是好的（「双端实现」的 Node 那一半）
- *   2. 联网搜索**不需要 API Key**（它只是抓公开页面，不碰大模型）
- *
- *   node test/node-search.mjs
- *   NODE_PORT=8801 node test/node-search.mjs
- *
- * 它在临时目录里另起一个 node server.js（PRT_PAPERS_DIR / PRT_DATA_DIR 指到
- * test/artifacts/node-scratch/），所以**完全不碰用户的 papers/ 和 data/**。
- *
- * 这里踩过一次坑，值得记下来：最初的写法是把用户的 config.json 备份出来、
- * 改成空 Key、跑完再写回。结果脚本开头写了 `taskkill /IM node.exe /F`，
- * 而脚本自己就是 node —— 它把自己杀了，退出钩子没跑，用户的 API Key 就留在被清空的状态。
- * 所以现在：① 只按 PID 杀自己拉起来的子进程；② 干脆不碰用户数据。
- */
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';

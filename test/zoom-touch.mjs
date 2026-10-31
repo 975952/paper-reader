@@ -1,28 +1,3 @@
-/**
- * 触摸屏手势回归：先判意图，再动手；捏合要跟手、要不掉帧。
- *
- *   BASE=http://127.0.0.1:8787 node test/zoom-touch.mjs
- *
- * 背景（用户口径）：
- *   2026-10-08「触摸屏缩放不丝滑」→ 触摸屏捏合其实被浏览器拿去做整页 Page Scale 缩放
- *   （实测 visualViewport.scale 1→4，而阅读器的 zoomAt 一次都没被调用）。
- *   2026-10-09「用户下手到底是滑动还是缩放判断清楚，不要先划又变大变小。还是有一点点小卡顿」
- *   → ①两指手势要**先判定意图**：间距没明显变化就只平移、绝不碰比例；
- *     ②捏合过程逐帧写 transform 会把文本层一起重新栅格化 → 预览期间把文本层藏掉
- *       （它本来就是透明的，只负责命中/选区），捏合过程从 9~10 帧掉帧变成 0~3 帧。
- *
- * ⚠️ 为什么这里**不断言帧率**：帧数是机器负载的函数（同一份代码实测 0~12 帧不等，
- *    尤其是同时开着 exe 窗口的时候）。帧的量化对比放在 test/perf/zoom-frame-rhythm.mjs
- *    与 test/perf/touch-pan-vs-pinch.mjs（打印数字给人看，带 A/B 对照）。
- *    本套件只钉**确定性的东西**：行为、几何、结构，以及「重画是不是排队开工」。
- *
- * 契约清单：
- *   ① 捏合**不许**动整页缩放（visualViewport.scale 保持 1）；② 两指平行拖动只滚动、比例不动；
- *   ③ 两指微抖什么都不发生；④ 对称捏合真的放大且锚点不飘；⑤ 先平移后捏合两件事都发生；
- *   ⑥ 预览期间文本层被藏起、松手恢复；⑦ 松手后的重画是排队开工的（不叠一起）；
- *   ⑧ 松手后视口内回到清晰位图，没有灰条/空白；⑨ 单指拖动仍是原生滚动；
- *   ⑩ 触摸板捏合（ctrl+wheel）没被改坏。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import fs from 'node:fs';
@@ -138,7 +113,6 @@ const pinchFramesFn = (t) => {
   return [{ x: 750 - d, y: 430, id: 1, force: 1 }, { x: 750 + d, y: 430, id: 2, force: 1 }];
 };
 
-/* ══════════════ 一、静态契约 ══════════════ */
 console.log('\n-- 静态契约');
 const statics = await page.evaluate(() => ({
   htmlTouchAction: getComputedStyle(document.documentElement).touchAction,
@@ -151,7 +125,6 @@ check('单指平移仍然允许（pan-x / pan-y 保留原生滚动）',
 check('阅读区关掉了浏览器滚动锚定（缩放后位置由 JS 自己算）',
   statics.overscrollAnchor === 'none', statics.overscrollAnchor);
 
-/* ══════════════ 二、意图判定 ══════════════ */
 console.log('\n-- 意图判定：滑动 vs 缩放');
 await resetView();
 await resetPerf();
@@ -168,7 +141,7 @@ check('两指平行拖动确实滚动了内容（不是被浏览器吃掉）',
 check('两指平行拖动也不缩放整个界面', panAfter.vv === panBefore.vv, `vvScale ${panBefore.vv} → ${panAfter.vv}`);
 
 /* 用户口径（2026-10-09 定稿）：
-   「只要是两指之间距离增大，**不管是哪个方向**都是放大，缩小也一样」
+   「只要是两指之间距离增大，不管是哪个方向都是放大，缩小也一样」
    → 竖着张开、斜着张开都必须算放大（判定只看距离，与方向无关）。 */
 await resetView();
 for (const [dirName, mk] of [
@@ -222,13 +195,6 @@ const pinned = await page.evaluate(async () => {
   };
   requestAnimationFrame(tick);
   const base = v.scale;
-  /* 故意让**中点一边往下走一边张开**（真实手指就会这样搓）：
-     如果画面跟着中点走，这里的 x/y 会一路漂 140px。
-     第一帧不动中点，是刻意的：锚点记在「第一次真正改比例」的那一帧的指针位置上，
-     那一帧指针在哪锚点就在哪。要是判定帧指针已经挪了 6px，那 6px 就成了
-     「锚点 vs 按下点」的固定差，再被 k 放大（实测 dy = −k·6.36，k=1.7 时 4.5px）——
-     那是**测量参考点**的问题，不是画面在动。所以判定帧与按下点重合，
-     剩下的 140px 中点漂移才是这句断言真正要否掉的东西（旧实现会漂满 140px）。 */
   for (let i = 1; i <= 22; i++) {
     const t = i / 22;
     const drift = i === 1 ? 0 : (140 * (i - 1)) / 21;
@@ -261,7 +227,6 @@ check('两指只有几像素抖动时纹丝不动',
   Math.abs(jitterAfter.scale / jitterBefore.scale - 1) < 0.003 && Math.abs(jitterAfter.scroll - jitterBefore.scroll) < 6,
   `scale ${jitterBefore.scale} → ${jitterAfter.scale}，scroll ${jitterBefore.scroll} → ${jitterAfter.scroll}`);
 
-/* ══════════════ 三、对称捏合 ══════════════ */
 console.log('\n-- 对称捏合');
 await resetView();
 const before = await page.evaluate(() => {
@@ -350,14 +315,6 @@ check(`捏合 + 松手重画期间没有超长卡顿（单次 < ${PERF.maxSingle
 check(`捏合 + 松手重画期间总卡顿可控（< ${PERF.totalLongTaskMs}ms）`,
   sumLong < PERF.totalLongTaskMs, `合计 ${sumLong}ms`);
 
-/* ══════════════ 四、提交阶段的状态机契约 ══════════════ */
-/**
- * 用户 2026-10-09 评审提出的两条，都在这里钉死：
- *   ① 提交那一帧锚点的屏幕坐标不许跳（视觉连续性）；
- *   ② 「旧 layer 的 CSS transform」和「新 page 的 scale factor」不许同时生效 ——
- *      实测过一次真事故：文本层里 pdf.js 的 span 是百分比定位 + CSS 变量字号，
- *      自己就会跟着页框缩放，再叠一层 scale(k) 就是双倍（fx 0.199 → 0.299）。
- */
 console.log('\n-- 提交阶段的状态机契约');
 await resetView();
 const continuity = await page.evaluate(async () => {
@@ -470,13 +427,6 @@ if (anim.error) {
     `逐帧位移最大 ${Math.max(...jumps).toFixed(2)}px`);
 }
 
-/**
- * 「手势做完之后偏移闪现」——用户 2026-10-09 的反馈，这一条专门钉它。
- * 根因：预览原来是把 `.pages` 整层 `scale(k)`，**页间距（14px）和内边距也被一起放大**，
- * 而提交后的真实布局里它们是固定值 → 离锚点每远一页就差一个 `间距 × (k−1)`
- * （实测 k=2.18 时视口内第 8 页在提交那一帧跳了 16.5px）。
- * 现在预览逐页预演真实布局，提交那一帧所有页都不该位移。
- */
 await resetView();
 const shift = await page.evaluate(async () => {
   const v = window.__viewer;
@@ -529,7 +479,6 @@ if (shift.error) {
     `放大 ×${shift.k}，视口内 ${shift.pages} 页，最大位移 ${shift.worst}px${shift.which ? `（第 ${shift.which.page} 页 ${JSON.stringify(shift.which.from)} → ${JSON.stringify(shift.which.to)}）` : ''}（整层缩放的旧实现是 16.5px）`);
 }
 
-/* ══════════════ 五、先平移后捏合 ══════════════ */
 console.log('\n-- 先平移后捏合');
 await resetView();
 const bothBefore = await viewerState();
@@ -546,14 +495,6 @@ check('先平移再张开：两件事都发生了（先滚后缩）',
   bothAfter.scale > bothBefore.scale * 1.4,
   `scale ${bothBefore.scale} → ${bothAfter.scale}（×${(bothAfter.scale / bothBefore.scale).toFixed(2)}）`);
 
-/* ══════════════ 五之二、先拖到边界、再捏合 ══════════════
-   真实用户最常见的动作之一：「已经在最上面了，还往下搓一把，然后捏合放大」。
-   平移的位移是**夹住**的（到边界就不动了），所以这时「手指底下的那个点」和
-   「画面实际上钉住的点」会差一个「搓过头的量」。如果升级成缩放时锚点没跟着
-   修正，预览期看不出来（预览本来就钉住不动），**提交那一帧**会整个画面猛拽一下 ——
-   正是用户抱怨的「手势做完之后偏移闪现」。
-   这里用同步测量（中间不 await 任何帧）：提交前后量同一批页的矩形，差值就是用户
-   在「最后一帧预览」与「下一帧」之间会看到的位移。 */
 await resetView();
 const clamp = await page.evaluate(() => {
   const v = window.__viewer;
@@ -575,13 +516,13 @@ const clamp = await page.evaluate(() => {
   const anchorBefore = v._zoomPreview ? { refX: v._zoomPreview.refX, refY: v._zoomPreview.refY } : null;
   // 搓了一把之后改距离 → 升级成缩放。
   // 升级这一帧用 ×1.001：比例几乎没变，所以「页面矩形动了多少」量的就是
-  // **锚点接得对不对**，而不是缩放本身带来的位移。
+  // 锚点接得对不对，而不是缩放本身带来的位移。
   v.previewScale(base * 1.001, { clientX: 700, clientY: 400 + overshoot });
   const pinned = v._zoomPreview ? { refX: v._zoomPreview.refX, refY: v._zoomPreview.refY } : null;
   const mid = rects();
   const midShift = Math.max(0, ...Object.keys(panRects).map((k) => (mid[k]
     ? Math.hypot(mid[k][0] - panRects[k][0], mid[k][1] - panRects[k][1]) : 0)));
-  // 接着真的放大，然后拿**最后一帧预览**与提交后比（同步量，中间不 await 任何帧）
+  // 接着真的放大，然后拿最后一帧预览与提交后比（同步量，中间不 await 任何帧）
   v.previewScale(base * 1.5, { clientX: 700, clientY: 400 + overshoot });
   const before = rects();
   v.commitZoomPreview();
@@ -605,16 +546,6 @@ check('拖到边界后再捏合：提交那一帧画面不位移（偏移闪现�
   clamp.worst <= 3,
   `放大 ×${clamp.k}，视口内 ${clamp.pages} 页，最大位移 ${clamp.worst}px${clamp.which ? `（第 ${clamp.which.page} 页 ${JSON.stringify(clamp.which.from)} → ${JSON.stringify(clamp.which.to)}）` : ''}`);
 
-/* ══════════════ 五之三、偏离中心的捏合（横向没得滚时不许横跳） ══════════════
-   2026-10-10 用户口径：「要归中就固定归中，不要已经移到左右又闪回中间」。
-   预览期画面是**按手指钉住**的，但提交后能停在哪儿取决于新布局的滚动范围：
-   缩小时页面会变得比阅读区窄（`maxScrollX` 变 0），布局把页居中 —— 于是预览期已经
-   横向挪出去的画面，在提交那一帧被硬拽回中间。修复前实测（同一套激励）：
-     缩小 5×→1.75× 中点偏右 **-483.2px**、中点居中 **-268.7px**、
-     缩小 2.3×→1.5× 偏左 **+119.8px / 纵向 -130.9px**。
-   修法：预览直接预演「提交后的几何」，滚动量夹进新布局真正能滚到的范围
-   （横向没得滚时 ≡ 0，预览从头到尾就是居中的）。
-   这里量的是**锚点所在页**（可见范围之外的页根本没有 preview transform）。 */
 console.log('\n-- 偏离中心的捏合（提交那一帧不许横跳）');
 const commitShift = (midX, opts) => page.evaluate(async ({ midX: mx, startScale, zoom, scrollTo }) => {
   const v = window.__viewer;
@@ -656,14 +587,6 @@ for (const [name, mx, opts] of offCenterCases) {
     `锚点第 ${r.ap} 页，预览末帧 [${r.snap.left},${r.snap.top}] → 提交后位移 ${r.dx}×${r.dy}px（修复前这类场景是 -483 / -269 / +120px）`);
 }
 
-/* ══════════════ 五之四、容器被撑大时也不许被浏览器夹到别处 ══════════════
-   2026-10-10 第二次反馈：「手势做完之后，有时候还是会出现瞬移」。
-   根因不是预览算错，而是**提交把夹取交给了浏览器**：DOM 的 scrollWidth/scrollHeight
-   会被溢出的后代撑大（软缩放中带 transform 的层、比页面大的切片画布，实测能多出几千像素），
-   浏览器允许的滚动量于是比布局真正的大 —— 预览夹在 A、提交落到 B，就是一次瞬移
-   （24 次随机手势里 5 次中招，最大 7516px，见 test/artifacts/gesture-fuzz.mjs）。
-   这里**人为把容器撑大**（塞一个绝对定位的方块）复现那个条件：
-   预览必须夹住，提交必须落在同一处。 */
 console.log('\n-- 容器被撑大时的提交位置');
 const inflated = await page.evaluate(async () => {
   const v = window.__viewer;
@@ -722,7 +645,6 @@ check('容器被撑大时，提交仍然落在预览那一帧（不被浏览器�
   + `未夹取的 want=${inflated.want} → 预览夹到 sx=${inflated.planned?.sx}，提交后 scrollLeft=${inflated.committed.left}，`
   + `画面位移 ${inflated.dx}×${inflated.dy}px（修复前这里会落成 want，横跳几十到几千像素）`);
 
-/* ══════════════ 六、文本层开销与文本流解析次数 ══════════════ */
 console.log('\n-- 文本层开销与文本流解析次数');
 const detail = await page.evaluate(async () => {
   const v = window.__viewer;
@@ -749,13 +671,6 @@ if (detail.error) {
     total < PERF.textLayerPassMs, `合计 ${total.toFixed(1)}ms（bind ${detail.bind} / normalize ${detail.norm} / nudge ${detail.nudge}，${detail.spans} 个 span）`);
 }
 
-/**
- * 一页渲染期间，pdf.js 的文本流只能被取一次。
- * 注意：`getTextContent()` 内部就是 `streamTextContent()`（见 pdf.min.mjs 的实现），
- * 所以「只解析一次」表现为 **streamTextContent 恰好 1 次**（那是 getTextContent 内部那一次）。
- * 旧实现是 TextLayer 自己 `streamTextContent`（1）+ `_bindRealFonts` 里 `getTextContent`（再来 1 次内部调用）
- * = 2 次解析，这里就会红。
- */
 const counts = await page.evaluate(async () => {
   const v = window.__viewer;
   const i = v.numPages;
@@ -776,7 +691,6 @@ check('渲染一页只解析一次文本流（旧实现是 2 次）',
   counts.stream === 1 && counts.get <= 1,
   `streamTextContent=${counts.stream} getTextContent=${counts.get}（期望 1 / ≤1）`);
 
-/* ══════════════ 七、单指拖动仍然是原生滚动 ══════════════ */
 console.log('\n-- 单指拖动');
 await resetView();
 const dragScroll = await (async () => {
@@ -794,7 +708,6 @@ const dragScroll = await (async () => {
 })();
 check('单指拖动照旧是原生滚动（没有为了拿捏合把滚动也关掉）', dragScroll > 40, `scrollTop=${Math.round(dragScroll)}`);
 
-/* ══════════════ 八、触摸板捏合没被改坏 ══════════════ */
 console.log('\n-- 触摸板捏合（ctrl+wheel）');
 await resetView();
 await resetPerf();
@@ -811,10 +724,6 @@ check('触摸板捏合（ctrl+wheel）仍然缩放 PDF',
   wheelAfter.scale > wheelBefore.scale * 1.1, `${wheelBefore.scale.toFixed(2)} → ${wheelAfter.scale.toFixed(2)}`);
 check('触摸板捏合也不会缩放整个界面', wheelAfter.vv === wheelBefore.vv, `${wheelBefore.vv} → ${wheelAfter.vv}`);
 
-/* ══════════════ 九、缩放速度是设置项（2026-10-10 用户口径「把缩放速度做进设置里面」） ══════════════
-   同一段手势、同样的手指行程，只改 `viewer.setZoomSpeed(v)`：
-   倍率应当按 (d/d0)^(1.6·v) 走，也就是**取对数之后与 v 成正比** —— 2 倍速度 ≈ 2 倍 log 增量。
-   手指行程特意取小（100 → 115px），否则会撞上 scale 上限 6，比出来的全是饱和值。 */
 console.log('\n-- 缩放速度设置项');
 const pinchAtSpeed = async (speed) => {
   await resetView();
@@ -838,7 +747,7 @@ check('缩放速度与倍率成正比（取对数后约 2 倍递增）',
   Math.abs(sp20.log / sp10.log - 2) < 0.35 && Math.abs(sp10.log / sp05.log - 2) < 0.35,
   `倍数 ${(sp10.log / sp05.log).toFixed(2)}× / ${(sp20.log / sp10.log).toFixed(2)}×（期望 ≈2）`);
 // 触摸板那条路走的是 app.js 的 exp(-px × 0.0022 × speed)，读的是 uiStyle ——
-// 所以这里**走真实设置面板**（滑杆 → input → applyUiSettingsFromControls），
+// 所以这里走真实设置面板（滑杆 → input → applyUiSettingsFromControls），
 // 顺带把「设置页那个滑杆真的接通了」也测掉。
 await resetView();
 const setSpeedViaSettings = async (v) => {

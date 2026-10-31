@@ -45,13 +45,6 @@ pub fn handle(rq: Request, body: &[u8], _ctx: &Ctx) {
         Err(e) => return send_json(rq, 400, &err_json(&e)),
     };
 
-    /*
-     * 审计 §P0：**只使用已保存配置**里的 baseURL / apiKey / model。
-     *
-     * 从前这里写的是 `pick("baseURL", "baseURL", ...)`，于是任何拿到本机 API 调用权的
-     * 页面都能把用户的 Key 转发到任意主机、或让服务端带着 Key 去请求任意 URL。
-     * 现在请求体里出现这三个字段一律忽略（旧前端还会带，忽略同样安全）。
-     */
     let mut forbidden: Vec<String> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
     if let Value::Object(m) = &payload {

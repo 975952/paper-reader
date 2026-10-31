@@ -1,5 +1,5 @@
 /**
- * 目录跳转：点一项应该让**那个标题顶在最上面**，而不是只跳到那一页的页顶。
+ * 目录跳转：点一项应该让那个标题顶在最上面，而不是只跳到那一页的页顶。
  *   BASE=http://127.0.0.1:8787 node test/outline.mjs
  */
 import puppeteer from 'puppeteer-core';
@@ -51,7 +51,7 @@ const outline = await page.evaluate(async () => {
 });
 check('这篇 PDF 有书签目录', outline.length > 0, `${outline.length} 项`);
 if (!outline.length) {
-  // 没有目录就没法继续往下验。这条提前退出**也要**按结果给退出码，
+  // 没有目录就没法继续往下验。这条提前退出也要按结果给退出码，
   // 否则「大纲为空」时报了 ❌ 却仍然 exit(0)，套件就成了假绿。
   await browser.close();
   const failed = results.filter((r) => r.ok).length;

@@ -1,17 +1,3 @@
-/**
- * 截图附件「图片单独存」验收（2026-10 用户口径：「图片单独存」）。
- *
- * 覆盖：
- *   后端（Node）   POST/GET /api/attachment、非法 id / 非图片拒绝、按会话键落目录；
- *   生命周期      发送时上传、会话保存后 GC（孤儿图删掉 / 被引用的保留）、
- *                 清空会话图片全删、删除会话整目录删；
- *   前端恢复      重开论文后用户消息里截图还在（按 id 取回原图），不再出现「截图附件未保存」；
- *                 老会话（只有 screenshot 标记、没有 id）仍给「重新添加截图」提示；
- *                 失败后重开再点「重试这次发送」→ 截图作为图片重新发给模型。
- *
- * 跑法：cd test && node attachments.mjs
- * 需要本机 Chrome（可用 CHROME 环境变量覆盖）。
- */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -121,7 +107,6 @@ try {
     body: JSON.stringify({ baseURL: `http://127.0.0.1:${aiPort}/v1`, model: 'attachments-mock', apiKey: 'attachments-key' }),
   });
 
-  /* ══════════ 后端接口：非法输入 ══════════ */
   const docIdForApi = 'attach-api-check';
   let h = 5381;
   for (const c of docIdForApi) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0;
@@ -220,7 +205,6 @@ try {
     restored.hasImg && restored.srcIsData && restored.natural[0] > 0, `natural=${restored.natural.join('x')}`);
   check('前端：重开后不再出现「截图附件未保存」', !restored.note);
 
-  /* ══════════ 清空会话 → 图片全删 ══════════ */
   await fetch(`${BASE}/api/session?doc=${encodeURIComponent(docId)}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ entries: [], history: [], ops: [], updatedAt: Date.now() }),

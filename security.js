@@ -1,29 +1,8 @@
-/**
- * 安全与数据边界（server.js 专用，零依赖）
- *
- * 对应 docs/安全与数据边界审计.md：
- *   P0  本地 API 认证（不可预测的 per-boot token + 自定义请求头）
- *   P0  /api/chat 只使用已保存配置（禁止请求体覆盖 baseURL / apiKey / model）
- *   P1  /api/config 严格字段白名单 + 范围限制
- *   P1  按接口的请求体上限
- *   P2  错误信息脱敏、日志过滤
- *
- * 这里放的都是纯函数 + 常量，方便单独检查和复用。
- */
 'use strict';
 
 const crypto = require('crypto');
 
-/* ==================================================================== P0 认证 */
 
-/**
- * 启动时生成一次不可预测的 session token。
- * 32 字节 CSPRNG → 64 位十六进制；进程重启即失效。
- *
- * 测试可以显式注入 `PRT_API_TOKEN=<值>` 用固定值（审计 §P0 明确允许：
- * 「测试认证必须显式注入，不能依赖生产后门」）。**没有**任何隐式的后门 token：
- * 不注入就是随机值，注入的值就是唯一有效的值。
- */
 function makeToken() {
   const injected = process.env.PRT_API_TOKEN;
   if (typeof injected === 'string' && injected.trim()) {
@@ -39,16 +18,6 @@ function makeToken() {
 
 const TOKEN = makeToken();
 
-/**
- * token 的注入与校验开关分离：
- *   - token 总是生成，也总是注入到「本服务自己吐出去的 index.html」；
- *   - 校验默认**开启**，显式 `PRT_REQUIRE_TOKEN=0` 才关掉（浏览器开发模式 / 尚未适配
- *     请求头的测试套件用它）。
- *
- * 注意：**不存在**「固定 token / 后门 token」之类的测试捷径。测试要过认证只能显式
- * 注入 `PRT_REQUIRE_TOKEN=0`，或者从它自己启动的进程里把 token 取出来 —— 生产路径
- * 上没有任何旁路（见 docs/安全与数据边界审计.md 验收要求最后一条）。
- */
 const ENFORCE = process.env.PRT_REQUIRE_TOKEN !== '0';
 
 /** 自定义请求头。取不常见的名字，避免和任何现有中间件打架。 */
@@ -69,31 +38,12 @@ function isInjectedToken() {
     && process.env.PRT_API_TOKEN.trim() === TOKEN;
 }
 
-/**
- * 机器可读的 token 输出行，给测试 harness 用。
- *
- * 为什么需要它：好几套测试自己 spawn 一个隔离的 `node server.js`，然后要用 HTTP 说话。
- * 它们必须有确定性的方式拿到 token，否则只能去改「默认关闭认证」——那才是真的后门。
- * 所以这里把 token **只打到 stdout 的这一行**，并且：
- *   * `PRT_API_TOKEN` 已注入 → 不打印（调用方本来就知道）；
- *   * `PRT_QUIET_TOKEN=1` → 不打印（交付的桌面版 / 不希望 token 落日志的场合）。
- * token 不出现在任何其它日志、错误信息或 DOM 文本里。
- */
 function tokenAnnouncement() {
   if (isInjectedToken()) return null;
   if (process.env.PRT_QUIET_TOKEN === '1') return null;
   return `[prt] api-token: ${TOKEN}`;
 }
 
-/**
- * 免认证路径。
- *
- * 只有 `/api/health`：它是**存活探针**，返回体固定是 `{ ok, port }`，
- * 不含任何用户数据、不读盘、不写盘、不出网。测试套件靠轮询它来判断
- * 「隔离服务起来了没有」，而那时它们还没拿到 token ——
- * 如果它也要求 token，就会陷入「要先有 token 才能探测服务，可服务没起来就没法读 token」
- * 的死循环，测试只能退回「关掉认证」，反而更糟。
- */
 const PUBLIC_PATHS = new Set(['/api/health']);
 
 function isEnforced() {
@@ -123,14 +73,6 @@ function readCookie(req, name) {
   return '';
 }
 
-/**
- * 这次请求有没有带上正确的 token。
- *
- * 子资源例外（只有 /api/pdf 的 GET/HEAD）：浏览器加载 `<embed src>` 或 PDF.js 直接
- * 用 XHR 取字节时无法附加自定义头，所以这里额外接受同源的 `prt_session` cookie。
- * 该 cookie 是 HttpOnly + SameSite=Strict、且只在「本服务吐出的 index.html」上种下，
- * 因此其它本地页面拿不到它、跨站请求也不会自动带上。
- */
 function authorized(req, pathname) {
   // 存活探针免认证（见 PUBLIC_PATHS 的说明）
   if (PUBLIC_PATHS.has(pathname)) return true;
@@ -146,12 +88,6 @@ function authorized(req, pathname) {
   return false;
 }
 
-/**
- * 附加防线：Origin / Referer 白名单。
- * **不能替代 token**（审计 §P0 第 4 条），只在 token 已经校验通过之后再看一眼，
- * 用来挡住「token 通过某种途径泄漏到别的页面」这种情况。
- * 两个头都没有时拒绝：非浏览器客户端应显式使用 token/受信任请求头。
- */
 const ALLOWED_ORIGIN_RE = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(\.)?(:\d+)?$/i;
 
 function originAllowed(req) {
@@ -178,16 +114,7 @@ function unauthorized(res, sendJson) {
   sendJson(res, 401, { error: { message: '未授权：缺少或错误的本地访问令牌（请刷新页面）' } });
 }
 
-/* ==================================================================== P0 聊天 */
 
-/**
- * /api/chat 允许出现在请求体里的字段。
- * 审计 §P0：只允许 messages / stream / temperature / max_tokens / 上下文范围。
- *
- * 明确**不再接受** baseURL / apiKey / model —— 它们只能来自 data/config.json。
- * 旧前端仍会带上它们，所以这里是「忽略」而不是 400：忽略同样满足
- * 「拿到本地 API 调用权的页面不能把 Key 转发到任意地址」。
- */
 const CHAT_FIELDS = new Set([
   'messages', 'stream', 'temperature', 'max_tokens', 'idleMs',
   // 上下文 / 范围类（前端将来的扩展字段，不参与上游请求体构造）
@@ -253,14 +180,7 @@ function pickMaxTokens(v) {
   return { value: n };
 }
 
-/* ==================================================================== P1 配置 */
 
-/**
- * /api/config 的严格白名单（审计 §P1）。
- * 未知字段一律忽略；每个字段有自己的类型/范围/长度限制。
- *
- * 返回 { patch, ignored } —— ignored 只用于本地诊断日志，不回给前端。
- */
 const CONFIG_FIELDS = [
   'apiKey', 'baseURL', 'model', 'visionModel', 'targetLang',
   'temperature', 'stream', 'idleMs', 'theme', 'fontSize', 'glossary',
@@ -287,15 +207,6 @@ function validUrlString(raw) {
   return s;
 }
 
-/**
- * 字符串字段的长度检查。
- *
- * 返回 `{ ok: value }` 或 `{ tooLong: true }` 或 `{ notString: true }`。
- *
- * **绝不截断**：审计 §P1 / §验收 明确要求「超限返回 413/400，不截断后静默保存」。
- * 从前这里是 `v.slice(0, n)` —— 一个 5000 字的 model 会被悄悄存成 256 字、
- * 接口还回 200，用户看到「保存成功」但设置已经被改坏了。
- */
 function boundedString(v, n) {
   if (typeof v !== 'string') return { notString: true };
   if (v.length > n) return { tooLong: true, limit: n };
@@ -392,7 +303,6 @@ function sanitizeConfigPatch(patch) {
   return { patch: out, ignored, capped };
 }
 
-/* ============================================================ P1 请求体上限 */
 
 /** 按接口的请求体上限（审计 §P1：超限返回 413，不截断保存） */
 const BODY_LIMITS = {
@@ -472,13 +382,6 @@ const PROFILE_LIMITS = {
 
 const ISO_LIKE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:[+-]\d{2}:\d{2}|Z)$/;
 
-/**
- * /api/profile 的校验：版本 / 条目数 / 字符串长度 / 时间格式。
- *
- * 与前端 `public/js/profile.js` 的 `validateProfile()`、Rust `limits::check_profile()`
- * 保持同一口径。**校验失败绝不落盘**（旧档案原样保留），避免坏数据覆盖好数据。
- * @returns {{ error:string } | { value:object }}
- */
 function checkProfile(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: '学习档案必须是对象' };
   if (Number(raw.version) !== 1) return { error: '学习档案版本不支持' };
@@ -540,7 +443,6 @@ function checkProfile(raw) {
   return { value };
 }
 
-/* ============================================================== P2 脱敏 */
 
 /**
  * 诊断日志：只在本地打印，绝不进 HTTP 响应。
@@ -561,12 +463,6 @@ function safeStringify(v) {
   }
 }
 
-/**
- * 把一串文本里明显敏感的内容打码。
- *
- * 与 Rust `limits::scrub_text()` 逐条对齐：密文（Bearer / apiKey / token 的值）、
- * 本机绝对路径、本次 token 本身。
- */
 function scrubText(s) {
   let t = String(s == null ? '' : s);
   t = t.replace(/Bearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, 'Bearer ***');

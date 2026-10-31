@@ -1,15 +1,5 @@
-/* ═══════════════════════════════════════════════════════════════
-   论文阅读器 — 样式（极简版）
-   ═══════════════════════════════════════════════════════════════ */
 
 :root {
-  /* ── 暖灰 / 米白 / 深灰 / 油橄榄绿工作台色板（浅色）──
-   2026-10 调色：背景族整体提到"白底 + 很淡暖黄"（用户口径：「还是带一点浅黄，
-   就在这个白的上面稍微偏一点颜色」）。油橄榄绿 --accent 与深色模式一个字没动。
-   颜色只在这里定义；散落处的硬编码颜色一律换成这套 token。
-   蓝色系（#2563eb / #3b6ef5 / #6b93ff / #78a2ff / #eaf1ff / rgba(59,110,245,*) 等）全部退役。
-   ⚠️ 浅色色板在四块里同步（本块 / :root[data-theme="light"] / 文件末尾的"更轻的暖色工作台"
-   / 系统深色的媒体查询），改一处必须四处一起改。 */
   --bg: #F8F5EB;
   --bg-elev: #FDFBF5;
   --bg-sunken: #F1EDE0;
@@ -17,10 +7,6 @@
   /* 次要文字 #63645A：对新的面板底 #FDFBF5 是 5.90:1、对工作台底 #F8F5EB 是 5.50:1；
      更弱的 --fg-faint 让给 #77786C。层级「主文字 > 次要 > 弱化」不变。 */
   --fg-dim: #63645A;
-  /* 弱化文字 #77786C：2026-10 底色提亮后对比度**反而上升** —— 对 #FDFBF5 4.33:1、
-     对 #F8F5EB 4.11:1、对凹陷底 #F1EDE0 3.83:1、对纸面 #FCFAF2 4.44:1
-     （旧米黄底分别是 4.21 / 3.66 / 3.36 / 4.40）。该变量有 58 处在用：
-     页码 / 原文引用 / 占位符 / 空态 / 各种次级说明。 */
   --fg-faint: #77786C;
   --border: #E4DEC9;
   --border-strong: #D5CEB4;
@@ -60,10 +46,6 @@
   --statusbar-h: 22px;
   --left-w: 210px;
   --right-w: 360px;
-  /* ── 响应式布局令牌 —— app.js 的 applyResponsiveLayout() 直接读这两个值判断收展 ──
-     --viewer-min 正文（PDF 阅读区）最小可用宽度：窗口放不下就让侧栏自动收起，
-                  而不是把 PDF 挤到只剩一条（780px 窗口曾经把正文压到 ~200px/33%）；
-     --rail-w     侧栏收起后，贴在最外侧的活动栏宽度（收起侧占用的等效宽度）。 */
   --rail-w: 40px;
   --viewer-min: 420px;
   --reading-fs: 14px;
@@ -104,13 +86,6 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  /* 选择器写成 :root:root（= 只提优先级，不做任何其它改变）。
-     原因：文件后半段还有一个 :root 调色块（早期 phase 1 留下的重复覆盖），
-     它和这里的 :root 同优先级、位置更靠后，会把「跟随系统 + 深色」这条路上的
-     深色背景盖回浅色，而 --fg 已经是深色板的浅字 —— 结果就是**浅底浅字**。
-     这个缺陷在改暖色之前就存在（改动前也能复现）。:root:root 的优先级高于单个
-     :root，能压过后面那块；而 :root[data-theme="light"] 是显式选浅色、优先级同为
-     (0,2,0) 且位置更靠后，仍然照常生效，所以「显式浅色」不受影响。 */
   :root:root {
     /* 与 :root[data-theme="dark"] 保持一致：深色底提亮一档，避免整条右栏看起来是"黑块" */
     --bg: #2E2B24;
@@ -151,15 +126,6 @@
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  /* 用户口径（2026-10-04）：「深色模式下文字不应该是白色的吗」——
-     原来正文主色是暖米 #EDE6D2，在深底上显得发黄、不够亮，和「深色模式 = 白字」的直觉不符。
-     改成接近纯白 #FFFFFF（对 #211F1A 对比度 19.8:1），次要/弱化文字同步提亮，
-     保证「主文字白、次要浅灰、更弱更灰」的层级还在。
-
-     又一轮实测反馈：「译文一整块直接就是黑的，之后上面露出来一点」——
-     原来的 --bg #211F1A 亮度只有 8%，整条右栏看起来就是一块黑。
-     把深色底整体提亮一档（--bg #211F1A→#2E2B24、--bg-elev #2A2721→#38342B），
-     底色不再是"黑块"，与正文纸面的反差也更柔和。 */
   --bg: #2E2B24; --bg-elev: #38342B; --bg-sunken: #24211C; --fg: #FFFFFF;
   --fg-dim: #CDC7B8; --fg-faint: #A9A294; --border: #4A453A; --border-strong: #5C5648;
   --accent: #A8BFA7; --accent-soft: #3C4030;
@@ -178,19 +144,6 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ══ 触摸屏：捏合手势归应用自己管，不许浏览器拿去做整页缩放 ══════════════════
-   为什么：触摸屏两指捏合在 Chromium 里走的是**整页 Page Scale**，
-   不是触摸板那种 `wheel + ctrlKey`。不加这条的话，捏一下会把顶栏 / 侧栏 /
-   PDF 位图一起拉伸（实测 visualViewport.scale 1 → 4），而阅读器的缩放逻辑
-   一次都收不到事件 —— 用户看到的就是「缩放不丝滑、发糊」。
-   （WebView2 侧的对应开关是 `IsPinchZoomEnabled`，见 desktop/src/window.rs。）
-
-   取值 `pan-x pan-y` 而不是 `none`：**保留单指拖动 / 双指滚动的原生滚动**，
-   只关掉「捏合缩放」这一项。关掉之后两指 touchmove 会原样送到页面，
-   由 public/js/pdfview.js 的 `_bindTouchZoom()` 接管成 PDF 缩放。
-   放在 `html` 上是为了让整个界面口径一致（在侧栏上捏也不该把 UI 拉大）；
-   touch-action 不继承，取「自身与祖先的交集」，所以个别元素写 `none`
-   （如 .sec-head）仍然更严格，不受影响。 */
 html { touch-action: pan-x pan-y; }
 
 button { font-family: inherit; font-size: inherit; color: inherit; cursor: pointer; }
@@ -202,7 +155,6 @@ kbd { font-family: var(--mono); font-size: var(--ui-fs-xs); background: var(--bg
 .link:hover { text-decoration: underline; }
 .cnt { color: var(--fg-faint); font-weight: 400; }
 
-/* ───────────────────────────── 顶栏 ───────────────────────────── */
 
 .topbar {
   height: var(--topbar-h);
@@ -271,20 +223,7 @@ kbd { font-family: var(--mono); font-size: var(--ui-fs-xs); background: var(--bg
 @media (max-width: 1080px) { .zoom-word { display: none; } .zoom-range { width: 70px; } }
 @media (max-width: 900px) { .zoom-range { display: none; } }
 
-/* ───────────────────────────── 布局 ───────────────────────────── */
 
-/**
- * `#main` 用 **grid** 排成两行（2026-10）：
- *   第一行 = 左栏 + 分隔条 + 正文区 + 右栏（原来的全部内容，横向 flex）
- *   第二行 = 底栏，横着铺满整窗
- *
- * 为什么不用 `flex-wrap`：试过，第一行只吃到「内容高度」（实测 #main 高 915px，
- * 但第一行只占 568px，底栏于是停在 y=647 而不是贴到 950），flex 行的交叉轴
- * stretch 在换行容器里不按预期把行撑满。grid 的 `1fr auto` 是确定性的：
- * 第一行吃掉「总高 − 44px」，第二行固定 44px。
- *
- * 左栏 / 分隔条 / 正文 / 右栏放进第一行那个 flex 容器里（见下面的 `#main > .main-row`）。
- */
 #main {
   height: calc(100vh - var(--topbar-h));
   display: grid;
@@ -328,15 +267,6 @@ body.no-right .right-cols, body.no-right #rightCols { display: none; }
 /* ─────────────────────── 活动栏（侧栏收起时的竖条） ───────────────────────
    位置在 #main 的最左 / 最右（#leftSide 左边、#rightSide 右边），不放在侧栏内部 ——
    放进去就会跟着侧栏一起被 display:none 掉。宽度 = --rail-w，不可拖动。 */
-/**
- * 活动栏（2026-10 用户口径）：
- *   「左侧栏应该一直都是几个选项在最左边的一个小侧栏，一直都不消失，
- *     然后在这个小侧栏右边可以开启大的侧栏」。
- * 所以它从「只在对应侧收起时才出现」改成**两侧常驻**：
- *   · 左边一条竖条永远在，点图标在它右边展开大侧栏；
- *   · 右边同理。
- * 收起大侧栏不再收起这条竖条 —— 竖条本身就是恢复入口，永远找得回来。
- */
 .rail {
   display: flex;                    /* 常驻（以前是 display:none，只在收起时才出现） */
   flex: 0 0 var(--rail-w);
@@ -380,7 +310,6 @@ body:not(.no-right) #railRight { border-left-color: transparent; }
 body.dragging { cursor: col-resize; user-select: none; }
 body.dragging .viewer { pointer-events: none; }
 
-/* ─────────────────────── 左栏：文件 / 目录 / 笔记 ─────────────────────── */
 
 .side-head { padding: var(--panel-pad) var(--panel-pad) calc(var(--panel-pad) - 4px); }
 .filter {
@@ -399,23 +328,6 @@ body.dragging .viewer { pointer-events: none; }
 /* 左栏整体滚动：目录和笔记按内容自然展开，不再各自塞进小格子 */
 .filelist { list-style: none; margin: 0; padding: 0 calc(var(--list-pad-x) - 2px); overflow: auto; flex: 0 0 auto; max-height: 30vh; min-height: 48px; }
 
-/**
- * 左栏「当前显示的那一块」要**按内容自然展开**，滚动的必须是整条左栏。
- *
- * ⚠️ 2026-10 实测缺陷（e2e「目录不再被限制在小区域里」现场）：
- *   `#outlineList` client=421 / scroll=478 —— 目录自己成了一个小滚动框，
- *   20 项里有 3 项滚不到，用户要看目录得先在那个小框里滚一遍。
- *   根因就在下面两条规则：`.sec` 与它里面的列表都写了 `flex: 1 1 auto` + `min-height: 0`，
- *   于是左栏里同时可见的三块（文件 / 目录 / 笔记）**按比例瓜分**左栏高度：
- *   文件 105 · 目录 469 · 笔记 159，而目录内容需要 526 —— 差出来的 57px
- *   因为没有 `flex-shrink: 0`，被压进了列表自己的 `overflow: auto` 里。
- *   祖先链量得很清楚：`ul#outlineList`(421) ← `section.sec`(469) ← `aside#leftSide`(915, overflow-y:auto)。
- *
- * 修法：**长出来的部分由左栏整体滚**（`#leftSide` 本来就是 overflow-y:auto，是唯一的滚动容器）——
- *   把 `.sec` 与列表的 `flex-grow` 保留（内容少时照样撑满，不会在下面留一大片空白）、
- *   把 `flex-shrink` 设成 0（内容多时不再被压扁，也就没有第二个滚动容器）。
- *   `overflow: auto` 保留：放得下时不会出现滚动条，放不下时由左栏兜住。
- */
 /* 只让**容器本身**伸缩；里面的头部 / 列表 / 搜索框各自保持内容高度，
    否则会出现「头部被拉伸成一大块、列表被挤到下面」的新毛病（实测踩到）。 */
 #leftSide > .sec:not(.hidden) > .side-head,
@@ -431,16 +343,6 @@ body.dragging .viewer { pointer-events: none; }
 #leftSide > .sec:not(.hidden) > .notes,
 #leftSide > .sec:not(.hidden) > .rel-list { flex: 1 0 auto; min-height: 0; max-height: none; overflow: auto; }
 
-/**
- * 「文件」块的结构与另外三块**不一样**：它的标题栏 `.side-head` 是左栏的**直接子元素**，
- * 且自己内部还装着 `#fileFilter` 搜索框（下拉区在它下面，不在里面）；
- * 文件列表 `#fileList` 与 `.dropzone` 是它的**兄弟**。
- *
- * ⚠️ 所以**不能**给 `.side-head` 设 `flex: 1 1 auto`：那样它内部那个搜索框会被当成
- * 唯一的可伸缩子元素，被撑成一整块（实测被撑到 **640px 高**），文件列表反被挤到最底部
- * 只剩 88px —— 看起来就是「左栏文件被挡住、下面全是空的」。用户报的「左边的也还是会被挡住」
- * 正是这个。正确做法：标题栏保持内容高度，让**文件列表**去吃剩下的高度。
- */
 #leftSide > .side-head:not(.hidden) { flex: 0 0 auto; }
 #leftSide > .side-head:not(.hidden) ~ .dropzone { flex: 0 0 auto; }
 #leftSide > .side-head:not(.hidden) ~ .filelist { flex: 1 1 auto; min-height: 48px; max-height: none; overflow: auto; }
@@ -459,7 +361,7 @@ body.dragging .viewer { pointer-events: none; }
 .filelist li.empty { color: var(--fg-faint); cursor: default; }
 
 /* ── 文件行：抓手 + 文件名 + 删除（2026-10「移动顺序 / 删除」）──
-   左侧抓手与右侧 × 只在悬停 / 当前项时显形，但**位置一直占着**（opacity，不是
+   左侧抓手与右侧 × 只在悬停 / 当前项时显形，但位置一直占着（opacity，不是
    display），否则鼠标扫过整行文字会左右跳。 */
 .filelist li[data-name] { display: flex; align-items: center; gap: calc(2px * var(--ctl-scale)); }
 .filelist li .file-grip {
@@ -534,7 +436,6 @@ body.dragging .viewer { pointer-events: none; }
   color: var(--fg-faint); font-size: var(--ui-fs-2xs); line-height: 1.5;
 }
 
-/* ───────────────────────── 参考文献（左栏） ───────────────────────── */
 
 .tbtn.tiny { min-width: calc(20px * var(--ctl-scale)); height: calc(20px * var(--ctl-scale)); font-size: calc(11px * var(--ctl-scale)); padding: 0 calc(4px * var(--ctl-scale)); }
 .rel-sum { font-size: var(--ui-fs-2xs); color: var(--fg-faint); line-height: 1.6; padding: 0 calc(var(--panel-pad) + 2px) calc(var(--panel-pad) - 2px); }
@@ -596,7 +497,6 @@ body.dragging .viewer { pointer-events: none; }
 .rel-tag.err { border-color: var(--err); color: var(--err-text); }
 .rel-item .rt { cursor: pointer; }
 
-/* ───────────────────────────── 公式（KaTeX） ───────────────────────────── */
 /* 侧栏很窄，块级公式必须能横向滚动，否则会把整个面板撑破 */
 .katex { font-size: 1.03em; }
 .katex-display {
@@ -608,7 +508,6 @@ body.dragging .viewer { pointer-events: none; }
 .text .katex { line-height: 1.2; }
 .katex-error { color: var(--err-text); font-size: .92em; }
 
-/* ───────────────────────── 论文操作菜单 ───────────────────────── */
 
 .ops-menu {
   position: fixed; z-index: 88; top: 40px; right: 96px;
@@ -635,11 +534,6 @@ body.dragging .viewer { pointer-events: none; }
 .ops-item.cached .ops-title { color: var(--accent); }
 .ops-hint { font-size: var(--ui-fs-2xs); color: var(--fg-faint); line-height: 1.45; }
 
-/* ───────────────── 面板注册表（阶段 2.2a：六个面板的标题栏 / 折叠 / 管理器） ─────────────────
-   左栏文件是 .side-head，目录 / 笔记 / 参考文献是 section.sec，右栏两块是 section.ai-block ——
-   DOM 结构一个都没改，这里只给它们补「同一套折叠外观 + 标题栏上的 ⋯ 按钮」。
-   面板根部在 JS 里补 data-panel=<id> / data-dock=<left|right|hidden>；文件列表与拖入区是
-   .side-head 的**兄弟**节点，收起时靠相邻兄弟规则一起收（不给它们套 .sec 是为了不动既有布局）。 */
 
 /* 标题栏上的 ⋯ ：位置是注册表算出来的**顺序**，所以只给布局，不改 .sec-head / .ai-head 的既有子元素规则 */
 .panel-head-ctrl { flex: 0 0 auto; margin-left: auto; align-self: center; }
@@ -685,7 +579,6 @@ body.dragging .viewer { pointer-events: none; }
 
 
 
-/* ───────────────────────── Markdown 表格 ───────────────────────── */
 /* 侧栏很窄，宽表格必须能横向滚动，不能把面板撑破 */
 .md-table-wrap { max-width: 100%; overflow-x: auto; margin: 7px 0; }
 .md-table { border-collapse: collapse; width: 100%; font-size: .95em; line-height: 1.5; }
@@ -698,7 +591,6 @@ body.dragging .viewer { pointer-events: none; }
 .md-table td > code, .md-table th > code { white-space: nowrap; }
 .md-table .katex { font-size: 1em; }
 
-/* ───────────────────────────── 阅读区 ───────────────────────────── */
 
 .viewer-wrap { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-sunken); overflow: hidden; }
 .viewer { flex: 1 1 0; min-height: 0; overflow: auto; position: relative; outline: none;
@@ -707,28 +599,8 @@ body.dragging .viewer { pointer-events: none; }
   overflow-anchor: none; }
 .pages { display: flex; flex-direction: column; align-items: center; width: max-content; min-width: 100%; gap: 14px; padding: 14px 0 50px; }
 
-/* ══ 缩放预览期间把文本层藏起来（只影响绘制，不影响布局）══════════════════════
-   为什么：预览是给 .pages 整体写 transform，浏览器每帧都要重新栅格化这一层。
-   文本层有几百个绝对定位的 span（实测 16 页夹具 334 个），是这一层里最贵的部分；
-   实测（test/perf/zoom-frame-rhythm.mjs，A/B 对照）：每帧写 transform 时有 9~10 帧
-   掉到 33ms，把文本层藏掉之后捏合过程是干净的 16.7ms/帧。
-
-   为什么**视觉上完全没有副作用**：文本层的 span 本来就是 `color: transparent`
-   （见上面 .textLayer 的规则），用户看到的字全是 canvas 画出来的。这一层只负责
-   鼠标命中与选区，捏合的时候既不能选也点不到，藏起来零损失。
-   pdf.js 官方 viewer 在缩放期间也是同一条思路（`hideTextLayer: postponeDrawing`）。
-
-   类名由 pdfview.js 在 _beginZoomPreview() 加上、commitZoomPreview() 摘掉。 */
 .pages.zoom-preview .textLayer { visibility: hidden; }
 
-/* ── 滚动条（2026-10 用户口径：「PDF 上下滚动的那个栏稍微做宽一点」） ──────────
-   之前全应用没有一条滚动条样式，用的是 Chrome 默认外观：约 15px、系统灰、
-   和这套暖色工作台不搭，而且细得不好抓。这里统一成：
-     · 宽 16px（比默认宽一档，鼠标好落）；
-     · 轨道用面板底（跟内容同底，不抢注意力）；
-     · 滑块用 --border-strong 同族色，悬停加深一档；
-     · 圆角 8px + 2px 透明边（滑块看起来细一点，但**命中区仍是 16px**）。
-   只给「整块面板 / 正文区」这类主滚动容器加，不给短列表加 —— 内联小列表用细滚动条更好。 */
 .viewer::-webkit-scrollbar,
 .ai::-webkit-scrollbar,
 .ai-body::-webkit-scrollbar,
@@ -835,29 +707,11 @@ body.dragging .viewer { pointer-events: none; }
 .search-result .sr-snippet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-result mark { background: var(--hit); color: inherit; border-radius: 2px; padding: 0 1px; }
 
-/* 状态栏已删除（2026-10）：PDF 下面原来常驻一条 22px 高的横条，只写着「就绪」，
-   纯占地方。解析进度改由页码那一格的 .busy 提示（见下面 .page-input.busy），
-   不再单独占一条横条。
-
-   取而代之的是**底栏**（用户口径）：「可以加一个整体的底栏分担一下最上面一栏的压力，
-   比如调节大小和翻页可以放在下面」。它放的是与阅读位置直接相关的两组控件（翻页 + 缩放），
-   与顶栏同一组动作的按钮并存，共用同一批函数，所以状态永远一致。 */
 /* 消息动作里的图标按钮（2026-10 用户口径：「复制 / 回到第8页用图标表示不要用文字」）。
    尺寸与其他 .acts button 对齐，但不占文字宽度。 */
 .msg .acts button.act-icon { padding: 0; width: 26px; height: 24px; display: inline-flex; align-items: center; justify-content: center; }
 .msg .acts button.act-icon > svg { width: 14px; height: 14px; }
 
-/* ═══════════ 多会话条（2026-10） ═══════════
-   用户口径：「问答是不是要做多对话分对话」→ 会话列表 + 新建 + 切换。
-   位置：右栏顶栏（#aiBar）下面一条，显示当前会话名；点开是列表。
-   全部用现有主题令牌，不新增颜色。 */
-/* ── 会话条（多对话）—— 2026-10 收口 ──────────────────────────────────────
-   用户口径：「问答和翻译都有那个多对话的标」。两条一起改：
-     · 只在问答块开着时出现（renderSessionBar 按 rightPanelInCol(1) === 'chat' 判断）；
-     · 去掉那个不承载信息的绿色圆点，换成一个细线「会话」图标；
-     · 不再是一个占满整行的带边框输入框样子的块 —— 改成右上角一个很轻的小胶囊，
-       文字用次级灰，只有悬停 / 打开时才变强调色。面板顶部因此安静下来，
-       和「白底 + 淡暖黄」的底色连成一片，不再有一条绿边压在上面。 */
 .sessbar {
   position: relative; flex: 0 0 auto;
   display: flex; justify-content: flex-end;
@@ -927,11 +781,6 @@ body.dragging .viewer { pointer-events: none; }
 .sess-clear { border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; margin-top: 4px; }
 .sess-empty { padding: 10px 7px; color: var(--fg-faint); font-size: var(--ui-fs-xs); text-align: center; }
 
-/* ═══════════ 底栏（2026-10） ═══════════
-   用户口径：「底栏应该是横着一整栏，而且现在的太扁了」。
-   所以它是 `#main` 的直接子项（铺满整个窗口底部，横跨左栏 + 正文 + 右栏），
-   高度从原来 22px 的细条加高到 44px。
-   `#main` 是 flex row，靠 flex-basis:100% + order 把它挤到下一行（见 #main 的规则）。 */
 .viewer-foot {
   flex: 0 0 100%;
   order: 99;
@@ -950,13 +799,6 @@ body.dragging .viewer { pointer-events: none; }
 .viewer-foot .zoom-word { color: var(--fg-faint); margin-right: 4px; }
 .viewer-foot .zoom-range { width: 150px; }
 .viewer-foot .zoom-pct { min-width: 46px; text-align: right; font-variant-numeric: tabular-nums; }
-/**
- * 底栏**常驻**（2026-10 用户口径：「底栏应该是一直都有，主页也要有」）。
- *
- * 之前有一条 `body:not(.reading) .viewer-foot { display: none }` —— 首页时整条消失，
- * 布局少一截、看起来像坏了。现在它一直在；首页时里面**与文档相关**的控件由 JS 置
- * `disabled`（翻页 / 页码 / 缩放都点不动，但看得见），这样布局稳定、意图也清楚。
- */
 .viewer-foot .tbtn:disabled,
 .viewer-foot .page-input:disabled,
 .viewer-foot #zoomRange:disabled,
@@ -975,11 +817,6 @@ body.dragging .viewer { pointer-events: none; }
 @keyframes pin-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) { .page-input.busy { animation: none; } }
 
-/* ═══════════ 首页 / 书架页（2026-10） ═══════════
-   只解决两件事：选一篇论文、继续上次阅读。刻意不做仪表盘。
-   全部复用现有主题令牌（--bg-elev / --border / --fg / --fg-dim / --fg-faint /
-   --btn / --accent），**不新增颜色常量** —— 深浅色两套主题都靠令牌自动跟随，
-   这里不需要（也不该）出现第二个 @media (prefers-color-scheme) 分支。 */
 
 .home {
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
@@ -988,7 +825,7 @@ body.dragging .viewer { pointer-events: none; }
 }
 .home.hidden { display: none; }
 /* 与首页互斥（2026-10）：非阅读态时正文整个不显示。
-   之前只给 #home 加了显示/隐藏，**忘了让 #viewer 让位** —— 于是从 PDF 回首页时，
+   之前只给 #home 加了显示/隐藏，忘了让 #viewer 让位 —— 于是从 PDF 回首页时，
    已经渲染出来的页面还留在那里（用户实测：「会有一部分 pdf 残留，还可以滚动」）。 */
 body:not(.reading) #viewer { display: none; }
 /* 阅读态下首页整个让位（与 #viewer 互斥） */
@@ -1142,39 +979,14 @@ body.row-dragging { cursor: row-resize; user-select: none; }
 
 .ai-body { flex: 1 1 0; min-height: 0; overflow: auto; padding: calc(var(--ctl-gap) * .5) 0 var(--panel-pad); display: flex; flex-direction: column; }
 
-/* ── 译文块：最近的一条翻译在最上面（2026-10 用户口径：「最近的翻译应该要放在最上面」）──
-   实现是 **DOM 顺序就是新 → 旧**（app.js 的 addEntry 对译文块用 prepend），
-   配合普通 `column` 布局 —— 这样最新一条天然在顶部，滚动也是普通的向下滚。
-
-   ⚠️ 不要退回 `column-reverse`：那条路在 Chrome 154 上测过两种写法，都满足不了需求 ——
-     · `column-reverse` + 默认 flex-start：短内容贴底、长内容能滚；
-     · `column-reverse` + `justify-content: flex-end`：短内容能贴上沿，但**溢出被吃掉**
-       （scrollHeight 恒等于 clientHeight，多出来的内容够不到，滚动条不出现）。
-   也不要给条目加 `flex: 0 0 auto` 之类的补丁去救它：根因是反向轴的溢出语义，
-   不是条目被压扁（实测条目高度是对的 1507px，容器就是不认）。
-
-   `margin-top: auto` 是这里的关键一条：内容不足一屏时，把整块**压到上沿**
-   （否则 flex 会把它留在底部）；内容超过一屏时 margin 自动变成 0，滚动照常。 */
 .ai-block[data-block="translate"] > .ai-body {
   flex-direction: column;
   padding: var(--panel-pad) 0 calc(var(--ctl-gap) * .5);
 }
-/* `margin-bottom: auto` 是这里的关键一条：它挂在**最后一条**（视觉上最旧的那条）上，
-   把剩余空间全部吃掉，于是上面所有条目被顶到上沿（内容不足一屏时）；
-   内容超过一屏时剩余空间为 0、margin 自动变 0，滚动照常。
-   ⚠️ 两个容易写错的地方（都踩过）：
-     · 挂 `margin-top: auto` 会**反过来**把内容推到下面（auto 上边距吃的是上方的自由空间）；
-     · 用 `:first-child` / `:last-child` 会挂到那句提示 `.ai-hint` 上 —— 消息的类型是 `.msg`，
-       必须用 `:first-of-type` / `:last-of-type`。 */
 .ai-block[data-block="translate"] > .ai-body > .msg:last-of-type { margin-bottom: auto; }
 /* 译文块是「最纯净的界面」：没有动作条（保存笔记那条窄标题行例外，它是编辑中的输入区）。 */
 .ai-block[data-block="translate"] .acts,
 .ai-block[data-block="translate"] .acts * { display: none !important; }
-/* R7：结果块底部渐隐提示。
-   原因：.ai-body 是 overflow:auto 的滚动容器，公式/文字被滚动边界"切断"时，
-   视觉上像渲染失败或被裁掉（视觉验收在 09/11/12 三张图上都报了这个观感）。
-   内容溢出时在底边叠一层 22px 渐隐，明确"下面还有"；滚到底自动消失。
-   挂 .ai-block 而不是 .ai-body（后者会被滚走）；pointer-events:none 不挡交互。 */
 .ai-block { position: relative; }
 .ai-block::after {
   content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 22px;
@@ -1183,10 +995,6 @@ body.row-dragging { cursor: row-resize; user-select: none; }
 }
 .ai-block.has-scroll::after { opacity: .96; }
 @media (prefers-reduced-motion: reduce) { .ai-block::after { transition: none; } }
-/* 注：译文块虽然反转了排布，但**渐隐提示仍然留在底边、不需要覆盖** ——
-   反转后最新一条在顶部，更早的那些被往下推，「下面还有」指的就是它们。
-   （曾经在这里写过一条 `bottom:auto; top:0` 的覆盖，既与通用规则同特异性互相打架，
-   逻辑上也是错的：那样会把提示指向"上面还有"，而上面永远是最新那条。） */
 .ai-body .empty { color: var(--fg-faint); font-size: var(--ui-fs-sm); line-height: 1.9; padding: 18px 14px; text-align: center; }
 .ai-hint { color: var(--fg-faint); font-size: var(--ui-fs-xs); line-height: 1.8; padding: 14px 13px; text-align: center; }
 .ai-hint.hidden { display: none; }
@@ -1213,32 +1021,7 @@ body.row-dragging { cursor: row-resize; user-select: none; }
 
 /* 消息的上下内边距 / 段间距由「结果密度」令牌决定；正文本身的字号仍然是 --ai-fs（阅读字号） */
 .msg { display: flex; flex-direction: column; gap: var(--ctl-gap); padding: var(--gap-msg) var(--ai-pad); max-width: var(--ai-max-width); opacity: var(--ai-opacity); }
-/**
- * 侧栏拉宽之后，回答文字**居中**（2026-10 用户口径：
- *   「文字区域和侧栏边沿的距离应该是可以变化的，通过直接拖动改变，左右两边的间隔对称」）。
- *
- * 右栏在大屏上最宽能拖到窗口一半（见 app.js 的 rightSideMaxW），此时如果还按原来的
- * 「max-width:760 且贴左对齐」，宽出来的空间会全部堆在右边 —— 文字区域到两侧栏边的间隔
- * 一边 14px、一边几百 px，很难看。这里让消息块在侧栏里水平居中：
- *   · 侧栏宽度 ≤ --ai-max-width（默认 760 + 左右内边距）时：width:100% 直接铺满，
- *     与原来的观感**完全一致**；
- *   · 再往宽拖：文字块保持舒适阅读宽度，左右留白**相等**，并随拖动一起变宽变窄。
- * 只作用于右栏结果区的 .msg；左栏和首页的其它容器不受影响。
- */
 .ai-body > .msg { width: 100%; margin-inline: auto; }
-/**
- * 文字列左右边沿的**隐藏拖动条**（逻辑见 app.js 的 initTextEdgeHandle）。
- *
- * 用户口径：「文字边沿的位置需要能通过一个栏直接拉着调整，这个栏平时隐藏，鼠标放上去的时候
- * 只在鼠标的那一个小的区域显示，而且上下都是那种渐变」「左右两边都要有」；
- * 随后又补：「这个颜色太丑了，换成浅色的，或者就一个镂空的浅色的」——
- * 所以**不再是**原来那条油橄榄绿实心条，改成**镂空的浅色胶囊**：
- *   · 平时 opacity:0 + pointer-events:none，完全看不见、也不挡任何操作；
- *   · 鼠标贴到边沿 ±10px 才出现，而且只有 110px 高（JS 跟着光标 y 摆）；
- *   · 只有一圈浅色描边（--border-strong：浅色主题是暖米色、深色主题是亮一档的灰褐），
- *     中间透出背景 = 镂空；上下两端用 mask 渐变淡出 —— 不是贯穿整栏的实线；
- *   · 位置与显隐全部由 JS 用内联 left/top + .on 类控制，这里只负责长相。
- */
 #rightSide { position: relative; }
 .text-edge-hint {
   position: absolute; z-index: 40; width: 10px; height: 110px;
@@ -1466,7 +1249,7 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
 .send-scope:not(.hidden) { min-height: 14px; }
 
 /* ── 发送范围芯片 + 四选项上拉栏（2026-10 第 2 步） ─────────────────────────
-   口径：当前范围**必须一眼看见**（不能让用户猜），所以芯片上写极短标签；
+   口径：当前范围必须一眼看见（不能让用户猜），所以芯片上写极短标签；
    完整含义放 title 与面板里。面板是绝对定位浮层，不占布局高度 —— 打开时输入框不会跳。 */
 .scope-chip {
   display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
@@ -1545,7 +1328,6 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
 .entry-meta { font-size: var(--ui-fs-2xs); color: var(--fg-faint); margin-top: 5px; letter-spacing: .2px; }
 .entry-meta.failed { color: var(--err-text); }
 .entry-meta.stopped { color: var(--accent); }
-/* ───────────────────────────── 设置弹窗 ───────────────────────────── */
 
 .modal { position: fixed; inset: 0; z-index: 100; background: rgba(74, 64, 38, .38); display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
 .modal-box { width: min(520px, 94vw); max-height: 86vh; overflow: auto; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); padding: 16px 18px 18px; }
@@ -1579,7 +1361,6 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
 .test-result.ok { color: var(--ok-text); }
 .test-result.err { color: var(--err-text); }
 
-/* ───────────────────────────── 划词气泡 ───────────────────────────── */
 
 .bubble {
   position: fixed; z-index: 60; display: flex; gap: 2px;
@@ -1618,13 +1399,6 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
 
 /* ═══════════ 正文里的引用标记 [n] + 文献检索面板 ═══════════ */
 
-/* 平时不可见，鼠标移上去才亮 —— 点一下跳到参考文献。
-   ⚠️ `pointer-events: none` 是**必须**的（2026-10-06 修「稳定选词」）：
-   它盖在 `[12]` 这几个字上面，一旦吃鼠标事件，mousedown 就落在 div 而不是文字上，
-   浏览器给不出真正的文字锚点 —— 起手落在 [n] 上的一次 120px 小拖选，
-   实测能选出 2776 字、横跨两页（用户说的「一搞就选中一大块」）。
-   代价是 `:hover` 不再触发，所以悬停点亮改由 pdfview.js 的 `_updateCiteHover()`
-   用几何命中加 `.hot` 类来驱动；点击也改由 `citeAt()` 按坐标判命中。 */
 .cite-link {
   position: absolute; border-radius: 3px; cursor: pointer; pointer-events: none;
   transition: background .1s, box-shadow .1s;
@@ -1717,7 +1491,6 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
   border-radius: 7px; padding: calc(5px * var(--ctl-scale)) calc(14px * var(--ctl-scale)); font-size: calc(12px * var(--ctl-scale)); font-weight: 600; cursor: pointer;
 }
 .note-foot .primary:hover { filter: brightness(1.08); }
-/* ───────────────────────────── 框选 / Toast ───────────────────────────── */
 
 .region-overlay { position: fixed; inset: 0; z-index: 70; cursor: crosshair; background: rgba(63, 64, 56, .18); }
 .region-rect { position: absolute; border: 1.5px solid var(--accent); background: rgba(85,107,47,.16); box-shadow: 0 0 0 9999px rgba(63,64,56,.30); pointer-events: none; display: none; }
@@ -1800,11 +1573,6 @@ body[data-density="comfortable"] {
    实测右栏 .ai-body 换块一趟会从 2676 掉到 2411、左栏直接归零。 */
 .side.left, .ai-body { overflow-anchor: none; }
 
-/* ─────────────────────── UI refresh / phase 1 ───────────────────────
-   只调整视觉层，不改变面板 ID、停靠规则或拖拽行为。阅读区保持安静，
-   工具区用清晰的层级和状态色告诉用户“现在在哪里、下一步能做什么”。
-   ⚠️ 这一块**重复定义**了浅色色板（历史遗留），必须和文件顶部 / 末尾那两处保持同一个值；
-   改色时四处一起改，否则「保存设置」前后会看到两种底色。 */
 :root {
   --bg: #F8F5EB;
   --bg-elev: #FDFBF5;
@@ -1817,7 +1585,6 @@ body[data-density="comfortable"] {
   --btn-fg: #3F5140;
   --shadow-sm: 0 1px 2px rgba(74, 64, 38, .10);
   --shadow: 0 10px 30px rgba(74, 64, 38, .12);
-  /* 与 :root 的 35px 保持一致（用户口径：应用内标题栏 = VS Code 的 35px）。 */
   --topbar-h: 35px;
   --panel-pad: 10px;
   --ctl-gap: 6px;
@@ -1923,31 +1690,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .toast { border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); }
 
 
-/* ══════════════════════════════════════════════════════════════════════════
-   骨架收口 + 卡片容器自适应（2026-10-03 晚，Lead）
-   ══════════════════════════════════════════════════════════════════════════
-
-   用户这次要的不是「好看一点」，而是 VS Code 那种**布局纪律**。三条纪律在这一节里落地：
-
-   ① 每一栏内部永远只有三段，顺序固定、职责固定：
-        标题栏（固定高） → 内容区（吃掉所有剩余空间） → 切换器 + 输入区（固定在底部）
-      所以内容区必须 min-height:0 + overflow:auto；输入区必须 flex:0 0 auto。
-      不给内容区 min-height:0 的话，flex 子项的 min-height:auto 会让它撑破容器，
-      出现「输入框被顶出窗口 / 最下面几条消息被裁掉滚不到」——这正是之前的老毛病。
-
-   ② 卡片容器是**自适应**，不是「把右栏宽度改成 100%」：
-      实测过的真缺陷 —— 面板窗口宽 520 时右栏只有 411 宽，窗口再拉大也一直 411。
-      根因不在宽度属性，而在于 #rightCols（.right-cols 是 flex:0 0 auto）把
-      **内容的 max-content 宽度当成了基准**，而内容里那行单行提示 .ai-hint
-      「点「释」在这里解释这段；「＋对话」加入选中的文字或截图，然后你自己提问」
-      的 max-content 正好约 411px。修法是给这条链上的 flex 子项补 min-width:0
-      （允许收缩到内容宽度以下）+ width:100% / flex:1 1 auto（撑满可用空间）。
-      —— 这也是用户原话「小窗口不溢出、大窗口不显得拥挤」的实现方式。
-
-   ③ 同一类操作只有一个入口、一个样式：
-      译文 / 问答 的入口只在每一栏底部的分段切换器（#aiBar / #aiBar2，按钮 .aibar-btn）。
-      旧的 #panelDockRight 图标坞已删除，所以这里不再有它的任何样式。
-   ══════════════════════════════════════════════════════════════════════════ */
 
 
 /* 单行提示不能反过来撑宽整栏：允许它换行，并且允许自己被压缩。
@@ -1985,22 +1727,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
    形态是「分段切换器」而不是一排独立按钮：同一栏里当前开着的那个是选中态。
    普通态 = 透明底 + 次要文字色；悬停 = 浅底 + 主文字色；选中 = 选中底 + 主色文字。
    颜色全部走主题 token（不写死蓝色），换肤时这里不用动。 */
-/**
- * 右栏顶部的「译文 / 问答」切换器（2026-10）。
- *
- * 用户口径：「译文和问答的现在的上面的那一栏可以直接去掉，然后两种状态的选择图标
- * 可以放在最上面」。所以它从右栏**底部**搬到了**顶部**，每个结果块自己的
- * `.ai-head` 标题栏则整个去掉（标题与条数都由这里的选中态表达）。
- *
- * 样式按「顶栏」写：下边框分隔，而不是以前的上边框。
- *
- * ⚠️ 底色用 transparent，**不要**写 --bg-elev（2026-10 收口）：
- *   面板本体（#rightSide）的底是 --bg，紧挨在标签行下面的会话条与结果区也都是它。
- *   标签行单独用 --bg-elev 会在右栏顶部压出一条更亮的横条 —— 两行挨着两种底色，
- *   看起来就是一条脏边。分隔交给下边框，层次交给选中态。
- *   这个文件里 .aibar 一共有 5 处定义（1015 / 1599 / 1604 / 1724 / 1809），
- *   **只有本条是最后生效的**，改底色只改这里。
- */
 .aibar {
   flex: 0 0 auto;
   min-width: 0;
@@ -2072,15 +1798,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   justify-content: center;
 }
 
-/* 输入框**只属于问答栏**（用户口径 2026-10-04）：
-   · 「译文不需要输入啊」—— 译文是看的，不给输入框；
-   · 「两个都关闭的时候还会有一个问答的口」—— 一栏里**谁都没开**时（renderCol 会删掉
-     data-active-panel），原来那条 `[data-active-panel="translate"]` 不匹配，
-     空栏底部就露出一个没有归属的输入框。
-   所以反过来写：只有明确显示着「问答」的那一栏才显示输入区，其余（译文 / 空栏）一律隐藏。
-
-   注意这里隐藏的是**输入区**，不是整条右栏：切换器仍在栏底，随时能切回问答继续打字；
-   输入框里的草稿不会丢（节点没被销毁，只是不显示）。 */
 .side.right:not([data-active-panel="chat"]) > .composer { display: none; }
 
 /* ── 区域之间的分隔线统一为一条 1px 暖灰线，不用卡片阴影 ──
@@ -2088,19 +1805,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer { border-top-color: var(--border); }
 .aibar { border-top-color: var(--border); }
 
-/* 顶栏改成浮层之后（见上面的「顶栏：阅读时自动隐藏」），它不再占布局高度。
-   这里只做**一件事**：把正文区向上提 --topbar-h，让屏幕顶部那一档被顶栏吃掉，
-   顶栏收起时不留 46px 白带、状态栏仍然压在屏幕最后 22px 上。
-
-   ⚠️ 不要再动 `viewer-wrap` 的上边距 —— 曾经的写法是
-   `margin-top: calc(var(--topbar-h) * -1)`，把正文区整体提到 −46，
-   于是**第一页的上沿跑到了 y=−26**：页面顶上 46~72px 被浮层顶栏盖住，
-   翻到正文开头那几行正好看不见（用户实测反馈「桌面端的全都被挡住了」）。
-   现在正文区从 0 开始，第一页自然落在间隙与内边距之下（实测 y≈30），
-   顶栏滑出时盖住的是页面**上方那段空白**，不盖正文。
-
-   · `#main` 的 overflow:hidden 会把浮层顶栏裁掉，所以改成 visible（正文滚动由 .viewer 自己管）。
-   · 面板窗口没有顶栏（display:none，且 body.panel-window 把 --topbar-h 归零），沿用既有 100vh。 */
 body.topbar-auto #main {
   height: 100vh;
   overflow: visible;
@@ -2124,12 +1828,6 @@ body.topbar-auto .pages { margin-top: 0; }
   .aibar-btn { padding: 4px 8px; }
 }
 
-/* ── 标题栏里「标题」必须占住剩余宽度 ──
-   起因是一个真实缺陷：左栏只有 209px，标题栏里排着「抓手 22px + 标题 + 计数 + 操作区 76px」。
-   标题原来只是一个裸文本节点，在 flex 里被两边挤到 0 宽；而标题栏本身就是「展开 / 收起」的入口
-   （bindPanelHead 给了它 role=button 与 Enter/Space 支持），结果用户点标题栏正中时命中的
-   是右边的 ↻ 按钮，「点标题展开」看起来就是坏的（test/relations.mjs 在这一点上超时）。
-   现在标题有自己的 .sec-title，明确吃掉剩余空间（.no-drag 的操作区在右端不参与拖拽）。 */
 .sec-title {
   flex: 1 1 auto;
   min-width: 0;
@@ -2140,26 +1838,6 @@ body.topbar-auto .pages { margin-top: 0; }
 /* 标题栏是「点一下展开 / 收起」的入口：光标用 pointer。 */
 .sec-head[role="button"] .sec-title { cursor: pointer; }
 
-/* ══════════════════════════════════════════════════════════════════════════
-   顶栏：阅读时自动隐藏，鼠标移到屏幕顶边才滑下来
-   ══════════════════════════════════════════════════════════════════════════
-
-   用户口径（2026-10-03）：
-     「在阅读的时候，最上面那一栏应该是鼠标悬停在上面才出现，鼠标移走就收起。」
-     「控件需要下移的可以跟着下移，文章不动。」
-
-   实现要点（每一条都是被踩过的坑）：
-   ① 顶栏改成**浮层**（position:fixed），#main 高度补回整个视口 ——
-      这样顶栏出现 / 收起时正文的位置**一个像素都不动**（用户明确要求「文章不动」）。
-      旧做法是 #main = calc(100vh - 46px)，顶栏一旦隐藏就会空出一条 46px 的白带。
-   ② 触发区是屏幕最上面 6px 的一条带子，不是「鼠标碰到顶栏」——
-      顶栏自己已经移出屏幕了，用它当悬停目标会出现「移上去就收起、收起来又出现」的抖动。
-   ③ 顶栏滑出后必须**自己撑住悬停**（否则鼠标一离开那条 6px 就立刻收回，点不到任何按钮）：
-      触发区与顶栏构成一个悬停组，命中其中任何一个都保持展开。
-   ④ 键盘用户不能被困住：顶栏里有 Tab 焦点时也保持展开；**焦点在表单控件上时不自动收起**
-      （否则打字到一半鼠标一动，输入框就滑走了）。
-   ⑤ 拖动分隔条、拖出面板、打开搜索等操作期间不自动收 —— 手上有活的时候顶栏乱跑最烦人。
-   ⑥ 面板窗口（独立窗口）里没有顶栏，这些规则靠 body.panel-window 排除。 */
 :root { --topbar-near: 8px; }
 
 .topbar {
@@ -2169,15 +1847,6 @@ body.topbar-auto .pages { margin-top: 0; }
   will-change: transform;
   box-shadow: 0 6px 18px rgba(74, 64, 38, .10);
 }
-/* 触发区：透明的一条带子，压在屏幕最上沿。
-   **只在顶栏收起时接收指针** —— 顶栏滑出后这条带子正好压在顶栏的第一行按钮上，
-   如果不关掉 pointer-events，它会把按钮的点击吃掉（实测：elementFromPoint 命中到带子、
-   顶栏里的按钮点不动）。 */
-/* ⚠️ 命名铁律：**body 上的状态类不能和任何元素的类名同名**。
-   历史事故：状态类曾叫 `topbar-hot`，与顶栏热区元素 `<div class="topbar-hot">` 同名 ——
-   `body.classList.add('topbar-hot')` 一执行，<body> 自己就命中了那条 position:fixed 的
-   元素样式，整个 body 缩成屏幕顶部一条，正文整片消失。
-   现在顶栏热区元素已经删除（顶栏常驻，不再自动隐藏），状态类叫 `topbar-near`，两者不会再撞。 */
 /* 展开条件：鼠标在触发区里 / 鼠标在顶栏上 / 顶栏内有键盘焦点 / JS 强制展开 */
 body.topbar-near .topbar,
 .topbar:hover,
@@ -2197,23 +1866,10 @@ body.topbar-static .viewer-wrap { margin-top: 0; margin-bottom: 0; }
    body.topbar-auto 时是「浮层滑入滑出」，body.topbar-static 时是常驻。 */
 body { padding-top: 0; }
 
-/* ⚠️ 这里原来有一条 `body.topbar-auto .viewer { padding-top: 6px }`（早期写「留一点呼吸位」留下的），
-   它和上面那条 `padding-top: var(--topbar-h)` **同选择器同特异性**，而且位置更靠后 ——
-   于是把上边距又压回 6px，第一页上沿落在 y=20，仍被顶栏（下边 46）压住 26px。
-   实测排查到的假修复就是这个：改了 CSS 但没生效，量的数字一点没变。
-   所以这条**必须删掉**，把正文的顶部内边距交给上面那一条统一管。 */
 @media (prefers-reduced-motion: reduce) {
   .topbar { transition: none; }
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
-   R7.1：浮动顶栏不能盖住两侧栏
-
-   自动顶栏是 fixed 浮层。它出现时，阅读区已经让出顶部空间，但左右栏原来
-   仍从 y=0 开始，于是左侧活动栏的第一个图标、右侧面板头会被浮层压住。
-   这里让「顶栏正在显示」成为两侧栏的真实上内边距；顶栏收起后恢复原位。
-   使用 box-sizing:border-box（全局已设）不会增加主布局高度，也不会产生滚动条。
-*/
 body.topbar-auto.topbar-near:not(.panel-window) #leftSide,
 body.topbar-auto.topbar-near:not(.panel-window) #rightCols,
 body.topbar-auto.topbar-near:not(.panel-window) #railLeft,
@@ -2230,24 +1886,12 @@ body.left-empty #railLeft { display: flex; border-right: 1px solid var(--border)
 body.right-empty #rightCols,
 body.right-empty #splitRight { display: none; }
 body.right-empty #railRight { display: flex; border-left: 1px solid var(--border); }
-/* 窄窗第三档：侧栏被压到最小（≥60px）时**不整条藏掉**，改成正文横向滚动。
-   用户口径：「翻译的内容应该是要记录在右侧那个里面的，不管打不打开」。
-   最后两条带 `body.side-squeezed` 双类的选择器特异性更高，
-   用来压过 `body.no-right #rightCols { display: none }` —— 也就是说
-   窄窗下即使 JS 判了「收起」，只要这一侧还有内容要显示，就只压窄、不隐藏。 */
 body.side-squeezed .viewer-wrap { overflow-x: auto; }
 body.side-squeezed #rightCols,
 body.side-squeezed #leftSide { min-width: 60px; }
 body.side-squeezed.no-right #rightCols { display: flex; width: var(--right-w, 60px); }
 body.side-squeezed.no-left #leftSide { display: flex; width: var(--left-w, 60px); }
 
-/* 更轻的暖色工作台：**白底带一点很淡的暖黄**（2026-10 用户口径：
-   「还是带一点浅黄，就在这个白的上面稍微偏一点颜色」）。
-   PDF 纸张默认跟随 --paper-tint，设置里可切回纯白。
-   ⚠️ 浅色色板在**四块**里同步定义（文件顶部 :root / :root[data-theme="light"] /
-   这里 / 顶部系统深色的媒体查询），改一处不算改完 —— 本块位置最后，浅色实际生效的是它。
-   实测（对各自的底色）：--fg 9.6–10.4:1、--fg-dim 5.1–5.9:1、--fg-faint 3.8–4.4:1、
-   --accent 5.1–5.9:1；elev 与 bg 的亮度差 0.052、bg 与 sunken 差 0.066，卡片仍浮得起来。 */
 :root {
   --bg: #F8F5EB;
   --bg-elev: #FDFBF5;
@@ -2272,26 +1916,6 @@ body.side-squeezed.no-left #leftSide { display: flex; width: var(--left-w, 60px)
   }
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
-   应用内标题栏（无边框桌面壳）
-   ══════════════════════════════════════════════════════════════════════════
-
-   用户口径（2026-10-04）：「不做那个浮动栏了，就一直显示；把最上面那一栏（最小化 / 关闭
-   按钮那一行）做进应用内部，**完全模仿 VS Code**」。
-
-   所以这里不是"再设计一套"，而是照 VS Code 的 Windows 自定义标题栏 1:1（数值取自
-   src/vs/workbench/browser/parts/titlebar/media/titlebarpart.css 与
-   src/vs/platform/window/common/window.ts）：
-     · 标题栏高度 35px（DEFAULT_CUSTOM_TITLEBAR_HEIGHT）
-     · 窗口控件容器 138px = 3 × 46px；每个按钮 width:46px / height:100%，图标盒 16px
-     · 悬停：普通键 10% 覆盖（浅色标题栏用黑 10%）；关闭键 rgba(232,17,35,.9) + 图标变白
-     · 窗口失焦：整条标题栏 opacity .6
-   配色不照抄 VS Code 的灰（本项目是暖灰 + 米白 + 橄榄绿，AGENTS.md 明确「不要蓝色」），
-   只有关闭键那一下红悬停按 VS Code 原值保留——那是肌肉记忆，改了反而怪。
-
-   ⚠️ wry 0.55 **没有** `data-wry-drag-region` 这个特性（翻过 wry-0.55.1/src/lib.rs，
-   只有 with_drag_drop_handler，那是拖文件的）。拖动 / 缩放 / 三个按钮全部由 app.js
-   走 IPC（window.ipc.postMessage）→ Rust tao 执行，见 initWindowChrome()。 */
 
 .app-title-region {
   display: flex; align-items: center; gap: 8px;

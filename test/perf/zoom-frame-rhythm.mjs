@@ -1,19 +1,3 @@
-/**
- * 触摸屏捏合的帧节奏：捏合过程 vs 松手之后，各掉多少帧（调研工具，不做断言）。
- *
- *   node test/perf/zoom-frame-rhythm.mjs
- *
- * A/B 对照（同一台机器、同一次运行）：
- *   A 正常        —— 每帧给 .pages 写 transform
- *   B 停掉写 transform —— 手势判定、commit 照旧，只是不上屏
- *   两者之差就是「逐帧缩放这一层」真正加上的开销。
- *
- * 实测结论（2026-10-09）：
- *   预览期间**不藏文本层**：捏合过程 9~10 帧掉到 33ms（avg 19.6~21.9ms）；
- *   预览期间**藏掉文本层**：捏合过程 0~3 帧掉帧（avg 16.7~17.6ms），与对照 B 基本一致。
- *   松手之后仍有 4~5 帧 >25ms，那是重排 + 重画位图（已按「一页一页让帧」摊开）。
- * 文本层本来就是透明的（只负责命中/选区），藏起来零视觉损失 —— 见 style.css 的说明。
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';

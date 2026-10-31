@@ -1,16 +1,3 @@
-/**
- * 启动探针：打开一篇文章，把首页状态与页面日志打出来。
- *
- *   BASE=http://127.0.0.1:8911 node test/smoke.mjs
- *
- * ⚠️ 它**零断言**，不能当门禁（恒输出、恒 exit 0）—— 只用来一眼看「页面到底起没起来」。
- *
- * 2026-10 修掉两个坑：
- *   ① 原来把 BASE 写死成 `http://127.0.0.1:8787` —— 那是**用户真机安装版**的端口，
- *      跑一次就打到他真实书架上。现在改成必须走隔离服务，并加 `assertIsolatedDataDir` 拦截。
- *   ② 原来把论文名写死成 `attention-is-all-you-need.pdf`，夹具目录里根本没有这个文件。
- *      现在改成打开隔离书架里体积最大的那一篇（不写死书名）。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 
@@ -41,7 +28,7 @@ const st = await page.evaluate(() => ({
   docName: document.getElementById('docName')?.textContent,
   pages: document.querySelectorAll('.page').length,
   canvases: document.querySelectorAll('.page canvas').length,
-  // 状态栏已删除（2026-10）：改看页码那一格的就绪信号
+  // 状态栏已删除：改看页码那一格的就绪信号
   pageLabel: document.getElementById('pageInput')?.value,
   // #welcome 已升级成独立首页 #home，阅读态由 body.reading 表达
   reading: document.body.classList.contains('reading'),

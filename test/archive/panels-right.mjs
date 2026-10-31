@@ -1,17 +1,3 @@
-/**
- * 「翻译和问答只放在右边、一栏只能开一个、右键再开一栏、拖动出应用内卡片」——独立验证套件。
- *
- *   cd test && node panels-right.mjs
- *
- * 完全隔离：自起一个 node server.js（PORT=8917，PRT_DATA_DIR / PRT_PAPERS_DIR 指向 mkdtemp 临时目录，
- * NO_OPEN=1），用无头 Edge 跑，跑完删临时目录、杀服务进程。**不碰真实 data/ 与 papers/**（脚本开头
- * 会对真实 data/config.json 取 SHA256，结束时比对，证明只读）。
- *
- * 断言清单见 task-1 的 A–J。每条断言都打印 [OK]/[XX] + 实测值；结尾一行 `N/N 通过`。
- * 设计与反例说明写在 test/artifacts/right-cols/RESULTS.md。
- *
- * 纪律：本套件只读 public/**，任何实现缺陷都通过 send_message 报给 lead，不在这里改实现。
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -20,7 +6,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { staticAudit } from './artifacts/right-cols/static-audit.mjs';
 
-/* ══════════════════════════ 配置 ══════════════════════════ */
 const ROOT = path.resolve(import.meta.dirname, '..', '..');
 const PORT = 8917;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -42,7 +27,6 @@ const NARROW_W = 800;
 const NARROW_H = 900;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* ══════════════════════════ 结果收集 ══════════════════════════ */
 const results = [];
 let currentSection = '';
 let sectionKind = 'runtime';   // static | runtime | blocked
@@ -77,7 +61,6 @@ async function probe(page, fn, ...args) {
   }
 }
 
-/* ══════════════════════════ 临时目录 / 服务 ══════════════════════════ */
 fs.mkdirSync(ART, { recursive: true });
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prt-right-cols-'));
 const DATA = path.join(tmp, 'data');
@@ -124,14 +107,6 @@ const procLog = (proc) => {
   try { return fs.readFileSync(proc.__logFile, 'utf8'); } catch { return ''; }
 };
 
-/**
- * 起一个无头浏览器并连上它。
- *
- * **为什么不直接用 puppeteer.launch()**：puppeteer 固定用管道接子进程的 stdio
- * （`@puppeteer/browsers` 的 configureStdio 永远返回 'pipe'），在受限沙箱里 `spawn` 直接 EPERM。
- * 改成「自己 spawn（stdio 落文件）+ puppeteer.connect(CDP WebSocket)」，这样只要浏览器自己能起来就能测。
- * 返回 { browser, mode }；浏览器起不来时返回 { error }，由调用方决定是报 BLOCKED 还是 FAIL。
- */
 async function launchBrowser(exe) {
   const errors = [];
   // 路径 1：先按最省事的 puppeteer.launch 试（沙箱外/正常环境走这条）
@@ -182,7 +157,6 @@ try {
   section('静态契约审计（读 public/ 源码核对接口契约；不能替代下面的运行时断言）', 'static');
   for (const row of staticAudit()) check(row.name, row.ok, row.actual);
 
-  /* ══════════════ 第二层：隔离服务 ══════════════ */
   server = spawnLogged(process.execPath, ['server.js'], {
     cwd: ROOT,
     env: { ...process.env, PORT: String(PORT), PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, NO_OPEN: '1' },
@@ -257,7 +231,7 @@ try {
   check('打开合成论文后 #viewer 里有 PDF（测试前置条件）', pdfOk, `viewer.pdf=${pdfOk}`);
 
   /**
-   * 页面内小工具 + window.open 打桩。**每次 reload 之后都必须重新注入**（页面上下文会重来），
+   * 页面内小工具 + window.open 打桩。每次 reload 之后都必须重新注入（页面上下文会重来），
    * 所以包成函数，boot() 之后与 H 的 reload 之后各调一次。
    */
   async function installHelpers() {
@@ -298,10 +272,6 @@ try {
           dataCol: el.dataset.col || '', cls: el.className,
         };
       },
-      /** 右栏面板入口按钮。
-       *  2026-10-03 起右栏**只有一套**可见入口：每一栏底部的「译文 / 问答」分段切换器
-       *  （#aiBar / #aiBar2，按钮带 data-block）。旧的 #panelDockRight 图标坞已按用户
-       *  「不再额外渲染另一组相同按钮」的要求删除，所以这里统一走切换器。 */
       rbtn(id, col) {
         const host = document.getElementById(col === 2 ? 'aiBar2' : 'aiBar');
         if (host) {
@@ -342,7 +312,6 @@ try {
     try { await page.screenshot({ path: path.join(ART, `${name}.png`) }); return `${name}.png`; } catch { return '(截图失败)'; }
   };
 
-  /* ══════════════════════════════ A. 默认（无存档） ══════════════════════════════ */
   section('A. 默认（无存档）：右栏只有 1 列，译文 / 问答都不显示');
   const a = await probe(page, () => {
     const wrap = document.getElementById('rightCols');
@@ -401,7 +370,6 @@ try {
   check('A4 顶栏左右按钮独立收展侧栏，并同步图标状态', a4.ok, JSON.stringify(a4));
   await shot('A-default');
 
-  /* ══════════════════════════════ B. 互斥 ══════════════════════════════ */
   section('B. 互斥：一栏只开一个（__ctx 路径 + 点 #aiBar 按钮路径各一次）');
 
   // B 路径 1：__ctx / __state 直接调 setPanelVisible
@@ -473,7 +441,6 @@ try {
     b2.ok, `${b2.actual} · 按钮文案=${JSON.stringify(clickRes.texts)}`);
   await shot('B3-bar-mutex');
 
-  /* ══════════════════════════════ C. 第二栏 ══════════════════════════════ */
   section('C. 第二栏：openRightColumn() 后 2 列并排、第二栏 ≥240px、正文不被遮、--right-w2 已写');
   const cOpen = await page.evaluate(() => {
     const before = window.__state.panels.rightCols.count;
@@ -550,9 +517,8 @@ try {
   check('C5 列顺序仍是 #splitRight + .col-1 + #rightColSplit(.col-2)', c5.ok, c5.actual);
   await shot('C-two-cols');
 
-  /* ══════════════════════════════ D. 稳定身份 ══════════════════════════════ */
   section('D. 稳定身份：translate 放进第 2 栏，塞一条 .msg，隐藏→显示后节点还是同一个、滚动位置保留');
-  // 前置 ①：translate 先放进第 1 栏 —— 那里已经有 chat，**同栏互斥**应当把 chat 收起。
+  // 前置 ①：translate 先放进第 1 栏 —— 那里已经有 chat，同栏互斥应当把 chat 收起。
   // 前置 ②：再把 translate 放到第 2 栏 —— 第 1 栏空出来，chat 得以显示（第 2 栏的意义就是并排）。
   const dSetup = await page.evaluate(() => {
     window.__ctx.setPanelColumn('translate', 1);
@@ -626,7 +592,7 @@ try {
     const tb1 = window.__state.blockEls.translate;
     const hidden = {
       visible: window.__state.panels.translate.visible,
-      // 实现细节（Lead 已说明）：隐藏的右栏面板节点**脱离文档**停放（#panelPark 不进 body），
+      // 实现细节（Lead 已说明）：隐藏的右栏面板节点脱离文档停放（#panelPark 不进 body），
       // 所以「还在不在」不看可见性，看「同一个节点对象还在 + 标记内容还在 + 关掉后脱离文档」。
       sameObject: tb1 === nodeBefore,
       connected: !!tb1?.isConnected,
@@ -723,7 +689,6 @@ try {
   check('D6 换栏（第 2 栏 → 第 1 栏 → 第 2 栏）后 .ai-body 滚动位置与消息条数都保留', d6.ok, d6.actual);
   await shot('D-stable-identity');
 
-  /* ══════════════════════════════ E. 只许右侧 ══════════════════════════════ */
   section('E. 只许右侧：dockPanelTo(\'translate\',\'left\'|\'bottom\') 不许把它搬走');
   const eSetup = await page.evaluate(() => {
     window.__ctx.setPanelColumn('chat', 1);
@@ -772,7 +737,6 @@ try {
   check('E3 左栏图标坞里没有「译 / 问」入口', e3.ok, e3.actual);
   await shot('E-right-only');
 
-  /* ══════════════════════════════ F. 右键菜单「再开一栏」 ══════════════════════════════ */
   section('F. 右键右栏图标 → #dockMenu 出现「再开一栏」，点它列数变 2');
   // 本段前提：宽窗（第 2 栏只有放得下时才真的在布局里；窄窗会被 body.right-col2-off 临时隐藏）。
   // 上一轮 F1/F3 的假红就是这么来的 —— I 段把视口压成 800 之后没有还原。
@@ -784,7 +748,7 @@ try {
   // 先把状态收回到 1 列（把 translate 留在第 2 栏，列数 1 时它自动收起——正常路径）
   await page.evaluate(() => { window.__ctx.setPanelVisible('translate', false); });
   const fBack = await page.evaluate(() => {
-    // 函数能不能调、返回什么、列数变没变，**都在页面里判定**：
+    // 函数能不能调、返回什么、列数变没变，都在页面里判定：
     // 把函数对象本身带出来会经过 puppeteer 的序列化（typeof 会变成 'object'），上一轮 F1 就是被这个坑骗的。
     const fn = window.__ctx?.closeRightColumn;
     const type = typeof fn;
@@ -838,7 +802,7 @@ try {
     const menu = document.getElementById('dockMenu');
     if (!menu) return { ok: false, actual: '#dockMenu 不存在' };
     const items = [...menu.querySelectorAll('button')];
-    // 必须**精确**点「再开一栏」那一项：「放到第 2 栏」在菜单里排在它前面，
+    // 必须精确点「再开一栏」那一项：「放到第 2 栏」在菜单里排在它前面，
     // 用宽泛的 /第 2 栏/ 去 find 会点错项（上一轮就是这么误报的）。
     const want = items.find((b) => (b.textContent || '').includes('再开一栏'));
     if (!want) return { ok: false, actual: `没有「再开一栏」项：${JSON.stringify(items.map((b) => b.textContent))}` };
@@ -932,7 +896,6 @@ try {
     + ` · closeRightColumn 后=${JSON.stringify(f5.afterClose)}`
     + ` · openRightColumn 后=${JSON.stringify(f5.afterOpen)}`);
 
-  /* ══════════════════════════════ G. 拖动图标出应用内卡片 ══════════════════════════════ */
   section('G. 拖动右栏图标：>18px 打开应用内卡片，<18px 不触发');
   // 本段前提：宽窗（窄窗下右栏会被 no-right 收起，图标坞也就没有布局矩形）
   await page.setViewport({ width: VIEW_W, height: VIEW_H });
@@ -1094,7 +1057,6 @@ try {
   });
   await sleep(300);
 
-  /* ══════════════════════════════ H. 持久化 ══════════════════════════════ */
   section('H. 持久化：开第 2 栏 + translate 在第 2 栏 + 两块都可见 → reload 后不变');
   // 本段前提：宽窗（第 2 栏要真的在布局里，「两块都可见」才量得到矩形）
   await page.setViewport({ width: VIEW_W, height: VIEW_H });
@@ -1163,10 +1125,9 @@ try {
   check('H2 page.reload() 后仍是 2 列、col 归属不变、两块都还可见', h2.ok, h2.actual);
   await shot('H-after-reload');
 
-  /* ══════════════════════════════ I. 窄窗 ══════════════════════════════ */
   section('I. 窄窗 800×900：不应出现横向滚动条，正文宽度 > 200px');
-  // I1 是「窄窗 1 列」：先在**宽窗**下把第 2 栏收掉（否则窄窗那一刻量到的是「临时藏掉第 2 栏」的形态），
-  // 口径（与 Lead 核对）：窄窗**只**加 body.right-col2-off / no-right，**绝不写模型**。
+  // I1 是「窄窗 1 列」：先在宽窗下把第 2 栏收掉（否则窄窗那一刻量到的是「临时藏掉第 2 栏」的形态），
+  // 口径（与 Lead 核对）：窄窗只加 body.right-col2-off / no-right，绝不写模型。
   await page.setViewport({ width: VIEW_W, height: VIEW_H });
   await sleep(400);
   const iSetup = await page.evaluate(() => {
@@ -1198,7 +1159,7 @@ try {
   check('I1 窄窗 1 列：无横向滚动条，正文 >200px', i1.ok, i1.actual);
   await shot('I1-narrow-1col');
 
-  // I2/I3/I4：在**窄窗**下明确表达「用户要 2 列」——模型必须记 2 列，而窄窗只做临时隐藏
+  // I2/I3/I4：在窄窗下明确表达「用户要 2 列」——模型必须记 2 列，而窄窗只做临时隐藏
   const i2Setup = await page.evaluate(() => {
     const before = window.__state.panels.rightCols.count;
     const r = window.__ctx.openRightColumn();
@@ -1253,7 +1214,6 @@ try {
   });
   check('I5 窗口变宽后第 2 栏自动回来（用户不用重新点一次）', i4.ok, i4.actual);
 
-  /* ══════════════════════════════ J. 零页面错误 ══════════════════════════════ */
   section('J. 零页面错误（pageerror / console.error / 请求失败）');
   await page.setViewport({ width: VIEW_W, height: VIEW_H });
   await sleep(500);
@@ -1264,7 +1224,6 @@ try {
   check('J3 无失败请求', failedRequests.length === 0, failedRequests.join(' || ') || '(空)');
   }   // ← if (browser)：无头浏览器起不来时，A–J 这一段整体跳过（已在上面记 [XX]+BLOCKED）
 
-  /* ══════════════════════════ 只读证明 ══════════════════════════ */
   section('隔离与只读核对');
   const cfgAfter = sha(REAL_CONFIG);
   check('真实 data/config.json 全程未被改动（SHA256 一致）', cfgAfter === REAL_CONFIG_BEFORE,
@@ -1288,7 +1247,6 @@ try {
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 忽略 */ }
 }
 
-/* ══════════════════════════ 汇总 ══════════════════════════ */
 const failed = results.filter((r) => !r.ok);
 const staticRows = results.filter((r) => r.kind === 'static');
 const runtimeRows = results.filter((r) => r.kind === 'runtime');

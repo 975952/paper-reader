@@ -1,19 +1,3 @@
-/**
- * 译文块：纯净界面 / 滚动 / 引用跳回
- *   node test/translate-pure.mjs
- *
- * 用户口径（2026-10）：
- *   ①「翻译的怎么滚动不了了」—— 译文多了以后滚不动；
- *   ②「翻译的去掉所有的功能按键，就做最纯净的界面」；
- *   ③「把原文引用的那一块做成可点击的，点击就自动跳回」。
- *
- * 三个都验：
- *   · 长译文（24 段）能滚：scrollHeight > clientHeight，且真的能改 scrollTop；
- *   · 译文条目的动作条里**没有任何按钮**（复制 / 回原文 / 接着问 / 笔记全去掉），
- *     role 行里也不再有「回原文」图标；
- *   · 原文引用整块可点（button + 手型 + 可访问名），点它页码跳到引用所在页；
- *   · 问答条目的动作条**不受影响**（复制 / 笔记仍在）。
- */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';

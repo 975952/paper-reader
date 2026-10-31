@@ -1,17 +1,3 @@
-/**
- * 选词稳定性验收 —— 用户反馈（2026-10-06）：
- *   「有时候不是按鼠标选中的区域，有时候一搞就选中一大块」。
- *
- *   BASE=http://127.0.0.1:8791 node test/selection-stable.mjs
- *
- * 这套断言全部用**真实鼠标事件**（page.mouse），裁判是「鼠标点/扫过的地方」：
- *   · 期望的字符范围由**独立的几何实现**算出来（逐字符 Range 外接框 + 最近字符），
- *     与被测代码不是同一套逻辑；
- *   · 选中方块还额外拿 **canvas 真实墨迹**做裁判（方块里必须真有字）。
- *
- * 覆盖：行内小拖选 / 拖到左右页边 / 跨行 / 行距缝隙 / 逆向拖 / 引用热点 [n] /
- *       双击选词 / 缩放后 / 程序化选区不被改写 / 引用卡片仍能打开。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import fs from 'node:fs';
@@ -57,7 +43,6 @@ await page.evaluate((id) => {
 }, first.docId);
 await page.waitForFunction(() => window.__viewer?.pdf, { timeout: 60000 });
 
-/* ══════════════════════ 页面侧工具（独立于被测代码） ══════════════════════ */
 await page.evaluate(() => {
   const pageEl = (n) => document.querySelector(`.page[data-page="${n}"]`);
   window.__pg = pageEl;
@@ -88,7 +73,7 @@ await page.evaluate(() => {
   };
 
   /**
-   * 独立实现：鼠标点 → 它所在的那个**连续文字段**（同一行、相邻字符水平间隙 < 30px）。
+   * 独立实现：鼠标点 → 它所在的那个连续文字段（同一行、相邻字符水平间隙 < 30px）。
    * 为什么要按「段」而不是整行：论文里有双栏 / 作者栏，同一行可能有两个不相干的栏，
    * 按整行取字符会把另一栏的字也算进来。
    */
@@ -120,7 +105,7 @@ await page.evaluate(() => {
   };
 
   /**
-   * 独立实现：两点之间**应该**被选中的文本。
+   * 独立实现：两点之间应该被选中的文本。
    * 顺序按 DOM 顺序切（Range 的语义就是 DOM 顺序），两端各留 ±1 字符的容差留给调用方。
    */
   window.__expect = (n, x1, y1, x2, y2) => {
@@ -216,7 +201,7 @@ const reset = async () => { await page.evaluate(() => { window.getSelection().re
 const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 
 /**
- * 要测的页：**按当前 PDF 的总页数现算**，不写死页码 ——
+ * 要测的页：按当前 PDF 的总页数现算，不写死页码 ——
  * 这套件既要能跑用户的真实论文（15 页），也要能跑 `test/desktop.mjs` 的合成夹具（3 页）。
  */
 const NUMPAGES = await page.evaluate(() => window.__viewer.numPages || 1);
@@ -249,12 +234,6 @@ const usableLines = (p, want = 4) => page.evaluate((n, cnt) => {
     seen.add(key);
     const row = chars.filter((z) => Math.abs(z.cy - c.cy) < 6);
     if (row.length < 12) continue;
-    /**
-     * 必须是**连续的一段文字**：论文里同一视觉行可能有双栏、图注在左而正文在右，
-     * 那种行的 left/right 横跨两个不相干的块，拿它当"一行文本"去拖选，
-     * 期望值本身就说不清（实测最后一页的图注行就会这样）。
-     * 判据：同一行内相邻字符的水平间隙都 < 40px。
-     */
     const sorted = row.slice().sort((a, b) => a.x - b.x);
     let gapOk = true;
     for (let i = 1; i < sorted.length; i++) {
@@ -269,10 +248,9 @@ const usableLines = (p, want = 4) => page.evaluate((n, cnt) => {
   return out;
 }, p, want);
 
-/* ══════════════════════ 一、行距缝隙处拖选 ══════════════════════ */
 console.log('\n-- 一、起手/终点落在行距缝隙里：不许变成"一大块"，也不许一个字都选不出来');
 /**
- * 缝隙点在几何上是**歧义**的（算上面那行还是下面那行都合理），所以这里不比文本，
+ * 缝隙点在几何上是歧义的（算上面那行还是下面那行都合理），所以这里不比文本，
  * 只验用户真正在意的两条：① 选出来的量级正常（不超过两行 + 余量）② 两端都落在文字上。
  */
 const seamPoints = (p, max = 4) => page.evaluate((n, cnt) => {
@@ -338,7 +316,6 @@ for (const p of PAGES) {
   check(`p${p} 缝隙处选区两端都在文字上`, containerEnds === 0, `非文字端 ${containerEnds} 次`);
 }
 
-/* ══════════════════════ 二、真实拖选：选出来的就是鼠标扫过的 ══════════════════════ */
 console.log('\n-- 二、真实拖选（期望值由独立几何实现算出）');
 /* 注意：坐标是**视口坐标**，必须「算一页、立刻拖一页」——
    先把三页的坐标都算好再统一拖，等于拿着第 1 页的坐标去点第 11 页。 */
@@ -384,7 +361,6 @@ for (const p of PAGES) {
   }
 }
 
-/* ══════════════════════ 三、方块必须压在真实墨迹上 ══════════════════════ */
 console.log('\n-- 三、选中方块压在 canvas 墨迹上');
 {
   const p = 2;
@@ -410,13 +386,7 @@ console.log('\n-- 三、选中方块压在 canvas 墨迹上');
   check('没有横跨大半页的方块', geo.maxH < geo.pageH * 0.1, `最高 ${(geo.maxH / geo.pageH * 100).toFixed(1)}% 页高`);
 }
 
-/* ══════════════════════ 四、引用热点 [n] 不再吃鼠标 ══════════════════════ */
 console.log('\n-- 四、正文引用热点 [n]');
-/**
- * 找一个**有可见 [n] 热点**的页：逐页翻，最多找 12 页。
- * 不写死页码：合成夹具（`test/desktop.mjs` 用）可能压根没有引用热点，
- * 那种情况下这一节整体跳过，而不是报红 —— 断言要测的是"热点存在时的行为"。
- */
 const citePage = await (async () => {
   for (let p = 1; p <= Math.min(NUMPAGES, 12); p++) {
     await gotoPage(p);
@@ -466,10 +436,6 @@ if (cites.length) {
     dbl.len > 0 && dbl.len <= 12 && dbl.citeOpen === false,
     `选中 ${dbl.len} 字「${norm(dbl.text)}」· 卡片开着=${dbl.citeOpen}`);
 
-  // 4.4 悬停点亮（.cite-link 现在不吃鼠标事件，靠几何命中补回来）
-  /* 注意顺序：**必须放在"单击 [n]"之前**。单击会 `jumpToPageWithHistory()` 跳到文末的
-     参考文献页，之后再拿原来的坐标去悬停，指针下面已经不是那个热点了（实测假红）。
-     另外要先把鼠标挪开再移上去：指针**已经**在热点上时浏览器不补发 mousemove。 */
   await reset();
   await page.mouse.move(c0.x, Math.max(60, c0.y - 80));
   await sleep(200);
@@ -495,7 +461,6 @@ if (cites.length) {
   }
 }
 
-/* ══════════════════════ 五、双击选词 ══════════════════════ */
 console.log('\n-- 五、双击选词（词内部字符）');
 for (const p of [...new Set([2, NUMPAGES])].filter((x) => x >= 1 && x <= NUMPAGES)) {
   await gotoPage(p);
@@ -536,7 +501,6 @@ for (const p of [...new Set([2, NUMPAGES])].filter((x) => x >= 1 && x <= NUMPAGE
   check(`p${p} 双击选词命中（${pts.length} 次）`, pts.length >= 6 && bad === 0, `偏差 ${bad}/${pts.length}`);
 }
 
-/* ══════════════════════ 六、程序化选区不被改写 ══════════════════════ */
 console.log('\n-- 六、程序化构造的选区原样保留（修复不能越界）');
 await gotoPage(1);
 {
@@ -557,14 +521,7 @@ await gotoPage(1);
     `选中 ${norm(before).length} 字 → 仍是 ${norm(after.text).length} 字`);
 }
 
-/* ══════════════════════ 七、滚动之后再拖选（缓存失效类缺陷） ══════════════════════ */
 console.log('\n-- 七、滚动之后再拖选');
-/**
- * 命中的几何量是**带缓存的**（`charPosAt` 的命中表 + 逐字符 x 区间）。
- * 如果缓存的是屏幕坐标，滚动之后就会整整偏一个滚动量 —— 表现正是用户说的
- * 「不是按鼠标选中的区域」。这一节专门盯这类缺陷：
- * 先在同一页上拖一次（把缓存灌满），滚动一段，再拖一次，对期望值复核。
- */
 {
   const p = PAGES[0];
   await gotoPage(p);
@@ -604,7 +561,6 @@ console.log('\n-- 七、滚动之后再拖选');
   check('滚动之后拖选仍然选到鼠标扫过的那一段', n > 0 && bad === 0, `${n} 次，偏差 ${bad}`);
 }
 
-/* ══════════════════════ 八、缩放后依然稳定 ══════════════════════ */
 console.log('\n-- 八、放大后重新验证');
 await gotoPage(2);
 for (let i = 0; i < 3; i++) { await page.click('#footZoomIn'); await sleep(900); }
@@ -666,7 +622,6 @@ await sleep(1200);
   await sleep(1200);
 }
 
-/* ══════════════════════ 汇总 ══════════════════════ */
 check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 check('没有控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '));
 

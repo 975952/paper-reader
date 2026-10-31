@@ -2477,7 +2477,7 @@ zoom-touch **52/52**、zoom **39/39**、selection 31/31、cjk 11/11。
 - 验收均使用 test/artifacts 下的隔离数据、合成论文与假模型，不读写用户模型配置、Key 或书架。上述结果验证程序流程，不代表对真实模型学习程度判读准确率的评估。
 - 最终证据：test/artifacts/memory-exe-yDtwpV、test/artifacts/qa-exe-F9vzzK；保留请求、存储快照和错误记录供复核。
 - 已重新构建并复制到项目根目录和桌面，二者与 release 产物逐字节一致：10,544,640 B，SHA256 BD782966AAD0E70E2414DEFE258D4A1CB857231CA913CD23CAE4701BFF619150。
-- 改动前的源码检查点：d6710d0；本轮没有推送远端。
+- 改动前的源码检查点：2215a1e（提交信息后来统一精简过一次，见 §45）；本轮没有推送远端。
 
 
 ## 44. 截图附件单独存 + 右栏/字号体验 + 仓库整理与推送（2026-10-31）
@@ -2515,14 +2515,15 @@ zoom-touch **52/52**、zoom **39/39**、selection 31/31、cjk 11/11。
 - 回归：`qa.mjs` 36/36、`send-range.mjs` 24 条、`session-bar.mjs` 24 条、`ai-send-regression.mjs` 13/13、
   `save-reliability.mjs` 全过；布局/字号 13/13、带图发送 14/14、文字列拖动 22/22 隔离探针全绿。
 - exe 重编并复制到项目根目录与桌面（两份 SHA256 一致）：10,593,792 B，
-  SHA256 `616D08B1A66B57442B163CA30C0C4998FB228A353BE3F5520EB14615F69FEECD`；
+  SHA256 `616D08B1A66B57442B163CA30C0C4998FB228A353BE3F5520EB14615F69FEECD`
+  （后来去掉源码里的冗余注释，exe 再次重编，见 §45）；
   入口实测：写一条带截图引用的会话后重开论文，用户消息里截图按 id 原图恢复、无「未保存」提示、无脚本错误。
 
 ### 44.3 仓库整理与推送
 
-- 提交：`ad48c1e`（.gitignore 忽略本机代理配置 / msys2 安装日志）、`bfa46c5`（功能收口，含前一轮未提交的
-  后台学习记忆 / 教学重构）、`5d3fbe1`（README 同步最新行为并整理过期描述）；连同此前 3 个未推提交一起
-  推送 `origin/main`（`7abe0a3` → `5d3fbe1`），远端与本地 HEAD 一致。
+- 提交：`6b1421c`（.gitignore 忽略本机代理配置 / msys2 安装日志）、`bc90419`（功能收口，含前一轮未提交的
+  后台学习记忆 / 教学重构）、`9d57c24`（README 同步最新行为并整理过期描述）；连同此前 3 个未推提交一起
+  推送 `origin/main`（`7abe0a3` → `9d57c24`），远端与本地 HEAD 一致。（这些提交信息后来统一精简过一次，见 §45。）
 - `.gitignore` 新增 `ClashMeta手机配置.yaml`（本机代理配置，私人网络资料）与 `InstallationLog.txt`
   （msys2 安装器日志），两者只留本机、永不进仓库。
 - README：功能表按现状改写（截图单独存 / 后台学习记忆 / 发送范围四选一 / 会话恢复），界面与快捷键章节
@@ -2532,3 +2533,44 @@ zoom-touch **52/52**、zoom **39/39**、selection 31/31、cjk 11/11。
   `C:\Users\<本机用户>\...` 改为相对仓库根（`path.resolve(import.meta.dirname, …)`）；
   `limits.rs` / `security.js` 的路径示例换成占位用户名；复扫全部 tracked 文件，已无本机用户名 / 真实本机路径。
 - 全量 tracked 文件安全扫描：无真实 API Key、无代理链接、无私钥、无外网 IP（只剩测试假 Key 与占位路径）。
+
+
+## 45. 代码与仓库风格整理（2026-10-31）
+
+用户口径：「现在一看就是 vibe 做的，你能把这个风格改一改吗」——确认范围是 GitHub 门面（release / README /
+提交信息）和代码注释风格，并且要求先把现有东西备份好。
+
+### 45.1 备份
+
+- `backup/prt-pre-destyle-20261031.bundle`：`git bundle create --all`，10,423,211 B，
+  `git bundle verify` 通过；含改前全部提交历史。
+- `backup/prt-source-pre-destyle-20261031.zip`：改前源码包（`test/pack.mjs` 产物）。
+- `backup/` 在 `.gitignore` 里，只留本机。
+
+### 45.2 门面
+
+- README 从约 400 行压到约 100 行：去掉 emoji 标题、「最近更新」清单、大表格和逐条历史增量，
+  只留简介 / 下载 / 功能 / 运行 / 测试 / 目录 / 隐私 / 已知限制 / 文档；文件链接复核 0 坏链。
+- GitHub Release v1.0.0 说明改成短段文字（无 emoji、无大写强调），标题简化为 `v1.0.0`。
+- 最近 7 个提交的信息统一重写成一句话式（`docs: …` / `feat: …` / `chore: …`），
+  用 `git filter-branch --msg-filter` 只改信息、不改树（重写前后 `git diff` 为空），
+  随后 force-push 分支与 tag `v1.0.0`。
+
+### 45.3 代码注释
+
+- 两轮自动清理，脚本 `test/artifacts/restyle/clean-comments.mjs`（一次性工具，不进仓库）：
+  只删「整行都是注释」的行，脚本自带「代码行指纹重算后必须完全一致」的护栏，指纹不一致的文件自动跳过。
+- 删掉的主要是：以「用户口径 / 实测 / 踩坑 / 回归 / 断言 / 2026-xx」开头的大段叙事块、
+  `══════` 框线装饰、以及注释里的 `**加粗**`；保留功能性的短注释。
+- 结果：注释行 7,934 → 3,162（占源码行数 16.2% → 7.1%），源码总行数 48,898 → 44,353。
+- 注释清理脚本与调试脚本都在 `test/artifacts/`（gitignore），没有进仓库。
+
+### 45.4 验证
+
+- 全部改动过的 js/mjs：`node --check` 0 失败；css/html 注释配对检查通过；`cargo test` 29/29。
+- 套件：`desktop.mjs` 67/67（首跑有两条联网断言因当时的网络抖动假红，复跑通过）、
+  `attachments.mjs` 22/22、`qa.mjs` 36/36、`send-range.mjs` 24 条、`ai-send-regression.mjs` 13/13。
+- exe 重编并复制到项目根目录与桌面（两份 SHA256 一致）：10,394,624 B，
+  SHA256 `F4F31B2206E3E228154BFEFB837914AE09A5DB99743DA448ADFF6C76D7E694AB`（比上一版小约 199KB，
+  主要是内嵌前端的注释变少）。
+- GitHub Release v1.0.0 的 `paper-reader.exe` 资产将在本轮推送后替换为新 exe，tag 同步指到最终提交。

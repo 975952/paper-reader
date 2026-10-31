@@ -1,25 +1,3 @@
-/**
- * 两指手势到底是滑动还是缩放：浏览器行为 + 应用判定 的对照实验（调研工具，不做断言）。
- *
- *   node test/perf/touch-pan-vs-pinch.mjs
- *
- * 回答三个问题（每条都是被实测打脸之后才定下来的设计）：
- *
- * ① 浏览器会不会抢走两指手势？
- *    在 `html{touch-action:pan-x pan-y}` 下，Chromium 对两指手势**什么都不做**：
- *    不滚、不捏合、不发 touchcancel，事件原样送到页面（四种手势形状都测过）。
- *    所以页面不需要 preventDefault 去"抢"，touch-action 一条就够了。
- *    对照：连 touchmove 监听都不装时，浏览器反而会把手势吃掉（move=0）。
- *
- * ② 那在触摸序列里写 scrollTop 行不行？——**不行**
- *    两指手势里每帧写一次 `container.scrollTop`，从第二帧起 touchmove/touchend
- *    全都收不到（20 个 move 只剩 1 个，没有 touchcancel，手势直接死掉）。
- *    写 `transform` 没这个问题。这就是"两指平移走 transform、松手才落成滚动"的原因。
- *
- * ③ 应用的意图判定对不对？
- *    平行拖动 → 只滚不缩；几像素抖动 → 纹丝不动；对称捏合 → 只缩；
- *    先平移后张开 → 先滚后缩。
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -154,7 +132,6 @@ for (const mode of ['none', 'passive', 'nonpassive', 'prevent', 'scroll']) {
 }
 console.log('  → 结论：不写 scroll 就一切正常（连 preventDefault 都不需要）；一写 scrollTop，序列立刻断掉。');
 
-/* ══════════ ③ 应用自己的意图判定 ══════════ */
 console.log('\n══ ② 应用判定（用应用自己的处理）══');
 const CASES = [
   { name: '两指平行下滑（间距不变）', frames: panFrames, want: '只滚不缩' },

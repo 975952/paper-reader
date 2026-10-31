@@ -1,16 +1,3 @@
-/**
- * 参考文献标题猜测 / 检索相关性（2026-10 用户报的 bug 的回归套件）
- *   cd test && node refsearch.mjs       （或：node test/refsearch.mjs）
- *
- * 事故现场：`V. Sindhwani, T. Sainath, and S. Kumar. Structured transforms for
- * small-footprint deep learning. …` 被猜成标题 **`V`**，于是拿单个字母 V 去 arXiv
- * 检索，返回「$V$-rings versus $Σ$-$V$ Rings」「On a conjecture of V. V. Shchigolev」
- * 这类毫不相干的论文 —— 用户看到的就是「我都不知道这个查找是怎么在找」。
- *
- * 这里只起一个**隔离**的 Node 服务（PRT_DATA_DIR / PRT_PAPERS_DIR 指向 test/artifacts），
- * 不碰用户的书架与 data/。标题猜测是纯函数，不需要联网；只有「真去搜一次」那两条
- * 需要外网，拿不到外网时按 SKIP 处理（不假装通过）。
- */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';

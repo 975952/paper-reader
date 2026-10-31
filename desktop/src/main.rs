@@ -22,7 +22,7 @@ mod window;
 use std::io::Write;
 
 /// 统一日志出口。
-/// 注意：**绝对不能用 eprintln!/println!** —— GUI 子系统下标准句柄可能是空的，
+/// 注意：绝对不能用 eprintln!/println! —— GUI 子系统下标准句柄可能是空的，
 /// 宏在写失败时会 panic，那就违背"任何异常都不该让进程退出"了。
 pub fn log_line(msg: &str) {
     let mut err = std::io::stderr();
@@ -131,16 +131,6 @@ fn main() {
         log_line("[boot] API 认证已启用；页面必须由本服务提供（token 由 index.html 注入）");
     }
 
-    // 机器可读的 token 行：给「自己 spawn 隔离服务」的测试 harness 用。
-    //
-    // 注意这里**刻意不走 log_line**：log_line 会落一份到 data/paper-reader.log，
-    // 那就把 token 写进日志文件了（审计 §P0 第 5 条要求 token 不进日志）。
-    // 所以它只写 stdout，而且：
-    //   * `PRT_API_TOKEN` 已注入（调用方本来就知道）→ 不打印
-    //   * `PRT_QUIET_TOKEN=1`（交付版）→ 不打印
-    //
-    // （原来是 /** */ 文档注释，但文档注释挂在表达式上是无效的，rustc 会报
-    //   unused_doc_comments；正式构建不该留这种噪声，所以改回普通注释。）
     if let Some(line) = auth::token_announcement() {
         let mut out = std::io::stdout();
         let _ = writeln!(out, "{}", line);

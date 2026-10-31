@@ -1,8 +1,3 @@
-/**
- * R6 回归：会话恢复 / 可恢复请求 / 跨论文全文竞态 / 缓存去重。
- * 运行：node test/r6.mjs
- * 只使用本文件下的隔离 data、papers 和本地假模型服务。
- */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -121,12 +116,6 @@ try {
   }));
   check('恢复历史无页面异常或错误 toast', pageErrors.length === 0 && restored.errors.length === 0, pageErrors.join(' | ') || restored.errors.join(' | '));
   check('隐藏结果块恢复前已创建且非法 block 归入问答', restored.blocks.includes('chat') && restored.blocks.includes('translate') && restored.entries.every((x) => ['chat', 'translate'].includes(x.block)));
-  /**
-   * 2026-10 删减后右栏**恒为单列**：一列只开一个面板，译文与问答不可能同时摆在台面上。
-   * 旧写法用 `setPanelColumn('chat', 1)` / `('translate', 2)` 把两块并排摆成两栏 —— 那套栏位 API
-   * 连同第 2 栏一起删了。恢复出来的消息按块落在 `state.blockEls` 上，所以「两块都恢复」这件事
-   * 改成直接查块节点，不再要求它们同时在文档里。
-   */
   const restoredByBlock = await page.evaluate(() => {
     const msgs = (id) => [...(window.__state.blockEls?.[id]?.querySelectorAll('.msg') || [])];
     return {
@@ -183,11 +172,6 @@ try {
   await wait(250);
   const secondTranslate = await page.evaluate(() => ({ n: window.__state.sessionEntries.length, calls: window.__state.sessionEntries.filter((x) => x.quote === '重复选区').length }));
   check('缓存命中不重复追加翻译 entry', firstTranslate.calls === 1 && secondTranslate.calls === 1 && secondTranslate.n === firstTranslate.n, JSON.stringify({ beforeTranslate, firstTranslate, secondTranslate }));
-  /**
-   * 上面两次 doTranslate 会把译文块推到台面上（单列里同一时刻只有一块可见）。
-   * 这条前置断言是必须的：下面的 「重新生成」 用 `?.click()` 找按钮，按钮找不到就是静默 no-op，
-   * 而再下面那条「不误发请求」照样通过 —— 假绿。先把「入口真的在」钉死。
-   */
   const translateStage = await page.evaluate(() => ({
     block: document.querySelector('#aiArea .ai-block')?.dataset.block || '',
     regen: [...document.querySelectorAll('#aiArea .ai-block .msg .acts button')].some((b) => b.textContent === '重新生成'),

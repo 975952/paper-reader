@@ -1,17 +1,3 @@
-/**
- * 用**真实论文**量渲染参数与开销（调研工具，不做断言）：
- * 每页 canvas 到底多少像素、ratio 多少、切片多大、一次 _renderPage 多久、滚动时掉多少帧。
- *
- *   node test/perf/real-paper-perf.mjs            # 默认用 papers/attention-arxiv.pdf
- *   PAPER=xxx.pdf node test/perf/real-paper-perf.mjs
- *
- * 为什么要有它：夹具（合成 PDF、纯文字、3 页）太轻，量不出真机上的开销。
- * 2026-10-09 就是靠它发现 `renderRatio()` 在 1× 屏上硬按 2 倍渲染 —— 每页 10.3 MP、
- * 滚动时 13 个长任务共 1329ms；改成按 dpr 之后是 2.6 MP / 1 个长任务 54ms。
- *
- * ⚠️ 会**只读**拷一份你的论文到 `test/artifacts/`（gitignore + pack.mjs 拒收非夹具 PDF），
- *    原始文件一个字节都不动；papers/ 里没有论文时自动退回夹具。
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';

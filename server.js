@@ -1,15 +1,4 @@
 #!/usr/bin/env node
-/**
- * 论文阅读器 —— 本地服务（零依赖，只用 Node 标准库）
- *
- * 职责：
- *   1. 托管前端静态文件（public/）
- *   2. 列出 / 读取 papers/ 目录里的 PDF
- *   3. 转发 AI 请求到任意 OpenAI 兼容接口（绕开浏览器 CORS，密钥只留在本机）
- *   4. 保存设置、阅读进度、高亮笔记到 data/
- *
- * 只监听 127.0.0.1，不对外暴露。
- */
 'use strict';
 
 const http = require('http');
@@ -23,12 +12,6 @@ const modelProfiles = require('./model-profiles');
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
-/**
- * 论文目录 / 数据目录默认在仓库里，但允许用环境变量换掉。
- * 这是给测试留的：想验证「没有 API Key 时联网搜索照样能用」，
- * 就得让服务端读一份空配置，而不是把用户真填的 Key 搬走再搬回来
- * —— 那样一旦测试中途被强杀（taskkill /F 不会跑退出钩子），用户的 Key 就真丢了。
- */
 const PAPERS_DIR = process.env.PRT_PAPERS_DIR || path.join(ROOT, 'papers');
 const DATA_DIR = process.env.PRT_DATA_DIR || path.join(ROOT, 'data');
 const HOST = '127.0.0.1';
@@ -38,19 +21,9 @@ const MAX_UPLOAD = 256 * 1024 * 1024;
 /**
  * 单张截图附件的上限（POST /api/attachment）。
  * 与 security.js 的 BODY_LIMITS.attachment、Rust 的 limits::BODY_ATTACHMENT 三处一致。
- * 图片是**单独存**的（data/attachments/），不进会话 JSON，所以这个上限只约束单张图。
+ * 图片是单独存的（data/attachments/），不进会话 JSON，所以这个上限只约束单张图。
  */
 const ATTACHMENT_LIMIT = 8 * 1024 * 1024;
-/**
- * 诊断模式（审计 §P2）：只有显式 `PRT_DIAGNOSTICS=1` 才在接口里返回本机绝对路径。
- * 默认关闭 —— `/api/papers` 从前无条件返回 `dir: PAPERS_DIR`，等于把用户的
- * 本机目录结构告诉任何能访问本地服务的页面。
- *
- * 测试 harness 需要它：`test/_env.mjs` 的
- * `assertIsolatedDataDir(resolveDataDir(papers.dir))` 靠这个字段证明「服务确实指向
- * 临时目录」——这是防止测试写坏用户真实书架的安全互锁。所以自己 spawn 隔离服务的
- * 测试套件要在 env 里带上 `PRT_DIAGNOSTICS=1`。
- */
 const DIAGNOSTICS = process.env.PRT_DIAGNOSTICS === '1';
 
 const MIME = {
@@ -88,12 +61,6 @@ async function readBody(req, limit = sec.BODY_LIMITS.chat) {
     const chunks = [];
     let size = 0;
     let over = false;
-    /**
-     * 超限时**不能** `req.destroy()`：那会在客户端还没读到响应之前把连接掐掉，
-     * 表现成 ECONNRESET / socket hang up，用户只看到「网络错误」而看不到 413。
-     * 正确做法是丢掉后续数据（不再累积 → 内存不会涨），把请求读到自然结束，
-     * 再把 413 发出去。
-     */
     req.on('data', (c) => {
       if (over) return;
       size += c.length;
@@ -127,7 +94,7 @@ async function readJsonBody(req, limit) {
 /**
  * 按接口读 JSON 请求体：超限 / 解析失败分别给出 413 / 400。
  * 返回 null 表示已经回过响应，调用方直接 return。
- * 审计 §P1：超限必须 413，且**一个字都不能写盘**（调用方拿到 null 就结束）。
+ * 审计 §P1：超限必须 413，且一个字都不能写盘（调用方拿到 null 就结束）。
  */
 async function readJsonBodyOrReq(req, res, limit) {
   try {
@@ -154,22 +121,6 @@ function safeJoin(base, rel) {
   return abs;
 }
 
-/**
- * 文档 id：论文文件名的稳定短哈希，用于存放进度/笔记/会话。
- *
- * ⚠️ **必须幂等**：`docIdOf(docIdOf(x)) === docIdOf(x)`。
- *
- * 这是一个真 bug 的修复（2026-10）：前端在两处传的 `doc` 参数格式不同 ——
- * 有的地方传文件名（`?open=` 那条路），有的地方传 docId（`state.doc.docId`）。
- * 老实现无条件再哈希一次，于是同一个文档算出两个 key：
- *     docIdOf('multipage-sample.pdf')            = multipage-sample_pdf-afcbb748
- *     docIdOf('multipage-sample_pdf-afcbb748')   = multipage-sample_pdf-afcbb748-2866f44b
- * 会话文件按前者命名、列表按后者去扫 → **永远扫不到，界面一直是「还没有会话」**。
- *
- * 所以：已经长得像 docId 的输入直接原样返回。判定要**严格**，别把正常文件名误判成 id
- * （文件名几乎都带 `.pdf`，而 slug 里不会有点，所以「无扩展名 + slug-十六进制」这个
- * 形状足够安全）。
- */
 const DOC_ID_RE = /^(.{1,64})-([0-9a-f]{6,10})$/;
 function docIdOf(name) {
   const s = String(name);
@@ -180,11 +131,6 @@ function docIdOf(name) {
   return `${slug}-${h.toString(16)}`;
 }
 
-/**
- * 一个 doc 参数可能对应哪些历史 key。
- * 老版本写出的文件用的是「二次哈希」的键，列会话时必须一并认出来，
- * 否则用户升级后原来的会话会"消失"。
- */
 function docKeyCandidates(doc) {
   const out = [];
   const push = (v) => { if (v && !out.includes(v)) out.push(v); };
@@ -235,21 +181,6 @@ function writeDataFile(name, obj) {
 
 /* --------------------------------------------------- 图片附件（单独存） */
 
-/**
- * 截图等图片附件**不进会话 JSON**，单独存成文件：`data/attachments/<会话键>/<id>.<ext>`。
- *
- * 为什么单独存（用户口径：「图片单独存」）：
- *   · 截图是 base64 图片本体，写进会话 JSON 会让每个会话文件膨胀到几 MB
- *     （前端整个会话还有 350KB 上限，见 app.js 的 sessionPayload）—— 会话保存会开始丢历史；
- *   · 单独存之后会话 JSON 里只留一个 32 位 id 引用（几十字节），恢复会话时按 id 取回原图。
- *
- * 目录键与会话文件同一套（docIdOf(doc) + '-' + sid）：GC 只动当前会话自己的图。
- * 删除时机（设计口径）：
- *   ① 每次会话保存成功后，按「这次 payload 里还引用着的 id」清理本会话目录
- *      （清空会话 = 没有引用 → 图片全删）；
- *   ② DELETE /api/session 时把整个会话的附件目录一起删；
- *   ③ 「传了但最终没写进会话」的孤儿图（发送失败 / 保存失败）会在下一次保存时被 ① 清掉。
- */
 const ATTACHMENT_EXTS = ['png', 'jpg', 'webp'];
 const ATTACHMENT_ID_RE = /^[0-9a-f]{32}$/;
 
@@ -310,13 +241,6 @@ async function removeAttachmentDir(doc, sid) {
   try { await fsp.rm(attachmentDir(doc, sid), { recursive: true, force: true }); } catch { /* 忽略 */ }
 }
 
-/**
- * /api/attachment —— 截图附件的单独存储（不进会话 JSON）。
- *   POST ?doc=&sid=   body = 原始图片字节（Content-Type 随意，按文件头识别）
- *                     → { ok, id, mime }
- *   GET  ?doc=&sid=&id=<32位十六进制>  → 原始图片字节
- * 鉴权走全局的 /api/* 令牌（前端 fetch 会自动带 X-PRT-Token），不额外开例外。
- */
 async function handleAttachment(req, res, url) {
   const doc = url.searchParams.get('doc') || 'default';
   const sid = url.searchParams.get('sid') || '';
@@ -382,17 +306,6 @@ const DEFAULT_CONFIG = {
 
 /* ---------------------------------------------------------------- papers */
 
-/**
- * 用户手工排好的书架顺序（2026-10「移动 PDF 顺序」）。
- *
- * 单独存一个 `data/papers-order.json`，**不改 papers/ 里的文件名** ——
- * 文件名是 docId / 笔记 / 会话 / 阅读进度的主键，改名字等于把所有历史记录弄丢。
- * 文件里只放一个名字数组：`{ "order": ["b.pdf", "a.pdf"] }`。
- *
- * 列表排序规则（/api/papers）：**没进 order 的文件排在最前（按 mtime 倒序）**，
- * 进过 order 的按数组顺序排。这样新导入的 PDF 一定出现在最上面（和以前一样），
- * 用户排好的旧文件也不会被新文件打乱。
- */
 const PAPER_ORDER_FILE = 'papers-order.json';
 
 async function readPaperOrder() {
@@ -459,12 +372,6 @@ async function listPapers() {
   return out;
 }
 
-/**
- * DELETE /api/papers?name=xxx.pdf —— 删除一篇论文文件。
- *
- * 只删 papers/ 里的 PDF，**不删** data/ 里按 docId 存的笔记 / 会话 / 阅读进度：
- * 万一用户重新导入同一个文件，笔记还在。删完之后把名字从排序文件里摘掉。
- */
 async function handleDeletePaper(req, res, url) {
   const base = path.basename(String(url.searchParams.get('name') || ''));
   const abs = safeJoin(PAPERS_DIR, base);
@@ -490,12 +397,6 @@ async function handleDeletePaper(req, res, url) {
   return sendJson(res, 200, { ok: true, name: base });
 }
 
-/**
- * 把文件流式发给客户端。
- * 必须监听源流 error：pipe() 不会把源流错误转给 res，
- * 未处理的 'error' 会变成 uncaughtException 直接干掉整个进程
- * （Windows 上文件被独占、U 盘/网络盘断开、读到一半 EIO 都会触发）。
- */
 function streamFile(res, absPath, opts) {
   const rs = fs.createReadStream(absPath, opts);
   rs.on('error', () => { try { res.destroy(); } catch { /* ignore */ } });
@@ -574,13 +475,6 @@ async function handleChat(req, res) {
     return sendJson(res, 400, { error: { message: sec.sanitizeMessage(`请求体解析失败: ${e.message}`, '请求体解析失败') } });
   }
 
-  /**
-   * 审计 §P0：**只使用已保存配置**里的 baseURL / apiKey / model。
-   * 从前这里写的是 `payload.baseURL || stored.baseURL`，于是任何拿到本机 API 调用权的
-   * 页面都能把用户的 Key 转发到任意主机、或者让服务端带着 Key 去请求任意 URL。
-   * 现在请求体里出现这三个字段一律**忽略**（旧前端还会带，忽略同样安全），
-   * 同时在本地诊断日志里记一笔，方便判断是不是有人在试探。
-   */
   const forbidden = sec.CHAT_FORBIDDEN.filter((k) => Object.prototype.hasOwnProperty.call(payload, k));
   if (forbidden.length) {
     sec.diag(`/api/chat 请求体里的 ${forbidden.join(', ')} 已忽略（只能来自 data/config.json）`);
@@ -740,21 +634,6 @@ async function getText(url, accept = '*/*', ua = 'paper-reader/1.0 (local; refer
   return r.text();
 }
 
-/* ── 从参考文献串里猜标题 ────────────────────────────────────────────────
- * 2026-10 用户报的 bug：`V. Sindhwani, T. Sainath, and S. Kumar. Structured
- * transforms …` 被猜成标题 **`V`**，于是拿单个字母 V 去 arXiv 检索，搜回来
- * 「$V$-rings versus $Σ$-$V$ Rings」「On a conjecture of V. V. Shchigolev」这类
- * 毫不相干的论文，用户完全看不懂在查什么。
- * 根因是「按 `. ` 硬切成句 + 第一段里没有逗号/and 就当标题」：作者名的缩写点
- * （`V.` `T.` `S.`）正好把作者列表切成了单字母段，第一个单字母段就被当成标题。
- *
- * 现在的口径：
- *   1. 切段时不把**缩写点**当句子边界（点号前是一个孤零零的大写字母就不切）；
- *   2. 从前往后跳过「像作者列表」的段（纯缩写段 / 逗号多 / and / et al / 带缩写的人名）；
- *   3. 取第一段「像标题」的（不是 In/Proceedings/期刊名，长度够）；
- *      都没命中就用跳完作者后的第一段兜底。
- * 猜出来的东西如果不具备可检索性（单字母、纯数字…），searchReference 会退回
- * 整条文献串去搜 —— 宁可搜不准，也不能拿一个字母去搜。 */
 
 const REF_VENUE_RE = /^(in|proceedings|proc\.?|advances|journal|transactions|conference|workshop|symposium|arxiv|corr|pages?|vol\.?|pp\.?|press|ieee|acm|springer|elsevier|wiley|neurips|nips|icml|iclr|cvpr|iccv|eccv|acl|emnlp|naacl|aaai|ijcai|kdd|sigir|www)\b/i;
 const REF_CJK_RE = /[\u4e00-\u9fa5]/;
@@ -769,7 +648,7 @@ function splitRefSegments(s) {
     if (ch === '。' || ch === '．' || ch === '！' || ch === '？') { push(); continue; }
     if (ch === '.' && (i + 1 >= s.length || /\s/.test(s[i + 1]))) {
       // `V. Sindhwani` 的 `V.` 不切；但 `Hochreiter, S. Long short-term memory` 里的
-      // `S.` 前面有逗号 —— 那是「姓, 名首字母」这种**完整**的作者写法，该切。
+      // `S.` 前面有逗号 —— 那是「姓, 名首字母」这种完整的作者写法，该切。
       const tail = buf.replace(/\s+$/, '');
       const initial = /(^|\s)[A-Z]$/.test(tail);
       const surnameInitial = /,\s*[A-Z]$/.test(tail);
@@ -850,15 +729,6 @@ function titleScore(a, b) {
   return hit / Math.max(A.size, B.size);
 }
 
-/**
- * 这条结果和我们搜的那个标题到底是不是同一篇。
- * 检索标题认错时（比如猜成单字母 V），几个源都会返回一堆完全无关的论文；
- * 老实现照单全收列给用户，用户看到的就是「我都不知道这个查找是怎么在找」。
- * 两档判据：
- *   * 标题可信：重合词占**较长一边**的 34% 以上（与排序用的 titleScore 同口径）；
- *   * 标题不可信（退回整条文献串）：只要求候选标题的词几乎都出现在这条串里（≥80%）——
- *     整串里有作者、期刊、年份，按比例算会把正确的候选稀释掉。
- */
 function resultMatchesTitle(searchTitle, confident, candTitle) {
   const Q = new Set(normWords(searchTitle));
   const C = new Set(normWords(candTitle));
@@ -869,12 +739,6 @@ function resultMatchesTitle(searchTitle, confident, candTitle) {
   return hit / Math.max(Q.size, C.size) >= 0.34;
 }
 
-/**
- * 给一条参考文献找 PDF / 链接。
- * arXiv（常直接给 PDF）→ OpenAlex（免费、有 open_access.oa_url）→ Crossref（覆盖面最广，DOI 落地页）。
- * Semantic Scholar 只在没被限流时作为补充（公开接口经常 429）。
- * 全是公开接口，不需要密钥；某个源失败就跳过，不会整体失败。
- */
 function openAlexAbstract(work) {
   const index = work?.abstract_inverted_index;
   if (!index || typeof index !== 'object') return '';
@@ -1067,15 +931,6 @@ function parseBaidu(html) {
   return out;
 }
 
-/**
- * 结果与查询串是不是完全沾不上边。
- *
- * 真实踩过的坑：把一整句中文问句丢给 Bing，它会退化成单字查询，返回一堆
- * 「这」字的字典释义。这种结果当成「来源」列给用户比没有还糟 —— 模型会被带偏，
- * 用户点开也全是垃圾。所以这里做一次极保守的相关性筛查：
- * 只要有任意一条结果命中了查询里的一个「有辨识度的词」就放行，
- * 一条都不命中才判定这个引擎这次不能用，换下一个引擎。
- */
 function queryTokens(q) {
   const s = String(q || '').toLowerCase();
   const toks = new Set();
@@ -1131,7 +986,7 @@ async function webSearch(q, n = 6) {
       if (results.length >= 2) dropped++;
     } catch { /* 换下一个引擎 */ }
   }
-  // 这里**不能**写「反正别的引擎失败了，就把这批不相关的先给出去」。
+  // 这里不能写「反正别的引擎失败了，就把这批不相关的先给出去」。
   // 之前留过这么一个兜底，结果 Bing 退化成单字查询时，一堆「这」字的字典释义
   // 照样被当成来源返回给模型和用户。宁可不给，也别给错的。
   return {
@@ -1157,15 +1012,6 @@ function parseIPv4Quad(s) {
   return out;
 }
 
-/**
- * 内网地址不接。这个接口是「让本机去下载一个外部 URL」，
- * 不挡的话就变成一个可被网页利用的内网探测器（SSRF）。
- * 导入论文用到的都是 arXiv / 期刊这类公网地址，挡掉内网不影响正常使用。
- *
- * 注意 `URL.hostname` 对 IPv6 是**带方括号**的（`new URL('http://[::1]/').hostname === '[::1]'`），
- * 而且 IPv4-mapped 形式会被规范化成十六进制（`[::ffff:169.254.169.254]` → `[::ffff:a9fe:a9fe]`），
- * 所以两种写法都要能认出来 —— 两块都是实测发现的真实绕过口子。
- */
 function isPrivateHost(hostname) {
   let h = String(hostname || '').toLowerCase();
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
@@ -1218,16 +1064,6 @@ function isPrivateIPv4(quad) {
   return false;
 }
 
-/**
- * 解析一个「允许让本机去下载」的 URL。
- * 审计 §P1：协议、凭证、控制字符都要检查；`checkPrivate` 控制是否做内网检查。
- *
- * 为什么内网检查要能关掉：**第一跳**的内网检查由调用方用原始错误码/文案做
- * （`handleImportPdf` 顶部的 `checkFetchUrl`，回 400「内网地址不允许导入」），
- * 而用户自己指定的地址本来就是「他想下载的那个地址」——本机 dev server 也在这个
- * 检查之外。真正要挡的是**重定向**：所以第 2 跳起每一跳都必须做内网检查。
- * 返回 { url } 或 { error }。
- */
 function checkFetchUrl(raw, checkPrivate = true) {
   let u;
   try {
@@ -1275,21 +1111,6 @@ async function readCapped(body, max) {
   return { buffer: Buffer.concat(chunks) };
 }
 
-/**
- * 手动跟随重定向（最多 MAX_REDIRECTS 跳）。
- *
- * 从前这里是 `fetch(target, { redirect: 'follow' })`：只检查了**初始** URL 的主机，
- * 于是一个公网地址只要 302 到 http://127.0.0.1:… 或 http://169.254.169.254/ 就能
- * 绕过全部内网检查（审计 §P1）。现在每一跳都重新做协议 + 内网检查。
- *
- * `checkPrivateOnFirstHop`：默认 true（直连地址照旧立刻被拒）。
- * 传 false 只有一种场合 —— 调用方已经自己检查过第一跳的内网属性，
- * 想让**重定向目标**才走内网判定（测试用的本机重定向器就是这种：
- * `handleImportPdf` 顶层先用 `checkFetchUrl(target)` 做一次直连判定，
- * 把结果通过这个参数透传下来）。
- *
- * 返回 { resp, finalUrl } 或 { error, status? }。
- */
 async function fetchWithSafety(rawTarget, { headers, timeoutMs = 60000, checkPrivateOnFirstHop = true } = {}) {
   let current = rawTarget;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -1319,7 +1140,7 @@ async function fetchWithSafety(rawTarget, { headers, timeoutMs = 60000, checkPri
       }
       return { resp, finalUrl: checked.url.href };
     }
-    // 3xx：**先丢掉这次响应体**，再重新走一遍协议/主机检查
+    // 3xx：先丢掉这次响应体，再重新走一遍协议/主机检查
     try { await resp.body?.cancel(); } catch { /* ignore */ }
     let next;
     try {
@@ -1370,7 +1191,7 @@ async function handleImportPdf(res, url) {
   if (!target) return sendJson(res, 400, { error: { message: '缺少 url' } });
   if (target.length > 2000) return sendJson(res, 400, { error: { message: 'url 过长' } });
 
-  // 初始 URL 先检查一次（错误码/文案与从前一致），随后**每一跳**都会再检查一次。
+  // 初始 URL 先检查一次（错误码/文案与从前一致），随后每一跳都会再检查一次。
   // 这里直连就已经挡掉内网地址（不发出任何请求）；重定向目标由 fetchWithSafety
   // 逐跳检查 —— 所以把「第一跳已检查过」透传下去，避免直连日志里出现两条同样的判定。
   const first = checkFetchUrl(target);
@@ -1525,13 +1346,6 @@ async function handle(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || HOST}`);
   const pathname = decodeURIComponent(url.pathname);
 
-  /**
-   * 审计 §P0：所有 /api/* 都必须带自定义请求头。
-   *
-   * 校验在**最前面**，早于任何读盘 / 写盘 / 出网动作 —— 401/403 不会写入任何用户数据。
-   * 例外只有 `/api/pdf` 的 GET/HEAD（浏览器子资源加载拿不到自定义头），
-   * 详见 security.js 的 authorized()。
-   */
   if (pathname.startsWith('/api/') && sec.isEnforced()) {
     if (!sec.authorized(req, pathname)) {
       return sec.unauthorized(res, sendJson);
@@ -1632,7 +1446,7 @@ async function handle(req, res) {
       const { patch, ignored, capped } = sec.sanitizeConfigPatch(raw);
       if (ignored.length) sec.diag(`/api/config 忽略字段: ${ignored.join(', ')}`);
       /**
-       * 超长字段**返回 400，绝不截断保存**（审计 §验收：「超限返回 413/400，
+       * 超长字段返回 400，绝不截断保存（审计 §验收：「超限返回 413/400，
        * 不截断后静默保存」）。从前一个 5000 字的 model 会被悄悄存成 256 字、
        * 接口还回 200 —— 用户以为保存成功了，设置其实已经被改坏。
        */
@@ -1660,14 +1474,6 @@ async function handle(req, res) {
     return send(res, 405, 'Method Not Allowed');
   }
 
-  /**
-   * ---- 学习档案（全局一份；不属于任何论文 / 会话）
-   *
-   * 用户口径（2026-10）：「知识库写入的时候应该要带有当时的时间，现在的时间在后续
-   * 过程中要交给模型获得输出」。所以：
-   *   · 时间戳由**前端**在写入时生成（客户端本地时区），服务端只校验格式、不改写；
-   *   · 这里只负责安全落盘（校验失败不覆盖旧文件），不参与模型调用。
-   */
   if (pathname === '/api/profile') {
     if (req.method === 'GET') {
       const saved = await readDataFile('learning-profile.json', null);
@@ -1712,17 +1518,6 @@ async function handle(req, res) {
       await writeDataFile('state.json', { ...cur, ...patch });
       return sendJson(res, 200, { ok: true });
     }
-    /**
-     * DELETE /api/state?doc=<docId> —— 首页的「移除最近记录」。
-     *
-     * 只从 `docs` 里删掉这一条阅读记录；如果 `lastDoc` 正是它，一并清空那三个
-     * 「上次打开」字段。**绝不删除 papers/ 里的文件** —— 用户看到的文案是
-     * 「移除最近记录（文件还在 papers/）」，语义必须与之一致。
-     *
-     * 为什么要一个独立的动词、而不是让前端把 docs[docId] 置成 undefined 再整体 POST：
-     * `POST /api/state` 是**浅合并**（{...cur, ...patch}），undefined 根本不会真的删键，
-     * 要支持它就得给 POST 加深合并语义 —— 那反而更容易写坏旧数据。独立动词也更好限制范围。
-     */
     if (req.method === 'DELETE') {
       const doc = url.searchParams.get('doc') || '';
       if (!doc) return sendJson(res, 400, { error: { message: '缺少 doc' } });
@@ -1768,19 +1563,6 @@ async function handle(req, res) {
     return send(res, 405, 'Method Not Allowed');
   }
 
-  /**
-   * /api/session —— 一篇论文的对话。
-   *
-   * 2026-10 起支持**多会话**（用户口径：「问答是不是要做多对话分对话」→ 会话列表 + 新建 + 切换）。
-   * 存储布局（**向后兼容**，老文件不动也不改名）：
-   *
-   *   老： session-<docId>.json                       ← 单会话时代的文件，仍然照读照写
-   *   新： session-<docId>-<sid>.json                 ← 每个会话一个文件，sid 由前端生成
-   *
-   * 不传 `sid` 时行为与以前**完全一致**（读/写 `session-<docId>.json`）——
-   * 这样即使前端没升级、或者有老书签，也不会读坏数据。
-   * 传了 `sid` 才走新的一份文件。老文件由前端在"第一次新建会话"时当作默认会话接管。
-   */
   if (pathname === '/api/session') {
     const doc = url.searchParams.get('doc') || 'default';
     const sid = (url.searchParams.get('sid') || '').replace(/[^\w-]/g, '').slice(0, 40);
@@ -1803,12 +1585,6 @@ async function handle(req, res) {
       await pruneAttachments(doc, sid, payload);
       return sendJson(res, 200, { ok: true });
     }
-    /**
-     * DELETE /api/session?doc=<doc>[&sid=<sid>] —— 删掉一个会话文件（不碰论文 / 笔记）。
-     * Rust 版（desktop/src/api.rs 的 session()）一直有这个动词；Node 版此前只实现了
-     * GET/POST，于是「删除会话」在浏览器版里静默 405（多会话列表的删除按钮只在 exe 里能用）。
-     * 这里补齐，两套后端行为一致。
-     */
     if (req.method === 'DELETE') {
       try { await fsp.rm(path.join(DATA_DIR, file), { force: true }); }
       catch (e) {
@@ -1822,19 +1598,8 @@ async function handle(req, res) {
     return send(res, 405, 'Method Not Allowed');
   }
 
-  /**
-   * /api/attachment —— 截图附件的单独存储（不进会话 JSON），详见 handleAttachment 的注释。
-   * 必须在下面的静态文件回落之前拦住，否则会被 SPA 回落到 index.html。
-   */
   if (pathname === '/api/attachment') return handleAttachment(req, res, url);
 
-  /**
-   * GET /api/sessions?doc=<doc> —— 这篇论文的会话列表（2026-10 多会话）。
-   *
-   * 只回**元信息**（sid / 条数 / 最后一条摘要 / 更新时间），不回正文 ——
-   * 会话多的时候列表接口不该把每一份正文都读出来。
-   * 老的单会话文件以 sid='' 出现在列表里（前端把它当"默认会话"）。
-   */
   if (pathname === '/api/sessions') {
     const doc = url.searchParams.get('doc') || 'default';
     const keys = docKeyCandidates(doc);
@@ -1894,14 +1659,6 @@ async function handle(req, res) {
   let rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const abs = safeJoin(PUBLIC_DIR, rel);
   if (!abs) return send(res, 400, 'Bad path');
-  /**
-   * 目录索引：`/mobile/` 要落到 `public/mobile/index.html`。
-   * 没有这一条的时候，`/mobile/` 会被下面的「单页应用回落」抢走，
-   * 直接返回桌面版的 index.html —— 表现就是「请求手机版，拿到的却是桌面版」，
-   * 而且它不报错（200 + 正常页面），排查时非常容易被骗（实测踩过：
-   * 手机版页面里 document.getElementById('mViewer') 是 null，但没有任何 404）。
-   * 这里显式把「以 / 结尾」和「指向真实目录」的路径映射到该目录下的 index.html。
-   */
   const dirIndex = (rel === '' || rel.endsWith('/'))
     ? path.join(rel, 'index.html')
     : (fs.existsSync(abs) && fs.statSync(abs).isDirectory() ? path.join(rel, 'index.html') : '');
@@ -1939,25 +1696,6 @@ async function handle(req, res) {
 
 /* --------------------------------------------------------- 页面 token 注入 */
 
-/**
- * 把 session token 注入本应用自己的 HTML 页面（审计 §P0 第 2 条）。
- *
- * 注入三样东西：
- *   1. `<meta name="prt-token" content="...">`  —— 供前端读取
- *   2. 一段内联脚本：定义 `window.__PRT_TOKEN__` 和 `window.apiFetch()`，
- *      并在 `document` 上装一个捕获阶段的 fetch 补丁 —— 页面里**所有**
- *      fetch('/api/...') 自动带上 `X-PRT-Token`，前端不用改 20 处调用点。
- *   3. `Set-Cookie: prt_session=...`（HttpOnly + SameSite=Strict）—— 只为了让
- *      `/api/pdf` 这种「浏览器子资源加载」也能通过校验（它无法带自定义头）。
- *
- * 注入是「加法」：就算 public/ 那边的 index.html 完全不认识 token，页面照样能跑，
- * 只是 `window.apiFetch` 不存在而已。
- * token 只出现在响应体与响应头里，**不进日志、不进错误信息**。
- *
- * 占位符刻意用 `@@PRT_TOKEN@@` 而不是 `__PRT_TOKEN__`：后者是**属性名**的一部分
- * （`window.__PRT_TOKEN__`），用同一个串做全局替换会把属性名也换成 `window."token"`，
- * 直接产出语法错误 —— 实测被 test/zoom.mjs 的「没有未捕获的页面异常」抓出来过。
- */
 const TOKEN_SNIPPET = `<!-- prt-auth: 本地 API 令牌（勿外传，刷新即失效） -->
 <meta name="prt-token" content="@@PRT_TOKEN@@" />
 <script>
@@ -2067,7 +1805,7 @@ async function main() {
     console.log(`      打开： ${url}`);
     console.log(`      论文目录： ${PAPERS_DIR}`);
     console.log(`      配置文件： ${path.join(DATA_DIR, 'config.json')}`);
-    // 审计 §P0：明确告诉操作者当前认证状态（**绝不打印 token 本身**）
+    // 审计 §P0：明确告诉操作者当前认证状态（绝不打印 token 本身）
     console.log(`      API 令牌校验： ${sec.isEnforced() ? '已启用（所有 /api/* 需带 X-PRT-Token；/api/health 免认证）' : '已关闭（PRT_REQUIRE_TOKEN=0）'}`);
     /**
      * 机器可读的 token 行：给「自己 spawn 隔离服务」的测试套件用。

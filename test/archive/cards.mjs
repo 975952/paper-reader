@@ -1,12 +1,3 @@
-/**
- * 「卡片能拖动」+「打开论文自动适配大小」验收。
- *
- *   BASE=http://127.0.0.1:8787 node test/cards.mjs
- *
- * 两件事都是用户提的：
- *   1. 所有弹出来的卡片都要能拖动位置（划词气泡 / 结果浮层 / 参考文献 / 笔记 / 设置）
- *   2. 论文打开时应该自动匹配到最合适的大小
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import fs from 'node:fs';
@@ -82,12 +73,6 @@ await sleep(1800);
 
 /* ═══════════ 零、面板管理器：常用显示控制 + 按需布局 ═══════════ */
 console.log('\n-- 面板管理器分层');
-/**
- * 打开面板管理器。
- * 注意：顶栏 ▤（#panelBtn）**已按用户要求移除**，现在的入口是「右键面板标题栏」
- * （app.js bindPanelHead 的 contextmenu → openPanelMenu(head)）。这里就用真实入口，
- * 顺带把「Esc 关闭后焦点回到把手（面板标题栏）」也一并验证。
- */
 const openPanelMenu = async () => {
   await page.evaluate(() => {
     const head = document.querySelector('#leftSide > section.sec > .sec-head') || document.querySelector('.sec-head');
@@ -226,19 +211,6 @@ const relOn = await page.evaluate(() => ({
 check('再次点击显示控制能恢复关系面板', relOn.state === true && relOn.hidden === false, JSON.stringify(relOn));
 await page.keyboard.press('Escape');
 await sleep(200);
-/**
- * Esc 关闭面板管理器：断言「关掉了 + 焦点没丢」。
- *
- * 这里**放松了原来「必须正好等于某个标题栏节点」的写法**，原因如实记下来：
- *   原实现里 `panelMenuFor` 指向「右键的那个标题栏」，Esc 时 anchor.focus() 把焦点还回去。
- *   但 `menuBtn` 点一下会走 refreshPanelMenuSoon() 重画整张菜单，行里的按钮被 replaceChildren
- *   换掉，锚点就成了脱离文档的节点，focus 静默失败 —— **焦点掉到 <body>**，键盘用户要从头 Tab。
- *   已修：按面板 id 现查触发行的按钮；并保证聚焦目标绝不在菜单内部（父级 display:none 时
- *   focus() 一律无效，实测过）。真实效果是焦点稳定落在**某个面板标题栏**上。
- *
- * 判据改成「管理器关闭 + 焦点在文档里可交互元素上 + 不在 body」，不再钉死具体是哪一个标题栏
- * （钉死节点身份会把「实现了目标」误判成失败；而「掉到 body」仍然会红）。
- */
 const escFocus = await page.evaluate(() => {
   const ae = document.activeElement;
   const head = document.querySelector('#leftSide > section.sec > .sec-head') || document.querySelector('.sec-head');
@@ -257,7 +229,6 @@ check('Esc 关闭面板管理器，且焦点没掉到 body（回到面板标题�
   escFocus.closed && escFocus.isInteractive && !escFocus.atBody,
   JSON.stringify(escFocus));
 
-/* ═══════════ 一、打开论文自动适配大小 ═══════════ */
 console.log('\n-- 打开论文自动适配大小');
 
 const fitOf = () => page.evaluate(() => {
@@ -306,23 +277,7 @@ check('手动缩放后再改窗口大小不会把比例抢回去',
   `${manual.scale} → ${afterResize.scale}`);
 
 /* ═══════════ 二、右栏分块不能被容器裁掉 ═══════════ */
-/**
- * 真实事故：加了输入框下面那排「全文/联网」之后输入区变高，
- * 用户之前拖好的块高度就装不下了 —— `.ai` 是 overflow:hidden，
- * 超出部分被直接裁掉，看起来就是「右侧输出最下面的内容被下面的东西挡住」。
- *
- * 阶段 2.1 起窗口太窄会自动收起右栏（app.js 的 applyResponsiveLayout）。
- * 右栏一收起，`.ai-block` 就完全不参与布局，clipCheck() 会「结构性地」全绿 ——
- * 那种绿什么都没验证。所以下面每次取完数据都先确认「这一组确实是在有右栏的宽度下跑的」。
- */
 console.log('\n-- 右栏分块高度');
-/**
- * 右栏分块高度。
- *
- * 2026-10-04 改造后右栏是**多列**的（一列只开一个面板，见 app.js「右栏列」一节）：
- * 两块同时开着时各占一栏，所以「裁没裁」要**按块自己所在的那一栏**量，
- * 不能拿 #aiArea 的底边去卡第 2 栏里的块（那是结构性的假红/假绿）。
- */
 const clipCheck = () => page.evaluate(() => {
   const paneOf = (el) => el.closest('#aiArea, #aiArea2') || document.getElementById('aiArea');
   const blocks = [...document.querySelectorAll('.ai-block')].map((el) => {
@@ -355,13 +310,6 @@ const clipCheck = () => page.evaluate(() => {
   };
 });
 
-/**
- * 阶段 2.2a 起，右栏两块（译文 / 问答）的显示、顺序、高度都归 `reader.panels` 这一份
- * 统一面板注册表管；老的 `reader.ai`（按论文分叉的 byDoc）只在第一次打开时被迁移一次。
- * 所以这里预置的必须是新 key —— 写老 key 会被「先迁后读」的逻辑当成没预置过，
- * 高度断言就变成在测默认值了（覆盖会静默变弱）。
- * 断言本身一个字没动：预置的 400 / 600 加起来超过容器，产品必须夹进去而不是裁掉。
- */
 await page.evaluate(() => {
   const panel = (id, dock, order, size) => ({ id, dock, order, visible: true, collapsed: false, pinned: false, size });
   localStorage.setItem('reader.panels', JSON.stringify({
@@ -396,12 +344,6 @@ check('窗口变矮后同样不会被裁（自动按比例压缩）', !c2.clippe
 
 await page.setViewport({ width: 1500, height: 950 });
 await sleep(900);
-// 2026-10-04 口径变更：**译文栏不再有输入框**（用户原话「译文不需要输入啊」）——
-// 译文是看的，问答才需要打字。所以这一栏显示的若不是「问答」，先切到问答再打字，
-// 否则 #chatInput 是 display:none 的（点不动）。这不是绕过缺陷，是这一段的正确前置。
-// ⚠️ 切换器现在**每栏一组**（#aiBar / #aiBar2）：只点 #aiBar 的话，问答若在被分到第 2 栏
-// 就切不过去，#chatInput 仍是 display:none → 打字发不出去 → 下面 waitForFunction 30s 超时。
-// 这里改成「两栏的切换器都点一遍 + 断言输入框真的可见」。
 await page.evaluate(() => {
   for (const bar of ['aiBar', 'aiBar2']) {
     const btn = document.querySelector(`#${bar} .aibar-btn[data-block="chat"]`);
@@ -447,11 +389,6 @@ check('输出区最后一条的底部动作条露在容器里（没被挡住）'
   lastVisible ? `消息底 ${lastVisible.bottom} / ${lastVisible.pane} 底 ${lastVisible.areaBottom}` : '(没找到消息)');
 
 /* ═══════════ 二b、极窄窗口：宁可收起右栏，也不把正文压到 --viewer-min 以下 ═══════════ */
-/**
- * 用户报的问题：780px 窗口下两侧栏都展开，正文只剩 ~200px、PDF 缩放到 33%。
- * 2.1 的规则是「放不下就先自动收右栏，还放不下再收左栏」，
- * 所以这里断言的是：正文不低于 --viewer-min，且右栏确实被收起、活动栏出现在窗口边缘。
- */
 console.log('\n-- 极窄窗口下的正文保护');
 await page.setViewport({ width: 780, height: 620 });
 await sleep(1200);
@@ -472,13 +409,6 @@ check('窗口变宽后右栏自动恢复（自动收起不残留、结果块高�
   `no-right=${widened.noRight} · 正文 ${widened.viewerW}px · 块高 ${widened.blocks.map((b) => b.h).join('/')}`);
 
 /* ═══════════ 二c、老 reader.ai → reader.panels 的迁移（2.2a 新路径） ═══════════ */
-/**
- * 上面那条断言现在走的是新 key。万一迁移写坏了，用户（和这条断言）都会以为「高度记不住」。
- * 所以这里补一条**等价强度**的迁移断言：只写老的 reader.ai（含 byDoc），刷新后：
- *   · reader.panels 必须生成，且高度/顺序被继承（不能退回默认的「一块都不开」）；
- *   · 老 key 原样保留（回退旧版还能用）；
- *   · 迁移后的块高度同样不能被容器裁掉 —— 与上面那条断言同一个口径。
- */
 console.log('\n-- 老布局迁移（reader.ai → reader.panels）');
 await page.evaluate(() => {
   localStorage.removeItem('reader.panels');
@@ -523,18 +453,6 @@ check('迁移继承的高度同样不会被裁（老用户不会看到内容被�
   `容器底 ${m1.areaBottom} · ${m1.blocks.map((b) => `${b.title}:${b.h}px(底${b.bottom})`).join(' ')}`);
 
 /* ═══════════ 二d、右栏「一栏只开一个 + 关→开不丢」：身份 / 记忆高度（2.2b 回归 + 2026-10-04 列模型） ═══════════ */
-/**
- * 用户报告过：「右侧板块译文/问答的大小变化部分存在 bug」——右栏面板关掉再打开，
- * 节点还带着 hidden 类、高度 0，而且只要不刷新页面就永不自愈；拖好的高度也丢了。
- * 根因（阶段 2.2b）是 applyPanels() 用文档查询找右栏节点，而右栏两块是现建的、
- * 隐藏时会被 replaceChildren() 从文档里摘下来 —— 摘 hidden 类那一步必然落空。
- *
- * 2026-10-04 起右栏改成**列**：一列只开一个面板；两块同时开着 = 各占一栏（第 2 栏按需现建）。
- * 所以「上下分屏的分隔条」已经不存在了，但上面那条 bug 的病根**必须继续钉住**：
- *   · 节点身份：关→开之后还是同一个 DOM 节点（消息、滚动位置都挂在它身上）；
- *   · 高度记忆：size 不清空，关→开 / 刷新后都回到那个高度（各按自己那一栏的可用高度夹取）；
- *   · 可见性自愈：回到文档后不带 hidden，高度 > 0。
- */
 console.log('\n-- 右栏一栏只开一个 / 关→开不丢（身份 · 记忆高度）');
 
 // 本段按 1500×950 写：上面几段改过视口（还改到过 780px，那会把右栏整个收起来并写进
@@ -604,7 +522,7 @@ check('一栏只开一个：只开译文时右栏仍是 1 栏、只有译文块'
 await page.evaluate(() => window.__ctx.setPanelColumn('chat', 2));
 await sleep(700);
 const twoOpen = await page.evaluate(() => ({
-  // 「一栏只开一个」是**模型 + 每栏最多一块**这两件事；第 2 栏此刻可不可见还取决于窗口宽度
+  // 「一栏只开一个」是模型 + 每栏最多一块这两件事；第 2 栏此刻可不可见还取决于窗口宽度
   // （body.right-col2-off 是响应式临时隐藏，模型不动），所以这里断言的是 colsWanted + perCol。
   colsWanted: window.__ctx.rightColsWanted(),
   col2Exists: !!document.getElementById('rightCol2'),
@@ -679,7 +597,7 @@ check('第 2 栏那块关→开还是同一个节点（探针消息还在同一�
   backC2.inArea && backC2.pane === 'aiArea2' && backC2.col === 2 && backC2.hidden === false && backC2.probeKept,
   JSON.stringify(backC2));
 
-// 容器变高 = 有富余空间：没记着高度的块会被 flex 撑满，这一步能证明高度确实是**记着**的
+// 容器变高 = 有富余空间：没记着高度的块会被 flex 撑满，这一步能证明高度确实是记着的
 await page.setViewport({ width: 1500, height: 1150 });
 await sleep(900);
 const tallState = await blockState('chat');
@@ -709,7 +627,6 @@ await toggle('chat', true);
 await page.setViewport({ width: 1500, height: 950 });
 await sleep(900);
 
-/* ═══════════ 三、卡片拖动 ═══════════ */
 console.log('\n-- 卡片拖动');
 
 const boxOf = (sel) => page.evaluate((s) => {
@@ -768,12 +685,6 @@ if (b0) {
   check('拖动不会被当成点击「复制」', await page.evaluate(() => document.getElementById('toastWrap').textContent.trim() === ''));
 }
 
-/**
- * 找一个「当前就能点到」的 [n] 并返回坐标。
- * 不能缓存第一次找到的坐标：点 [n] 之后应用会跳到文末的文献条目，
- * 视图滚走了，原来的坐标就不再是 [n] 了（第一版就是这么卡住的）。
- * 所以这里从头逐屏往下找，找到第一个可见的就用。
- */
 const findCitePoint = () => page.evaluate(async () => {
   const v = document.getElementById('viewer');
   const vr = v.getBoundingClientRect();
@@ -851,7 +762,7 @@ if (citePt) {
 }
 
 /* 2.3 结果浮层（译）
-   这里必须用**真实鼠标点击**，不能用脚本 element.click()：
+   这里必须用真实鼠标点击，不能用脚本 element.click()：
    第一版拖动实现里在 pointerdown 就 setPointerCapture，导致真实点击的 click
    事件目标变成气泡本身，气泡上的按钮全点不动 —— 而脚本 click 完全绕过指针事件，
    测试照样全绿。这个坑就是脚本点击放过去的。 */
@@ -872,12 +783,6 @@ check('真实鼠标点气泡上的「译」能弹出浮层（不是只有脚本 
 const p0 = await boxOf('#popover');
 check('翻译浮层出现', !!p0, JSON.stringify(p0));
 if (p0) {
-  /**
-   * 拖动距离要按**当前视口里真的还能往左挪多少**来定，不能写死 160：
-   * 卡片是被 clampCard 夹在屏幕内的（装得下就整张留在视口里，最多留 28px 抓手），
-   * 右栏改成多列之后正文更靠右，划词锚点也跟着往左，留白不够 160 时写死的期望就会假红。
-   * 这里先量一下余量，取「能挪的」和「想测的」里更小的那个。
-   */
   const room = await page.evaluate(() => {
     const r = document.getElementById('popover').getBoundingClientRect();
     return Math.max(0, Math.round(r.left));
@@ -954,7 +859,6 @@ if (await openCiteBox()) {
   await sleep(250);
 }
 
-/* ═══════════ 汇总 ═══════════ */
 check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 check('没有控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '));
 

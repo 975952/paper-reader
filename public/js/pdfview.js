@@ -1,24 +1,8 @@
-/**
- * PDF 阅读核心：虚拟化连续滚动 + 文本层 + 缩放 + 目录 + 全文搜索 + 区域截取
- *
- * 依赖 pdf.js（public/vendor/pdf.min.mjs），用 pdf.js 官方的 TextLayer，
- * 保证选区的读取顺序和浏览器原生 selection 一致。
- */
 import { clamp, throttle, sleep } from './util.js';
 import { stripPageLabels } from './reading-context.js';
 
 let pdfjsLib = null;
 
-/**
- * pdf.js worker 的地址必须是**绝对可解析**的，否则 APK 里会静默退化成「主线程假 worker」。
- *
- * 两个真实场景：
- *   · 桌面 / Node 服务：页面在 `http://host/`，worker 就是 `/vendor/pdf.worker.min.mjs`；
- *   · 手机版 APK：页面是 `file:///android_asset/mobile/index.html`，根路径 `/` 指向**文件系统根**，
- *     写 `/vendor/...` 会 404。这时必须按模块自身位置算相对路径 → `file:///android_asset/js/vendor/...`。
- *
- * 所以用 import.meta.url 解析：无论页面挂在哪、是不是根路径，都能指到同一个文件。
- */
 export function pdfWorkerUrl() {
   try {
     return new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
@@ -36,32 +20,11 @@ export async function initPdfjs() {
   return pdfjsLib;
 }
 
-/**
- * 屏幕**真正**需要多少倍率：设备像素比，夹到 [1, 2]。
- *
- * 为什么 ratio = dpr 就是「够」：canvas 的 CSS 尺寸等于页面尺寸，设备像素比是 1 时
- * 1 个 CSS 像素正好对应 1 个物理像素 —— 既不糊也不浪费。
- * 这个函数只回答「屏幕需要多少」，用来判「整页还是切片」「密度够不够」；
- * 实际画多大还要乘下面的超采样系数，再用像素预算收口（见 `_renderPlan`）。
- */
 function deviceRatio() {
   const d = window.devicePixelRatio || 1;
   return clamp(d, 1, 2);
 }
 
-/**
- * 超采样系数：在实际需要的基础上**再多画一点**，让边缘不那么硬。
- *
- * 2026-10-10 用户口径：「界面的锐化太强了，就正常就行」。
- * 起因是第四轮为了治卡顿，把「无条件 2 倍超采样」改成了「按 dpr 严格 1:1」——
- * 1:1 时 PDF 的细笔画正好落在像素格上，看着发硬（1× / 1.25× / 1.5× 屏最明显；
- * 2× 屏本来就是设备分辨率，超采样到 2.5 一页要 16 MP，不划算，所以封顶在 2）。
- *
- * 25% 是有意的**轻微**：像素数 1.56 倍（2 倍超采样是 4 倍），
- * 实测 fitWidth 在 1× 屏上是 2.6 → 4.0 MP，滚动仍然 0 长任务；
- * 而**密度始终高于屏幕需求**，不会退回到「放大就糊」那一轮的问题。
- * 嫌硬/嫌糊只改这一个数（1 = 严格 1:1）。
- */
 const SUPERSAMPLE = 1.25;
 
 /** 实际画多大：屏幕需求 × 超采样，仍然封顶 2（再高就是白烧内存） */
@@ -69,33 +32,7 @@ function renderRatio() {
   return clamp(deviceRatio() * SUPERSAMPLE, 1, 2);
 }
 
-/**
- * 单页位图的像素预算（百万像素）。`renderRatio()` 给的是「屏幕要多少」，
- * 这里再兜一道「别超过多少」：一块 canvas 撑到几十 MB 时，重画一次几百毫秒、
- * 显存也吃不消，浏览器还会静默降采样（那就白画了）。
- *
- * ⚠️ 2026-10-10 修：这个预算必须**按「实际画出来的那块」算，不能按整页算**。
- * 以前是 `renderRatioFor(cssW, cssH)` 先按**整页**面积把倍率压到 0.75，
- * 再交给切片逻辑 —— 顺序反了：切片只有 2.4 MP、完全放得下，却继承了被压低的 0.75。
- * 实测（`test/artifacts/sharpness.mjs`，密度 = 屏幕 1 个 CSS 像素分到几个位图像素）：
- *   dpr=1：scale 5 起密度掉到 0.75（浏览器放大位图 = 糊）；
- *   dpr=2：fit 宽度就已经是 1.53/2，3.5× 掉到 1.0，5× 之后 0.75 —— 用户说的
- *   「放大之后就不太清晰了」就是这个。
- * 现在改成 `_renderPlan()`：**先按 dpr 定要画哪一块，再按这块的面积分配预算**，
- * 边距用剩下的预算反解（面积越大边距越小），于是可见区域**恒等于设备分辨率**。
- */
 const MAX_FULL_MP = 9;
-/**
- * 整页降采样能忍到什么程度（相对 `renderRatio()`）。
- *
- * 一块位图两种画法，成本都被 MAX_FULL_MP 卡住，区别在**取舍**：
- *   · 整页 + 降一点倍率：滚动时**不用重画**（位图盖着整页），代价是轻微发虚；
- *   · 可见区域 + 满倍率：清晰，但每滚过一个边距就要重画一次。
- * 所以只有「降一点点就能整页放下」时才选整页：2× 屏上 fitWidth 一页 10.3 MP、
- * 降到 1.87（93%）就能整页放下 —— 这点差别肉眼看不出来，换来滚动不重画；
- * 而放大到 3.5× 时整页只能降到 1.23（61%），那就必须切片保满分辨率。
- * 0.9 这条线就是这么定的（实测见 test/artifacts/sharpness.mjs）。
- */
 const WHOLE_PAGE_TOLERANCE = 0.9;
 
 /** 当前设置里的 PDF 纸张颜色。Canvas 不能直接读取 CSS 的 background，
@@ -112,60 +49,21 @@ function paperColor() {
  *  实际边距由 `_renderPlan()` 按**剩余预算**反解，屏幕越密边距越小。 */
 const SLICE_MARGIN = 600;
 
-/* ────────────────────────── 双指缩放速度（设置项） ──────────────────────────
-   用户口径（2026-10-10）：「把缩放速度做进设置里面」。
-   以前速度是两个写死的常数：触摸屏捏合的跟手倍率 `PINCH_GAIN = 1.6`
-   （`scale = start × (d/d0)^gain`）和触摸板的灵敏度 `0.0022`（`app.js` 的 ctrl+wheel）。
-   现在两者都乘一个**用户可在设置里调**的倍率 `zoomSpeed`，默认 1（= 原来的手感）。
-
-   为什么上限是 2、下限是 0.5：gain 的物理含义是「手指距离变化 1% → 画面缩放百分之几」。
-   1.6 已经是 1:1 之上的加速；再往上（2 倍 → 3.2）手指稍微一动就翻页级地跳，
-   往下（0.5 倍 → 0.8）则比原生还迟钝、捏合会像没反应。范围卡在这里是防止
-   调出一个自己都控制不住的手感。 */
 export const ZOOM_SPEED_MIN = 0.5;
 export const ZOOM_SPEED_MAX = 2;
 /** 把设置里的值夹到合法范围；空值 / NaN / 字符串都回落到默认 1 */
 export const clampZoomSpeed = (v) => clamp(Number(v) || 1, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX);
 
-/**
- * 文本层命中盒**纵向**最多扩张多少像素（见 `_tileTextHitBoxes`）。
- *
- * 只用来补「行距之间那条 1~3px 的缝隙」—— 缝隙补上之后，
- * 鼠标落在两行之间也不会退化成「容器 + 第几个子节点」那种没有文字含义的位置。
- * 上限必须这么小：实测 padding 到 158px 时，整盒会被 `Range.getClientRects()`
- * 当成选区矩形返回（画出来的方块变成一个大色块）。宁可留大空白给
- * `repairSelectionEnds()` 兜底，也不给矩形任何被污染的机会。
- */
 const HIT_PAD_MAX = 6;
 
-/**
- * 命中判定里「纵向差 1px」相当于多少横向差。
- *
- * `charPosAt()` 用它把「先看属于哪一行、再看行内第几个字」写成一次求最小值的打分：
- * 权重必须大到「纵向差 1px 压倒横向任意误差」，否则页面很宽时
- * 「同一行最右边那个字」会把「下一行最左边那个字」比下去 —— 拖选终点就跳行了。
- */
 const CHAR_HIT_ROW_WEIGHT = 10000;
 
-/**
- * 读某个层当前的 CSS 缩放倍数。
- *
- * `_softRescale()`（拖动缩放时的拉伸预览）会把文本层/热点层整体 `transform: scale(k)`，
- * 此时层里所有坐标都是**缩放前**的，指针位置要除回 k 才能和缓存下来的盒子比较。
- * 这里只解析内联样式字符串（不触发布局），成本可忽略。
- */
 function layerScale(el) {
   const m = /^scale\(([\d.]+)\)$/.exec(el?.style?.transform || '');
   const k = m ? Number(m[1]) : NaN;
   return Number.isFinite(k) && k > 0 ? k : 1;
 }
 
-/**
- * 从一段文本里解析出参考文献条目 `[n] ...`。
- *
- * 要求方括号出现在**行首**才算条目：正文里也有 `[12]` 这种行内引用，
- * 不这样限定的话整页正文都会被当成文献条目。
- */
 export function parseReferencesFromText(text, { minLen = 12, maxLen = 700 } = {}) {
   const out = [];
   if (!text) return out;
@@ -182,12 +80,6 @@ export function parseReferencesFromText(text, { minLen = 12, maxLen = 700 } = {}
   return out;
 }
 
-/**
- * 单独抽一份 PDF 的全文，**不影响当前打开的那份**。
- * 「论文关系」要读库里其他论文的正文，判断谁引用了谁；
- * 用 viewer.load() 会把用户正在看的那篇顶掉，所以这里自己开一个文档实例。
- * 换行要保留：参考文献条目是按「行首 [n]」识别的。
- */
 export async function extractPdfText(url, { maxPages = 40, onProgress } = {}) {
   const lib = await initPdfjs();
   const task = lib.getDocument({
@@ -255,26 +147,7 @@ export class PdfViewer {
     this._selRects = null;   // 当前选区的归一化方块，按页存；重画页面时用它补回来
     this.referencePages = new Set(); // 参考文献表页不绘制正文引用热点
     this.referenceByNum = new Map();  // 已解析的编号索引，点击引用时优先走缓存
-    /**
-     * ⚠️ `page -> Set<编号>`：**哪些参考文献条目在哪一页**。
-     *
-     * 为什么需要它（用户实测缺陷 2026-10-04：「有的可以识别出来点击出现弹窗，有的不行」）：
-     * 原来只按**整页**判断（`referencePages.has(i) → 整页不画热点`），
-     * 但真实论文里「结论段 + 表格引用 + 文献表开头」常常同页共存 ——
-     * 实测 `attention-arxiv.pdf` 第 10 页同时有 §7 结论段（`…Grammar [8].` / `…models [37],`）
-     * 和 Table 4 的 10 个引用，只因该页有 `[1]`–`[4]` 这 4 条文献条目，
-     * **整页 13 个正文引用一个热点都没画**（漏 21% 的正文引用）。
-     *
-     * 有了这张表就能精确到条目：只跳过「这一行的开头正好是本文献表里的那个编号」的行，
-     * 同一页里的其它正文引用照常可点。
-     */
     this.referenceEntries = new Map();
-    /**
-     * 是否处于「自动适配」状态。打开文档时默认为 true（load() 里会按窗口宽度算一次），
-     * 手动缩放（setScale）会把它关掉。
-     * 之前这里没有初始化，于是 load() 虽然算出了适配比例，却没记成「适配模式」，
-     * 结果窗口一变大变小页面就不再跟着变 —— 用户看到的就是「打开后大小不对」。
-     */
     this._fitMode = true;
     // 缩放手势期间只做一次合成层变换；停止后再提交真实页面尺寸。
     // 这样触摸板/滑块不会在每个 input 上触发全量布局和 PDF 重绘。
@@ -314,21 +187,6 @@ export class PdfViewer {
     this._watchJank();
   }
 
-  /**
-   * 轻量掉帧自检：**给真机用的取证工具**。
-   *
-   * 为什么需要它：我这边只能用无头 Chrome + 合成事件测，测不出用户机器上的真实手感
-   * （他报「还是卡顿」，而我手上的数字是干净的）。与其继续猜，不如让应用自己报数。
-   *
-   * 规则（尽量不打扰、也尽量不耗电）：
-   *   · 只在「有动作」时采样：滚动 / 手势 / 提交；闲置 1.2s 就停掉 rAF，不常驻；
-   *   · 一个"动作窗口"里统计帧间隔、掉帧数、长任务，以及这段时间花在重画上的毫秒数；
-   *   · 只有真的卡（最长帧 ≥ 100ms 或掉帧比例 ≥ 30%）才回报一次，3 秒内不重复；
-   *   · **不弹任何界面提示**：只 console 打一行，并把最近 20 次记录留在
-   *     `window.__jankLog` 里，方便直接抄给我。
-   *     （2026-10-22 用户口径：右下角那些「掉帧 N 帧」的提示框全部去掉。
-   *      采集逻辑保留，是因为真机手感只能靠它取证 —— 但它只需要静默记账。）
-   */
   _watchJank() {
     const p = this._perf = {
       raf: 0, frames: [], kind: '', last: 0, t0: 0, renders: 0, renderMs: 0,
@@ -396,53 +254,10 @@ export class PdfViewer {
     try { console.warn('[perf]', text); } catch { /* ignore */ }
   }
 
-  /**
-   * 触摸屏两指手势：**先判意图，再动手**。
-   *
-   * ── 为什么必须自己做（实测证据 test/perf/zoom-touch-takeover.mjs）──────────
-   * 触摸屏捏合**不会**变成 `wheel` + ctrlKey（那是触摸板的路径，Windows 上由系统把
-   * 触摸板 pinch 合成成带 CONTROL 的 WM_MOUSEWHEEL）。浏览器把它当成**整页 Page Scale**：
-   * 实测两指张开时 `visualViewport.scale` 从 1 直接跳到 4，而 `zoomAt` 一次都没被调用 ——
-   * 顶栏、侧栏、PDF 位图一起被拉大，用户看到的就是「糊 + 不跟手」。
-   * （WebView2 侧对应 `IsPinchZoomEnabled`，wry 把它和 `with_hotkeys_zoom` 绑在一起，
-   *   见 desktop/src/window.rs 的说明。）
-   *
-   * ── 判定优先（用户口径 2026-10-09：「下手到底是滑动还是缩放判断清楚，不要先划又变大变小」）
-   * 两指落下到「看清意图」之间**一个像素都不动**，避免手指间距的抖动被当成缩放：
-   *   · 间距变化 ≥ max(16px, 15%)  → 判成**缩放**（之后整段手势都按缩放走，不再回头）
-   *   · 中点位移 ≥ 10px            → 判成**平移**（直接改 scroll，不碰比例）
-   *   · 都没到阈值                 → 什么都不做
-   * 两指平行拖动时间距几乎不变，所以只会平移、比例一动不动 —— 这正是要的效果。
-   *
-   * ── 为什么不 preventDefault（实测 test/perf/touch-pan-vs-pinch.mjs）
-   * 在 `html{touch-action:pan-x pan-y}` 下，Chromium 对**两指**手势既不滚动也不捏合、
-   * 也不发 touchcancel（四种手势全测过：事件原样送到页面、滚动 0px、vvScale 保持 1）。
-   * 也就是说浏览器层面本来就是「惰性」的，不需要 preventDefault 去抢；
-   * 反而一旦 preventDefault，后续「松开一根手指继续拖」就再也滚不动了（整个触摸序列被作废）。
-   * 只在判定成缩放之后才 preventDefault，作为「万一某个引擎想插一脚」的兜底。
-   *
-   * 合帧与触摸板路径一致：touchmove 只记最新值，真正改比例/改滚动放到 requestAnimationFrame。
-   */
   _bindTouchZoom() {
     const el = this.container;
-    /**
-     * 判定阈值。
-     *
-     * ⚠️ 2026-10-09 用户口径定稿（第四轮）：
-     *   「只要判断是缩放，就不要移动位置；只要是两指之间距离增大，**不管是哪个方向**都是放大，缩小也一样」
-     * 也就是**距离优先**：两指间距变了就是缩放，与方向无关、与中点动不动无关。
-     * 所以这里把缩放的阈值压得很小（6px 或 2.5%），平移阈值保持 10px；
-     * 只有「间距几乎不变、中点明显在走」才算平移。
-     */
     const PINCH_ENGAGE_RATIO = 0.025;  // 间距相对变化
     const PINCH_ENGAGE_PX = 6;         // 间距绝对变化（两指靠得近时按这个算）
-    /**
-     * 触摸屏捏合的「跟手倍率」：`scale = start * (d/d0)^GAIN`。
-     * GAIN = 1 是严格的 1:1（手指张开一倍、画面放大一倍）。
-     * 用户两次要求「速度调大」：1 → 1.25 → **1.6**；2026-10-10 又要求
-     * 「把缩放速度做进设置里面」→ 这里只是**基准值**，实际乘 `this.zoomSpeed`
-     * （设置页那个滑杆，1 = 就是这个手感，0.5~2 可调）。每帧现读，改了立刻生效。
-     */
     const PINCH_GAIN = 1.6;
     const PAN_ENGAGE_PX = 10;          // 中点位移
     let mode = 'idle';                 // idle | undecided | pan | pinch
@@ -492,7 +307,6 @@ export class PdfViewer {
         : { mode, x: m.x, y: m.y };
       if (!raf) raf = requestAnimationFrame(flush);
     };
-    // 手指真的抬起来才算手势结束：不要用防抖在手指还按着的时候重排（实测那样会插进一次 200ms 卡顿）
     const onEnd = (e) => {
       if (mode === 'idle' || e.touches.length >= 2) return;
       if (raf) { cancelAnimationFrame(raf); raf = 0; }
@@ -743,22 +557,6 @@ export class PdfViewer {
     }
   }
 
-  /**
-   * 手势中的轻量预览：只缩放 pages 容器这一层，避免逐页改尺寸/读 offsetTop。
-   * this.scale 仍实时更新，所以百分比和外部状态立即同步；真正布局延迟到手势停下。
-   *
-   * ── 铁律：**每帧一次 DOM 读都不做** ────────────────────────────────────
-   * 旧实现每帧 `elementFromPoint` + 两次 `getBoundingClientRect`
-   * （写完 transform 再读一次 = 强制同步布局），再加上逐帧改 scrollLeft/scrollTop。
-   * 手感上这就是「跟手但一顿一顿」。改成本地代数：
-   *   ① 手势开始那一帧量一次几何，记下 pages 容器原点的**内容坐标** E、滚动量 s、
-   *      容器视口原点 c0；
-   *   ② 锚点 p（手指抓住的那个 PDF 点）在内容坐标里固定不变；
-   *   ③ 每帧只写一条 `translate(t) scale(k)`（transform-origin: 0 0），
-   *      由 `E + t + k(p − E)` 落在当前手指位置 c 解出
-   *        t = (c − c0) + s − E − k(p − E)
-   *      —— 全是加减乘除，不碰布局。
-   */
   _beginZoomPreview() {
     const c = this.container;
     const containerRect = c.getBoundingClientRect();
@@ -827,19 +625,6 @@ export class PdfViewer {
     return preview;
   }
 
-  /**
-   * 预演某个比例下的真实布局：每页的内容坐标 top 与 left。
-   *
-   * 为什么要它（2026-10-09 实测「手势做完之后偏移闪现」）：
-   * 之前预览是给 `.pages` 整层 `scale(k)` —— **页间距（14px）和上下内边距也被一起放大**，
-   * 但提交后的真实布局里它们是固定值。于是离锚点每远一页，位置就差一个
-   * `间距 × (k−1)`：实测 k=2.18 时视口内第 8 页在提交那一帧跳了 **16.5px**
-   * （14 × 1.18 = 16.5，一分不差）。用户看到的就是「做完手势偏移一下」。
-   * 现在预览按这里的预测值逐页摆放，与提交后的布局逐页对齐 → 提交那一帧不动。
-   *
-   * 公式与 `layout()` 完全一致：`top = padTop + Σ(round(h×scale) + gap)`，
-   * 横向按 `.pages` 的居中规则 `(max(页宽, 容器宽) − 本页宽) / 2`。
-   */
   _predictedLayout(scale, padTop, gap, containerW) {
     const tops = new Array(this.numPages + 1);
     const lefts = new Array(this.numPages + 1);
@@ -865,42 +650,16 @@ export class PdfViewer {
   /** 手势开始那一帧记下锚点（内容坐标 + 页内相对位置），全程不再改 */
   _anchorZoomPreview(preview, cx, cy) {
     if (preview.anchor) return;
-    /* `refX/refY` = **锚点要钉在屏幕上的位置**，整段缩放手势都不变。
-       用户口径（2026-10-09）：「只要判断是缩放，就不要移动位置」——
-       手指搓动时中点会漂，如果让画面跟着中点走，看起来就是「闪/飘」；
-       只有对称的横竖拉伸（中点不动）才不闪，正是这个道理。
-       所以缩放期间**只缩放、不平移**：锚点钉在按下去时的位置。
-       （两指平移是另一个模式：那时才移动，见 previewPan。） */
     preview.refX = cx;
     preview.refY = cy;
     this._setZoomPreviewAnchor(preview, cx, cy);
   }
 
-  /**
-   * 记下「当前跟踪的那个点」：内容坐标 + 它在哪一页的什么相对位置。
-   *
-   * ⚠️ 下面这六个字段**必须一起更新**，它们分别是"预览每帧解常数用"和"提交时对回来用"的两套表示：
-   *   · `anchor`（内容坐标，给 previewPan 反推手指起点）
-   *   · `page` / `fx` / `fy`（提交时量一次页框矩形，用它把锚点对回 refX/refY）
-   *   · `anchorPage` / `anchorLocalX` / `anchorLocalY`（逐页预览每帧解整体常数 C/D）
-   * 只改一半的后果实测过（2026-10-09）：拖到滚动边界（平移被夹住）后再捏合，
-   * 预览钉在旧点上、提交却按新点算，**提交那一帧画面跳 519px** —— 正是用户说的偏移闪现。
-   * 所以重锚点只有这一个入口。
-   *
-   * `fx/fy` **不夹到 [0,1]**：页内相对位置允许线性外推（手指在页外时，
-   * `r.top + fy*r.height` 仍精确等于那个屏幕位置）。夹了反而会让
-   * 「预览钉的点」与「提交对回的点」变成两个不同的点。
-   */
   _setZoomPreviewAnchor(preview, cx, cy) {
     preview.anchor = {
       x: preview.scrollX + (cx - preview.cLeft),
       y: preview.scrollY + (cy - preview.cTop),
     };
-    /* 锚点在**哪一页的哪个相对位置**（fx/fy）。
-       提交时用「页框矩形 + 相对位置」把位置对回去，而不是继续用上面的内容坐标：
-       布局之后 pages 容器里的**间隙与内边距不随比例缩放**（CSS 里是固定 14px），
-       所以「内容坐标 × k」在提交那一刻只是近似 —— 实测差 30px 左右（就是「飘」）。
-       页内相对位置则严格不变（页内所有东西都按同一个比例缩放）。 */
     const page = this._pageAtContent(preview.anchor.y);
     if (!page) return;
     const r = page.getBoundingClientRect();
@@ -916,17 +675,6 @@ export class PdfViewer {
     preview.anchorLocalY = cy - r.top;
   }
 
-  /**
-   * 每帧的写：**逐页**预演真实布局（不读任何几何）。
-   *
-   * k === 1（两指平移）时退化成「整层平移」，直接用容器 transform —— 一次写、和以前一样快。
-   * k ≠ 1（捏合）时逐页写：页面自己 `scale(k)`，位置按 `_predictedLayout` 预演，
-   * 于是**页间距/内边距保持固定**，与提交后的真实布局逐页对齐（提交那一帧不再位移）。
-   * 见 `_predictedLayout` 里的实测说明（16.5px → 0）。
-   *
-   * 只写"看得见的那几页"：视口外的页不写（transform 不改布局，不会影响别的页），
-   * 这样每帧的写次数与可见页数同阶（实测 1~3 页）。
-   */
   _writePreviewTransform(preview, k, tx, ty) {
     if (Math.abs(k - 1) < 1e-4) {
       // 纯平移：整层一条 transform，等价且最省
@@ -939,34 +687,12 @@ export class PdfViewer {
     const hi = Math.min(this.numPages, last + 1);
     const pred = this._predictedLayout(this.scale, preview.padTop, preview.gap, preview.containerW);
     const old = preview.oldLayout;
-    /**
-     * 预览 = **把提交后的那一帧画出来**：页面位置用预测布局，滚动量用「钉住锚点所需的值」
-     * 再夹到这个布局真正能滚到的范围里。
-     *
-     * 为什么必须夹（2026-10-10 用户口径：「要归中就固定归中，不要已经移到左右又闪回中间」）：
-     * 提交后能不能停在我们想要的位置，取决于**新布局的滚动范围**。缩小的时候页面会变得比
-     * 阅读区窄（`maxScrollX` 变 0），布局会把页居中 —— 而预览期却在按手指横向钉住，
-     * 于是提交那一帧被硬拽回去。实测（test/artifacts/offcenter-commit.mjs）：
-     *   5× → 1.75× 缩小：中点居中时提交帧横移 **269px**、中点偏右时 **483px**，
-     *   纵向也有一例 **83px**（顶到文档头）。
-     * 夹住之后「预览看到的位置」与「提交后的位置」在数学上恒等：
-     *   px = (pred.lefts[i] − old.lefts[i]) + (scrollX − sx)，sx 就是提交会写的那个 scrollLeft。
-     * 横向没得滚时 sx ≡ 0，预览从头到尾就是居中的 —— 也就是用户要的「固定归中放大」。
-     */
     const ap = preview.anchorPage;
     let C = 0;
     let D = 0;
     if (ap && old.tops[ap] != null) {
       const ax = preview.anchorLocalX;      // 锚点在页内的局部坐标（未缩放）
       const ay = preview.anchorLocalY;
-      /* 坐标系（这是唯一一套，别再加别的项）：`.pages` 自己就是被滚动的那个内容，
-         所以页顶的屏幕位置 = `cTop + 内容 top − scrollY`，内容坐标原点就在 `.pages` 的
-         padding 起点。（`originX/originY` 是捕获时顺手记的、恒等于 0，**不要**再拿它加减，
-         否则会凭空多出一个 `scrollY` 的量级 —— 实测那样写预览会整体飞掉。）
-         新布局的内容尺寸 → 新布局真正能滚到的范围：
-         纵向：`bottom` 含最后一页后面那个 gap（row-gap 不会渲染出来），所以减掉再加 padding-bottom。
-         横向：`lefts` 已经是按「居中、且不小于容器宽」算的，所以取每页右边缘的最大值即可
-         （页比容器窄时它小于容器宽 → 结果为 0，正是「没得滚」）。 */
       let contentW = 0;
       for (let i = 1; i <= this.numPages; i++) {
         const right = (pred.lefts[i] ?? 0) + (pred.widths[i] ?? 0);
@@ -981,11 +707,6 @@ export class PdfViewer {
       const sy = clamp(wantSY, 0, maxSY);
       C = preview.scrollY - sy;
       D = preview.scrollX - sx;
-      /* 把这一帧算出来的滚动量记在 preview 上：**提交时直接落这个值**（见 commitZoomPreview）。
-         不能让提交再写一遍「未夹取」的 want、交给浏览器去夹 —— DOM 的 scrollWidth/scrollHeight
-         会被溢出的后代（拉伸中的层、切片画布）撑大，浏览器允许的滚动量比布局真正的大，
-         于是预览显示 A、提交落到 B：实测 24 次随机手势里 5 次中招、最大横移 7516px
-         （test/artifacts/gesture-fuzz.mjs）。预览与提交用同一个数才叫「所见即所得」。 */
       preview.sx = sx;
       preview.sy = sy;
     }
@@ -1028,13 +749,6 @@ export class PdfViewer {
       cy = preview.cTop + this.container.clientHeight / 2;
     }
     this._anchorZoomPreview(preview, cx, cy);
-    /* 从「平移」升级成「缩放」时，锚点要重新钉一次，否则升级/提交那一帧会跳。
-       钉在**当前指针位置**：平移期画面一直是 1:1 跟着手指的（到边界被夹住时例外，
-       见 previewPan 的夹取分支 —— 那里会把 fx/fy/page 改成「手指底下那个点」），
-       所以「手指底下那个点」此刻就在手指上，钉住它就等于**画面纹丝不动地开始放大**。
-       注意不能写成 `refX + panTx`：被夹住过的平移，手指位置和画面位置差着「搓过头的量」，
-       那样算出来的锚点会让「预览钉的点」与「提交对回的点」分成两个点
-       （实测搓过头 480px → 提交那一帧画面跳 **660px**）。 */
     if (preview.panTx != null && !preview.upgraded) {
       preview.upgraded = true;
       if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
@@ -1057,19 +771,6 @@ export class PdfViewer {
     this.opts.onScale?.(this.scale);
   }
 
-  /**
-   * 两指平移预览：只写 transform，**一个字都不写 scroll**。
-   *
-   * 为什么不直接改 scrollTop（实测 test/perf/touch-pan-vs-pinch.mjs）：
-   * 在触摸序列中途写一次 `container.scrollTop`，后续 touchmove / touchend **全部收不到**
-   * ——20 个 move 只剩 1 个，手势当场死掉（浏览器没有发 touchcancel，就是不发事件了）。
-   * 同样位置写 `transform` 则完全没事（捏合那条路一直是写 transform，20 个 move 全到）。
-   * 所以平移也走 transform，松手时一次性落到 scroll：
-   *   · 1:1 跟手，不看浏览器滚动实现的脸色；
-   *   · 提交那一刻位置严格对齐，且**不重排、不重画、不碰比例**；
-   *   · 位移按「最多能滚到哪儿」夹住（maxScroll 在手势开始时量过一次），
-   *     所以到边界的手感跟原生滚动一样，不会越拉越多再回弹。
-   */
   previewPan(clientX, clientY) {
     if (!this.pdf || !this.pagesEl) return;
     this._touchPerf('手势·平移');
@@ -1087,10 +788,10 @@ export class PdfViewer {
     const ty = clamp(rawTy, preview.scrollY - preview.maxScrollY, preview.scrollY);
     if (tx !== rawTx || ty !== rawTy) {
       /* 到边界了：内容停在边上，手指底下那个 PDF 点就换了。
-         锚点必须跟着挪（**整套一起挪**，见 _setZoomPreviewAnchor 的说明），
+         锚点必须跟着挪（整套一起挪，见 _setZoomPreviewAnchor 的说明），
          否则「拖到边之后再捏合」会从旧锚点算，升级帧和提交帧各跳一次。 */
       this._setZoomPreviewAnchor(preview, clientX, clientY);
-      // `anchor` 要用**夹住之后**的内容坐标（它与「手指底下那个点」差一个夹取量），
+      // `anchor` 要用夹住之后的内容坐标（它与「手指底下那个点」差一个夹取量），
       // 上面的 helper 算的是未夹取的版本，这里覆盖掉。
       preview.anchor.x = clientX + preview.scrollX - preview.cLeft - tx;
       preview.anchor.y = clientY + preview.scrollY - preview.cTop - ty;
@@ -1100,22 +801,6 @@ export class PdfViewer {
     this._writePreviewTransform(preview, 1, tx, ty);
   }
 
-  /**
-   * 提交缩放预览：**steady → preview → committing → steady** 里的 committing 段。
-   *
-   * 这一段必须整体跑在**同一个同步任务**里，浏览器中间不会绘制，所以不存在
-   * 「旧视觉坐标被丢掉 → 重新补回来」的中间帧。实测（test/perf/commit-continuity.mjs）：
-   * 手指中点固定在 (750,430) 时，锚点在手势全程 36 帧（含提交那一帧）里
-   * 离手指最大偏差 0.2px、逐帧位移全是 0 —— 没有瞬移。
-   *
-   * 顺序上有一处**不能换**：必须先清 `.pages` 的 transform，再去量页框矩形。
-   * 因为 `getBoundingClientRect()` 会把祖先的 transform 算进去；带着 preview transform
-   * 量出来的矩形是缩放后的，用它反算滚动量会重复算一次缩放。
-   * 所以流程是「清 transform → 摆好旧内容 → 改真实布局 → 量新矩形 → 写滚动」，一次到底。
-   *
-   * 换帧（新位图换上）之后由 `_resetLayerScale()` 收尾，保证回到 steady 时
-   * canvas 没有拉伸标记、四个覆盖层没有 transform —— 见那里的不变量说明。
-   */
   commitZoomPreview() {
     const preview = this._zoomPreview;
     if (!preview) return;
@@ -1141,12 +826,6 @@ export class PdfViewer {
     // 最终比例，再改 page 外框尺寸，避免旧位图留在新页面里造成错位/重叠。
     this._softRescale();
     this.layout();
-    /* 落滚动：**直接用预览最后一帧算出来的那两个数**（见 _writePreviewTransform）。
-       预览就是按 (sx, sy) 画的，提交写同样的值 → 这一帧在数学上不可能位移。
-       为什么不再「量页框矩形再反推」：那条路要重新解一次锚点，而且把夹取交给浏览器 ——
-       浏览器的上限来自 DOM 的 scrollWidth/scrollHeight，会被溢出的后代（拉伸中的层、
-       切片画布）撑大，比布局真正的大，于是预览夹住了、提交却没夹 → 瞬移（实测最大 7516px）。
-       `sx/sy` 一定落在真实范围内（预测的内容尺寸 ≤ 真实内容尺寸），浏览器不会再夹第二次。 */
     if (preview.sx != null) {
       this.container.scrollLeft = preview.sx;
       this.container.scrollTop = preview.sy;
@@ -1177,7 +856,7 @@ export class PdfViewer {
 
   /**
    * 换缩放前：拆掉已渲染的页，并记下还在渲染中的页（它们被 cancel 后不会自愈）
-   * 只在**非**手势缩放时用（换文档之类）；拖动缩放走 _softRescale。
+   * 只在非手势缩放时用（换文档之类）；拖动缩放走 _softRescale。
    */
   _beginZoomChange() {
     const inflight = Array.from(this.renderTasks.keys());
@@ -1185,21 +864,6 @@ export class PdfViewer {
     return inflight;
   }
 
-  /**
-   * 「软」缩放：不拆 DOM、不加 .placeholder，直接把已有位图按比例拉伸当预览。
-   *
-   * 为什么必须这样：`_teardownPage()` 会给页面加 `.placeholder`，
-   * 而 `.page.placeholder::after` 是一条灰色斜条纹 —— 拖动缩放时每动一下就拆一次页面，
-   * 用户看到的就是「灰条一直闪」（甚至整页变灰）。
-   * 现在改成：位图先拉伸（糊一下但画面连续），等手势停下来再真正重画、换上清晰的。
-   *
-   * ⚠️ 单位铁律（2026-10-09）：**层里只允许有一种定位单位 ——「渲染比例下的绝对 px」**。
-   * 这一层要整层 `scale(k)` 才能跟上新页框，而任何「自己也会跟着页框缩放」的东西
-   * （百分比定位、吃 `--total-scale-factor` 的字号）再叠一层 scale(k) 就是**双倍**。
-   * 所以：pdf.js 的 span（百分比 + CSS 变量字号）先被 `_freezeTextLayerMetrics` 冻结成 px；
-   * 选中方块与笔记书签也改成 px。唯独文本层的 `transform` 由这里统一管，
-   * 业务代码不要再自己给这几个层写 transform。
-   */
   _softRescale() {
     for (const entry of this.rendered.values()) {
       const base = entry.renderScale || this.scale;
@@ -1211,10 +875,6 @@ export class PdfViewer {
     }
   }
 
-  /** 旧位图按比例拉伸：位图是绝对 px，直接改宽高/偏移最省事（不重画）。
-   *  ⚠️ 高位图可能是**切片**（`entry.slice`）：那时这块 canvas 只覆盖切片那么大，
-   *  拉伸的宽高必须是 `slice.w/h × k`，不能用整页的 `cssW/cssH` ——
-   *  否则一块 1589×1153 的切片会被拉成整页 2142×2772，画面明显错位（实测密度算出 2.317>dpr 才发现）。 */
   _softRescaleCanvas(entry, k) {
     const c = entry.canvas;
     if (!c) return;
@@ -1237,12 +897,6 @@ export class PdfViewer {
     }
   }
 
-  /**
-   * 一页「临时缩放」的收尾：新位图换上之后必须满足
-   *   canvas 的软缩放标记 = 无、四个覆盖层的 transform = 无。
-   * 这是提交阶段的状态机不变量（steady → preview → committing → steady），
-   * 漏掉任何一项，旧 transform 就会和新比例同时生效 —— 也就是"双重缩放"。
-   */
   _resetLayerScale(entry) {
     if (!entry) return;
     entry.canvas?.classList.remove('soft-zoom');
@@ -1251,23 +905,7 @@ export class PdfViewer {
     }
   }
 
-  /**
-   * 手势停下后再真正重画（防抖 + **一页一页来**）。
-   *
-   * 为什么要节流（实测 test/perf/zoom-commit-timeline.mjs）：
-   *   一页重画 = 重建文本层（字体绑定/字距/命中带）+ 重画位图，实测 240~450ms；
-   *   旧实现一次把视口内外 5 页全部开工，主线程于是连续卡住近 1 秒 ——
-   *   用户口径就是「松手之后顿一下，再捏就不跟手了」。
-   *   现在按「离视口中心近的优先」排队，一页画完让出一帧再画下一页：
-   *   用户正在看的那一页最先变清晰，中间随时可以再捏/再滚（新预览一到就放弃队列）。
-   *   中间那次让帧实测把长任务从 8 个 / 779ms 降到 4 个 / 314ms。
-   */
   _scheduleRerender(delay = 140) {
-    /* ⚠️ 不能因为「已经在跑」就把请求丢掉（踩过一次）：
-       拖动缩放那 41 次 setScale 会在队列跑着的时候继续标脏 + 继续请求，
-       丢掉请求的后果是「某一页明明在视口里、却一直糊着」（实测 6 秒都不自愈）——
-       因为队列是在开跑那一刻按当时的可见范围建的，之后变可见的页没人管。
-       所以：记一个「还想再跑一趟」的标记，这一趟跑完再用新的可见范围补一趟。 */
     this._rerenderWanted = true;
     if (this._rerenderRunning) return;
     clearTimeout(this._rerenderTimer);
@@ -1316,16 +954,6 @@ export class PdfViewer {
       }
     } finally {
       this._rerenderRunning = false;
-      /**
-       * ⚠️ 关键补丁（2026-10-09 实测抓到的真 bug）：
-       * `_scheduleRerender()` 在「队列正在跑」时只记 `_rerenderWanted`、不排定时器，
-       * 指望这一趟跑完把标记消费掉。但这一趟可能**中途 return**（手势插进来）
-       * 或者**跑满轮次上限**退出 —— 那样标记就永远没人处理：
-       * 现场实测（zoom.mjs 失败时的 DOM 快照）是
-       *   `page=1 dirty=true renderScale=2.694 scale=2.072 tasks=[] running=false wanted=true timer=false`
-       * ——那一页在视口里糊着，10 秒都不自愈。
-       * 所以退出时只要「做过事 + 还有请求」，就补一个定时器再跑一趟，保证请求不丢。
-       */
       if (didWork && this._rerenderWanted && !this._destroyed) {
         clearTimeout(this._rerenderTimer);
         this._rerenderTimer = setTimeout(() => {
@@ -1348,12 +976,6 @@ export class PdfViewer {
     }
   }
 
-  /**
-   * 被 cancel 的在途渲染不会自己重来：任务从 renderTasks 里删掉后没人补渲染，
-   * 而 _restoreAnchor 若算出同一个 scrollTop，浏览器不会派发 scroll 事件，
-   * 于是页面就永久空白了。这里在任务落定后补一次渲染。
-   * 只对本次换缩放时在途的那几页挂一次回调，不会造成失败重试死循环。
-   */
   _resumeInflight(inflight, gen = this._gen) {
     for (const i of inflight) {
       const p = this.renderTasks.get(i);
@@ -1387,7 +1009,7 @@ export class PdfViewer {
 
   /**
    * 设置双指缩放速度（1 = 默认手感，见 `clampZoomSpeed` 的说明）。
-   * 触摸屏捏合每帧都现读 `this.zoomSpeed`，所以设置页拖动滑杆时**下一帧就生效**，
+   * 触摸屏捏合每帧都现读 `this.zoomSpeed`，所以设置页拖动滑杆时下一帧就生效，
    * 不用重开论文，也不打断正在做的手势。
    */
   setZoomSpeed(mult) {
@@ -1433,12 +1055,6 @@ export class PdfViewer {
     let hasDirty = false;
     for (let i = lo; i <= hi; i++) {
       const entry = this.rendered.get(i);
-      /* dirty = 软缩放留下的拉伸预览，需要重画成清晰版（但不走 placeholder 那条路）。
-         ⚠️ 这类**不能在这里直接开工**：本函数是滚动处理器调的，一次会把视口内所有页
-         同时点着 —— 实测那样会在 commit 之后立刻叠出一个 178ms 长任务
-         （commit 写 scrollTop → 60ms 后 _handleScroll → 这里 → 两页并行重画），
-         把上面那套「排队 + 让帧」整个绕过去了。
-         交给 _runRerenderPass 一页一页画；缺页（placeholder）仍然立刻补，滚动不能等。 */
       if (entry?.dirty) { hasDirty = true; continue; }
       if (!entry && !this.renderTasks.has(i)) this._renderPage(i, { gen });
     }
@@ -1455,24 +1071,6 @@ export class PdfViewer {
     await this._renderPage(i, { force: true, priority: true, gen: this._gen });
   }
 
-  /**
-   * 决定「这一页这一帧画哪一块、按多大倍率画」——顺序是**先区域、后预算**。
-   *
-   * 1. 倍率两个口径：`deviceRatio()` 是屏幕**真正需要**多少（dpr），
-   *    `renderRatio()` 是实际画多大（再乘一点超采样，见 `SUPERSAMPLE`）。
-   *    「整页还是切片」「降采样能忍到哪」都按**屏幕需求**判，超采样只影响实际画的尺寸。
-   * 2. 整页按目标倍率画放得进预算 → 整页。
-   * 3. 放不进、但降一点点（≥ `WHOLE_PAGE_TOLERANCE` × 屏幕需求）就能整页放下 → 整页 + 那点降采样
-   *    （滚动时不用重画，值这一点点糊）。
-   * 4. 否则 → 只画**可见区域**，倍率仍然是目标倍率。这一步以前是反的：先按整页面积
-   *    把倍率压到 0.75 再切片，于是切片也糊 —— 用户说的「放大之后就不太清晰」。
-   * 5. 连可见区域都超预算（超大窗口 + 2× 屏）→ 才降倍率，
-   *    但**不低于屏幕需求**（降到屏幕以下就真的糊了）。
-   * 6. 剩下的预算拿来做边距（滚动时不用马上重画）：边距面积解方程
-   *    `(w+2m)(h+2m)·ratio² = 预算`，所以屏幕越密、窗口越大，边距越小。
-   *
-   * 返回 `{ ratio, slice, window? }`，`slice` 是相对页面左上角的 CSS px 矩形（null = 整页）。
-   */
   _renderPlan(i, cssW, cssH) {
     const base = renderRatio();          // 实际画多大（含轻微超采样）
     const need = deviceRatio();          // 屏幕真正需要多少
@@ -1487,12 +1085,6 @@ export class PdfViewer {
     if (!pageEl) return { ratio: base, slice: null };
     const pr = pageEl.getBoundingClientRect();
     const vr = this.container.getBoundingClientRect();
-    /* 画哪一块 = 「阅读区大小的窗口」挪进页面范围内、取离阅读区最近的位置：
-       · 页面盖住阅读区 → 就是可见区域；
-       · 页面只露出一角、或者**根本不在视口里**（离屏页被排进重画队列时就是这种）
-         → 取最近的等大窗口（页面上/下那一头）。
-       ⚠️ 这里**绝不能**退化成「整页按 dpr 画」：5× 下一页是 3060×3960 CSS，
-       dpr=2 就是 **48.5 MP / 194 MB 一张位图**，浏览器当场卡死（实测过一次）。 */
     const winW = Math.min(cssW, Math.max(1, vr.width));
     const winH = Math.min(cssH, Math.max(1, vr.height));
     const vx0 = clamp(vr.left - pr.left, 0, Math.max(0, cssW - winW));
@@ -1510,10 +1102,6 @@ export class PdfViewer {
       : 0;
     return {
       ratio,
-      /* `window` = **必须被覆盖**的那一块（就是阅读区大小的窗口）。
-         判断「已渲染的切片还够不够用」只能拿它去比 —— 拿 `slice`（= window + 边距）
-         去比的话，边距自己也在"需要"里，于是任何一点滚动都判成不够用，
-         边距等于白留：实测 5× 时 45 个滚动步触发了 45 次重画（长任务合计 2536ms）。 */
       window: { x: vx0, y: vy0, w: winW, h: winH },
       slice: {
         x: Math.max(0, Math.floor(vx0 - margin)),
@@ -1564,14 +1152,6 @@ export class PdfViewer {
     if (!force && !soft && this.rendered.has(i)) return;
     const pageEl = this.pageEls[i];
     if (!pageEl) return;
-    /**
-     * 双缓冲：上一张位图先留着当预览，新的画好了再换掉它。
-     * 不管走哪条路径（软缩放 / 换切片 / 面板变宽）中间都不会露出
-     * `.page.placeholder::after` 那条灰斜纹，也不会闪白 ——
-     * 用户反馈的「拖动缩放时灰条一直闪」就是这么来的。
-     * 新的画布是**另一个 canvas**，所以两边不会抢同一个上下文，
-     * 也就不需要「等在途任务落定再重画」那套了。
-     */
     const storedEntry = this.rendered.get(i);
     const prevEntry = storedEntry?.canvas?.parentElement === pageEl ? storedEntry : null;
     if (storedEntry && !prevEntry) this.rendered.delete(i);
@@ -1597,7 +1177,7 @@ export class PdfViewer {
       const viewport = page.getViewport({ scale: this.scale });
       const cssW = viewport.width;
       const cssH = viewport.height;
-      // 倍率与区域一起定：**先按 dpr 定画哪一块，再按这块的面积分配预算**（见 _renderPlan）
+      // 倍率与区域一起定：先按 dpr 定画哪一块，再按这块的面积分配预算（见 _renderPlan）
       const { ratio, slice } = this._renderPlan(i, cssW, cssH);
       const drawW = slice ? slice.w : cssW;
       const drawH = slice ? slice.h : cssH;
@@ -1613,7 +1193,7 @@ export class PdfViewer {
       canvas.style.top = `${oy}px`;
       canvas.classList.remove('soft-zoom');
       // 换帧时先把新画布藏起来，等画完再露出来 —— 否则会先闪一下白底。
-      // 注意**不能用 z-index** 压住旧画布：文本层没有 z-index（靠 DOM 顺序盖在画布上），
+      // 注意不能用 z-index 压住旧画布：文本层没有 z-index（靠 DOM 顺序盖在画布上），
       // 一旦给画布设了 z-index，它就会盖住文本层，鼠标点不到文字 —— 选取文字直接失效。
       // 这里靠 DOM 顺序解决：新画布插在旧画布后面，天然在上层。
       if (prevCanvas) canvas.style.visibility = 'hidden';
@@ -1712,18 +1292,6 @@ export class PdfViewer {
 
       // 文本层
       try {
-        /**
-         * ⚠️ 这一页的文本流**只取一次**。
-         * 旧实现是：TextLayer 用 `page.streamTextContent()` 取一遍；
-         * `_bindRealFonts` 里又 `page.getTextContent()` 取一遍 ——
-         * 而 pdf.js 的 `getTextContent()` 只是把 `streamTextContent()` 拼起来，**没有任何缓存**
-         * （见 public/vendor/pdf.min.mjs 里 `async getTextContent(t={})` 的实现），
-         * 等于同一页在 worker 里被解析两遍。实测（test/perf/zoom-commit-timeline.mjs）这一段约 90ms/页，
-         * 正好压在「松手之后」那一下上。
-         * pdf.js 的 TextLayer 既接受 ReadableStream 也接受 `{items, styles}` 对象
-         * （构造器里有 `if (t instanceof ReadableStream) … else 自己包一个流`），
-         * 所以先取一次，再同时喂给文本层和字体绑定。
-         */
         let textContent = null;
         try {
           textContent = await page.getTextContent({ includeMarkedContent: true });
@@ -1738,35 +1306,9 @@ export class PdfViewer {
         });
         entry.textLayer = tl;
         await tl.render();
-        /**
-         * ⚠️ 顺序很重要，三步都不能少（用户实测缺陷 2026-10-04：
-         *   「选词划词没有做准，没有和真实的字对齐」「鼠标偏移一点点就选中了一大段」）：
-         *
-         *   ① `_bindRealFonts`：pdf.js 把 PDF 的**嵌入字体**装进了 `document.fonts`
-         *      （`g_d1_f1` 这种族名），但渲染出来的 span 用的是通用族兜底（`sans-serif`/`monospace`）。
-         *      于是 **DOM 按系统字体排版、canvas 按嵌入字体画字**，宽度能差 10~16%
-         *      （实测 "Provided proper attribution is…"：DOM 自然宽 421.16 vs 墨迹 361.5）。
-         *      pdf.js 只能用一个整体 scaleX 把总宽拉回去，字符位置必然错位 ——
-         *      行两端误差 ~1px、行中间最大 4.9px（200% 下 8.1px）。这就是「对不齐」。
-         *   ② `_normalizeTextScale`：把 scaleX 换成 letter-spacing（换字体后仍需，
-         *      因为子集缺字形会逐字回退，宽度还会差 3.5~6.3%）。
-         *   ③ `_nudgeTextLayer`：**垂直命中带补偿**。文本层 span 的 top 是按 PDF 字体的
-         *      ascent 算的，但参与命中测试的 inline 文本框高度由当前字体决定；
-         *      两份字体不一致时每行可见字形最下面约 2.75px（10pt，占墨迹高 32%）在命中上属于下一行，
-         *      而相邻行盒只隔 0.97px → 拖选时终点掉到下一行，「选 10 个字」变成「选 96 个字」。
-         */
         if (!stale()) {
           await this._bindRealFonts(textDiv, page, textContent);
           if (!stale()) {
-            /* 先把这个文本层「冻结」成**渲染比例下的绝对 px**，再做后面三步。
-               为什么必须冻结（2026-10-09 实测，见 test/perf/commit-continuity.mjs）：
-               提交缩放时 `_softRescale()` 会给每一层挂 `transform: scale(k)`（位图/覆盖层
-               都是按旧比例算的绝对 px，只能整层缩放跟上新页框）。但 pdf.js 写的 span
-               是 `left/top` **百分比**、字号吃 `--total-scale-factor` —— 这两样**自己就会
-               跟着页框缩放**，再叠一层 scale(k) 就是**双倍**：实测 span 的页内相对位置
-               fx 0.199 → 0.299（正好多缩了 1.5 倍），而同一层里被 `_nudgeTextLayer`
-               改写成 px 的 `top` 却是对的 —— 一个层里混着两套单位，怎么缩都有一半是错的。
-               冻结之后就只剩一套单位：**层里全是 px，整层 scale(k) 恰好正确**。 */
             this._freezeTextLayerMetrics(textDiv, entry);
             this._normalizeTextScale(textDiv);
             this._nudgeTextLayer(textDiv, page);
@@ -1942,12 +1484,6 @@ export class PdfViewer {
     return { hits, total };
   }
 
-  /**
-   * 画搜索命中。
-   * 关键：不能直接标整个 span —— pdf.js 的一个 span 常常是一整行，
-   * 那样会「一整排都变黄」。这里按命中的字符区间建 Range，
-   * 用 range.getClientRects() 拿到精确到词的小方块。
-   */
   _paintHits(i) {
     const entry = this.rendered.get(i);
     if (!entry) return;
@@ -2048,14 +1584,6 @@ export class PdfViewer {
     return out;
   }
 
-  /**
-   * 跳到目录项指的位置。
-   *
-   * 只用 goToPage() 的话只能滚到这一页的页顶 —— 标题如果在本页中间，
-   * 点完它还在屏幕中间，看起来就是「没跳到位」。
-   * PDF 的书签目标本来就带 Y 坐标（XYZ 的第 4 项 / FitH 的第 3 项 / FitR 的第 6 项），
-   * 这里把它换算成视口偏移，让标题正好顶在最上面。
-   */
   async goToDest({ page, top = null }, { smooth = true, margin = 6 } = {}) {
     const target = clamp(Math.round(page || 1), 1, this.numPages || 1);
     if (!this.pageEls[target]) return;
@@ -2230,30 +1758,6 @@ export class PdfViewer {
 
   /* ------------------------------------------------------------ 文本层校正 */
 
-  /**
-   * pdf.js 的 TextLayer 对多字符 span 会加 transform: scaleX(...)，把整段文字
-   * 横向压扁/拉长去贴合 PDF 里的字宽。被 transform 的文本在浏览器里做命中测试
-   * 会有 1~2 个字符的误差 —— 表现为「选中的词」和「实际送去翻译的词」差几位。
-   * 这里把 scaleX 换成等效的 letter-spacing：宽度一样，但字形不再被缩放，
-   * 命中测试和视觉就一致了。
-   */
-  /**
-   * 把 pdf.js 已经加载好的**嵌入字体**真正用到文本层的 span 上。
-   *
-   * 用户实测缺陷（2026-10-04）：「选词划词没有做准，没有和真实的字对齐」。
-   * 根因：`document.fonts` 里已经有 `g_d1_f1` 这类真实嵌入字体（status=loaded，
-   * 宽度和 canvas 墨迹只差 0.88px），**但渲染出来的 span 用的是通用族兜底**
-   * （`font-family: sans-serif` / `monospace`）。于是 DOM 按系统字体排版、
-   * canvas 按嵌入字体画字，同一串文字宽度能差 10~16%：
-   *   "Provided proper attribution is…"  DOM 自然宽 421.16 / pdf.js 期望 362.67 / 墨迹 361.5
-   * pdf.js 只能用一个**整体 scaleX** 把总宽拉回去 → 字符位置必然错位：
-   * 逐词偏差行两端 ~1px、**行中间 4~6px**（≈0.7~0.9 个字），200% 缩放下最大 8.1px。
-   *
-   * 做法：拿 `page.getTextContent()` 的 items，按顺序与 span 双指针对上，
-   * 把 span 的字体换成 `item.fontName`，并据此重算 `--scale-x`。
-   * ⚠️ 对不上就**整页放弃**（上错字体比不改更糟）—— pdf.js 会跳过空串 / role=img /
-   * markedContent 包装，双指针必须能一路对上才算可信。
-   */
   async _bindRealFonts(container, page, textContent = null) {
     try {
       /* textContent 由 `_renderPage` 传进来（那一页的文本流已经取过一次了，见那里的说明）；
@@ -2275,16 +1779,6 @@ export class PdfViewer {
       }
       /* 覆盖率太低说明流式文本和页面文本不是同一份，宁可整页保持 pdf.js 原样。 */
       if (!pairs.length || pairs.length < Math.max(1, spans.length * 0.6)) return;
-      /**
-       * ── 两趟「读写分离」，不要在一个循环里又写又读 ─────────────────────────
-       * 旧写法每个 span 都是「写 fontFamily → getBoundingClientRect 读宽度 → 写 --scale-x」，
-       * 而 `--scale-x` 是 `transform: scaleX()` 的输入、fontFamily 又会改排版：
-       * 于是**每个 span 都把整份文档的样式与布局重新算一遍**（强制同步布局 / layout thrashing）。
-       * 实测（test/perf/zoom-commit-timeline.mjs，16 页夹具）：
-       * 单页这一项要 **152~184ms**，是「捏合松开后顿一下」的最大一笔开销；
-       * 拆成 ①只读 computedStyle ②只写字体 ③一次性读全部宽度 ④只写 --scale-x 之后，
-       * 整页只剩 1 次强制布局。宽度必须在写完字体、且 --scale-x 归 1 之后读（和旧写法同一时刻）。
-       */
       const rows = [];
       for (const [span, item] of pairs) {
         const fam = String(item.fontName || '').trim();
@@ -2314,34 +1808,12 @@ export class PdfViewer {
     } catch { /* 拿不到文本内容就不动 —— 保持 pdf.js 原样，至少不是更坏 */ }
   }
 
-  /**
-   * 垂直命中带补偿：让「鼠标命中带」的中心与「canvas 上真实墨迹」的中心重合。
-   *
-   * 用户实测缺陷（2026-10-04）：「鼠标偏移一点点就选中了一大段」。
-   * 根因：span 的 `top` 是 pdf.js 按 **PDF 字体 ascent** 算的，但参与命中测试的
-   * **inline 文本框**高度由**当前 DOM 字体**决定。两份字体不一致时，每行可见字形
-   * 最下面约 2.75px（10pt 正文，占墨迹高 8.5px 的 32%）在命中上属于**下一行**，
-   * 而相邻行盒只隔 0.97px → 拖选时终点被解析到下一行，选区从 10 个字拉到 96 个字
-   * （再低 8px 就是 433 个字、跨 6 行）。
-   *
-   * 补偿量 ≈ (行盒高 − 墨迹高)/2 与字体相关的差值。子智能体实测的安全工作区：
-   * 10pt ≈ +2~+5px、12pt ≈ +1.75px、17.2pt ≈ −4.25px；
-   * **过冲比现状更糟**（> +6px 时选区变 0 字或 433 字），所以这里按字体度量算，
-   * 不写全局常数，并夹在 ±0.5em 之内兜底。
-   */
   _nudgeTextLayer(container, page) {
     try {
       const pageEl = container.closest('.page') || container.parentElement;
       const pageH = pageEl?.clientHeight || 0;
       const spans = container.querySelectorAll('span:not(.markedContent)');
       const ctx = this._measureCtx || (this._measureCtx = document.createElement('canvas').getContext('2d'));
-      /**
-       * 读写分离（同 `_bindRealFonts`）：旧写法在一个循环里
-       * 「getComputedStyle + Range.getClientRects + pageEl.getBoundingClientRect → 写 span.style.top」，
-       * 写 top 会把布局打脏，下一轮的读又要强制同步布局 —— 每个 span 一次，整页实测 ~20ms。
-       * 现在所有读都在写之前完成（pageEl 的矩形也只量一次，循环里它不会变），
-       * 于是整页只留 1 次强制布局。
-       */
       const pr = pageEl.getBoundingClientRect();
       const rows = [];
       for (const span of spans) {
@@ -2393,36 +1865,6 @@ export class PdfViewer {
     } catch { /* 补偿失败就保持原样 */ }
   }
 
-  /**
-   * 把文本层的命中盒**在纵向补满行距缝隙**（一行一条命中带，边界取相邻行中心线的中点）。
-   *
-   * ── 为什么必须补（用户实测缺陷 2026-10-06：「有时候不是按鼠标选中的区域，
-   *    有时候一搞就选中一大块」）────────────────────────────────────────────
-   * 根因不在选区逻辑，而在文本层的布局：
-   *   `.textLayer` 的子元素**全部**是 `position:absolute`（不在行内流里），
-   *   容器因此一个行盒都没有。鼠标落在任何 span 盒子以外的地方 ——
-   *   行距之间那条缝隙、行尾右侧的空白、左右页边、同一行两个 run 之间的小空隙 ——
-   *   浏览器的「坐标 → 文字位置」没有行盒可吸附，就退化成
-   *   **「容器 + 第几个子节点」**（实测 `caretRangeFromPoint` 返回 `DIV.textLayer@43`）。
-   *   于是 Range 从锚点一路「吃到」第 k 个子节点：
-   *     · 行内横拖 120px → 1356 字 / 80 个矩形 / 框高跨 492px（跨好几行）；
-   *     · 起手/终点落在行间缝隙 → 0 字（两端都退化成容器，一个字都选不出来）；
-   *     · 起手落在 `[n]` 引用热点或页边上 → 2776 字、横跨两页。
-   *
-   * ── 这里只做「纵向补缝」，横向的空白留给 `repairSelectionEnds()` ──────────
-   *   纵向：行上/下边界取「与相邻行中心线的中点」，扩张量夹在 HIT_PAD_MAX 以内
-   *   （正常行距只差 1~3px，够用）；用 `padding-top/bottom` 扩张命中盒，`top` 反向补偿，
-   *   字形位置一个像素都不动。
-   *   ⚠️ 横向 padding **绝对不能加**、纵向也不能放大：受控实验（test/lab-leak.mjs）实测，
-   *   只要 span 有横向 padding，它在「跨 span 的选区」中就会被浏览器**整盒**返回 ——
-   *   `Range.getClientRects()` 给出 300/953（边框盒）而不是 52/434（行盒），
-   *   画出来的选中方块立刻横贯整页，正是用户说的「一搞就选中一大块」；
-   *   纵向 padding 加到 158px 时页 1 的作者栏也会被整盒返回。
-   *   所以左右页边、图区那种大空白**不铺**，由 `repairSelectionEnds()` 按几何命中兜底。
-   *
-   * 效果：正常行距的缝隙被补上之后，落点不会再退化成容器位置；
-   * 加上兜底之后，同样 120px 的拖动从 1356 字降到 50 字上下（见 test/selection-stable.mjs）。
-   */
   _tileTextHitBoxes(container) {
     try {
       const layerRect = container.getBoundingClientRect();
@@ -2432,7 +1874,7 @@ export class PdfViewer {
 
       /* ① 只读一遍几何（先读后写，避免每个 span 都触发一次重排）。
          注意：这一份 `read` 会原样返回给 `charPosAt()` 当命中表用 ——
-         它必须包含**所有**有文字子节点的 span（含只有空格的），
+         它必须包含所有有文字子节点的 span（含只有空格的），
          否则「鼠标点在两个 run 之间的空格上」会找不到字符位置。 */
       const read = [];
       for (const span of container.querySelectorAll('span:not(.markedContent)')) {
@@ -2499,17 +1941,6 @@ export class PdfViewer {
         row.bandBottom = Math.min(H, Math.max(midNext, row.bottom));
       }
 
-      /* ④ 写样式（全部算完再写，只触发一次重排）：**只做纵向扩张，而且只补行距缝隙**。
-         ⚠️ 两条硬约束（都是实测出来的，别改）：
-         ① **横向 padding 绝对不能加**：受控实验 test/lab-leak.mjs 里，只要 span 有横向
-            padding，它在「跨 span 的选区」中就会被浏览器**整盒**返回 ——
-            `Range.getClientRects()` 给出 300/953（边框盒）而不是 52/434（行盒），
-            画出来的选中方块立刻横贯整页，正是用户说的「一搞就选中一大块」。
-         ② **纵向 padding 也要夹住**：同一实验里小 padding 不污染矩形，但页 1 的作者栏
-            在 pt=158px 时又被整盒返回了。所以只补「行距缝隙」这一档（实测 1~3px 就够），
-            上限 HIT_PAD_MAX；页面上下页边、图区那种大空白不铺，
-            交给 `repairSelectionEnds()` 的几何命中兜底。
-         `top` 反向补偿，保证字形位置一个像素都不动。 */
       for (const row of rows) {
         for (const it of row.items) {
           const pt = Math.min(HIT_PAD_MAX, Math.max(0, it.t - row.bandTop));
@@ -2526,19 +1957,6 @@ export class PdfViewer {
     return null;
   }
 
-  /**
-   * 「这个屏幕坐标下面是哪个字」—— 不走浏览器的坐标→位置回退，自己按几何算。
-   *
-   * 为什么要自己算：几类鼠标落点浏览器给不出真正的文字位置（成因见 `_tileTextHitBoxes`）：
-   *   · 行距缝隙 / 左右页边 / 行尾空白 → 浏览器退化成「容器 + 第几个子节点」；
-   *   · 起手落在引用热点 `[n]` 上 → 实测锚点能差 10 个字。
-   * `repairSelectionEnds()` 用它把跑偏的选区两端拉回文字上。
-   *
-   * 几何来自 `_tileTextHitBoxes()` 返回并缓存在 `entry.hitBoxes` 上的命中表
-   * （页面内局部坐标），所以每次判定只读一次页面矩形，不逐个 span 读 DOM。
-   *
-   * @returns {{node: Text, offset: number, page: number}|null}
-   */
   charPosAt(clientX, clientY) {
     /* 先找最近的一页：拖到阅读区**外面**松手（右侧面板上）时，坐标要夹回页面边缘，
        否则「拖出去松手」就没有字符位置可用，跑偏的选区没法纠正。 */
@@ -2568,20 +1986,10 @@ export class PdfViewer {
       if (!best || d < best.d) best = { d, b };
     }
     if (!best) return null;
-    // `_offsetInSpan` 里的字符区间是**视口坐标**（getBoundingClientRect 已含缩放），所以这里传原始 x
+    // `_offsetInSpan` 里的字符区间是视口坐标（getBoundingClientRect 已含缩放），所以这里传原始 x
     return { ...this._offsetInSpan(best.b.span, best.b.node, clamp(clientX, pr.left, pr.right)), page: Number(this.pageEls[i].dataset.page) };
   }
 
-  /**
-   * span 里离 clientX 最近的**字符边界**。
-   *
-   * 每个字符的 x 区间缓存进 WeakMap（文本层重建时元素一起消失，缓存自动作废），
-   * 所以同一段文字只量一次。
-   *
-   * ⚠️ 缓存里存的是**相对 span 左边缘**的偏移，不是屏幕坐标：
-   * 页面会滚动，屏幕坐标每次都要重算（否则滚动之后再拖选，算出来的字符位置会整整偏一个滚动量）。
-   * 相对量在滚动、缩放（`_softRescale` 的 CSS 缩放）下都不变。
-   */
   _offsetInSpan(span, node, clientX) {
     if (!this._charX) this._charX = new WeakMap();
     const spanRect = span.getBoundingClientRect();
@@ -2612,23 +2020,6 @@ export class PdfViewer {
     return { node, offset: Math.min(offset, (node.textContent || '').length) };
   }
 
-  /**
-   * 把「跑偏的选区」两端拉回文字上。
-   *
-   * 判据：Range 的某一端**不是文本节点**。那说明浏览器算出的是「容器 + 第几个子节点」
-   * 这类没有文字含义的位置（成因见 `_tileTextHitBoxes`），Range 会从锚点一路吃到那个
-   * 子节点 —— 界面上看就是「一搞就选中一大块」。这时用鼠标的两个真实落点
-   * （按下点 / 松手点）自己算字符位置，重建选区。
-   *
-   * 还有一类**更彻底的失败**要一起兜：拖选本该有选区，浏览器却给了一个**塌掉的**空选区
-   * （起手落在页边空白、或者落在引用热点那种非文字元素上时实测会发生）——
-   * 用户拖了半天一个字都没选出来。`allowCollapsed` 打开时，用两个落点自己建选区。
-   *
-   * ⚠️ 只有这两种情况才动手：正常拖选、双击选词、三击选段、测试里程序化构造的选区
-   * 两端本来就是文本节点，**一个字节都不碰**。
-   *
-   * @param {{anchor?:{x:number,y:number}, focus?:{x:number,y:number}, allowCollapsed?:boolean}} opts
-   */
   repairSelectionEnds({ anchor = null, focus = null, allowCollapsed = false } = {}) {
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return false;
@@ -2658,24 +2049,6 @@ export class PdfViewer {
     return true;
   }
 
-  /**
-   * 把 pdf.js 的 `transform: scaleX(...)` 换算成等效的 `letter-spacing`。
-   *
-   * 保留它是因为**换真字体后仍然需要**：嵌入字体常常是子集，缺字形会逐字回退到
-   * 系统字体，整行宽度还会差 3.5~6.3%（实测 "[5] Kyunghyun Cho, Bart " 378.89 vs 392.26）。
-   *
-   * ⚠️ 两个已修正的细节（子智能体实测）：
-   *   ① `letter-spacing` 在 Chrome 里**最后一个字符也会加**，所以除数应该是 `text.length`
-   *      而不是 `length-1` —— 原来那样每行最多偏 1.09px；
-   *   ② `--rotate` 非 0 的 span 要跳过：那是旋转文本，`rect.width` 是旋转后的外接框，
-   *      拿它算 letter-spacing 会写进完全错误的字距。
-   */
-  /**
-   * 把 pdf.js 生成的文本层冻结成**渲染比例下的绝对 px**：
-   *   `left` / `top` 百分比 → px，`font-size` 的 `calc(...)` → 计算后的 px。
-   * 这样整个层只剩一套单位，提交缩放时统一 `scale(k)` 才是正确的（见 _renderPage 里的说明）。
-   * 页框尺寸用 entry.cssW/cssH —— 那正是这一层渲染时的尺寸（`.textLayer` 是 inset:0）。
-   */
   _freezeTextLayerMetrics(container, entry) {
     const W = entry.cssW || container.clientWidth || 0;
     const H = entry.cssH || container.clientHeight || 0;
@@ -2694,7 +2067,7 @@ export class PdfViewer {
   _normalizeTextScale(container) {
     const spans = container.querySelectorAll('span:not(.markedContent)');
     /**
-     * 同样要读写分离：`rect.width` 是**写完上一个 span 的 letter-spacing 之后**再读的，
+     * 同样要读写分离：`rect.width` 是写完上一个 span 的 letter-spacing 之后再读的，
      * 所以旧写法每行都强制一次布局。这里先一次读完所有宽度，再统一写。
      */
     const rows = [];
@@ -2736,24 +2109,8 @@ export class PdfViewer {
     if (!entry || !entry.pinLayer) return;
     // 复用热点层时只清引用节点，保留同层的笔记书签。
     entry.pinLayer.querySelectorAll('.cite-link').forEach((node) => node.remove());
-    /**
-     * ⚠️ 热点是 `pointer-events:none` 的（见 style.css 里 `.cite-link` 的说明）：
-     * 它盖在 `[12]` 这几个字**上面**，一旦吃鼠标事件，mousedown 就落在 div 而不是文本上，
-     * 浏览器给不出真正的文字锚点 —— 起手落在 `[n]` 上的一次小拖选能选出 2776 字（跨两页）。
-     * 代价是 `e.target.closest('.cite-link')` 和 `:hover` 都不再成立，
-     * 所以这里留一份**几何表**：`citeAt()` 按坐标判命中，`_updateCiteHover()` 点亮悬停。
-     */
     entry.citeHits = [];
 
-    /**
-     * 参考文献**条目**本身通常以 [n] 开头，它不是正文引用，不能点击后再跳回同一页并伪造
-     * 一条"返回原位置"记录。
-     *
-     * ⚠️ 判据必须是「这一行的开头 + 编号命中本文献表」，**不能**是「这一页是参考文献页」。
-     * 原来写的是 `if (this.referencePages.has(i)) return;` —— 整页粒度，
-     * 于是「结论段 / 表格引用 / 文献表开头」同页的真实论文（实测 attention-arxiv p.10）
-     * 整页 13 个正文引用全部失去热点（占全部正文引用的 21%），表现为"有的能点有的不能点"。
-     */
     const refNumsOnPage = this.referenceEntries?.get(i) || null;
     const pageEl = this.pageEls[i];
     const pr = pageEl.getBoundingClientRect();
@@ -2787,20 +2144,6 @@ export class PdfViewer {
           if (r.width < 3 || r.height < 3) continue;
           const d = document.createElement('div');
           d.className = 'cite-link';
-          /**
-           * ⚠️ 热点坐标必须钳进**这一页**，不能钳进阅读区视口（用户实测 2026-10-04：
-           *   「文中的 [] 数字不能直接跳转了」）。
-           *
-           * 原来的写法把屏幕坐标钳到 `viewerRect`（阅读区可视矩形）里再换算回页面坐标。
-           * 一页 PDF 往往比视口高得多（实测 1149px 页 vs 928px 视口），于是：
-           *   · 落在视口**下方**的引用，`top` 全被钳到 `viewerRect.bottom` 同一条线上 ——
-           *     几十个热点在页面底部叠成一排，谁也点不准；
-           *   · 落在视口**上方**露出的部分，又正好压住那条线。
-           * 结果就是「有的 [n] 能点、有的点了没反应」。
-           *
-           * 正确做法：只把**超出页面**的那一点点（pdf.js 文本度量会溢出几个像素）收回来，
-           * 与视口无关 —— 页面滚动时热点跟着页面走，本来就不需要视口参与。
-           */
           const pageW = pageEl.clientWidth || pr.width;
           const pageH = pageEl.clientHeight || pr.height;
           const k = layerScale(entry.pinLayer);
@@ -2817,26 +2160,12 @@ export class PdfViewer {
           d.style.height = `${citeH}px`;
           d.title = `引用 [${nums.join(', ')}] —— 点击跳到参考文献`;
           entry.pinLayer.append(d);
-          /**
-           * 命中表存**页面内局部坐标**（不是屏幕坐标）：`citeAt()` 每次鼠标移动都要用，
-           * 存屏幕坐标就得对每个热点读一次 `getBoundingClientRect()`（一页几十个 ×
-           * 每帧一次 = 几百次布局查询）；存局部坐标则只需要每页读一次页面矩形。
-           * 卡片锚点在**命中时**现取，滚动后也不会过期（见用户实测 2026-10-04）。
-           */
           entry.citeHits.push({ el: d, nums, raw, page: i, x: citeLeft, y: citeTop, w: citeW, h: citeH });
         }
       }
     }
   }
 
-  /**
-   * 这个屏幕坐标下面有没有正文引用热点 `[n]`。
-   *
-   * 热点自己不吃鼠标事件（见 `_paintCites` 的说明），所以点击/悬停都改成
-   * **按坐标几何命中**：只读每页一次页面矩形，其余全是命中表上的算术。
-   *
-   * @returns {{nums:number[],raw:string,page:number,anchor:object,el:Element}|null}
-   */
   citeAt(clientX, clientY) {
     for (const [i, entry] of this.rendered) {
       const hits = entry.citeHits;
@@ -2865,14 +2194,6 @@ export class PdfViewer {
     return null;
   }
 
-  /**
-   * 鼠标经过引用热点时点亮它 / 换手型光标。
-   *
-   * `.cite-link` 改成 `pointer-events:none` 之后 CSS 的 `:hover` 不再触发，
-   * 这里用同一个几何命中把「鼠标移上去才亮」的观感补回来。
-   * 光标走 `.page.cite-hot` 类（见 style.css）：热点自己不吃事件，
-   * 只能让**整页文字**在悬停热点期间变手型。
-   */
   _updateCiteHover(clientX, clientY) {
     const hot = this.citeAt(clientX, clientY);
     const el = hot?.el || null;
@@ -2886,13 +2207,6 @@ export class PdfViewer {
     this._hotCitePage = pageEl;
   }
 
-  /**
-   * 抽出全文里的**整个参考文献表**：[{num, page, text}]，按编号排序。
-   *
-   * 参考文献都在文末，所以从最后一页往前扫；连续几页都没条目就停 ——
-   * 正文里也有 `[12]` 这种行内引用，但要求方括号出现在**行首**才能算条目，
-   * 行内的引用就不会被误收进来。
-   */
   async findAllReferences(onProgress) {
     const gen = this._gen;
     const found = new Map();
@@ -3059,13 +2373,6 @@ export class PdfViewer {
     }
   }
 
-  /**
-   * 把当前选区画成不重叠的方块（原生 ::selection 已经设成透明）。
-   *
-   * rectsByPage 会记在 this._selRects 里：页面被虚拟化卸掉再滚回来时，
-   * 浏览器自己的选区已经随 DOM 一起消失了，只有靠这份记录才能把方块补回来，
-   * 否则「翻页/滚动之后选区就没了」，而 state.selection 还在 —— 界面和数据对不上。
-   */
   paintSelection(rectsByPage) {
     this._selRects = rectsByPage || null;
     for (const [i] of this.rendered) this._paintSel(i);
@@ -3098,15 +2405,6 @@ export class PdfViewer {
 
 /* ------------------------------------------------------------------ 辅助 */
 
-/**
- * 从 pdf.js 的显式目标数组里取「Y 坐标」（PDF 用户空间，原点在左下）。
- * 不同目标类型参数位置不一样：
- *   [ref, {name:'XYZ'}, left, top, zoom]
- *   [ref, {name:'FitH'|'FitBH'}, top]
- *   [ref, {name:'FitR'}, left, bottom, right, top]
- *   [ref, {name:'Fit'}] / [ref, {name:'FitV'}, left] → 没有 Y，返回 null
- * 取不到就返回 null，调用方会退回「滚到页顶」。
- */
 function destTop(dest) {
   if (!Array.isArray(dest)) return null;
   const kind = (dest[1] && typeof dest[1] === 'object' && dest[1].name)
@@ -3118,16 +2416,6 @@ function destTop(dest) {
   return null;
 }
 
-/**
- * 把浏览器给的一堆碎片矩形合成「一行一个方块」。
- *
- * 为什么必须合并：`range.getClientRects()` 是**按 span 切**的碎片，同一行文字会得到
- * 好几个高度不一、位置轻微错开的矩形（实测选 5 个 span 出 10 块，整页出 136 块）。
- * 而 .sel-mark 是半透明的蓝（rgba(59,110,245,.28)），叠在一起就会一块深一块浅，
- * 密的地方直接糊成一大片蓝 —— 用户看到的「整页整块变蓝」和「有的浅蓝有的深蓝」就是这个。
- *
- * 按行合并之后每个方块互不重叠，颜色就均匀了，顺带 DOM 节点也少了一个数量级。
- */
 function mergeRectsByLine(list) {
   let rs = list.filter((r) => r.w > 0.0005 && r.h > 0.0005);
   if (!rs.length) return [];
@@ -3196,13 +2484,6 @@ function countOccurrences(haystack, needle) {
   return count;
 }
 
-/**
- * 在文本层 span 序列里找 query，返回**精确到字符区间**的命中片段：
- *   [{ spanIndex, start, end }, ...]
- * pdf.js 会把一句话切成很多 span、而且一个 span 常常就是一行，
- * 所以既要处理跨 span 匹配，又要记下命中在 span 内的起止偏移，
- * 否则只能整段标黄（看起来就是「一整排都变黄」）。
- */
 function findInSpans(spans, query) {
   const q = query.toLowerCase().trim();
   if (!q) return [];

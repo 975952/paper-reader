@@ -1,12 +1,3 @@
-/**
- * 主控（极简版）
- *
- * 交互约定：
- *   译  = 直接翻译选中文字，就地出结果
- *   释  = 直接把选中文字讲明白，就地出结果（不需要提问）
- *   问  = 只把选中文字塞进对话引用，等你自己提问，不发请求
- *   ⎚   = 框选图/表/公式交给视觉模型
- */
 import { $, $$, el, appendAll, toast, toastAction, cleanText, renderMarkdown, escapeHtml, debounce, throttle, clamp, fmtSize } from './util.js';
 import { iconEl, iconHTML, hasIcon } from './icons.js';
 import { PdfViewer, clampZoomSpeed, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX } from './pdfview.js';
@@ -43,15 +34,6 @@ const AI_BLOCKS = [
   { id: 'chat', title: '问答', hint: '点「释」在这里解释这段；「＋对话」加入选中的文字或截图，然后你自己提问' },
 ];
 
-/* ══════════════════════════════ 右栏（译文 / 问答的单栏标签切换） ══════════════════════════════
-   用户口径（删减后）：右栏**永远只有一栏**。
-
-     · 译文 / 问答**只**能在右栏（dock 恒为 'right'）—— 不能被停靠到左栏 / 底部。
-     · 一栏同时最多渲染**一个**面板；右栏顶部只显示当前面板标题，
-       底部只留一组「译文 / 问答」标签切换（#aiBar）。
-     · 不再有第 2 栏、不再有列归属、不再有应用内浮窗 ——
-       「一栏只能开一个 + 标签切换」已经覆盖了原来的并排需求。
-   DOM：#rightCols > #splitRight + #rightSide（内含 #aiArea + #composer + #aiBar）。 */
 
 /** 只许待在右栏的面板（= PANEL_DEFS 里 dock:'right' 的那两个） */
 const isRightPanel = (id) => PANEL_IDS_RIGHT.includes(id);
@@ -59,22 +41,9 @@ const isRightPanel = (id) => PANEL_IDS_RIGHT.includes(id);
 const rightAreaEl = (_n) => document.getElementById('aiArea');
 /** 右栏的 <aside>。参数 n 同上，恒为 1 */
 const rightColEl = (_n) => document.getElementById('rightSide');
-/** 右栏恒为一栏：第 2 栏（列数 / 宽度 / 栏位归属）整套已在批次一删除。
- *
- *  这里**故意保留** `rightColsWanted()` 与 `colOf()` 两个恒为 1 的函数：
- *  「这一栏在不在」「这块面板属于哪一栏」的判断散落在 10 多处调用点，
- *  留一对常量函数比改 30 行调用点更不容易出错，语义也仍然正确。
- *  老存档里的 `reader.panels.rightCols` 不再读写 —— 它只是一个没人看的字段。 */
 const rightColsWanted = () => 1;
 /** 右栏面板的列归属：恒为第 1 栏（见上） */
 const colOf = (_id) => 1;
-/**
- * 隐藏面板的停放区。
- * **故意是脱离文档的**（不 append 到 body）：译文 / 问答的节点永不重建（消息与滚动位置都挂在
- * 节点上），但对外口径仍是「没开就等于没有这一块」—— 挂在文档里的话
- * `document.querySelectorAll('.ai-block')` / `'#aiArea .msg'` 还会查到它，
- * 既有断言与「空态」判断都会被带偏。脱离文档后节点照样活着、状态全在，重新显示时原样挂回去。
- */
 let panelParkEl = null;
 function panelPark() {
   if (!panelParkEl) panelParkEl = el('div', { id: 'panelPark', 'aria-hidden': 'true' });
@@ -82,7 +51,7 @@ function panelPark() {
 }
 /**
  * 面板节点此刻应该在哪个容器里：可见且右栏没被收起 → 结果区；否则 → 停放区。
- * 只有**这一份**可见的那个面板进结果区（一栏只开一个），其余一律停放。
+ * 只有这一份可见的那个面板进结果区（一栏只开一个），其余一律停放。
  */
 function dockedAreaFor(id) {
   const p = state.panels?.[id];
@@ -92,14 +61,9 @@ function dockedAreaFor(id) {
   if (document.body.classList.contains('no-right')) return panelPark();
   return rightPanelInCol(1) === id ? rightAreaEl(1) : panelPark();
 }
-/**
- * 右栏面板的滚动位置：**脱离文档时浏览器会把 scrollTop 归零**，所以任何一次「搬走节点」
- * （隐藏 → 停放区）之前都要先把位置记在节点自己身上，重新挂回文档后再放回去。
- * 挂在节点上而不是共享表里：位置跟着这一块走，先记的不会被后记的覆盖。
- */
 function rememberBodyScroll(id) {
   const box = state.blockMeta[id]?.body;
-  // 只在**还在文档里**的时候读：节点一旦离开文档，scrollTop 会被浏览器归零，
+  // 只在还在文档里的时候读：节点一旦离开文档，scrollTop 会被浏览器归零，
   // 这时候读到的 0 会把真正的位置覆盖掉（R12 实测踩过：想要 794，存下来的是 0）。
   if (box && box.isConnected && box.clientHeight > 0) box.__prtScrollTop = box.scrollTop;
 }
@@ -121,7 +85,7 @@ function parkRightPanel(id, target) {
   const node = state.blockEls[id];
   if (!node || !target) return;
   const parked = target === panelPark();
-  // 停放态**同时**挂 hidden 属性：节点虽然脱离文档，但样式上也不该有任何显示机会
+  // 停放态同时挂 hidden 属性：节点虽然脱离文档，但样式上也不该有任何显示机会
   //（写 CSS 的隐藏容器也挡不住 position:fixed 之类的历史残留，属性这一层是最后一道保险）。
   if (parked) node.setAttribute('hidden', '');
   else node.removeAttribute('hidden');
@@ -133,49 +97,18 @@ function parkRightPanel(id, target) {
   if (!parked) applyBodyScroll(id);
 }
 
-/* 删减（2026-10 批次一 / 批次三）：「再开一栏 / 收起第 2 栏 / 放到第 N 栏」整套已删除，
-   连同它的存档读写一起 —— `openRightColumn / closeRightColumn / setPanelColumn /
-   normalizeRightPanelModel / adoptLegacyBothBlocks / loadRightCols / applyRightColsDom`
-   七个函数全部不存在。右栏恒为一栏，「一栏只开一个 + 底部标签切换」已经覆盖了原来的
-   并排需求；老存档里 `reader.panels.rightCols` 那种字段没人再读，也不会有人去清它。
-   老存档里「译文 + 问答同时可见」的状态由 setPanelVisible 的互斥规则收敛成只留一块。 */
 
-/* ══════════════════════════════ 面板注册表（阶段 2.2a / 2.2b） ══════════════════════════════
-   左栏四块（section.sec）与右栏两块（section.ai-block）统一成**一个** state.panels 注册表：
-     { id, dock, home, order, visible, collapsed, pinned, size, rect, z, w, docId }
-       dock      'left' | 'right' | 'bottom' | 'float' | 'hidden'（'tab' / 中央标签页本阶段不做）
-       home      浮出（dock='float'）之前在哪个停靠区 —— 占位块放哪、✕ / Esc 回到哪都看它
-       order     同一 dock 内的排序（小的在前）
-       visible   用户是否要它显示（'hidden' 等价 visible:false）
-       collapsed 只留标题栏
-       pinned    用户固定这一侧：窗口放不下时优先收起**没有固定面板**的那一侧（见 applyResponsiveLayout）
-       size      右栏块高度 px（左栏 / 底部忽略；null = 自适应平分）
-       rect      浮窗位置与大小 {left, top, w, h}（dock==='float' 时有效，每次都会钳进视口）
-       z         浮窗层叠序号（点击 / 拖动到最前时自增）
-       w         底部停靠时的列宽 px（null = 各列平分）
-       docId     浮出时是哪篇论文 —— 换论文时靠它把所有浮窗自动收回停靠
-   渲染契约一个字都没改：左栏仍是 section.sec（内部 id 全不动），右栏仍是
-   section.ai-block[data-block] + .ai-head / .ai-body / .ai-split，只是两边都补了 data-panel。
-   切换永远不重建节点（只改 hidden 类 / DOM 顺序 / 换容器），否则消息与滚动位置会丢。 */
 
 /** 六个面板的固定 id 与默认值：左栏文件/目录/笔记/参考文献，右栏译文/问答 */
 const PANEL_DEFS = [
-  // 2026-10 用户口径：「左侧边栏一次开一个，现在一打开有四个」。
-  // 所以左栏四块里**只有「文件」默认可见**，其余三块默认收起 ——
-  // 它们仍留在左栏底部那排图标里，点一下才显示（点开的那个会自动顶掉前一个，
-  // 见 setPanelVisible 的互斥规则）。这样打开论文时左栏只占一块的位置。
   { id: 'files', title: '文件', dock: 'left' },
   { id: 'outline', title: '目录', dock: 'left', visible: false },
   { id: 'notes', title: '笔记', dock: 'left', visible: false },
-  // 参考文献同理：默认只留图标入口；列表**按需**解析
+  // 参考文献同理：默认只留图标入口；列表按需解析
   //（见 ensureRelationsBuilt），打开论文时不再后台跑全文引用抽取。
   // 老用户保存过 reader.panels 的展开状态仍按存档恢复（见 readPanelDescriptor），
   // 但会被 normalizeLeftPanels() 收敛成「只有一块可见」。
   { id: 'relations', title: '参考文献', dock: 'left', visible: false, collapsed: true },
-  // 右栏两块默认**不显示**：结果区是可选输出，用到哪块自动出现
-  //（addEntry / showAiBlock），也能用输入框下面的开关栏或面板管理器打开。
-  // 这与 2.2a 之前的状态完全一致（老 state.ai.visible 默认也是 false），
-  // 所以「打开论文时右栏一块都不开」这条既有行为没有被这次统一改掉。
   { id: 'translate', title: '译文', dock: 'right', visible: false },
   { id: 'chat', title: '问答', dock: 'right', visible: false },
 ];
@@ -195,19 +128,6 @@ function defaultPanels() {
 }
 
 const panelTitle = (id) => (PANEL_DEFS.find((d) => d.id === id) || {}).title || id;
-/**
- * 面板根部节点：左栏四块（.side-head / section.sec）与右栏两块（section.ai-block）。
- *
- * **两类面板的节点来源不一样，不能都用文档查询**（阶段 2.2b 的回归就出在这里）：
- *   · 左栏四块是 index.html 里的静态 DOM，用属性选择器在整个文档里找 data-panel 就够；
- *   · 右栏两块（translate / chat）是**按需现建**的：ensureBlock() 建完把它登记在
- *     state.blockEls[id] 上，renderAiArea() 又会在面板隐藏时用 `replaceChildren()` 重排，
- *     把这块节点**从文档里摘下来**（节点本身没丢，state.blockEls 一直持有，内容与滚动都在）。
- * 所以「隐藏着」这一态里 `document.querySelector('[data-panel="chat"]')` 必然返回 null ——
- * 而 applyPanels() 摘 / 挂 `hidden` 类正好走的是这个查询：查询落空 → 类没被同步 → 重新打开
- * 时节点带着上一次的 `hidden` 回到 DOM，高度 0 且再也不会自愈（用户报的正是这个）。
- * 右栏两块一律以 state.blockEls 为唯一登记表，文档查询只服务于左栏。
- */
 function panelEl(id) {
   if (PANEL_IDS_RIGHT.includes(id)) return state.blockEls?.[id] || null;
   return document.querySelector(`[data-panel="${id}"]`);
@@ -223,11 +143,6 @@ const panelHeadEl = (id) => {
     : root.querySelector('.side-head, .sec-head, .ai-head');
 };
 
-/**
- * 合法 dock 取值。删减后只剩三种：左栏 / 右栏 / 隐藏。
- * **老存档里的 'bottom' / 'float' 不再合法** —— readPanelDescriptor 会把它们落回面板自己的
- * 注册位置（左栏四块回左栏、右栏两块回右栏），这正是我们要的：历史浮窗与底部停靠自动归位。
- */
 const PANEL_DOCKS = ['left', 'right', 'hidden'];
 
 /** 读一份合法描述符：非法值全部回落到默认值，宁可用默认值也不能出 NaN / undefined */
@@ -246,17 +161,6 @@ function readPanelDescriptor(id, raw, fallback) {
   };
 }
 
-/**
- * 一次性迁移：把老的 reader.ai（含按论文分叉的 byDoc）映射成 reader.panels。
- *   新 key 在 → 只读新 key，一行都不改（老 key 原样留着，回退到旧版还能用）。
- *   新 key 不在、老 key 在 → order / visible / size 映射到 translate / chat，
- *   再被 byDoc[当前 docId] 覆盖（如果存在），其余四个用默认值；迁移结果写进新 key。
- *   两个都没有 → 默认值。
- * 关键点：**绝不丢用户拖好的块高度**（reader.ai.size 或 byDoc[...].size 里那个数字）。
- *
- * 时机：boot() 里**第一件事**（在 initPanels / ensurePanel 之前），因为后面所有面板代码都要用
- * state.panels。放在模块顶层求值会太早 —— 那时还拿不到「当前是哪篇论文」，byDoc 覆盖会落空。
- */
 function loadPanels() {
   const panels = defaultPanels();
   let raw = null;
@@ -294,13 +198,6 @@ function loadPanels() {
   return panels;
 }
 
-/**
- * 迁移的「第二步」：loadPanels() 跑在 boot 最前面，那时只有 ?open= 一个线索，
- * 真实 docId（形如 slug-xxxxxxxx）往往要等 loadServerState() 回来才知道。
- * 所以迁移时把老 key 记在 state._aiMigrated 上，这里拿到 lastDoc / 当前列表项之后再补一次
- * byDoc 覆盖。**只补一次**，之后用户自己怎么摆就是最终状态。
- * 返回：这次是否真的补上了（调用方据此重排 DOM）。
- */
 function applyPanelMigration() {
   const legacy = state._aiMigrated;
   state._aiMigrated = null;
@@ -368,14 +265,6 @@ function applyPanelPatch(id, raw) {
   if (id === 'translate' || id === 'chat') fitBlockSizes();
 }
 
-/**
- * 多窗口 / 跨标签页的布局同步：另一个窗口（或另一个标签页）改了 reader.panels，
- * 这边把六个面板的描述重新套一遍。
- *
- * 原来这里还挂着一整套「系统级独立窗口」的收发：BroadcastChannel 总线、心跳、看门狗、
- * 关闭信号三层兜底 —— 那一套（panelWindow / panelBus / detachedRuntime / releaseDetachedWindow…）
- * 已随「独立窗口」功能整体删除，只留下这条真正有用的 storage 监听。
- */
 function initPanelSync() {
   window.addEventListener('storage', (e) => {
     if (e.key !== 'reader.panels' || !e.newValue) return;
@@ -400,13 +289,6 @@ const rightPanelsAll = () => PANEL_IDS
 /** 右栏当前显示的面板签名（可见集合变了才重排右栏，见 applyPanels 的 ③） */
 const rightPanelsSig = () => `${rightColsWanted()}|${PANEL_IDS_RIGHT.map((id) => `${id}#${colOf(id)}${state.panels[id].visible ? '1' : '0'}`).join(',')}`;
 
-/**
- * 把注册表刷到 DOM 上（删减后只剩三件事，顺序不能换）：
- *   ① 每个面板 root 补 data-panel / data-dock，visible / collapsed 落类；
- *   ② 左栏按 order 重排（搬的是同一批节点，走 withPanelMove 保住滚动位置 / 焦点 / 输入内容）；
- *   ③ 右栏整个走一遍 renderCols()：换块或变空态。
- * 不再有浮层 / 占位块 / 底部停靠区 —— 面板只有「在左栏 / 在右栏 / 藏着」三种去向。
- */
 function applyPanels() {
   for (const id of PANEL_IDS) {
     const p = state.panels[id];
@@ -433,7 +315,7 @@ function applyPanels() {
   document.body.classList.toggle('right-empty', visiblePanelsOfDock('right').length === 0);
 
   // ② 左栏按 order 重排。搬的是同一批节点，走 withPanelMove：滚动位置 / 焦点 / 输入内容一个都不丢
-  //（面板头常常是**当前有焦点**的节点，被搬走时浏览器会 blur 它，搬完必须 focus 回去）
+  //（面板头常常是当前有焦点的节点，被搬走时浏览器会 blur 它，搬完必须 focus 回去）
   const leftEl = $('#leftSide');
   if (leftEl) {
     const shownIds = panelsOfDock('left');
@@ -467,17 +349,6 @@ function togglePanelCollapsed(id) {
   if (p.dock === 'right') fitBlockSizes();
 }
 
-/**
- * 显示 / 隐藏一个面板。
- *
- * 隐藏**绝不清 size**：那是用户拖出来的高度偏好，关掉再打开必须回到原来那个高度
- *（阶段 2.2b 之前这里写着 `p.size = null`，等于每收展一次就把用户拖好的高度丢掉，
- *  再打开只能看到平分或 60px 保底）。真的装不下时由 fitBlockSizes() 按比例夹取，
- * 而不是把记忆扔掉。
- *
- * 隐藏是 display:none，滚动容器量不到高度、scrollTop 会归零，所以先把每块 body 的
- * 滚动位置记下来，重新显示之后再放回去 —— 用户看到的就是「隐藏再显示，位置还在」。
- */
 function setPanelVisible(id, on) {
   const p = state.panels[id];
   if (!p) return;
@@ -493,7 +364,7 @@ function setPanelVisible(id, on) {
       if (state.panels[other].dock === 'right') state.panels[other].visible = false;
     }
   }
-  // 左栏更严，而且更早：**整个左栏一次只显示一块**（用户口径 2026-10-03：
+  // 左栏更严，而且更早：整个左栏一次只显示一块（用户口径 2026-10-03：
   //   「左侧应该也做成一次只能打开一个」）—— 打开哪一块，其余三块自动收起，
   //   但每块自己的折叠状态（p.collapsed）不动，那是另一回事。
   if (on && !isRightPanel(id) && p.dock === 'left') {
@@ -523,14 +394,6 @@ function setPanelVisible(id, on) {
 
 /* ── 面板部件 ── */
 
-/**
- * 一个面板由哪些节点组成。左栏四块是 index.html 里的静态 DOM（section.sec / .side-head），
- * 右栏两块是**按需现建**的（用到才 ensureBlock）。
- *
- * 文件面板是**三兄弟**：.side-head 标题栏 + .dropzone 拖入区 + .filelist 文件列表
- *（内部 id 一个都没动）。删掉浮窗之后三兄弟不会再被搬到别的容器，但 applyPanels() 收起
- * 「文件」面板时仍然要**一起**收起它们 —— 只藏标题栏会在左栏留下半截拖入区。
- */
 function panelParts(id) {
   let node = panelEl(id);
   if (!node && PANEL_IDS_RIGHT.includes(id)) {
@@ -551,39 +414,7 @@ function prefersReducedMotion() {
 }
 const motionMs = (ms) => (prefersReducedMotion() ? 0 : ms);
 
-/* ══════════════ 删减记录（批次一）：浮窗 / 拖拽停靠 / 底部停靠 全部删除 ══════════════
-   这里原来装着「把面板放哪儿」的整套编排（约 900 行），连同底部停靠区一起删掉了：
 
-     · 浮窗几何与钳制：floatSafeBox / composerRect / rectsOverlap / overlapArea /
-       clampFloatRect / defaultFloatRect / floatCssRect / unionRect / visibleRect
-     · 浮出与回停靠：floatPanel / dockPanelTo / floatPanels / bringFloatToFront /
-       syncFloatFocus / nextFloatZ / applyFloatRect / ensureFloatChrome / floatBoxOf
-     · 收起与落位动画：closeFloatPanel / settleFloat / nearestEdgeRect / flipPanel /
-       cancelPanelAnims / panelAnim / logPanelAnim
-     · 占位块与停靠预览：ensurePanelSlot / removePanelSlot / syncPanelSlots /
-       dockZoneAt / floatRedockTarget / dockZoneRect / showDockPreview / hideDockPreview
-     · 浮窗拖动 / 缩放：bindFloatDrag / bindFloatResize
-     · 底部停靠区：setDockBottomHeight / bindDockBottomSplitter / bindDockColumnSplit
-
-   **为什么可以整段删掉**：审计显示这一整套只有两个真正的入口 —— 面板管理器里的
-   「浮出 / 停靠到…」按钮，和图标坞的右键菜单。两个入口都在同一批里删掉了，
-   于是这张调用网没有任何外部调用者。
-
-   随之删除的状态字段：p.rect / p.z / p.w / p.home / p.pinned（见 defaultPanels 与
-   readPanelDescriptor）。老存档里 dock='float' / 'bottom' 的面板会被 PANEL_DOCKS 白名单
-   落回它自己的注册位置，不需要额外迁移代码。
-
-   **保留下来的**是「搬节点不丢状态」那三个与布局无关的函数（capturePanelMove /
-   restorePanelMove / withPanelMove）—— 右栏换块时仍然靠它们保住滚动位置、焦点与输入框内容。 */
-
-/**
- * 搬的是同一批 DOM 节点，所以这里可以直接用**元素引用**记住 scrollTop ——
- * 不需要任何选择器（跨容器搬家时选择器最容易失配）。
- * 记两类滚动容器：① 节点自己与后代（.ai-body / .outline / .rel-list …）；
- * ② 节点往上的祖先（左栏 #leftSide 是整栏滚动的那一层）。
- * 一并记下：焦点元素（搬走带焦点的节点会被浏览器 blur 掉，键盘就废了）、
- * #chatInput 的内容与光标位置、消息条数（给探针留证据）。
- */
 function capturePanelMove(nodes) {
   const scrolls = [];
   const seen = new Set();
@@ -638,13 +469,6 @@ function restorePanelMove(snap) {
     }
   };
   put();
-  /**
-   * 搬完之后容器 / 内容的高度还会继续变（字体与公式渲染、图片解码…），高度一变，
-   * 刚才被夹住的滚动位置就又放得回去了；浏览器自己的「滚动锚定」也会在随后的布局里
-   * 把 scrollTop 往下带。所以每帧补一次，最多盯 40 帧（≈0.7s）：**用户一碰页面就停**
-   * （按下 / 滚轮 / 按键），保证不会跟用户自己之后的滚动较劲。
-   * 只补滚动：焦点与输入内容在第一趟就恢复了，不能被后面的帧反复覆盖。
-   */
   let stopped = false;
   const stop = () => { stopped = true; };
   const opts = { once: true, capture: true, passive: true };
@@ -736,17 +560,6 @@ function panelActions(id) {
    用户口径：「A 只留最左边那条窄活动栏」+「那几个点不动……直接删掉就行」。
    左栏的面板入口现在只剩常驻的 `#railLeft`（`syncRailActive()` 负责高亮）。 */
 
-/**
- * 面板入口手势。**现在只有右栏的「译文 / 问答」切换器（#aiBar）在用它**。
- *
- * 左栏底部那个图标坞（`#panelDock`）已按用户要求删除 ——
- * 原话：「我说的就是那几个侧栏下面的那几个点不动，但是你直接删掉就行」，
- * 以及更早的「A 只留最左边那条窄活动栏」。所以左栏的面板入口**只剩最左边那条活动栏**
- * （`#railLeft`，本来就是常驻的）。
- *
- * （更早的「右键＝更多菜单」「按住拖出＝应用内卡片」两套手势已随面板管理器与
- *   应用内浮窗一起删除：右键菜单里的每一项都指向已经不存在的功能。）
- */
 function bindPanelToggleGestures(btn, id, { onClick = null } = {}) {
   btn.addEventListener('click', (e) => {
     if (onClick) onClick(e);
@@ -759,18 +572,10 @@ function bindPanelToggleGestures(btn, id, { onClick = null } = {}) {
 const aiBarEl = (_n) => document.getElementById('aiBar');
 
 /* 左栏图标坞（#panelDock / syncPanelDock / dockButton / PANEL_DOCK_ICON）
-   已整体删除（2026-10 用户口径：「A 只留最左边那条窄活动栏」+「直接删掉就行」）。
+   已整体删除。
    左栏的面板入口现在只有常驻的 `#railLeft` 那一条，左右两侧不再各有一套图标。 */
 
 /** 点图标：显示 / 收起（右栏「一栏只开一个」的互斥由 setPanelVisible 保证） */
-/**
- * 把「左栏一次只开一块」这条不变量在 boot 时强制一遍。
- *
- * 为什么需要：`setPanelVisible` 里已经有互斥规则，但它只在**用户点击**时生效 ——
- * 老存档（reader.panels）里可能存着「文件 + 目录 + 笔记」同时可见，读回来就是三块都摊开。
- * 用户实测反馈的正是这个（「现在一打开有四个」）。所以启动时收敛一次：
- * 只留 order 最靠前的那一块可见，其余收起（**不动 collapsed**，那是另一回事）。
- */
 function normalizeLeftPanels() {
   const vis = PANEL_IDS
     .filter((id) => !isRightPanel(id) && state.panels?.[id]?.dock === 'left' && state.panels[id].visible)
@@ -780,14 +585,6 @@ function normalizeLeftPanels() {
   return true;
 }
 
-/**
- * 点左栏图标坞里的图标（2026-10 用户口径）：
- *   「点击已开的图标也不会关闭侧栏，而是不做反应」。
- *
- * 所以这里**不再 toggle**：已经开着的那一块再点一次是 no-op，只有点**没开**的
- * 才切换过去（左侧本来就只有一块可见，见 setPanelVisible 的互斥规则）。
- * 收起侧栏是**另一个**明确动作 —— 顶栏的「收起左栏」或拖动分隔条，不混在面板切换里。
- */
 function toggleDockPanel(id) {
   const p = state.panels[id];
   if (!p) return;
@@ -799,7 +596,7 @@ function toggleDockPanel(id) {
 
 /**
  * 六个面板统一走这一条渲染路径。
- * 左栏四块**不重写内部结构**：文件块用 .side-head 当标题栏，其余三块沿用 section.sec + .sec-head，
+ * 左栏四块不重写内部结构：文件块用 .side-head 当标题栏，其余三块沿用 section.sec + .sec-head，
  * 只补 data-panel 与标题栏上的折叠 / 隐藏控件（内部所有 id 一个都没动）。
  */
 function initPanels() {
@@ -824,44 +621,14 @@ const DEFAULT_UI_STYLE = Object.freeze({
   // 这两个和上面的 fontSize（阅读/结果字号 --ai-fs）是互相独立的三套刻度。
   uiFontSize: 13.5, controlSize: 100,
   showPage: true, showQuote: true, showSources: false,
-  /**
-   * 发送范围（2026-10 用户口径）：「第一个应该是默认全文加联网，在设置里面调节」。
-   *
-   * 这两个**不再是**输入框旁边「这次发送」的一次性开关（那一排连同「范围」菜单、「清空会话」
-   * 一起撤掉了），而是和主题 / 字号一样的**全局偏好**：默认都开着，改一次就一直算数，
-   * 跨论文、跨会话都不用再点。开关在设置页（#cfgUseFullText / #cfgUseWeb）。
-   */
   useFullText: true, useWeb: true,
-  /**
-   * 双指缩放速度倍率（2026-10-10 用户口径：「把缩放速度做进设置里面」）。
-   *
-   * 以前速度是两个写死的常数：触摸屏捏合 `PINCH_GAIN = 1.6`、触摸板灵敏度 `0.0022`。
-   * 现在两者都乘这个倍率，**默认 1 = 原来的手感**（老存档没有这个字段时也就落回 1，
-   * 用户的手感不会因为升级被偷偷改掉）。范围 0.5~2，见 pdfview.js 的 clampZoomSpeed。
-   */
   zoomSpeed: 1,
 });
 let uiStyle = { ...DEFAULT_UI_STYLE };
 
-/**
- * 阅读字号（结果正文 --ai-fs）的范围：12–30px。
- *
- * 2026-10 用户口径：「阅读字号要能够更大，到 30」—— 原来是 12–19，19 封顶在大屏上偏小。
- * 上限定成常量是因为**三处必须一致**：设置页滑杆的 max（`public/index.html` 的 #uiFontSize，
- * 那里写的是字面量 30，改这里要同步改）、applyUiStyle 的兜底夹取、Ctrl +/- 与设置页保存的夹取。
- * 下限 12 不动：再小中文就糊了。
- */
 const READ_FS_MIN = 12;
 const READ_FS_MAX = 30;
 
-/**
- * 右栏结果区「文字列」的可拖宽度范围（px），见 initTextEdgeHandle()。
- *
- * 原先 `.msg` 的 `--ai-max-width` 是固定 480–920（对应已下架的「结果最大宽度」设置）；
- * 现在用户可以直接拖文字列左右边沿调宽（2026-10 口径），范围放宽到 320–1600：
- * 下限 320 在 30px 字号下每行还能读十来个字，上限 1600 足够宽屏自由拖。
- * ⚠️ 拖动时写的就是 uiStyle.maxWidth 这一份值，所以 applyUiStyle 里的夹取必须用同一组常量。
- */
 const TEXT_COL_MIN = 320;
 const TEXT_COL_MAX = 1600;
 
@@ -873,7 +640,7 @@ const ctlScaleOf = (v) => clamp(Number(v) || DEFAULT_UI_STYLE.controlSize, 80, 1
 const state = {
   doc: null,
   viewerDocId: null,
-  // 响应式布局：窗口太窄导致的自动收起。**只在内存里**，绝不写进 reader.ui
+  // 响应式布局：窗口太窄导致的自动收起。只在内存里，绝不写进 reader.ui
   //（reader.ui.noLeft/noRight 是用户意图，两者混在一起会导致「窄窗用过一次就永久收起」）
   autoCollapse: { left: false, right: false },
   papers: [],
@@ -911,11 +678,6 @@ const state = {
   blockMeta: {},
   splitEls: {},
   dragBlock: null,
-  /**
-   * 发送范围。**默认全文 + 联网**，真值存在 uiStyle 里（见 DEFAULT_UI_STYLE）。
-   * 这里的初值只是「uiStyle 还没装进来」之前的安全默认；boot() 里 initLayout() 之后
-   * 由 syncScopePrefs() 用存档值覆盖。它不再有输入框旁边的按钮，改它只走设置页。
-   */
   useFullText: DEFAULT_UI_STYLE.useFullText,
   useWeb: DEFAULT_UI_STYLE.useWeb,
   docText: null,
@@ -926,24 +688,8 @@ const state = {
   refs: [],
   refsDoc: null,
   refsParsing: null,
-  /**
-   * 阶段 3：代际令牌。**只在换论文时 +1**（relBumpGen）。
-   * 所有异步收尾（解析参考文献 / 单条查 PDF）都要先校验
-   * `gen === state.relGen && docId === state.doc?.docId`，对不上就整批丢弃 ——
-   * 这是 R1/R2/R3/R5 的统一解法：切换论文后，旧论文的在途结果一个字都写不进来。
-   *
-   * 注意它**不**在「↻ 重新解析」时 +1：那条路径没换论文，在途的单条查询必须能
-   * 按稳定 key 落回重建后的新对象，否则 ↻ 会把按钮永久卡在「查询中…」。
-   * 「解析 vs 解析」的先后由 refsSeq 单独管。
-   */
   relGen: 0,
   refsSeq: 0,
-  /**
-   * 阶段 3：引用条目的显式状态表 `key -> { key, docId, status, found, fail, guessed }`。
-   * 以前 busy/found 直接挂在 ref 对象上，而 ref 对象在「↻ 重新解析」时会被整批换掉，
-   * 在途请求的结果就写进了被丢弃的旧对象（busy 永远卡住）。
-   * key 由内容派生（relKey = 编号 + 文本前 60 字），所以换了对象也找得回来。
-   */
   relItemState: new Map(),
   /** 阶段 3：列表视图（搜索 / 筛选 / 排序 / 分组折叠）—— 只存内存，切论文重置，不写 localStorage */
   relView: { q: '', filter: 'all', sort: 'num', fold: { lib: false, pdf: false, todo: false, cited: false } },
@@ -955,12 +701,6 @@ const state = {
   opsCache: new Map(),
   opsDone: {},
   opsDoc: null,
-  /**
-   * 「读懂论文」的教学状态（随会话存进 session-*.json）：
-   *   walk = { docId, sid, step, messages, updatedAt } —— 「带我一步步读」的进度与续讲历史
-   *   current = 当前教学对象（前置知识单项 / 图表公式对象），给「这个我懂了 / 这里没懂」用
-   * 教学类回答的缓存（带档案版本号）单独放，不混进 opsCache。
-   */
   teaching: { walk: null, current: null },
   teachingCache: new Map(),
 };
@@ -968,7 +708,6 @@ const state = {
 let viewer = null;
 let serverState = {};
 
-/* ══════════════════════════════ 启动 ══════════════════════════════ */
 
 (async function boot() {
   await Settings.load();
@@ -1025,14 +764,7 @@ let serverState = {};
   checkConfigWarning();
 })();
 
-/* ══════════════════════════════ 布局 / 拖动调宽 / 响应式收展 ══════════════════════════════ */
 
-/**
- * 响应式布局常量（与 style.css 里的同名令牌一一对应，改一处要改两处）
- *   VIEWER_MIN 正文最小可用宽度（--viewer-min）：放不下就收侧栏，而不是把 PDF 挤扁
- *   RAIL_W     活动栏宽度（--rail-w）：收起的一侧仍占这么宽（贴边的竖条）
- *   SPLIT_W    分隔条宽度（.splitter 是 flex: 0 0 5px）
- */
 const VIEWER_MIN = 420;
 const RAIL_W = 40;
 const SPLIT_W = 5;
@@ -1043,19 +775,6 @@ const COLLAPSE_BELOW = { left: 140, right: 200 };
 /** 右栏的历史最宽值（拖动 / 键盘微调共用的默认上限，见 rightSideMaxW 的说明） */
 const RIGHT_MAX_CLASSIC = 720;
 
-/**
- * 右栏最宽能拖到多少（2026-10 用户口径：
- *   「大屏幕的时候，右侧的侧栏应该能够往左拉伸的多一点，可以拉到一半的位置」）。
- *
- *   · 窗口宽 ≤ 1440px：维持原来的 720px —— 小屏上「半屏」比 720 还窄，不能反过来把
- *     用户现有的拖动手感改小；
- *   · 更大的屏幕：上限提到**窗口宽的一半** —— 分隔条可以一路拖到屏幕中线，
- *     右栏最多占半屏（再宽正文就没地方了）。
- *
- * 写成函数而不是常量：窗口尺寸一变，上限自动跟着变，不需要在 resize 里维护任何状态。
- * ⚠️ 拖动（bindSplitter）、键盘微调、读存档这三处都必须用它，否则会出现
- * 「拖到一半松手又被夹回 720」「存档里 1280 的宽度在 1440 窗口上装不下」这类不一致。
- */
 function rightSideMaxW() {
   return Math.max(RIGHT_MAX_CLASSIC, Math.round(window.innerWidth / 2));
 }
@@ -1063,24 +782,8 @@ function rightSideMaxW() {
 /** 宽度带 .14s 过渡，量正文宽度要等它走完（键盘微调这种宽度真的在变的路径用） */
 const REFIT_AFTER_MS = 200;
 
-/**
- * 布局意图。这里必须把两件事分清楚：
- *   sideIntent.noLeft/noRight  用户意图 —— 唯一会被写进 localStorage 的（reader.ui）
- *   state.autoCollapse         窗口太窄导致的自动收起 —— 只在内存里，绝不持久化
- * body.no-left / body.no-right = 用户意图 ∪ 自动收起，仍然是「收起」的唯一开关。
- * pinned：用户刚刚「明确展开过」的一侧，在当前窗口尺寸下不再被自动收起（窗口一变就作废）——
- * 否则窄窗里点活动栏展开会当场又被收起来，按钮等于坏的。
- */
 const sideIntent = { noLeft: false, noRight: false, pinned: { left: false, right: false } };
 
-/**
- * 两侧栏的**用户宽度意图**（拖动分隔条 / 读存档得到），与「这一刻实际生效的宽度」分开。
- *
- * 为什么必须分开：窗口变窄时侧栏会临时让宽（见 applyResponsiveLayout 的 SIDE_MIN 那一段），
- * 而 `--left-w` / `--right-w` 会被写成让宽后的值。如果读存档也从这两个变量读回来，
- * 那么「在窄窗口下关一次应用」就会把用户拖好的宽度永久改小 —— 和 autoCollapse 不许
- * 写进 reader.ui 是同一个道理。所以：**用户意图只从拖动与存档来，实际宽度只在布局里算。**
- */
 const sideBaseW = { left: 210, right: 360 };
 
 /** 读一个 px 令牌的数值（读不到就用兜底值） */
@@ -1095,30 +798,10 @@ function refitViewer(delay = 0) {
   if (delay > 0) setTimeout(run, delay); else run();
 }
 
-/* ══════════════ 文中书签：横向夹进阅读区可见范围 ══════════════
-
-   缺陷（2026-10 实测，不是推断）：右栏展开后阅读区只剩 920px，而纸面仍是**右栏没开时**
-   按适应宽度算出来的 1213px —— 纸面居中溢出，右边缘落到 x=1282，阅读区可见右边界只有 1135。
-   `.hl-pin` 是绝对定位在纸面右边缘的小书签（`right: 3px`，见 style.css / pdfview.js），
-   于是它的中心 x=1275 落在阅读区之外：`elementFromPoint(1275, 216)` 命中的是右栏里的
-   `DIV.msg`，**真实鼠标点不到**（只有 `document.querySelector('.hl-pin').click()` 这种
-   直接派发的事件还能打开笔记框，所以现象是「文中那条笔记点不开」而节点是活的）。
-
-   为什么用「夹取」而不是「重新适应宽度」：纸面比阅读区宽本身是合法的（用户放大到 250%
-   时必然横向溢出，e2e 还断言了「返回原位置后缩放仍是 198%」），在跨过右栏开关时偷偷改
-   缩放会同时改掉用户的缩放意图。书签是**导航入口**，它只需要保证「永远落在阅读区可见
-   范围内、点得到」：不溢出时就是原来的 `right: 3px`，溢出时贴在阅读区可见右边缘，
-   横向滚动时差值连续地跟着回来（over → 0 时正好等于 right: 3px，不会跳）。
-
-   实现只在页元素上写一个 CSS 变量 `--pin-clamp`，定位仍然全在 CSS 里：
-       .hl-pin { right: calc(3px + var(--pin-clamp, 0px)) }
-   好处：pdfview.js 重画书签（setHighlights / 虚拟化重渲染 / 缩放）时会**删掉重建**
-   `.hl-pin` 节点，但它从不碰这个变量 —— 变量挂在 .page 上，重建出来的书签自动带着
-   同样的夹取量，两边不需要互相通知。 */
 const PIN_INSET = 3;   // 与 style.css 里 .hl-pin 的 `right` 基准值必须一致
 
 /**
- * 阅读区**真正可见**的右边界。
+ * 阅读区真正可见的右边界。
  * 不能用 `rect.right`：滚动容器的 rect 含竖向滚动条占的那一条，
  * 按 rect.right 夹取会把书签塞到滚动条底下，还是点不到。
  */
@@ -1159,21 +842,8 @@ function schedulePinClamp() {
   pinClampRaf = requestAnimationFrame(clampPins);
 }
 
-/**
- * 两侧是否还有「被用户固定（pinned）」的面板。
- * 注意与 sideIntent.pinned 区分：那个是 2.1 的**临时**豁免（用户刚明确展开过这一侧，
- * 在当前窗口尺寸下不再被自动收起，窗口一变就作废）；这里的 pinned 是用户在面板管理器里
- * 明确要求的「这一侧别自动收」，持久化在 reader.panels 里，只参与自动收起的先后顺序。
- */
 const dockHasPinned = (dock) => PANEL_IDS.some((id) => state.panels?.[id]?.dock === dock && state.panels?.[id]?.pinned);
 
-/**
- * 唯一的布局重算入口：按窗口宽度决定两侧栏收不收。
- *   放得下 → 按用户意图恢复（本次的临时豁免同时作废）
- *   放不下 → 先自动收「用户没固定面板」的那一侧；两侧都没固定 / 都固定，维持 2.1 的默认顺序（先右后左）
- * 每次都从「用户意图」重新算，不累积上一次的自动收起，所以窗口一变宽就自动撤销。
- * 返回：body 上的收起状态是否变了（调用方据此决定要不要立刻重排正文）。
- */
 function applyResponsiveLayout() {
   const innerW = window.innerWidth;
   const baseLeftW = sideBaseW.left;
@@ -1182,39 +852,13 @@ function applyResponsiveLayout() {
   const viewerMin = cssPx('--viewer-min', VIEWER_MIN);
   // 侧栏先「让宽」再「整条消失」（见下方 sideWanted 的注释）
   const SIDE_MIN = 220;
-  /**
-   * 侧栏被压到的最小保底宽度：窄窗下宁可压窄，也不整条隐藏（用户口径：「翻译的内容应该是要
-   * 记录在右侧那个里面的，不管打不打开」）。
-   *
-   * ⚠️ 原来是 60。60px 的栏里 `.msg` 只剩 60 − 2×`--ai-pad`(14) = **32px**，中文一行两三个字，
-   * 而且 `.side` 是 `overflow:hidden`，多出来的内容直接**被裁掉**（滚也滚不到）——
-   * 用户看到的就是「右边被挡住了」。探针实测（`test/artifacts/phase1/probe-baseline2.json`）：
-   * 900px / 780px 窗口下 `--right-w=60px`、块宽 59px、`.ai-body` 只有 59px。
-   * 160px 是「块头能放下标题 + 正文每行能读十来个字」的下限；再窄就没有意义了。
-   * 注意这里只影响「这一侧还有可见块、但窗口放不下」的情形：真正放不下时依旧按
-   * `fits()` 的规则整条收起（`cards.mjs` 的 780px 自动收起断言仍然成立）。
-   */
   const SIDE_SQUEEZE_W = 160;
-  /** 用户口径：「窄窗下不要出现横向滚动条、正文不能只剩一条缝」→ 正文硬下限就取
-   *  --viewer-min（420）。⚠️ 这里**不能**降成一个很小的值：试过 200，结果 780px 窗口下
-   *  右栏死活不收、正文被压到 200px —— 那是另一种坏（正文读不了）。
-   *  真正的规则是「先让宽、再收起」：让宽的下限是 SIDE_MIN，让到最小还不够就整条收起。 */
   const VIEWER_HARD_MIN = viewerMin;
 
   // 两侧栏占掉的横向空间（右栏恒为一栏，不再有第 2 栏那份账）
   const chromeOf = (noLeft, noRight, lw = baseLeftW, rw = baseRightW) =>
     (noLeft ? railW : lw + SPLIT_W) + (noRight ? railW : rw + SPLIT_W);
 
-  /**
-   * 侧栏的「让宽」：用户这次的诉求是
-   *   「翻译部分窗口容易自动消失，翻译的内容应该是要记录在右侧那个里面的，不管打不打开」
-   * 而旧逻辑是**阶跃**的：窗口一旦不够宽，整条右栏直接 display:none ——
-   * 面板并没有真的消失（模型、消息、滚动位置都还在），但用户看到的就是「它没了」。
-   * 所以这里改成**两级**：
-   *   ① 先按需要把侧栏宽度往下压（下限 SIDE_MIN），正文优先；
-   *   ② 压到最小还是放不下，才按原来的规则整条收起。
-   * 强制收起只在「正文连 VIEWER_HARD_MIN 都保证不了」时发生。
-   */
   let leftApplied = baseLeftW;
   let rightApplied = baseRightW;
   const chrome = (noLeft, noRight, lw, rw) => chromeOf(noLeft, noRight, lw, rw);
@@ -1231,12 +875,6 @@ function applyResponsiveLayout() {
       }
     }
   }
-  /**
-   * 右栏「最多半屏」这个上限对**自动让宽**同样有效：窗口从大屏缩小之后，存档里拖出来的
-   * 1280 不应该在 1920 的窗口上继续占掉 62%（见 rightSideMaxW）。
-   * 只有夹完还能保住正文最小宽度时才夹 —— 否则交给下面的自动收起 / 压窄逻辑处理，
-   * 别为了守「半屏」把正文挤成一条缝。
-   */
   {
     const cap = Math.max(SIDE_MIN, rightSideMaxW());
     if (rightApplied > cap
@@ -1253,10 +891,6 @@ function applyResponsiveLayout() {
     sideIntent.pinned.left = false;
     sideIntent.pinned.right = false;
   } else {
-    // 阶段 2.2a：面板固定优先决定「先牺牲哪一侧」——
-    // 只有右栏有固定面板 → 先收左栏；只有左栏有固定面板 → 先收右栏；
-    // 两侧都有或都没有 → 维持 2.1 的默认顺序（先右后左）。
-    // pinned 只影响这里的自动收起，用户手动收起（sideIntent）不受它影响。
     const pinLeft = dockHasPinned('left');
     const pinRight = dockHasPinned('right');
     const order = pinRight && !pinLeft ? ['left', 'right'] : ['right', 'left'];
@@ -1280,42 +914,10 @@ function applyResponsiveLayout() {
   if (Math.round(leftFinal) !== Math.round(cssPx('--left-w', baseLeftW))) setVar('--left-w', leftFinal);
   if (Math.round(rightFinal) !== Math.round(cssPx('--right-w', baseRightW))) setVar('--right-w', rightFinal);
 
-  /**
-   * 第三档：**别再整条藏掉侧栏**（用户口径 2026-10-04：
-   *   「翻译的内容应该是要记录在右侧那个里面的，不管打不打开」）。
-   *
-   * 现状：窗口宽 960~1000px 时，正文被压到 `--viewer-min`(420) 之后右栏整条 `display:none`，
-   * 译文块 `0×0`、命中可见比例 0% —— 用户看到的就是「译文被挡死了，啥也看不见」。
-   * 而 `body.right-empty`（两块都关掉收成活动栏，是我按用户要求加的）也依赖
-   * `--right-w > 0` 才能把栏从 `display:none` 拉回来，所以窄窗下它一起失效。
-   *
-   * 这里加一条硬保底：**只要这一侧有可见面板要显示、且用户没主动收起，就保证它的宽度 ≥60px**。
-   * 于是窄窗下不再"整条消失"，而是"压缩到最小 + 正文横向滚动"（后者由 `body.side-squeezed` 加）。
-   * 修复顺序：这一条必须在 `applyPanels()`/`renderCols()` 之前，所以放在这里写 CSS 变量。
-   */
   let squeezed = false;
   if (!noLeft && document.body.classList.contains('no-left') && leftFinal < 60) { setVar('--left-w', 60); squeezed = true; }
-  /**
-   * 右栏：`noRight` 在窄窗下会是 true（`fits()` 放不下就自动收起）。但只要
-   * **这一侧还有可见面板要显示**，就不许它整条消失 —— 压到 60px 并让正文横向滚动。
-   *
-   * 注意这里必须按 `noRight`（实际是否收起）判断，不能按 `rightFinal`：
-   * `rightFinal` 在收起时等于**用户意图宽度**（360），拿它比 `< 60` 永远不成立
-   * （实测 980px 时 `--right-w=360px`、`#rightCols display=none`、译文块 0×0）。
-   */
   {
     const hasRightContent = PANEL_IDS_RIGHT.some((id) => state.panels[id]?.visible);
-    /**
-     * ⚠️ 保底只在**自动收起**时生效（`!sideIntent.noRight`）—— 这一条是子智能体逐帧验证抓出来的
-     * 「单向陷阱」：原来的条件只看 `noRight || rightFinal < 60`，而 `noRight` 恰好就是
-     * 「用户主动收起」以及「拖分隔条拖过 collapseBelow」，于是保底会把用户的意思覆盖掉：
-     * 拖过阈值 → 被压成 60px；再往回拖 → `--right-w` 中途到过 353px，松手又被写回 60px；
-     * 顶栏「收起右栏」也被吞（点完仍 60px）→ **进 60px 后既收不起也展不开也拉不宽，只能刷新**。
-     *
-     * 现在的口径：
-     *   · 用户**明确**要收起（`sideIntent.noRight`）→ 尊重他，整条收起，不做保底；
-     *   · 只是**自动**收起（窗口窄、或拖到 collapseBelow）→ 不隐藏，压到最小宽度并让正文横向滚动。
-     */
     const autoCollapsed = noRight && !sideIntent.noRight;
     if (hasRightContent && !sideIntent.noRight && (autoCollapsed || rightFinal < SIDE_SQUEEZE_W)) {
       setVar('--right-w', SIDE_SQUEEZE_W);
@@ -1391,15 +993,6 @@ function syncSideToggleButtons() {
   }
 }
 
-/**
- * 把一个右栏面板显示出来，并把右栏展开（顶栏那个右栏开关用）。
- *
- * **必须是模块级函数**：`openRightPanelFromRail` 定义在 initLayout() 内部
- * （那里才有 sideIntent 等闭包），`bindSideToggleButton` 调不到它 ——
- * 写成裸函数名会抛 `openRightPanelFromRail is not defined`（实测踩过，
- * 症状是「点顶栏右栏开关毫无反应」）。这里把它抬到模块作用域，
- * 内部需要的东西（state / sideIntent / 下面几个函数）本来就都是模块级的。
- */
 function revealRightPanelFromToggle() {
   const last = readRightChoice() || 'chat';
   const id = PANEL_IDS_RIGHT.includes(last) ? last : 'chat';
@@ -1421,14 +1014,6 @@ function bindSideToggleButton(side, btn) {
       setPanelVisible(readLeftChoice() || 'files', true);
     }
     setSideCollapsed(side, !collapsed, collapsed);
-    /**
-     * ⚠️ 展开右栏时**必须同时保证里面有一块面板开着**（2026-10 实测踩到）：
-     * 右栏两块默认都不显示，于是 `body.right-empty` 为真、`#rightCols` 是 `display:none`。
-     * 这时 `sideIntent.noRight` 本来就是 false，`setSideCollapsed('right', false)` 就是
-     * **彻底 no-op** —— 用户点顶栏右栏开关没有任何反应（而右侧小活动栏已按用户要求删掉，
-     * 页面上再没有第二个右栏入口，等于这个问题没有别的出口）。
-     * 所以这里补一句：栏是空的就先开一块（默认问答，能打字，是最常用的入口）。
-     */
     if (side === 'right' && collapsed && rightPanelInCol(1) === '') {
       revealRightPanelFromToggle();
     }
@@ -1442,7 +1027,7 @@ function initLayout() {
   if (saved.leftW) { sideBaseW.left = saved.leftW; document.documentElement.style.setProperty('--left-w', `${saved.leftW}px`); }
   if (saved.rightW) {
     /**
-     * 存档里的宽度先按**当前窗口**的上限夹一下：右栏的上限随窗口变（大屏最多半屏，
+     * 存档里的宽度先按当前窗口的上限夹一下：右栏的上限随窗口变（大屏最多半屏，
      * 见 rightSideMaxW）。比如在 2560 宽的窗口上拖过 1280，换到 1920 的窗口打开时
      * 不该一上来就占掉 2/3 —— 夹到 960，本次打开按这个宽度算，存档里的原值不动。
      */
@@ -1453,16 +1038,6 @@ function initLayout() {
   // 只恢复「用户意图」；自动收起由 applyResponsiveLayout() 按当前窗口宽度当场算
   sideIntent.noLeft = !!saved.noLeft;
   sideIntent.noRight = !!saved.noRight;
-  /**
-   * **有面板明确停靠在右栏且可见时，存档里的 noRight 不许把它藏起来。**
-   *
-   * 这是「右栏自锁」那一类缺陷的对策 —— 用户实测「译文被挡死了啥也看不见」的路径之一
-   * 就是存档 `reader.ui.noRight=true`（可能来自更早的窄窗自动收起或旧版本）。内容在、
-   * 栏不在，是最让人困惑的一种坏法，所以这里让「有内容要显示」优先。
-   *
-   * ⚠️ 反向那条（「右栏只有浮窗时把右栏收起来给浮窗让位」）已随应用内浮窗一起删除：
-   *   dock 再也不会是 'float'，浮窗不可能挡住右栏，也就没有「让位」这回事。
-   */
   const dockedRightVisible = PANEL_IDS_RIGHT.some((id) => state.panels[id]?.visible && state.panels[id].dock === 'right');
   if (dockedRightVisible) {
     sideIntent.noRight = false;
@@ -1487,16 +1062,6 @@ function initLayout() {
   }, 120));
 }
 
-/** 活动栏：点一下 = 展开对应侧栏，并把那一块滚到可见（2.2a：目标改成 data-panel，与面板管理器同一份模型）
- *
- *  左栏的口径（用户 2026-10-03）：
- *    「左侧应该也做成一次只能打开一个。而且再次点击选中的就直接收起收成小的侧边栏。
- *      然后点击侧边栏应该出来的就是点击的哪一个。」
- *  所以左栏有**三级**，不再是「展开 / 收起」两态：
- *    ① 展开且显示某一块     —— 点别块的图标 → 换成那一块；点自己那块（在左栏内）→ 收到 ②
- *    ② 收起成图标活动栏     —— 点图标 → 展开并显示**那一个**；点上次选的那个 → 回到 ① 的同一块
- *    ③ 文件块的筛选框等内部折叠（p.collapsed）—— 与 ①② 正交，点标题栏管的是它
- *  选中态高亮的判据是「这一块此刻在左栏里显示着」，而不是「上次点过谁」—— 界面不许骗人。 */
 function initRails() {
   const targets = { files: 'files', outline: 'outline', notes: 'notes', rel: 'relations' };
   $$('#railLeft .rail-btn').forEach((btn) => {
@@ -1505,14 +1070,6 @@ function initRails() {
       if (!id) return;
       const expanded = !document.body.classList.contains('no-left');
       const wasVisible = !!state.panels?.[id]?.visible;
-      /**
-       * 2026-10 用户口径：「点击已开的图标也不会关闭侧栏，**而是不做反应**」。
-       *
-       * 所以这里从原来的「再点一次收成活动栏」改成 **no-op**：
-       * 这一块已经开着、左栏也开着的时候，再点它是**什么都不做**（既不改面板，也不收栏）。
-       * 收起左栏是另一个明确动作 —— 顶栏的「收起左栏」或拖动分隔条。
-       * （实测踩过：改成 no-op 之前，用户点已开图标会把整条左栏收掉，看着像"图标坏了"。）
-       */
       if (expanded && wasVisible) return;
       rememberLeftChoice(id);            // 点活动栏出来的就是点的这一个，并且记住它
       setSideCollapsed('left', false, true);
@@ -1527,21 +1084,6 @@ function initRails() {
       }
     };
   });
-  /**
-   * 右侧活动栏那个按钮（`#railRightBtn`）**已删除**（2026-10 用户口径：
-   * 「最右边那个小的侧边栏不要」）。右栏的开关只剩顶栏的 `#topbarRightToggle`。
-   * 下面这个 onclick 只在元素还存在时才挂（`if (rightBtn)`），所以不会抛。
-   *
-   * ⚠️ 不能只写 `setSideCollapsed('right', false, true)`：当右栏**两块都关掉**时，
-   * `body.right-empty` 把整条右栏 `display:none` 了，而此刻 `sideIntent.noRight` 本来就是 false，
-   * 于是这个 onclick 是**彻底 no-op** —— 实测真鼠标点击按钮确实收到 pointerdown+click 也获得焦点，
-   * 但 `right-empty` 恒 true、`#rightCols` 恒 `display:none`、连点两次都无效。
-   * 这时页面上没有任何可见的译文/问答入口（`#aiBar` 随栏一起隐藏，`#panelDock` 只有左栏四块），
-   * 用户看到的就是「一个点不动的按钮」，只能靠划词才救回来。
-   *
-   * 正确语义：右栏是空的时候，这个按钮应该**打开一块面板**（而不是去展开一条空栏）。
-   * 记住上次用过哪一块，没有就默认问答（问答能打字，是最常用的入口）。
-   */
   const rightBtn = $('#railRightBtn');
   function openRightPanelFromRail() {
     const last = readRightChoice() || 'chat';
@@ -1566,33 +1108,7 @@ function initRails() {
   syncRailActive();
 }
 
-/**
- * 顶栏自动隐藏 —— **已整体退役**（2026-10-04 用户改口径：「不做那个浮动栏了，就一直显示」）。
- *
- * 这里原来留着一整套「热区 8px + 指针位置状态机 + 焦点续命」的实现，以及
- * `topbarAutoEnabled()` / `TOPBAR_TRIGGER_H` 这一对已经恒为「关」的开关。
- * 热区元素已从 index.html 删除，常驻状态改由 initTopbar() 钉死，所以整段一并删除。
- *
- * 顺带留下一条仍然成立的结论：自动隐藏的静息态把整条顶栏 translateY(-100%) 移到屏幕外，
- * **任何按坐标点击顶栏控件的路径都会失败**（`page.click('#opsBtn')` 会抛
- * "Node is either not clickable"）。常驻之后这条路自然通了。
- */
 
-/* ══════════════════════════════════════════════════════════════════════════
-   应用内标题栏：窗口动作通道（无边框桌面壳）
-   ══════════════════════════════════════════════════════════════════════════
-
-   桌面壳（desktop/src/window.rs）现在把窗口做成**无边框**，标题栏由页面自己画：
-     · 三个按钮（最小化 / 最大化·还原 / 关闭）→ IPC
-     · 标题区按住拖动、双击切最大化 → IPC
-     · 八向缩放热区 → IPC
-   浏览器里（`node server.js`、手机版）没有 `window.ipc` → 给 body 打 `no-window-chrome`，
-   窗口控件与缩放热区整块不显示，其余功能完全不受影响。
-
-   ⚠️ wry 0.55 **没有** drag-region 特性（`data-wry-drag-region` 是个无效标记，翻过
-   wry-0.55.1/src/lib.rs，只有 `with_drag_drop_handler`，那是拖文件的），所以拖动只能走
-   这条 IPC；Rust 侧收到后调 tao 的 `drag_window()` / `drag_resize_window()`。
-   几何与悬停反馈照 VS Code 1:1，见 style.css 的「应用内标题栏」一节。 */
 
 const WINDOW_IPC = typeof window !== 'undefined'
   && !!window.ipc && typeof window.ipc.postMessage === 'function';
@@ -1654,35 +1170,10 @@ function initWindowChrome() {
   syncFocus();
 }
 
-/**
- * 顶栏：**常驻**。
- *
- * 早期版本是「阅读时自动隐藏、鼠标移到屏幕顶边才滑下来」，靠一个 `<div class="topbar-hot">`
- * 热区元素 + 一整套指针位置状态机实现。两个原因让它整体下架：
- *   · 用户口径改成「顶栏常驻，不要再悬停才出现」；
- *   · 自动隐藏时顶栏在静息态整个移出屏幕，**任何按坐标点击**的路径都会失败
- *     （`page.click('#opsBtn')` 会抛 "Node is either not clickable"）。
- * 所以热区元素从 index.html 删除，这里把 body 钉在 `topbar-static`（CSS 里顶栏是普通流布局、
- * 不做 transform）。历史开关（`?topbar=auto` / `?topbar=static`、`reader.topbarAuto`）的解析
- * 已经全部删除 —— 现在**没有任何代码读 URL 上的 topbar 参数**，测试里继续带 `?topbar=static`
- * 只是被当成未知查询参数忽略掉，顶栏照样是常驻的。
- *
- * ⚠️ 命名铁律（这里踩过一次真实事故）：**body 上的状态类不能和任何元素的类名同名**。
- * 状态类曾叫 `topbar-hot`，与热区 div 的类名撞车，于是 `classList.add('topbar-hot')`
- * 让 `<body>` 自己命中 `position:fixed; height:56px` 的元素样式，正文整片消失。
- * 现在只保留 `topbar-static` 这一个状态类，与任何元素类都不同名。
- */
 function initTopbar() {
   if (!$('#topbar')) return;
   document.body.classList.remove('topbar-auto', 'topbar-near');
   document.body.classList.add('topbar-static');
-  /**
-   * 回首页（2026-10）。阅读态下才需要它，但按钮一直在 —— 首页上点它等于刷新首页，
-   * 无害且比「按钮忽隐忽现」更可预期。
-   *
-   * 注意：**不卸载当前论文**。只切视图，`viewer` 与 `state.doc` 都留着，
-   * 所以再点「继续阅读」是瞬间回去，不重走加载与会话清理。
-   */
   const home = $('#homeBtn');
   if (home) home.onclick = () => setView('home');
   // 会话菜单（多会话）：点按钮开合，点外部/Esc 关掉
@@ -1716,12 +1207,6 @@ function syncRailActive() {
   }
 }
 
-/**
- * 六个面板统一走这一条渲染路径（左栏四块 + 右栏两块）。
- * 左栏**不重写内部结构**：文件块用 .side-head 当标题栏，其余三块沿用 section.sec + .sec-head，
- * 只补 data-panel 与标题栏上的折叠开关 / ⋯ 按钮（内部所有 id 一个都没动）。
- * 节点一定是从 DOM 里找出来的那一个，绝不重建 —— 否则消息与滚动位置会丢。
- */
 function ensurePanel(id, def) {
   const p = state.panels[id];
   let node = panelEl(id);
@@ -1733,7 +1218,7 @@ function ensurePanel(id, def) {
       if (!node) return null;
       node.classList.add('panel');
     } else {
-      // 左栏三块的节点按**结构位置**认领（第 1 个 section.sec = 目录、第 2 个 = 笔记、
+      // 左栏三块的节点按结构位置认领（第 1 个 section.sec = 目录、第 2 个 = 笔记、
       // 第 3 个 = 参考文献）。这里不能只靠 [data-panel] 查：那段属性是本函数第一次跑时才写上去的，
       // 第一次进来时 DOM 里根本还没有这个标记，查不到就会把三个面板全漏掉、顺序也排不动。
       const idx = PANEL_DEFS.filter((d) => d.dock === 'left').findIndex((d) => d.id === id) - 1;
@@ -1785,12 +1270,12 @@ function bindSplitter(node, cssVar, min, max, collapseBelow) {
   const isLeft = cssVar === '--left-w';
   const side = isLeft ? 'left' : 'right';
   /**
-   * 上限允许传**函数**：右栏的上限跟着窗口宽度变（大屏最多半屏，见 rightSideMaxW），
+   * 上限允许传函数：右栏的上限跟着窗口宽度变（大屏最多半屏，见 rightSideMaxW），
    * 左栏还是常量。函数每次用到的那一刻才求值 —— 拖动途中窗口尺寸变了，
    * 也不会拿着旧上限把宽度夹回去。
    */
   const maxOf = () => (typeof max === 'function' ? max() : max);
-  // 拖动 / 键盘微调 = 用户在改**宽度意图**，同步记进 sideBaseW。
+  // 拖动 / 键盘微调 = 用户在改宽度意图，同步记进 sideBaseW。
   // （布局自动让宽走的是 document.documentElement.style.setProperty，不经过这里，
   //   所以「用户的宽度」和「这一刻生效的宽度」不会被搅在一起。）
   const setW = (px) => {
@@ -1856,7 +1341,7 @@ function bindSplitter(node, cssVar, min, max, collapseBelow) {
     window.removeEventListener('pointerup', up);
     const finalW = cssPx(cssVar, startW);
     if (finalW < collapseBelow) {
-      // 拖到阈值以下 = 用户主动把这一侧拖没了：等同手动收起，**要写进 reader.ui**；
+      // 拖到阈值以下 = 用户主动把这一侧拖没了：等同手动收起，要写进 reader.ui；
       // 宽度恢复成这一侧的记忆宽度（这次拖动开始前的宽度），下次展开还是这么宽
       setW(startW);
       setSideCollapsed(side, true);
@@ -1897,7 +1382,7 @@ function readUi() {
 
 /**
  * 左栏「上次选中的是哪一块」。用途只有一个：活动栏收起时，点已被选中的那个图标要能
- * 原样展开回**同一块**，而不是随便挑一个。所以它必须持久化，跟着 reader.ui 一起走。
+ * 原样展开回同一块，而不是随便挑一个。所以它必须持久化，跟着 reader.ui 一起走。
  * （点活动栏里别的图标会立刻改写它；点左栏内部那块图标则会把它清空，语义交给「此刻显示谁」。）
  */
 function readLeftChoice() {
@@ -1931,7 +1416,7 @@ function saveUi() {
   const old = readUi();
   localStorage.setItem('reader.ui', JSON.stringify({
     ...old,
-    // 存**用户意图**的宽度（sideBaseW），不是这一刻实际生效的宽度 ——
+    // 存用户意图的宽度（sideBaseW），不是这一刻实际生效的宽度 ——
     // 窄窗下侧栏会让宽，把让宽后的值存下来等于把用户拖好的宽度改掉（同 autoCollapse 的纪律）。
     leftW: Math.round(sideBaseW.left) || 210,
     rightW: Math.round(sideBaseW.right) || 360,
@@ -1973,24 +1458,10 @@ function applyUiStyle() {
   root.style.setProperty('--ui-fs', `${uiFontSizePx(style.uiFontSize)}px`);
   root.style.setProperty('--ctl-scale', `${ctlScaleOf(style.controlSize)}`);
   const paperMode = style.paper === 'white' ? 'white' : 'tint';
-  /**
-   * ⚠️ PDF 纸面**不跟随深色主题**（用户实测反馈 2026-10-04）：
-   *   「调了保存之后，pdf 有的变深色有的不变深色，而且变深色的字体也没变成白色」。
-   *
-   * 原因链：
-   *   ① 深色主题把 `--paper-tint` 设成 #2A2721（深暖灰），而下面这行原样把它写进 `--paper`；
-   *   ② pdf.js 是**把纸面颜色画进位图**的（`page.render({ background: paper })`），
-   *      连同 PDF 自己的黑字一起画上去 —— 底色变深、字**还是原来的黑字**，等于自毁可读性；
-   *   ③ 主题切换这条路径**没有重画已渲染页面**（只有「设置 → PDF 纸面背景」那条会调
-   *      `viewer.refreshPaper()`），于是先渲染的页仍是浅色、后渲染的页变深色 —— 一半一半。
-   *
-   * 修法：纸面只用浅色。`纯白` = #FFFFFF；`跟随界面` 用浅色纸色常量（#F8F1DF），
-   * 深色主题下一律保持浅色纸（夜里看文档仍是白纸黑字，界面外壳才是深的）。
-   */
   const paperTint = getComputedStyle(root).getPropertyValue('--paper-tint').trim();
   root.style.setProperty('--paper', paperMode === 'white' ? '#FFFFFF' : PAPER_TINT_LIGHT(paperTint));
   /* 双指缩放速度也得跟着 uiStyle 走。设置页改动那条路走 applyUiSettingsFromControls，
-     但「恢复默认设置」是**直接换 uiStyle 再 applyUiStyle()** —— 两条路都要把值推给 viewer，
+     但「恢复默认设置」是直接换 uiStyle 再 applyUiStyle() —— 两条路都要把值推给 viewer，
      否则点完「恢复默认」滑杆回到 1.0、实际手势还是旧速度。 */
   viewer?.setZoomSpeed?.(uiStyle.zoomSpeed);
   applyMessageVisibility();
@@ -2006,7 +1477,6 @@ function applyMessageVisibility() {
   }
 }
 
-/* ══════════════════════════════ 阅读器 ══════════════════════════════ */
 
 function initViewer() {
   viewer = new PdfViewer($('#viewer'), {
@@ -2016,12 +1486,6 @@ function initViewer() {
       syncFootPage(cur, total);
       saveProgress();
     },
-    /**
-     * 状态栏已删除（2026-10，PDF 下面那条只有「就绪」三个字的空条）。
-     * 但**解析进度不能一起丢**：几百页的 PDF 解析要几秒，没有反馈用户会以为卡住了。
-     * 所以把它压进页码那一格（#pageInput.title + .page-input.busy），
-     * 只占顶栏已有的位置，不再单独占一条 22px 高的横条。
-     */
     onStatus: (s) => { $('#docName')?.setAttribute('data-status', s || ''); },
     onProgress: (done, total) => {
       const busy = done < total;
@@ -2030,10 +1494,6 @@ function initViewer() {
       if (box) box.title = busy ? `正在解析 ${done}/${total} 页…` : '';
     },
     onScale: (scale) => syncZoom(scale),
-    /* 掉帧自检**不再往界面上报**（2026-10-22 用户口径：「右下角那些画面渲染的提示，
-       什么掉帧多少啊，之类的提示框全部去掉」）。
-       采集那一侧还在（pdfview.js 的 _watchJank），但只写 console 和 window.__jankLog：
-       要取证时照旧读得到，界面上不会再冒出「掉帧 N 帧」这类浮层。 */
     /* 双指缩放速度：开局就把存档里的值交给 viewer（触摸屏捏合的跟手倍率），
        之后设置页改动走 viewer.setZoomSpeed()。这样不依赖「先 applyUiStyle 再建 viewer」的顺序。 */
     zoomSpeed: clampZoomSpeed(uiStyle.zoomSpeed),
@@ -2078,14 +1538,14 @@ function initViewer() {
     jumpToPageWithHistory, jumpToDestWithHistory, returnToPreviousPosition,
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
     renderAttachments, refreshReturnButton,
-    // 发送范围四选项（2026-10 第 2 步）：让自动化直接验「范围 → 本次发送带什么」
+    // 发送范围四选项：让自动化直接验「范围 → 本次发送带什么」
     setScopeRange, toggleScopePanel, SCOPE_RANGES, rangeOverview, currentRange,
     get scopeRange() { return currentRange(); },
     // 结果区排布 / 滚动：译文块是 column-reverse（最近的在最上面）
     scrollToNewest, markReversedBodies,
     // 流式渲染目标（自动化造「一条已完成的结果」时走它，与真实链路同一个契约）
     streamTarget,
-    // 回答存笔记（2026-10 第 1 步）：允许自动化直接验证存储结构与写入结果
+    // 回答存笔记：允许自动化直接验证存储结构与写入结果
     answerNoteButton, openAnswerNoteEditor, confirmAnswerNote, syncAllAnswerNoteButtons,
     addEntry, finishEntry,
     // 布局常量：CSS 的 .splitter 宽度与这里的 SPLIT_W 必须一致（有断言盯着）
@@ -2103,19 +1563,12 @@ function initViewer() {
     setFullLimit(n) { FULL_LIMIT = n; },
   };
 
-  // #returnPosition 已从顶栏删除（2026-10）：「返回原位置」不再占顶栏一格。
+  // #returnPosition 已从顶栏删除：「返回原位置」不再占顶栏一格。
   // 逐步回退阅读位置这个能力仍然保留（引用跳转、目录跳转都还在用 jumpToPageWithHistory），
   // 只是不再有那个显式按钮 —— 所以这里用可选链，元素不在也不会抛。
   const retBtn = $('#returnPosition');
   if (retBtn) retBtn.onclick = () => returnToPreviousPosition();
 
-  /**
-   * 底栏（2026-10）：翻页 + 缩放整组**只有这一处**了 ——
-   * 用户两次收敛后的口径是「底栏有的功能上面的一栏就不要了」，
-   * 所以顶栏那套 #prevPage / #nextPage / #zoomIn / #zoomOut / #fitWidth 已经删掉，
-   * `#pageInput` / `#zoomRange` / `#zoomLabel` / `#pageCount` 这几个 **id 保留、搬到底栏**
-   * （app.js 与测试都按 id 取，搬位置不用改取值逻辑）。
-   */
   $('#footPrevPage').onclick = () => viewer.goToPage(viewer.current - 1);
   $('#footNextPage').onclick = () => viewer.goToPage(viewer.current + 1);
   $('#footZoomIn').onclick = () => viewer.setScale(viewer.scale * 1.15);
@@ -2148,13 +1601,6 @@ function initViewer() {
     // Apply the full gesture in the next display frame. No easing or trailing animation.
     const pixels = pinchPixels;
     pinchPixels = 0;
-    /**
-     * 触摸板捏合的灵敏度：`exp(-pixels * PINCH_GAIN * 缩放速度)`。
-     * 2026-10-09 用户口径「可以把这个缩放的速度加快一点」→ 0.0013 → **0.0022**（约 1.7 倍）。
-     * 2026-10-10「把缩放速度做进设置里面」→ 再乘设置页那个 `zoomSpeed`（默认 1 = 上面这个手感），
-     * 于是触摸屏捏合与触摸板捏合**同一个滑杆**控制，两边不会各快各慢。
-     * 这里每帧现读 `uiStyle`，设置页拖动时立刻生效。
-     */
     const speed = clampZoomSpeed(uiStyle.zoomSpeed);
     viewer.zoomAt(viewer.scale * Math.exp(-pixels * 0.0022 * speed), pinchPoint.x, pinchPoint.y);
   };
@@ -2173,7 +1619,7 @@ function initViewer() {
 }
 
 function refreshReturnButton() {
-  // 顶栏那个「返回原位置」按钮已删除（2026-10），所以这里没有按钮可刷 —— 直接返回。
+  // 顶栏那个「返回原位置」按钮已删除，所以这里没有按钮可刷 —— 直接返回。
   // 保留函数本身：__ctx 仍导出它、跳转历史（state.jumpHistory）仍由 recordReaderJump 维护，
   // 测试与将来的入口都还能用。
   const button = $('#returnPosition');
@@ -2224,11 +1670,6 @@ async function returnToPreviousPosition() {
   refreshReturnButton();
 }
 
-/**
- * 页码显示（2026-10：页码输入框已从顶栏搬到底栏）。
- * 抽成函数是因为它有**两个**触发点：onPageChange（翻页时）和 openDoc（打开论文时）——
- * 只挂 onPageChange 会让首次打开时底栏停在占位符「–」（实测踩过）。
- */
 function syncFootPage(cur, total) {
   const box = $('#pageInput');
   const tot = $('#pageCount');
@@ -2244,7 +1685,6 @@ function syncZoom(scale) {
   if (r && document.activeElement !== r) r.value = String(clamp(pct, Number(r.min), Number(r.max)));
 }
 
-/* ══════════════════════════════ 文件 ══════════════════════════════ */
 
 async function loadServerState() {
   try {
@@ -2281,23 +1721,6 @@ async function saveProgressNow() {
   toast('阅读进度已保存', 'ok');
 }
 
-/**
- * ══════════════════════════ 首页 / 书架页（2026-10） ══════════════════════════
- *
- * 首页只解决两件事：**选一篇论文**、**继续上次阅读**。它不是仪表盘。
- * 刻意不做：AI 操作、推荐、统计、阅读时长、学习计划、关系图、装饰性空卡片。
- *
- * 三个顶层视图：
- *   home    首页（#home 显示，#viewer 隐藏）
- *   reading 阅读态（#viewer 显示）
- *   search  全文搜索（#searchBar 由 initSearch 自己管，不属于本函数）
- *
- * **为什么要把 home / reading 做成互斥的两个兄弟节点**：
- * 改造前 `#welcome` 是挂在 `#viewer` 里面的「空状态」，于是
- * 「还没有论文」「读完了退回来」「打开失败」三种语义共用同一个模糊容器 ——
- * 打开失败时它显示的还是那句「拖入 PDF」的欢迎语，用户看不出发生了什么。
- * 现在 #home 与 #viewer 是兄弟，三种状态各有归属。
- */
 function setView(view) {
   const home = view === 'home';
   document.body.classList.toggle('reading', !home);
@@ -2311,11 +1734,6 @@ function setView(view) {
   renderHome();
 }
 
-/**
- * 底栏常驻，但**没有文档时里面的控件要置灰**（2026-10 用户口径：「底栏应该是一直都有，
- * 主页也要有」）。所以不是把整条藏起来，而是把翻页 / 页码 / 缩放这些
- * 「必须有一篇论文才有意义」的控件禁用掉 —— 布局不跳，意图也清楚。
- */
 function syncFootEnabled(on) {
   const usable = !!on && !!viewer?.pdf && state.viewerDocId === state.doc?.docId;
   for (const id of ['footPrevPage', 'footNextPage', 'footZoomIn', 'footZoomOut', 'footFitWidth', 'pageInput', 'zoomRange']) {
@@ -2338,7 +1756,7 @@ function relTime(ts) {
 
 /**
  * 阅读记录（state.json 的 docs）→ 首页要用的行。
- * 按 ts 倒序；**只保留 papers/ 里还在的文件** —— 被移走 / 删掉的记录不出现在首页，
+ * 按 ts 倒序；只保留 papers/ 里还在的文件 —— 被移走 / 删掉的记录不出现在首页，
  * 也不留死链接（对应设计里的状态 5）。
  */
 function recentDocs() {
@@ -2381,7 +1799,7 @@ async function removeRecent(docId) {
 }
 
 /**
- * 渲染首页。数据源是 `serverState.docs`（阅读记录），**不是** `state.papers` ——
+ * 渲染首页。数据源是 `serverState.docs`（阅读记录），不是 `state.papers` ——
  * 左栏 `renderPaperList()` 管的是「磁盘上有什么」，首页管的是「我读到哪了」。
  * 两者共用同一个 `openDoc()` 出口。
  */
@@ -2441,10 +1859,6 @@ async function refreshPaperList() {
   renderPaperList();
 }
 
-/* ── 文件行两侧的小图标（2026-10）──
-   ⚠️ 删除按钮**必须用 SVG、不能用字符 `×`**：文件行的 textContent 会被
-   e2e 套件当成「文件名」来比对（`li.textContent.trim()` → 文件名），
-   多出来的可见字符会让断言突然变红。SVG 没有文本节点，不参与 textContent。 */
 const PAPER_GRIP_SVG = '<svg viewBox="0 0 24 24" width="10" height="16" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>';
 const PAPER_X_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6.5 6.5 17.5 17.5"/><path d="M17.5 6.5 6.5 17.5"/></svg>';
 
@@ -2532,10 +1946,6 @@ function initFiles() {
     if (pdfs.length) importLocalFiles(pdfs);
   });
 
-  /* ── 首页上的两个入口（2026-10）──
-     「打开 PDF」直接借用左栏那个 #fileInput —— 一套选文件的逻辑只有一个实现。
-     「拖入」区只是**视觉提示**：真正的全页拖放由上面的 window 监听负责，
-     所以拖到首页任何地方都算数，不用精确对准那个框。 */
   $('#homeOpen')?.addEventListener('click', () => $('#fileInput')?.click());
   const drop = $('#homeDrop');
   if (drop) {
@@ -2554,13 +1964,6 @@ function initFiles() {
   bindPaperReorder($('#fileList'));
 }
 
-/**
- * 文件列表拖拽排序（原生 HTML5 DnD，桌面 WebView2 / Chrome 都支持）。
- *
- * 只改**显示顺序**：把新的名字数组 POST 给 /api/papers，服务端存进
- * data/papers-order.json，不动 papers/ 里的文件（文件名是 docId 的主键）。
- * 列表被筛选框过滤时也能排：拖到的目标行映射回完整列表的下标。
- */
 function bindPaperReorder(list) {
   if (!list) return;
   let from = '';
@@ -2610,12 +2013,6 @@ function bindPaperReorder(list) {
   });
 }
 
-/**
- * 把 `from` 挪到 `target` 前/后，先乐观更新界面，再保存到服务端。
- *
- * 保存请求**串行化**：连续快速拖两下时，两个 POST 如果乱序到达，
- * 后到的旧顺序会把新顺序覆盖掉（服务端只认最后一次写入）。
- */
 let paperOrderSave = Promise.resolve();
 function applyPaperOrder(from, target, after) {
   const names = state.papers.map((p) => p.name);
@@ -2722,12 +2119,6 @@ async function openLocalFile(file) {
   }
 }
 
-/**
- * 批量导入（2026-10 用户口径：「一次性导入或者拖入多个 pdf」）。
- * 一个文件时保持原来的行为（导入后直接打开）；多个文件时**不自动打开任何一篇**，
- * 导入完停在你原来的位置，并在提示里告诉数量 —— 打开哪一篇交给用户自己点。
- * 逐个串行上传：大 PDF 同时发几份会把内存和网络打满，进度提示也更准确。
- */
 async function importLocalFiles(files) {
   const pdfs = pdfFilesFrom(files);
   if (!pdfs.length) { toast('只支持 PDF 文件', 'err'); return; }
@@ -2770,12 +2161,6 @@ async function openDoc({ name, url, docId }) {
       return;
     }
   }
-  /**
-   * 这一次打开的「身份」。用单调递增的序号而不是 docId 来判断有没有被顶替：
-   * 同一篇文档可能被并发打开两次（比如启动时自动恢复上次的论文，用户同时又点了列表里的它），
-   * 那时 docId 相同，旧的判断会以为「我仍然是当前文档」，于是被中断的那次加载
-   * 会在 catch 里把界面清成「未打开文档」—— 而 PDF 其实已经显示出来了。
-   */
   const myOpen = (state.openSeq = (state.openSeq || 0) + 1);
   const superseded = () => myOpen !== state.openSeq;
   hideTranslationCard();
@@ -2787,7 +2172,7 @@ async function openDoc({ name, url, docId }) {
   document.title = `${name} · 论文阅读器`;
   $('#docName').textContent = name;
   $('#docName').title = name;
-  // 注意：这里**不切视图**。真正切到阅读态是在 viewer.load() 成功之后 ——
+  // 注意：这里不切视图。真正切到阅读态是在 viewer.load() 成功之后 ——
   // 加载失败要能退回首页，中间过程也不该先露出一个空白正文区。
   clearAllBlocks();
   state.attachments = [];
@@ -2855,12 +2240,6 @@ async function openDoc({ name, url, docId }) {
   // PDF 真的加载出来了才切到阅读态（见上面「不切视图」的说明）
   setView('reading');
   const saved = serverState.docs?.[docId];
-  /**
-   * 打开论文时优先「自动匹配到最合适的大小」：
-   *   · 用户从没手动缩放过（或是老记录、没有 fit 字段）→ 按当前窗口宽度适配；
-   *   · 用户明确拖过缩放（fit === false）→ 还原他自己挑的比例。
-   * 旧代码是无条件套用存下来的 scale，窗口大小一变化就对不上了。
-   */
   const userZoomed = !!(saved && saved.fit === false && saved.scale > 0.2);
   if (userZoomed) {
     viewer.setScale(saved.scale, { keepCenter: false });
@@ -2894,21 +2273,12 @@ async function openDoc({ name, url, docId }) {
   refreshReturnButton();
   saveProgress();
   renderScopeMenu();
-  /**
-   * 2026-10 用户口径：发送范围**默认就是全文 + 联网**，开关在设置里，不在输入框旁边。
-   * 所以打开论文后如果「读整篇论文」是开着的，就照旧提前把全文抽出来 —— 不这么做的话
-   * 用户第一次提问时全文还没就绪，会退化成「只带选中内容和当前页」，等于偏好没生效。
-   * 抽文本在后台跑，不挡打开流程；失败也只是不带全文（warmDocText 自己有兜底提示）。
-   * 参考文献仍然相反：**不在打开论文时后台抽取**，等用户真的打开这一块时再由
-   * ensureRelationsBuilt() 解析（见 renderRelations / initRelations 的注释）。
-   */
   if (state.useFullText) warmDocText();
 }
 
 /** pdf.js 在加载任务被销毁时会抛这类异常，属于「这次加载作废了」，不是真失败 */
 const isAbortish = (e) => /abort|destroy|cancel|stale/i.test(`${e?.name || ''} ${e?.message || ''}`);
 
-/* ══════════════════════════════ 目录 / 笔记 ══════════════════════════════ */
 
 async function renderOutline() {
   const list = $('#outlineList');
@@ -3011,21 +2381,6 @@ async function addHighlight(sel, note = '') {
   return added[0];
 }
 
-/* ═══════════════════════ 回答存笔记（source: 'answer'） ═══════════════════════
- *
- * 2026-10 用户拍板：**不新建存储**。回答存下来的笔记就是 `state.highlights[]` 里的一条，
- * 只是多一个 `source: 'answer'` 分支 —— 左侧笔记列表、编辑、删除、`/api/notes` 全部复用：
- *
- *   { id, source: 'answer', text: question, note: answerMarkdown, page, rects: [], ts }
- *
- * 字段分工（照抄现有划选笔记的语义，不发明新结构）：
- *   · `text`  = 用户的问题（当标题；笔记列表本来就把 text 当主行显示）
- *   · `note`  = AI 回答正文（Markdown 原样存；就是列表里那行彩色的补充内容）
- *   · `page`  = **只记一个主依据页**（方案里明确：第一版不扩展存储，回答卡片本身仍保留多条依据）
- *   · `rects` = 空数组 —— 明确表示「不参与 PDF 页边书签定位」，pdfview 的 setHighlights 会自动跳过
- *
- * 四种状态：未保存（纸张折角 + 加号）/ 编辑标题（窄行 + 确认 + 取消）/ 已保存（加号变对勾）/ 列表同步。
- * ═════════════════════════════════════════════════════════════════════════ */
 
 /** 这篇论文里，byId 对应的那条笔记还在不在（可能在左栏被删掉了） */
 function findAnswerNote(byId) {
@@ -3145,7 +2500,6 @@ function syncAllAnswerNoteButtons() {
   }
 }
 
-/* ══════════════════════════════ 正文引用 → 文献 ══════════════════════════════ */
 /* 点正文里的 [12]：跳到文末那条参考文献，并可以一键去 arXiv/OpenAlex/Crossref 找它的 PDF */
 
 function initCiteBox() {
@@ -3216,12 +2570,6 @@ function showCiteBox(n, ref, anchor, { canReturn = true } = {}) {
   placeBox(box, anchor);
 }
 
-/**
- * 详情补充区：书架匹配 + 已知的开放版本结果。
- *
- * **不碰 #citeResult** —— 那是「找这篇的 PDF」的检索结果容器，e2e / relations 都按
- * 「点完之后里面才有 .cite-item」来断言，预填进去会让它们提前通过。
- */
 function renderCiteDetail() {
   const out = $('#citeDetail');
   if (!out) return;
@@ -3311,10 +2659,6 @@ function renderCiteResults(data) {
   const out = $('#citeResult');
   out.innerHTML = '';
   const list = data?.results || [];
-  /* 先交代「这次到底拿什么去搜的」。以前这一步是完全不可见的：标题猜错时
-     （2026-10 bug：`V. Sindhwani, …` 猜成 `V`）用户只看到一堆莫名其妙的结果，
-     没有任何线索知道后端在查什么。这一行只解释口径，不是结果项（不占 .cite-item，
-     e2e / relations 都按 .cite-item 断言）。 */
   const got = String(data?.title || '').trim();
   if (got) {
     const hint = el('div', { class: 'cite-msg' });
@@ -3349,7 +2693,6 @@ function renderCiteResults(data) {
   if (data?.searchUrl) extra.append(el('a', { href: data.searchUrl, target: '_blank', rel: 'noopener noreferrer', text: '网页搜索 PDF' }));
   if (extra.children.length) out.append(el('div', { class: 'cite-item' }, el('div', { class: 'ci-top' }, el('span', { text: '没找到？' })), extra));
 }
-/* ══════════════════════════════ 笔记 ══════════════════════════════ */
 /* 点气泡上的「✎」= 收藏这段文字，然后立刻弹出编辑框写笔记；
    正文右边缘会出现一个小书签，点它就能随时读 / 改这条笔记。 */
 
@@ -3444,41 +2787,23 @@ async function deleteNoteItem(id) {
     toastAction(`删除未保存：${e.message}，笔记已恢复。`, '重试', () => deleteNoteItem(id), 'err', 12000);
   }
 }
-/* ══════════════════════════════ 划词气泡 ══════════════════════════════ */
 
 function initSelection() {
   const v = $('#viewer');
   // 原生 ::selection 已设成透明，这里自己画不重叠的方块（拖动过程中也在刷新）
   document.addEventListener('selectionchange', throttle(() => {
-    /* 浏览器偶尔会把选区的一端算成「容器 + 第几个子节点」（成因与修法见
-       pdfview.js 的 `_tileTextHitBoxes`）。那种 Range 会从锚点一路吃到那个子节点，
-       界面上就是「一搞就选中一大块」。画方块之前先按鼠标两个真实落点把跑偏的一端
-       拉回文字上 —— 正常选区（两端都是文本节点）一个字节都不动。 */
     if (state._dragSelecting && state._downAt && state._lastPt) {
       viewer?.repairSelectionEnds?.({ anchor: state._downAt, focus: state._lastPt, allowCollapsed: true });
     }
     const info = viewer?.getSelectionInfo();
     // 只在「确实有一个新选区」时更新方块。
-    // 选区为空时**故意不动**：虚拟化把页面卸掉时浏览器也会顺手把选区清空，
+    // 选区为空时故意不动：虚拟化把页面卸掉时浏览器也会顺手把选区清空，
     // 那时若跟着清，滚回来就再也看不到刚才选的是哪一段了（用户反馈的 bug）。
     // 真正的「取消选择」由点击别处 / Esc / 做出新选择来触发。
     if (info) viewer?.paintSelection(info.rectsByPage);
   }, 50));
   v.addEventListener('touchend', () => setTimeout(onSelectionChanged, 60));
 
-  /**
-   * 松手要监听整个 document，不能只监听 #viewer：
-   * 拖选时鼠标常常顺手划到右侧面板才松开，那样 #viewer 收不到 mouseup，
-   * 方块画出来了但气泡死活不弹（用户说的「有些地方选不中」就是这个）。
-   *
-   * 这里同时判断「这是一次单击，还是一次拖选」：
-   *   · 单击在空白处 / 面板上  → 取消选择（浏览器的选区这时已经塌掉了）
-   *   · 单击在按钮、输入框上    → 不动选区。点缩放/翻页按钮不该把选区弄没，
-   *                              用户放大往往正是为了看清选中的那段
-   *   · 拖选（指针移动过）      → 一律按「有了新选区」处理
-   * 注意浏览器自己的选区是唯一裁判：双击选词时第一次 mouseup 选区是空的、
-   * 第二次才是选中的词，所以这里只在「没有活选区」时才真的去清。
-   */
   document.addEventListener('mouseup', (e) => {
     if (e.target?.closest?.('#bubble, #citeBox, #noteBox, #settingsModal')) return;
     const down = state._downAt;
@@ -3575,14 +2900,6 @@ function initSelection() {
   });
 }
 
-/**
- * @param opts.deselect 这次松手是不是一次「取消选择」的单击（点在空白处/面板上）。
- *   是的话且浏览器已经没有活选区，就把气泡、方块、state.selection 一起清掉。
- * @param opts.down / opts.up 这一次松手的按下点与松手点。浏览器把选区算成
- *   「容器 + 第几个子节点」时（见 pdfview.js 的 `_tileTextHitBoxes`），靠这两个点
- *   把跑偏的一端算回文字上。
- * @param opts.retry 是否允许「这次没选出东西」时再试一次（见下面的说明）。
- */
 function onSelectionChanged({ deselect = false, down = null, up = null, retry = true } = {}) {
   state._dragSelecting = false;
   if (down && up) viewer?.repairSelectionEnds?.({ anchor: down, focus: up, allowCollapsed: true });
@@ -3658,14 +2975,6 @@ function showTranslationCard(sel) {
   return body;
 }
 
-/**
- * 点正文 `[n]` → 打开参考文献卡片。
- *
- * 为什么要延迟 300ms：`.cite-link` 改成 `pointer-events:none` 之后（理由见 style.css），
- * 双击 `[5]` 会**先**走一次单击路径 —— 而卡片一开就会 `jumpToPageWithHistory()` 跳到文末，
- * 用户就再也选不了这个 `[5]` 了。所以等一等：如果紧接着来的是双击的第二下
- * （或浏览器补发的 `dblclick`），就把这次卡片取消，把这次操作留给「选词」。
- */
 let citeActionTimer = 0;
 function scheduleCiteAction(cite, detail = 1) {
   cancelCiteAction();
@@ -3692,7 +3001,6 @@ function clearSelectionState() {
   viewer?.paintSelection(null);
 }
 
-/* ══════════════════════════════ 右栏结果块（面板注册表的渲染端） ══════════════════════════════ */
 /* 这两块就是 state.panels 里的 translate / chat：
    显示与否看 visible，顺序看 order，高度看 size。
    分块区仍然是「可选」的：默认一块都不显示，用到哪块自动出现；
@@ -3714,22 +3022,6 @@ function initAiArea() {
   window.addEventListener('resize', debounce(() => fitBlockSizes(), 150));
 }
 
-/* ══════════════ 文字列左右边沿：平时隐藏的拖动条 ══════════════
-
-   2026-10 用户口径（两句）：
-     「文字边沿的位置需要能通过一个栏直接拉着调整，这个栏平时隐藏，鼠标放上去的时候
-       只在鼠标的那一个小的区域显示，而且上下都是那种渐变」
-     「左右两边都要有」
-
-   对象是右栏结果区那条已经居中的**文字列**（`.ai-body > .msg`，两侧留白相等）：
-   · 左右边沿各配一条**平时完全看不见**的拖动条（opacity:0 + pointer-events:none，不占地方）；
-   · 鼠标进到边沿附近（±TEXT_EDGE_HIT）才出现，而且只出现一小段（TEXT_EDGE_BAR_H 高），
-     以光标 y 为中心、上下两端渐变淡出 —— 不是一条贯穿整栏的实线；
-   · 拖动任意一条边沿都会**对称**改文字列宽度（另一条边镜像跟着走），所以两侧留白始终相等；
-   · 宽度写进 uiStyle.maxWidth，刷新 / 重开论文都还在。
-
-   手感：被拖的那条边沿严格跟着光标 —— 宽度 = 2 × 光标到列中心的距离，
-   于是右边缘 = 中心 + 宽度/2 = 光标 x 本身，左边缘自动镜像；不是"边缘以两倍速度甩开鼠标"。 */
 const TEXT_EDGE_HIT = 10;        // 离边沿多近算"放到那个栏上"（px）
 const TEXT_EDGE_BAR_H = 110;     // 悬停提示条的高度（只要一小段，不要整栏）
 
@@ -3868,7 +3160,7 @@ function initTextEdgeHandle() {
     paint();
   };
 
-  // ⚠️ pointerdown 用**捕获**阶段：要比文本选择 / 消息里的按钮更早拿到按下事件，
+  // ⚠️ pointerdown 用捕获阶段：要比文本选择 / 消息里的按钮更早拿到按下事件，
   // 只在真的贴边时才拦（e.preventDefault + stopPropagation），其余点击照旧。
   side.addEventListener('pointerdown', startIfNear, true);
   side.addEventListener('pointermove', (e) => {
@@ -3887,30 +3179,12 @@ function clearAllBlocks() {
   refreshCounts();
 }
 
-/**
- * 只清**问答**那一块（会话是问答的东西，翻译不属于任何会话）。
- *
- * 2026-10 用户口径：「会话到底是翻译的还是问答，我认为应该是只有问答才有会话」。
- * 所以换会话 / 新建会话只清问答区：译文是按论文累积的结果，不该被会话切走；
- * 换**论文**时仍然走 clearAllBlocks()（两块都该清，那是另一回事）。
- */
 function clearChatBlock() {
   const meta = state.blockMeta.chat;
   if (meta) meta.body.innerHTML = '';
   refreshCounts();
 }
 
-/**
- * 建一个块。只建一次，之后复用同一个 DOM —— 增删/换位都不会丢消息。
- *
- * 2026-10（用户口径）：「译文和问答的现在的上面的那一栏可以直接去掉，
- * 然后两种状态的选择图标可以放在最上面」。
- * 所以这里**不再建 `.ai-head` 标题栏**：
- *   · 标题（译文 / 问答）改由右栏最上面的 #aiBar 选中态表达；
- *   · 条数不再单独显示（切换器上本来就只有两块，数字是噪声）；
- *   · 拖动换位 / 键盘换位 / 折叠按钮整套随之删除 —— 它们全都只挂在那条标题栏上，
- *     而两块的顺序现在固定为「译文、问答」，由 #aiBar 的顺序决定。
- */
 function ensureBlock(id) {
   if (state.blockEls[id]) return state.blockEls[id];
   const count = el('span', { class: 'ai-count' });
@@ -3933,16 +3207,6 @@ function clearDropMarks() {
   for (const node of Object.values(state.blockEls)) node.classList.remove('drop-before', 'drop-after');
 }
 
-/**
- * 「当前真正可见的上下两块」——改高度之前现算一次。
- *
- * 判据取 **DOM 真相**（两块都在文档里、都没带 hidden 类），不是模型里的 visible：
- * 拖动是异步的（pointermove 挂在 window 上），按下之后到松手之前，可见集合完全可能变
- *（消息进来自动打开另一块、用户点开关、截图自动开「问答」……）。这时候还照旧把 size
- * 写下去，就会写到一块**用户根本看不见**的块上 —— 用户报的「隐藏时被写成 60」是同一个
- * 病根：下面那块 height=0，`belowH - dy` 一夹就落到 60px 保底值。
- * 返回 null 表示这一对已经不成立，调用方必须整次作废（不要只写一半）。
- */
 function visibleSplitPair(belowId) {
   const vis = visibleBlocks();
   const i = vis.indexOf(belowId);
@@ -4040,14 +3304,6 @@ function setBlockVisible(id, on) {
   setPanelVisible(id, on);
 }
 
-/**
- * 让每一栏当前显示的结果块填满这一栏。
- *
- * `state.panels[id].size` 是上下分屏时代留下的兼容字段；当前右栏一栏只显示一个块，
- * 没有可见的上下拖拽分隔条。继续把这个旧值写成内联 `height` 会让历史 `60/180px`
- * 把译文压成几行，剩余整栏变成空白，所以这里只清掉旧的尺寸样式，让 `.ai-block`
- * 的 flex 规则自然吃满结果区。字段仍然保留，老存档和面板迁移不丢数据。
- */
 function fitBlockSizes() {
   // 每一栏各自有一个结果块；高度由 .ai / .ai-block 的 flex 链接管，
   // 不再把旧存档 size 写回 DOM。
@@ -4071,12 +3327,6 @@ function refreshCounts() {
   updateScrollFades();
 }
 
-/**
- * R7：结果块底部的渐隐提示。
- * `.ai-body` 是滚动容器，内容超出时在底边叠一层渐隐，告诉用户"下面还有"；
- * 滚到底（或本来就没溢出）就把标记摘掉，避免在末尾给出假的"还有内容"暗示。
- * 容差 2px 是为了兼容小数像素和缩放。
- */
 function updateScrollFades() {
   for (const node of Object.values(state.blockEls)) {
     if (!node) continue;
@@ -4112,11 +3362,6 @@ function flushPanelVisibility(id, visible) {
   node.dataset.dock = state.panels[id].dock;
 }
 
-/**
- * 一列里应该渲染哪一块（**一栏只能开一个**）：只认「可见 + 归属这一栏」的那一个。
- * 归属栏没开（列数 1）或已被同栏更高优先级的面板占掉 → 返回空串，调用方把节点停进 #panelPark。
- * 排序用 order（与旧的上下两块口径一致），同 order 时按注册表顺序。
- */
 function rightPanelInCol(n) {
   const list = PANEL_IDS_RIGHT
     .filter((id) => colOf(id) === n && state.panels[id].visible && state.panels[id].dock === 'right')
@@ -4130,7 +3375,7 @@ function renderCol(n) {
   if (!area) return;
   const id = rightPanelInCol(n);
   // 把「这一栏此刻显示的是谁」写到 <aside> 上：CSS 需要它来决定要不要显示输入区。
-  // 用户口径（2026-10-04）：「译文不需要输入啊」—— 译文栏只显示译文，不给输入框；
+  // 用户口径：「译文不需要输入啊」—— 译文栏只显示译文，不给输入框；
   // 问答栏才需要输入框。见 style.css 的 [data-active-panel="translate"] 那一条。
   const col = rightColEl(n);
   if (col) {
@@ -4179,18 +3424,6 @@ function renderAiArea() {
   renderCols();
 }
 
-/**
- * 右栏底部的「译文 / 问答」分段切换器 —— **右栏唯一的一组可见面板入口**。
- *
- * 用户口径（2026-10-03）：
- *   「右栏顶部：只放当前面板的标题和面板操作；右栏底部：只保留一组『译文 / 问答』切换器；
- *     不再额外渲染另一组相同按钮。」
- *
- * 语义（必须与「一栏只开一个」一致）：
- *   · 切换器只反映这一栏的状态：现在开着谁，谁就是选中态。
- *   · 点没开的那个 → 打开它（原来那个自动收起）。
- *   · 点正开着的那个 → 收起它（右栏变空）。
- */
 function renderAiBar() {
   const host = aiBarEl(1);
   if (!host) return;
@@ -4213,12 +3446,6 @@ function renderAiBar() {
       text: label,
       title: on ? `「${label}」（当前）` : `打开「${label}」 —— ${meta.hint || ''}`,
     });
-    /**
-     * 点切换器（2026-10 用户口径）：
-     *   「右侧的两个选择也是这样点击已开的图标也不会关闭侧栏，而是不做反应」。
-     * 所以已开的那一个再点是 no-op（不关右栏、不清内容），只有点另一个才切过去。
-     * 收起右栏由顶栏的「收起右栏」负责 —— 那是另一个明确动作。
-     */
     bindPanelToggleGestures(btn, id, {
       onClick: () => { if (!on) setPanelVisible(id, true); },
     });
@@ -4226,7 +3453,6 @@ function renderAiBar() {
   }));
 }
 
-/* ══════════════════════════════ 消息 ══════════════════════════════ */
 
 /**
  * 一条消息（Copilot 风格扁平结构）：
@@ -4246,16 +3472,11 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   /** 译文条目：本条的界面要「纯净」（无动作按钮，role 行也不留回原文图标） */
   const isTranslateEntry = block === 'translate';
 
-  /**
-   * 2026-10 用户口径：「问答里面不需要专门表一个『你』，直接删掉，就用现在的那种框就行了」。
-   * 所以用户消息**不再有那个「你」的头像徽标** —— 用户消息本来就是那个灰底框，
-   * 一眼能分清谁说的。role 行留给「页码 / 标签 / 回原文」这些真正有信息量的东西。
-   */
   const role = el('div', { class: `role${!isUser && !page ? ' hidden' : ''}` },
     tag ? el('span', { class: 'tag', text: tag, 'aria-hidden': 'true' }) : null,
     page && uiStyle.showPage ? el('span', { class: 'pg', text: `第${page}页` }) : null,
     // 译文块不要动作按钮（「最纯净的界面」）：连 role 行里这个「回原文」图标也去掉，
-    // 跳回原文统一由下面那块**可点击的原文引用**承担。
+    // 跳回原文统一由下面那块可点击的原文引用承担。
     !isUser && page && uiStyle.showPage && !isTranslateEntry ? el('button', {
       class: 'tbtn',
       title: `回到第${page}页原文`,
@@ -4263,11 +3484,6 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
       onclick: () => jumpToPageWithHistory(page, { smooth: true }),
     }, iconEl('jump-back')) : null,
   );
-  /**
-   * 原文引用块（2026-10 用户口径：「把原文引用的那一块做成可点击的，点击就自动跳回」）。
-   * 有页码时整块就是一个跳回原文的按钮：鼠标手型、悬停变强调色、键盘也能按（Enter / Space），
-   * 可访问名写明「跳回第 N 页原文」。没有页码（纯提问）时保持只读文本，不做假按钮。
-   */
   const refText = quote && uiStyle.showQuote ? quote : '';
   const refClickable = !!refText && !!page && !isUser;
   const ref = refText
@@ -4292,17 +3508,6 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   // 全局序号：分块之后 DOM 顺序 ≠ 时间顺序，取「最新一条」要靠它
   state.msgSeq = (state.msgSeq || 0) + 1;
   root.dataset.seq = String(state.msgSeq);
-  /**
-   * 译文块：**最新的插到最前面**（2026-10 用户口径：「最近的翻译应该要放在最上面」）。
-   *
-   * 这里刻意不用 `column-reverse` 那种"只改视觉顺序"的写法 —— 实测（Chrome 154）：
-   *   · `column-reverse` + 默认 `flex-start`：短内容贴**底**、长内容能滚；
-   *   · `column-reverse` + `justify-content: flex-end`：短内容能贴上沿，但**溢出被吃掉**
-   *     （scrollHeight 恒等于 clientHeight，多出来的内容够不到，滚动条不出现）。
-   * 两条都满足不了「最新在上 + 长了能滚」，所以改成老老实实把节点插到最前：
-   * 视觉顺序 = DOM 顺序 = 新 → 旧，滚动就是普通向下滚，容器用 `margin-top:auto`
-   * 在内容不足时把整块压到上沿（见 style.css）。
-   */
   if (block === 'translate') bodyEl.prepend(root);
   else bodyEl.append(root);
   const record = { block, tag: tag || '', page: page || null, quote: quote || '', kind, text: text || '', screenshot: !!shots.length, sources: [], meta: '', status: isUser ? 'user' : (text !== undefined ? 'complete' : 'pending'), retry: retry || null };
@@ -4333,22 +3538,12 @@ function finishEntry(entry, fullText, { page, onAsk, onRetry, retryLabel = '', s
   entry.root.querySelectorAll('.entry-meta, .source-details, .src-list').forEach((node) => node.remove());
   entry.acts.replaceChildren();
   entry.acts.classList.remove('hidden');
-  /**
-   * 译文块是「最纯净的界面」（2026-10 用户口径：「翻译的去掉所有的功能按键」）：
-   * 整条译文上不留任何按钮 —— 复制、回原文、接着问、保存笔记全部撤掉，
-   * 只保留「原文引用」这一块，点它就跳回原文（见 initReferenceJump）。
-   *
-   * ⚠️ 这里仍然把 `acts` 容器**显形**（只是清空），不能用 `.hidden` 藏起来：
-   *   context / links 等套件是拿 `#aiArea .msg.assistant .acts:not(.hidden)` 当
-   *   「这条回答收尾了」的信号的，隐藏会让那些套件误判成"还没生成完"。
-   *   视觉上用 CSS 的 `display:none` 收掉（见 style.css 里 .ai-block[data-block="translate"] .acts）。
-   */
   const bare = entry.root.dataset.operation === 'translation';  appendAll(entry.acts,
     bare ? null : el('button', {
       class: 'act-icon', title: '复制这段回答', 'aria-label': '复制这段回答',
       onclick: () => copyText(fullText),
     }, iconEl('copy')),
-    // 回答存笔记：与复制、回原文并排的小图标；已保存态变对勾（2026-10 第 1 步）
+    // 回答存笔记：与复制、回原文并排的小图标；已保存态变对勾
     bare ? null : answerNoteButton(entry),
     !bare && page ? el('button', {
       class: 'act-icon', title: `回到第 ${page} 页原文`, 'aria-label': `回到第 ${page} 页原文`,
@@ -4381,7 +3576,7 @@ function addFailureRetry(entry, message, onRetry) {
 }
 
 /**
- * 可恢复请求的最小持久化描述。截图**不存图片本体**（那是单独存的，见 uploadAttachment），
+ * 可恢复请求的最小持久化描述。截图不存图片本体（那是单独存的，见 uploadAttachment），
  * 只记附件 id + 尺寸 + 名称 —— 跨重启恢复时按 id 把原图取回来；老会话没有 id 的，
  * 退化成「截图未保存」提示。这样会话 JSON 不会被 base64 图片撑爆。
  */
@@ -4442,18 +3637,6 @@ const persistSession = debounce(() => {
 }, 800);
 function scheduleSessionSave() { if (state.doc) persistSession(); }
 
-/**
- * ══════════════════════════ 多会话（2026-10 用户口径） ══════════════════════════
- * 用户原话：「问答是不是要做多对话分对话」→ 会话列表 + 新建 + 切换。
- *
- * 存储（服务端，向后兼容）：
- *   老：`session-<docId>.json`            —— 单会话时代，仍然照读照写
- *   新：`session-<docId>-<sid>.json`      —— 每个会话一个文件
- * 前端只负责记住「这一篇当前在用哪个 sid」：
- *   `reader.activeSession = { <docId>: <sid> }`（localStorage）
- * sid 为空串 ''（或没有记录）时就用**老文件** —— 这样老用户第一次升级过来
- * 打开的仍是原来那套对话，不会突然变空。
- */
 const SESSION_KEY = 'reader.activeSession';
 
 function readActiveSessions() {
@@ -4478,19 +3661,6 @@ function sessionQuery(docId, sid) {
   return sid ? `${base}&sid=${encodeURIComponent(sid)}` : base;
 }
 
-/* ═════════════════ 截图附件：图片单独存（不进会话 JSON） ═════════════════
-
-   2026-10 用户口径：「图片单独存」，删除时机自己定。于是：
-     · 上传时机：**真正点发送**带图提问时才传 —— 只是放进输入框又删掉的草稿不会产生文件；
-     · 存哪：服务端 `data/attachments/<会话键>/<id>.<ext>`，会话 JSON 里只留 32 位 id 引用；
-     · 怎么读回来：恢复会话 / 跨重启重试时按 id 取回原图（本机 HTTP，带 token 的 fetch）；
-     · 何时删（服务端负责，见 server.js / api.rs 的 pruneAttachments）：
-         ① 每次会话保存成功后按「这次 payload 里还引用着的 id」清理本会话目录
-            （清空会话 = 引用为空 → 图全删）；
-         ② 删除会话 → 整个会话的附件目录一起删；
-         ③ 发送失败 / 保存失败留下的孤儿图，在下一次保存时被 ① 清掉。
-   上传失败不挡提问：这次照发，只是重开论文后这条消息没有可恢复的图
-   （老逻辑的「截图附件未保存」提示兜底）。 */
 const ATTACHMENT_ID_RE = /^[0-9a-f]{32}$/;
 const validAttachmentId = (v) => ATTACHMENT_ID_RE.test(String(v || ''));
 
@@ -4605,15 +3775,6 @@ function sessionPayload() {
       boundary: String(x.teaching.boundary || '').slice(0, 2000), page: x.teaching.page || null,
     } : null,
   }));
-  /**
-   * **非问答**的条目（也就是译文）必须保留在文件里。
-   *
-   * 2026-10 用户口径：「只有问答才有会话」。于是换会话时我们只清问答区，
-   * 译文还在页面上、也还在 state.sessionEntries 里；但**新建会话**时我们清掉了内存里的
-   * 条目，如果不把它们并回来，这次保存就会把这一篇的译文历史从文件里抹掉。
-   * 所以：把「文件里已有的、但不是问答的」条目按原顺序并入。
-   * 用 tag+text 去重，避免和内存里还在的条目重复。
-   */
   const inMemory = new Set(entries.map((e) => `${e.tag}\u0000${e.text}`));
   const kept = (Array.isArray(state._fileEntries) ? state._fileEntries : [])
     .filter((e) => e && e.block !== 'chat')
@@ -4756,13 +3917,6 @@ function restoreRetryCallback(row, entry, priorUser) {
   };
 }
 
-/**
- * 恢复一篇论文的会话。
- *
- * `only` 决定重放范围：
- *   · 不传 / `'all'` —— 换论文时用，两块都清过，全部重放
- *   · `'chat'`      —— 换会话（含新建）时用，只重放问答；译文那一块没被清，不重放
- */
 async function restoreSession(docId, { only = 'all' } = {}) {
   try {
     const sid = activeSidFor(docId);
@@ -4771,11 +3925,6 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const saved = await r.json();
     if (!readingRequestCurrent({ docId, openSeq, sid })) return;
-    /**
-     * 文件里**所有**条目留一份底账（`state._fileEntries`）。
-     * 用途：会话只覆盖问答区，译文不属于任何会话 —— 保存时要靠这份底账把
-     * 译文条目并回文件，否则新建会话那一次保存会把译文历史抹掉。
-     */
     state._fileEntries = Array.isArray(saved.entries) ? saved.entries : [];
     state.sessionEntries = Array.isArray(saved.entries) ? saved.entries.slice(-90) : [];
     state.history = restoreReadingHistory(saved.history, state.sessionEntries);
@@ -4801,7 +3950,7 @@ async function restoreSession(docId, { only = 'all' } = {}) {
       let row = state.sessionEntries[rowIndex];
       if (!row || typeof row !== 'object') continue;
       /**
-       * 换会话时（`only: 'chat'`）**只重放问答**：译文那一块的 DOM 没被清，
+       * 换会话时（`only: 'chat'`）只重放问答：译文那一块的 DOM 没被清，
        * 再插一遍就会重复。换论文时（默认）两块都清过，所以全部重放。
        */
       if (only === 'chat' && row.block !== 'chat') continue;
@@ -4876,7 +4025,6 @@ async function clearCurrentSession() {
   } catch (e) { toastAction(`清空失败：${e.message}`, '重试', clearCurrentSession, 'err', 10000); }
 }
 
-/* ── 多会话：列表 / 新建 / 切换 / 删除 ───────────────────────────────── */
 
 /** 正在显示的会话（只在 store 里活；关掉就没了） */
 const sessionStore = { open: false, list: [], busySid: null };
@@ -4992,7 +4140,7 @@ async function newSession() {
   state.opsDone = {};
   state.opsDoc = null;
   resetTeachingState();
-  // 立刻落盘一次：不存的话新会话在服务端**没有文件**，会话列表里就看不到它，
+  // 立刻落盘一次：不存的话新会话在服务端没有文件，会话列表里就看不到它，
   // 用户会以为「新建了但列表里没有」（实测踩过）。空会话也是一次有效的保存。
   try { await saveSessionNow(); } catch { /* 存不下也不阻塞新建 */ }
   await loadSessionList();
@@ -5024,15 +4172,6 @@ async function deleteSession(sid) {
   toast('会话已删除', 'ok', 1600);
 }
 
-/**
- * 右栏顶栏那一小块：显示当前会话标题 + 打开会话菜单。
- *
- * 2026-10 收口（用户口径：「问答和翻译都有那个多对话的标」）：
- *   · **只有问答块才显示会话条** —— 会话是「一篇论文的对话」，跟译文没有关系，
- *     译文页挂着一条会话信息纯属噪声（原来只要开着论文就显示，所以两边都有）。
- *   · 去掉那个绿色圆点：它不承载任何信息，只是把面板顶部压得发绿、显得吵。
- *     改成右上角一个很轻的「会话」小胶囊（细线图标 + 标题），要换会话才点它。
- */
 function renderSessionBar() {
   const btn = $('#sessBtn');
   const bar = $('#sessBar');
@@ -5072,15 +4211,7 @@ function renderSources(sources) {
   return details;
 }
 
-/* ══════════════════════════ 浮层卡片：可拖动 ══════════════════════════ */
 
-/**
- * 所有浮出来的卡片（划词气泡 / 结果浮层 / 参考文献 / 笔记 / 设置）都能拖动。
- *
- * 卡片都是 position:fixed + JS 算 left/top，所以拖动只要改这两个值就行。
- * 拖过的位置记在 cardPos 里，下次弹出来还在原地（双击手柄可以恢复自动位置）。
- * 唯一例外是划词气泡：它必须贴着新选中处出现，所以拖完不记位置。
- */
 const cardPos = new Map();
 
 /**
@@ -5118,12 +4249,6 @@ function rememberedCardPos(el) {
   return el?.id ? cardPos.get(el.id) || null : null;
 }
 
-/**
- * @param el        卡片
- * @param handleSel 拖动把手的选择器；不传 = 整张卡片都能拖
- * @param opts.fromAnywhere 卡上全是按钮时用（气泡）：按下后移动超过阈值才算拖，
- *                          单纯点一下仍然是点按钮
- */
 function makeDraggable(el, handleSel, { fromAnywhere = false, remember = true } = {}) {
   if (!el) return;
   const handle = handleSel ? el.querySelector(handleSel) : el;
@@ -5247,14 +4372,7 @@ function applyCardPos(el, left, top) {
   return { left: Math.round(left), top: Math.round(top) };
 }
 
-/* ══════════════════════════ 读懂论文（顶栏 ✦ 菜单 + 教学式回答） ══════════════════════════ */
 
-/**
- * 顶栏菜单：四项教学能力（`teaching.js` 的 TEACHING_OPS）。学习记忆在后台维护。
- *
- * 旧的「实验够不够支撑结论 / 局限与可疑之处」不再占菜单：它们降级成「先给我讲明白」
- * 等回答末尾的深入按钮（见 teachingDeepButtons），提示词仍保留在 ops.js。
- */
 function initOps() {
   const btn = $('#opsBtn');
   const menu = $('#opsMenu');
@@ -5306,7 +4424,6 @@ function initOps() {
 
 function hideOpsMenu() { $('#opsMenu')?.classList.add('hidden'); }
 
-/* ── 教学状态小工具 ──────────────────────────────────────────────── */
 
 /** 当前论文 + 当前会话下有效的 walk 进度（换论文/换会话自动失效） */
 function activeWalk() {
@@ -5356,7 +4473,6 @@ function teachingProfileBlock(question = '') {
   return buildProfileBlock(profileStore.data, docText, question, { docId: state.doc?.docId });
 }
 
-/* ── 教学类回答的缓存 ────────────────────────────────────────────── */
 
 function teachingCacheKey(docId, opId, suffix = '') {
   return `${docId}:${opId}:${TEACHING_PROMPT_VERSION}:p${profileStore.data.revision}${suffix ? `:${suffix}` : ''}`;
@@ -5370,26 +4486,7 @@ function teachingCacheSet(docId, opId, value) {
   state.teachingCache.set(teachingCacheKey(docId, opId), value);
 }
 
-/* ── 跑一项教学能力 ──────────────────────────────────────────────── */
 
-/**
- * 跑一项「读懂论文」能力。和 runOperation 同一套骨架（流式、停止、失败重试、缓存、会话存档），
- * 区别只在三处：
- *   1. 材料用 teachMessages（带当前时间 + 学习档案块），而不是 opMessages；
- *   2. 回答里可能有 prt 隐藏块 → 收尾时只解析后续操作按钮；
- *   3. 不同能力有各自的后续按钮（继续下一步 / 讲第 N 项 / 这里没懂 / 换一个对象…）。
- *
- * @param {string} opId  intro | prereq | walk | visual
- * @param {object} opts
- *   force      重新生成（忽略缓存）
- *   retryEntry 复用同一条结果（失败重试）
- *   extraUser  追加到用户消息的材料（图表对象 / 点开的清单项 / 初始进度）
- *   ask        覆盖本次任务文本
- *   history    续讲时带上的历史消息（[{role, content}]）
- *   tag        结果条目的标签（默认能力名；续讲用「第 2 步」这类）
- *   teaching   本次的教学对象（写进会话记录，恢复后「这个我懂了」仍可用）
- *   baseText   续讲时基于的原文（walk 的 route 已存在 state.teaching.walk.messages 里）
- */
 async function runTeaching(opId, {
   force = false, retryEntry = null, extraUser = '', ask = '', history = [],
   tag = '', teaching = null,
@@ -5492,7 +4589,6 @@ async function runTeaching(opId, {
   }
 }
 
-/* ── 回答后的按钮 / 档案写入 ──────────────────────────────────────── */
 
 /** 把 chips 画成按钮（prt 块解析出来的自由操作） */
 function renderChips(entry, chips) {
@@ -5521,10 +4617,6 @@ function sendTeachingPrompt(prompt) {
   $('#sendBtn')?.click();
 }
 
-/**
- * 画「能力相关」的后续按钮；不在渲染阶段写入学习记忆。
- * 各能力的按钮都是**静态兜底**：即使模型没输出 prt 块，这里也一定有可用操作。
- */
 function renderTeachingExtras(entry, { opId, chips = [], teaching = null } = {}) {
   const record = entry.root.__sessionRecord;
   if (record) {
@@ -5649,7 +4741,6 @@ async function condenseEntry(entry) {
   }
 }
 
-/* ── 带我一步步读：续讲 ──────────────────────────────────────────── */
 
 /**
  * 点「继续下一步 / 讲简单一点 / 给个例子」。
@@ -5730,7 +4821,6 @@ function startWalkSession(cleanText, entry) {
   scheduleSessionSave();
 }
 
-/* ── 图表与公式：对象选择器 ────────────────────────────────────────── */
 
 /** 确保整篇文本已抽出（对象识别要用；不触发模型索引） */
 async function ensureDocTextForObjects() {
@@ -5743,13 +4833,6 @@ async function ensureDocTextForObjects() {
   } catch { return state.docText || ''; }
 }
 
-/**
- * 「讲懂图表与公式」先选对象：
- *   当前页 0 个候选 → 给全文清单 + 框选截图提示；
- *        1 个     → 直接讲；
- *        ≥2 个    → 菜单原位列出候选，让用户按图号/表号/公式编号选。
- * `replace` 为 true 时表示从回答上的「换一个对象」回来，菜单可能已经关了，直接重开。
- */
 async function openVisualPicker({ replace = false } = {}) {
   if (!state.doc || !viewer?.pdf) { toast('先打开一篇论文', 'err', 3000); return; }
   const menu = $('#opsMenu');
@@ -5961,7 +5044,6 @@ function searchResultUrl(r) {
   return /^https?:\/\//i.test(cand) ? cand : '';
 }
 
-/* ══════════════════════════ 参考文献 ══════════════════════════ */
 
 /** 归一化标题：只留字母数字和汉字，用来判断「这条文献是不是书架里的某篇」 */
 function titleKey(s) {
@@ -6010,11 +5092,6 @@ const REL_STATUS = {
   error:   { tag: '查询失败', cls: 'err', group: 'todo' },
 };
 
-/* 删减（2026-10 批次二）：「找未入库的 PDF」「扫描库内引用」两个批量按钮、
-   状态筛选 / 排序两个下拉、「被引用」（反向引用）这一个状态与它的整条扫描链
-   （scanLibraryRelations / paperText / paperSig / relTextCache）全部删除。
-   参考文献这一块现在就是「本文引用了哪些文献」的普通列表：
-   点一行看详情、单条查开放 PDF（#citeSearch / 「查 PDF」按钮）、跳回正文、复制引用。 */
 const REL_GROUPS = [
   { id: 'lib', title: '书架已有' },
   { id: 'pdf', title: '已找到开放版本' },
@@ -6077,11 +5154,10 @@ function markSlotError(docId, ref, message) {
   return slot;
 }
 
-/* ── 阶段 3：代际令牌 ─────────────────────────────────────────────────── */
 
 /**
  * 换论文：代际 +1。所有异步收尾都必须过 relStale 这一关。
- * 「↻ 重新解析」**不**走这里（它不换论文，在途查询要能落回新列表）。
+ * 「↻ 重新解析」不走这里（它不换论文，在途查询要能落回新列表）。
  */
 function relBumpGen() {
   state.relGen = (state.relGen || 0) + 1;
@@ -6110,12 +5186,6 @@ function relYear(text) {
   return m ? Number(m[m.length - 1]) : 0;
 }
 
-/**
- * 解析当前论文的参考文献，并和书架做匹配。
- *
- * **按需**：不在打开论文时后台跑（那会在每次打开论文时都对整篇 PDF 做一遍引用抽取），
- * 而是等用户真的打开「参考文献」这一块时由 ensureRelationsBuilt() 触发。
- */
 async function buildRelations({ force = false } = {}) {
   if (!state.doc || !viewer?.pdf) { renderRelations(); return; }
   const docId = state.doc.docId;
@@ -6166,11 +5236,6 @@ function ensureRelationsBuilt({ force = false } = {}) {
   buildRelations({ force });
 }
 
-/**
- * 查一条文献的开放 PDF（复用 /api/ref-search：arXiv → OpenAlex → Crossref）。
- * 这是**用户逐条触发**的查找（详情卡片里的「找这篇的 PDF」、列表行上的「查 PDF / 重查」），
- * 没有整批版：批量「找未入库的 PDF」「扫描库内引用」已按产品口径删除。
- */
 async function lookupRefPdf(ref, ctx = {}) {
   const myDoc = ctx.docId || state.doc?.docId || null;
   const myGen = ctx.gen ?? state.relGen;
@@ -6213,12 +5278,6 @@ function relMatch(ref, q) {
   return y > 0 && String(y).includes(q);
 }
 
-/**
- * 点列表里的一行 → 打开详情。
- * 复用正文 [n] 用的同一个 `#citeBox`（可拖动、e2e 都在用），不新建第二套 UI。
- * 从列表进来的没有「原来在正文哪一页」这个语义，所以不给「返回原位置」，
- * 改用「跳回正文」（去 PDF 里这条文献所在的页）。
- */
 function showRefDetail(ref) {
   if (!ref) return;
   showCiteBox(ref.num, ref, null, { canReturn: false });
@@ -6372,16 +5431,7 @@ function initRelations() {
   renderRelations();
 }
 
-/* ══════════════════════════ 外链一律交给系统浏览器 ══════════════════════════ */
 
-/**
- * 应用是 WebView2 外壳，页面里的 `<a target="_blank">` **默认什么都不会发生**
- * —— 用户反馈的「论文查找里的网页链接点不动」就是这个原因。
- * 而如果去掉 target 让它在应用窗口里直接跳，又会被外站顶掉整个界面、还退不回来。
- *
- * 所以：所有 http(s) 链接统一拦下来，交给后端用系统默认浏览器打开。
- * 用事件委托，页面上不管哪里冒出来的链接（包括后来动态加进来的）都走这条路。
- */
 function openExternal(target) {
   const u = String(target || '').trim();
   if (!/^https?:\/\//i.test(u)) return false;
@@ -6471,14 +5521,6 @@ function scrollEntryToTop(body, entry) {
   });
 }
 
-/**
- * 把结果区滚到「最新一条」。
- *
- * 两种排布方向必须分开处理，判据是容器的 flex-direction：
- *   · 普通（column，问答流）：最新在最下面 → scrollTop = scrollHeight；
- *   · 反转（column-reverse，译文块，2026-10：「最近的翻译放在最上面」）：最新在最上面 → scrollTop = 0。
- * 写错方向的表现很隐蔽 —— 滚动条会停在最旧那一端，用户以为新结果没出来。
- */
 function scrollToNewest(el) {
   const body = el?.closest?.('.ai-body') || el;
   if (!body) return;
@@ -6501,7 +5543,7 @@ function markReversedBodies() {
 }
 
 /**
- * 回答正文渲染：**先剥掉 prt 隐藏块**，再把 〔p.N〕 / 〔p.N–M〕 变成可点击页码。
+ * 回答正文渲染：先剥掉 prt 隐藏块，再把 〔p.N〕 / 〔p.N–M〕 变成可点击页码。
  * 渲染失败/页码越界时保持普通文字，不影响回答本身。
  */
 function decoratePageRefs(html) {
@@ -6532,12 +5574,6 @@ function initPageRefs() {
   });
 }
 
-/**
- * 流式渲染目标：~30fps 合帧 + 只在贴底时自动跟随。
- * 注意：不能只靠 requestAnimationFrame —— 窗口被遮挡/最小化/无头环境下
- * rAF 会被浏览器节流甚至完全不触发，那样文字会攒到全部生成完才一次性出现，
- * 看起来就像「卡住了」。所以再挂一个定时器兜底。
- */
 function streamTarget(node) {
   let pending = null;
   let rawNode = null;
@@ -6648,7 +5684,6 @@ function hashStr(s) {
   return (h >>> 0).toString(36);
 }
 
-/* ══════════════════════════════ 译 / 释 / 问 ══════════════════════════════ */
 
 function ensureReady() {
   const d = Settings.data;
@@ -6685,24 +5720,11 @@ function setBusy(on, hint = '') {
   $('#stopBtn')?.classList.toggle('hidden', !on || !state.abort);
   $('#sendBtn').disabled = on;
   $('#clipBtn').disabled = on;
-  // 忙时那行显示进度；闲下来立刻回到「这次会发什么」的短状态（用户口径：不再清空）
   if (on) setHint(hint);
   else updateComposerHint();
-  /**
-   * ⚠️ `#regionBtn` 已从顶栏删除（2026-10），这里必须用可选链：
-   * 少了这个 `?.` 的时候，setBusy() 会在这一行抛
-   * 「Cannot set properties of null (setting 'disabled')」——
-   * 而它是在**流式响应结束时**被调用的，于是后半段（sendBtn/clearSession 复位、
-   * updateSendScope）全部不执行 → 界面永远停在「生成中」，译文也进不了右栏。
-   * 这是实测抓到的真回归（stream.mjs 0/10 块），不是测试脚手架问题。
-   */
   const regionTop = $('#regionBtn');
   if (regionTop) regionTop.disabled = on;
   $$('#attachRow .at-x').forEach((button) => { button.disabled = on; });
-  // 范围菜单：忙的时候整个收起并禁用（菜单项的禁用态由 renderScopeMenu 按 doc/busy 各自算）
-  // ⚠️ 2026-10 起「范围」菜单与「清空会话」都已从输入框那一排撤掉（改到设置页 / 会话菜单），
-  // 这两个 id 现在**不在 DOM 里**，必须用可选链 —— 否则 setBusy() 会在这里抛
-  // 「Cannot set properties of null」，那是在流式响应结束时调用的，界面会永远停在「生成中」。
   const scopeBtn = $('#optScope');
   if (scopeBtn) scopeBtn.disabled = on;
   if (on) closeScopePanel();
@@ -6734,11 +5756,6 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
     else if (mode === 'unavailable') parts.push('整篇论文暂不可提取');
     else parts.push('整篇论文（将增加读取 / 请求量）');
   }
-  /**
-   * ⚠️ 不再显示「最近 N 条对话」（2026-10 用户口径：「最近 6 条对话这种东西不需要，删掉」）。
-   * 历史仍然会随请求发出去（那是模型记住上下文所必需的），只是**不在范围提示里念给用户听**——
-   * 用户要关心的是「这次会读多少论文内容、会不会联网」，不是内部带了几轮历史。
-   */
   if (useWeb && String(query || '').trim()) parts.push('联网搜索');
   if (!parts.length && String(query || '').trim()) parts.push('仅当前问题');
   return parts.join(' · ');
@@ -6747,20 +5764,11 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
 function updateSendScope() {
   const node = $('#sendScope');
   if (!node) return;
-  // 范围上拉栏现在**真的有用**了（2026-10 第 2 步）：内容由 renderScopeRange() 填，
+  // 范围上拉栏现在真的有用了：内容由 renderScopeRange() 填，
   // 收起态由 .hidden 控制。这里只保证「不忙的时候两处状态一致」。
   renderScopeRange();
 }
 
-/**
- * 把「发送范围」两个偏好从 uiStyle 灌进 state —— 全产品唯一入口（2026-10 用户口径：
- * 「默认全文加联网，在设置里面调节」）。
- *
- * 调用点两处，缺一不可：
- *   · boot() 里 initLayout() 之后 —— 存档读进来才算数；
- *   · 设置页保存 / 回填时 —— 用户在设置里一改就立刻生效。
- * 顺带刷新输入框上方那句「本次发送」提示：默认全文 + 联网也要让用户看得见。
- */
 function syncScopePrefs() {
   state.useFullText = uiStyle.useFullText !== false;
   state.useWeb = uiStyle.useWeb !== false;
@@ -6770,18 +5778,6 @@ function syncScopePrefs() {
   updateSendScope();
 }
 
-/**
- * 把右栏某个面板**显示出来并设为当前标签** —— 全产品唯一入口。
- *
- * 用户口径（2026-10 删减后的右栏模型）：右栏恒为 1 列，「译文 / 问答」两个标签切换，
- * **结果出现在哪个标签就自动切到哪个标签**：翻译 → 译文；解释 / 自由提问 / 加入对话 → 问答。
- *
- * 为什么必须收成一个入口（2026-10-05 实测缺陷）：以前每条路径各写一半 ——
- * 有的只 `showAiBlock`（只改 visible）、有的只改 `data-active-panel`、有的什么都不做。
- * 结果点气泡「对话」时附件确实加进去了、`#chatInput.focus()` 也调了，
- * 但当前标签还是「译文」→ 输入框 `display:none`，focus 落回 body，
- * **屏幕上一个像素都没变**（`test/e2e.mjs:1097` 就是卡在这里超时的）。
- */
 function revealPanel(id) {
   const p = state.panels[id];
   if (!p) return;
@@ -6913,7 +5909,6 @@ async function doExplain(sel) {
   }
 }
 
-/* ══════════════════════════════ 加入对话（可加多个） ══════════════════════════════ */
 
 const uid = () => `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
@@ -6955,15 +5950,6 @@ function takeAttachments() {
   return list;
 }
 
-/**
- * 发送那一刻就把这条请求带走的附件从输入区收掉（2026-10 用户口径：带图片提问时，
- * 点发送之后图片要马上消失，不能等答案整个流完才消失）。
- *
- * 附件快照在 `pending.attachments` 里，所以收走不等于丢掉：
- *   · 发送失败 → `restoreSentAttachments()` 原样放回输入区，改改问题就能再发；
- *   · 点「重试 / 重新生成」→ `send(pending)` 直接复用快照，图会照常发给模型；
- *   · 用户消息气泡里也已经有缩略图，收走后仍看得见刚才发的是哪张图。
- */
 function dropSentAttachments(pending) {
   const ids = new Set((pending?.attachments || []).map((a) => a && a.id).filter(Boolean));
   if (!ids.size || !state.attachments.some((a) => ids.has(a.id))) return;
@@ -7012,22 +5998,17 @@ function flashHint(msg, ms = 3200) {
   hintTimer = setTimeout(() => { if (!state.busy) node.textContent = ''; }, ms);
 }
 
-/* ══════════════════════════════ 对话 ══════════════════════════════ */
 
 function initComposer() {
   $('#composer').addEventListener('submit', (e) => { e.preventDefault(); send(); });
   $('#stopBtn').onclick = () => { abortStream('user'); setHint('正在停止…'); };
   $('#clipBtn').onclick = () => state.startRegion?.();
-  // 「清空会话」不再常驻在输入框下面（2026-10 用户口径），改挂在会话菜单里。
+  // 「清空会话」不再常驻在输入框下面，改挂在会话菜单里。
   // 这里的绑定用可选链，元素不在也不抛。
   const clearBtn = $('#clearSession');
   if (clearBtn) clearBtn.onclick = clearCurrentSession;
   renderAttachments();
 
-  /**
-   * 发送范围（2026-10 第 2 步）：范围芯片 + 四选项上拉栏。
-   * 事件委托挂在 form 上（芯片与面板都在 form 里），键盘 / 点选走同一条路径。
-   */
   $('#composer')?.addEventListener('click', (e) => {
     if (e.target.closest('#composerScope')) { e.preventDefault(); toggleScopePanel(); return; }
     const opt = e.target.closest('#sendScope .scope-opt');
@@ -7054,49 +6035,12 @@ function initComposer() {
   });
 }
 
-/* ══════════════════ 发送范围（整篇论文 / 联网查资料） ══════════════════
-   2026-10 用户口径：「范围 / 选中文本 + 当前页 / 清空会话这些……第一个应该是默认全文加联网，
-   在设置里面调节」。
-   两个开关都是**低频、高影响**的（整篇明显增加请求量与等待时间，还牵涉隐私；联网会改变
-   答案来源），所以现在既不做常驻芯片、也不做输入框旁的菜单，而是收进设置页当全局偏好：
-     · 默认都开着（用户口径）；
-     · 一个勾选框 = 一个偏好，保存后跨论文 / 跨会话 / 跨启动都算数；
-     · 「整篇」不再需要二次确认 —— 它不再是「这一次发送」的高代价动作，而是用户自己
-       在设置里明确表达的长期意图。
-   本文件里引用到的 `#scopeMenu` / `#optScope` / `#scopeState` 三个节点都已经从
-   index.html 删除，相关的菜单实现（开/关/二次确认）也一并删了，只留一个空的
-   `renderScopeMenu()` 兼容壳（历史上 7 处调用点 + `window.__ctx` 导出仍在调它）。
-   改这两个偏好的**唯一入口**是设置页的 `#cfgUseFullText` / `#cfgUseWeb`，
-   落地点是 `applyUiSettingsFromControls()` → `syncScopePrefs()`。 */
 
 /** 整篇论文此刻能不能开：要有一篇真的装好的论文 */
 const fullScopeAvailable = () => !!state.doc && !!viewer?.pdf && state.viewerDocId === state.doc?.docId;
 
-/**
- * 兼容壳：范围菜单曾经整个删掉（发送范围搬进设置页），历史上很多地方（含 `window.__ctx`
- * 的导出与 `initComposer`）都会调它，所以保留同名函数最省事。
- *
- * 2026-10-05 更新（用户拍板第 2 步）：**范围又回到发送框了**，但形态与当年不同 ——
- * 设置里的默认范围仍然只决定初始值，实际发送前可以在发送框上拉栏里临时改，改完沿用到下一次。
- * 真正的内容渲染在 `renderScopeRange()`（下面「发送范围（四选项）」一节）。
- */
 function renderScopeMenu() { renderScopeRange(); }
 
-/* ═════════════════════ 发送范围（四选项，第 2 步） ═════════════════════
- *
- * 用户 2026-10 拍板：
- *   · 发送框上拉栏里四个互斥选项：当前内容 / 整篇论文 / 联网搜索 / 整篇论文 + 联网搜索
- *   · 设置页保留「默认发送范围」，只决定初始值
- *   · `#composerHint` 不再清空 —— 收起状态显示当前范围的短状态
- *   · 四个选项覆盖原来两个独立开关的**全部组合**（含「只联网」，不丢能力）
- *   · 「当前内容」由上下文自动决定：有选中文字发选中文字，没有就发当前页上下文
- *
- * 关键约束（改这块必须遵守）：**范围只对下一次发送生效、之后沿用**，
- * 而设置页那两个偏好（uiStyle.useFullText / useWeb）是**默认值**，不被发送框写坏。
- * 所以每次发送前把范围固定进 pending，`state.useFullText/useWeb` 跟着当次范围走 ——
- * 重试闭包捕获的是当次的 pending，因此重试绝不会串范围
- * （test/context.mjs 与 test/stream.mjs 都在盯这条）。
- * ═════════════════════════════════════════════════════════════════════ */
 
 const SCOPE_RANGES = {
   current: { key: 'current', short: '当前内容', icon: 'region', full: false, web: false,
@@ -7111,7 +6055,7 @@ const SCOPE_RANGES = {
 const SCOPE_RANGE_ORDER = ['current', 'paper', 'web', 'paper-web'];
 
 /** 设置页两个偏好 → 初始范围（沿用老存档语义，不改变既有默认「整篇 + 联网」）
- *  ⚠️ 只读 uiStyle（偏好本身），**不要**读 state.useFullText：那是「当次发送」的运行时值，
+ *  ⚠️ 只读 uiStyle（偏好本身），不要读 state.useFullText：那是「当次发送」的运行时值，
  *  混用会出现「默认开着整篇、范围却是当前内容」这种自相矛盾的初始态。 */
 function rangeFromPrefs() {
   const full = uiStyle.useFullText !== false;
@@ -7151,7 +6095,6 @@ function rangeOverview() {
   return tail.length ? `${head} · ${tail.join(' · ')}` : head;
 }
 
-/** 收起状态的那句短状态（用户口径：不再清空 #composerHint） */
 function updateComposerHint() {
   if (state.busy) return;                    // 忙的时候那行归进度文案用
   setHint(rangeOverview());
@@ -7209,7 +6152,7 @@ function toggleScopePanel() {
     renderScopeRange();
     panel.classList.remove('hidden');
     $('#composerScope')?.setAttribute('aria-expanded', 'true');
-    // 点面板外面就收起。监听挂在 document 捕获阶段，且**每次打开重新挂**
+    // 点面板外面就收起。监听挂在 document 捕获阶段，且每次打开重新挂
     // （不用 setTimeout 延迟挂 —— 那会和「点完立刻点别处」的竞态撞车）。
     document.addEventListener('pointerdown', scopeAway, true);
   } else {
@@ -7222,7 +6165,7 @@ function setScopeRange(key) {
   state.scopeRange = key;
   renderScopeRange();
   closeScopePanel();
-  // ⚠️ 这里**不写** uiStyle 的两个偏好：范围是「本次发送」的，
+  // ⚠️ 这里不写 uiStyle 的两个偏好：范围是「本次发送」的，
   // 设置页的默认范围才是长期意图。state 的两个标记跟着当前范围走（发送时同源）。
   applyRangeForSend(key);
 }
@@ -7261,12 +6204,6 @@ let FULL_LIMIT = 100000;
 /** 索引模式下一次取几段原文 */
 const PICK_K = 6;
 
-/**
- * 组装「整篇论文」上下文。
- *  ≤ FULL_LIMIT 字：按页原样发全文（页码标记，便于模型引用和回跳）。
- *  更长：第一次提问时用模型生成一份 800 字「阅读索引」并缓存，
- *        再按关键词从各页里挑出与问题最相关的 PICK_K 段原文一起发。
- */
 async function buildDocContext(question, selection) {
   if (!state.doc) return null;
   const myDoc = state.doc.docId;
@@ -7458,12 +6395,12 @@ async function send(retryPending = null) {
       docId: state.doc?.docId || null,
       docTitle: state.doc?.name || '',
       history, openSeq: state.openSeq, sid: activeSidFor(state.doc?.docId),
-      // 本次发送按**发送框当前范围**决定（四选项里选的那个），不再直接读设置页偏好
+      // 本次发送按发送框当前范围决定（四选项里选的那个），不再直接读设置页偏好
       useFullText: SCOPE_RANGES[currentRange()].full,
       useWeb: SCOPE_RANGES[currentRange()].web,
       scopeRange: currentRange(),
     };
-    // 截图附件单独存：**点发送才上传**（只放进输入框又删掉的草稿不会产生服务端文件）。
+    // 截图附件单独存：点发送才上传（只放进输入框又删掉的草稿不会产生服务端文件）。
     // 上传是并行的、本机 HTTP，几毫秒级；返回的 id 记在图片附件对象上（im.ref），
     // 之后写进会话的是 id 引用而不是 base64，恢复会话时再按 id 取回。
     const unuploaded = images.filter((im) => im.dataUrl && !validAttachmentId(im.ref));
@@ -7513,11 +6450,6 @@ async function send(retryPending = null) {
 
   const ctl = makeController();
   if (!ctl) return;
-  /**
-   * 附件在这里就离开输入区 —— 新发和重试走同一条路径。用户口径（2026-10）：
-   * 「有图片输入的时候，点发送之后，图片就直接消失，不要等答案完全出来了再消失」。
-   * 失败时 catch 里把附件放回输入区（见 restoreSentAttachments）。
-   */
   dropSentAttachments(pending);
   // 这条待发记录的范围固定下来：state 的两个标记跟着它走（重试时 pending 原样复用，不会串范围）
   applyRangeForSend(pending.scopeRange || currentRange());
@@ -7540,7 +6472,7 @@ async function send(retryPending = null) {
   let docCtx = null;
   try {
     /**
-     * 截图附件单独存：等上传完再发请求（本机 HTTP，几毫秒），把返回的 id 写进**这条用户消息**
+     * 截图附件单独存：等上传完再发请求（本机 HTTP，几毫秒），把返回的 id 写进这条用户消息
      * 的会话记录（shots[]）。会话 JSON 因此只增加几十字节的 id 引用，重开论文时按 id 取回原图。
      * 上传失败照发 —— 只是这条消息没有可恢复的图（老提示兜底），不挡提问。
      */
@@ -7685,7 +6617,6 @@ async function send(retryPending = null) {
   }
 }
 
-/* ══════════════════════════════ 截图 / 长截图 ══════════════════════════════ */
 /* 拖框选区域；把鼠标拖出正文区上下边缘会自动滚动，于是可以一路框到下一页 ——
    因为图是从 PDF 重新渲染的（不是截屏），超出视口的部分也能完整拿到。 */
 
@@ -7704,7 +6635,7 @@ function initRegion() {
     overlay.classList.add('hidden');
     hint.classList.add('hidden');
     rect.style.display = 'none';
-    // `#regionBtn` 已从顶栏删除（2026-10），所以这里两处都要可选链：
+    // `#regionBtn` 已从顶栏删除，所以这里两处都要可选链：
     // 少了它，startRegion() 会在 classList.add 上抛错 → 框选遮罩根本不会出现。
     $('#regionBtn')?.classList.remove('on');
     $('#clipBtn')?.classList.remove('on');
@@ -7764,7 +6695,7 @@ function initRegion() {
     }, 16);
   };
 
-  // #regionBtn 已从顶栏删除（2026-10）：截图入口改到问答栏的「＋」（#clipBtn）。
+  // #regionBtn 已从顶栏删除：截图入口改到问答栏的「＋」（#clipBtn）。
   // 框选能力本身保留（快捷键 R 与 #clipBtn 都走 startRegion），所以这里用可选链。
   const regionBtn = $('#regionBtn');
   if (regionBtn) regionBtn.onclick = () => startRegion();
@@ -7852,7 +6783,6 @@ async function captureToChat(topDoc, bottomDoc, leftVp, rightVp) {
   }
 }
 
-/* ══════════════════════════════ 搜索 ══════════════════════════════ */
 
 let searchToken = 0;
 let searchDebounced = null;
@@ -7984,7 +6914,6 @@ function stepHit(dir) {
   showSearchHit((idx + dir + hits.length) % hits.length, true);
 }
 
-/* ══════════════════════════════ 设置（只有 Key + 模型名） ══════════════════════════════ */
 
 const ENDPOINT_SHORT = {
   'https://api.deepseek.com/v1': 'api.deepseek.com',
@@ -8012,15 +6941,6 @@ function fillSettings() {
   fillUiSettings();
 }
 
-/**
- * 把设置页的控件对齐到当前 uiStyle。
- *
- * 设置页只保留六项（API Key / 模型名 / 接口地址 / 主题 / 阅读字号 / 恢复默认设置）：
- * 结果密度、顶栏行为、「更多样式」里那批调试刻度都已经从界面上撤掉 ——
- * 这里**只回填还存在的控件**，缺哪个就跳过（都用 `?.` 取值），
- * 这样以后再删控件也不会把设置页弄崩。
- * DEFAULT_UI_STYLE 里的字段仍然全部保留：老存档读回来照旧生效，用户的外观不会被偷偷改掉。
- */
 function fillUiSettings() {
   const theme = $('#uiTheme');
   if (theme) theme.value = uiStyle.theme;
@@ -8085,16 +7005,6 @@ function applyUiSettingsFromControls() {
   /* 缩放速度当场推给 viewer：触摸屏捏合下一帧就用新速度，不用重开论文、不打断手势 */
   viewer?.setZoomSpeed?.(uiStyle.zoomSpeed);
   applyUiStyle();
-  /**
-   * ⚠️ **主题变化也要重画 PDF 页面**，不能只在「纸面背景」变化时重画。
-   *
-   * 用户实测：「调了保存之后，pdf 有的变深色有的不变深色」——
-   * 根因就是这条分支原来只判 `oldPaper`：主题一变，`--paper` 跟着变，
-   * 但已渲染的页面（`this.rendered` 里的位图）不会重画，于是**先渲染的页仍是旧色、
-   * 之后滚进来的页用新色**，一屏里一半深一半浅。
-   * 纸面现在已不跟随深色主题，但这条重画仍然必须留着：
-   * 只要将来纸面色还可能变，主题切换就必须触发一次全量重画。
-   */
   if (oldPaper !== uiStyle.paper || oldTheme !== uiStyle.theme) viewer?.refreshPaper?.();
   saveUi();
   // 发送范围偏好一改就当场生效（输入框上方那句「本次发送」同步刷新）
@@ -8108,16 +7018,6 @@ function applyUiSettingsFromControls() {
   updateUiRangeLabels();
 }
 
-/**
- * 「恢复默认布局」（设置里的按钮 / 面板管理器底部的按钮）：
- *   ① 六个面板全回默认（dock / home / order / visible / collapsed / pinned / size / rect / z / docId）；
- *   ② 两侧栏宽度 + 底部停靠区高度回默认（--left-w / --right-w / --dock-bottom-h）；
- *   ③ 清掉用户的收起意图与 2.1 的临时豁免（sideIntent.noLeft/noRight/pinned）；
- *   ④ 停掉正在跑的浮窗动画、收掉停靠预览；
- *   ⑤ 重排 + 按当前窗口宽度重算（窄窗下仍然会按规则自动收起 —— 那是窗口的问题，不是记忆）。
- * 浮着的面板也一并收回停靠并复位（defaultPanels() 里没有 float，applyPanels() 会把节点搬回去）。
- * 只动「壳」：论文、会话、消息一条都不碰。
- */
 function resetPanels() {
   // 复位宽度意图与实际宽度都要回默认（sideBaseW 是「用户意图」，两边一起写才一致）
   sideBaseW.left = 210;
@@ -8234,7 +7134,6 @@ function checkConfigWarning() {
   }
 }
 
-/* ══════════════════════════════ 快捷键 ══════════════════════════════ */
 
 function initShortcuts() {
   document.addEventListener('keydown', (e) => {
@@ -8252,11 +7151,6 @@ function initShortcuts() {
       hideBubble();
       return;
     }
-    // Ctrl/⌘ + =（也就是 Ctrl++）/ - / 0：调「阅读字号」（结果正文），只动 --ai-fs。
-    // 这三条特意放在 `if (typing) return` 之前：Ctrl 组合不受 typing 保护，
-    // 否则输入问题时按 Ctrl+0 会触发浏览器整页缩放，而不是恢复阅读字号。
-    // 必须 preventDefault —— 不然 WebView2/Chromium 会同时触发原生整页缩放。
-    // 无修饰键的 + / - / 0 仍然是 PDF 缩放 / 适应宽度（见下面），依然受 typing 保护。
     if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); setReadingFontSize(uiStyle.fontSize + 1); return; }
     if ((e.ctrlKey || e.metaKey) && (e.key === '-' || e.key === '_')) { e.preventDefault(); setReadingFontSize(uiStyle.fontSize - 1); return; }
     if ((e.ctrlKey || e.metaKey) && e.key === '0') { e.preventDefault(); setReadingFontSize(DEFAULT_UI_STYLE.fontSize); return; }
@@ -8272,10 +7166,6 @@ function initShortcuts() {
     if (e.key === 't' || e.key === 'T') { if (hasSel) { e.preventDefault(); doTranslate(state.selection); } return; }
     if (e.key === 'e' || e.key === 'E') { if (hasSel) { e.preventDefault(); doExplain(state.selection); } return; }
     if (e.key === 'q' || e.key === 'Q') { if (hasSel) { e.preventDefault(); addToChat(state.selection); } return; }
-    // 框选截图（R）。`startRegion` 定义在 initRegion() 内部（那里才拿得到遮罩节点），
-    // 对外只有 `state.startRegion` 这一个通道 —— 和输入框那个 ✂ 按钮走的是同一条。
-    // 之前这里写的是 `$('#regionBtn').click()`：顶栏按钮删掉之后它会抛 null，
-    // 改成裸 `startRegion()` 又会抛 ReferenceError（不在作用域里）。
     if (e.key === 'r' || e.key === 'R') { e.preventDefault(); state.startRegion?.(); return; }
     if (e.key === '+' || e.key === '=') { viewer?.setScale(viewer.scale * 1.15); return; }
     if (e.key === '-' || e.key === '_') { viewer?.setScale(viewer.scale / 1.15); return; }
@@ -8294,7 +7184,6 @@ function initShortcuts() {
   });
 }
 
-/* ══════════════════════════════ 杂项 ══════════════════════════════ */
 
 // 只有用户主动停止（fetch 被 abort）才算「已停止」；超时是 TimeoutError，必须显示成错误
 const isAbort = (e) => e?.name === 'AbortError';
@@ -8330,17 +7219,6 @@ async function copyText(text) {
   }
 }
 
-/**
- * 启动决策（2026-10 首页改造的核心改动）。
- *
- *   有 `?open=`      → 直接进阅读页（明确的打开意图：双击文件、快捷方式、外部调用）
- *   其他一切情况     → **停在首页**，不自动打开上次论文
- *
- * 改造前这里是「否则自动打开上次论文」，于是用户每次启动都被直接丢进一篇 PDF，
- * 想换一篇得先按返回。现在改成：启动 = 首页，想继续读由用户点「继续阅读」。
- *
- * 产品负责人明确要求**不增加**「启动时继续上次论文」设置项，所以这里没有开关。
- */
 async function maybeReopenLast() {
   const url = new URL(location.href);
   const openName = url.searchParams.get('open');
@@ -8371,19 +7249,6 @@ async function maybeReopenLast() {
   setView('home');
 }
 
-/**
- * 关页前的最后一笔保存。
- *
- * ⚠️ 这里**不能用 navigator.sendBeacon**（2026-10 安全加固后踩到的真回归）：
- * 本地 API 现在要求所有 `/api/*` 都带自定义头 `X-PRT-Token`，而 sendBeacon
- * **无法设置请求头**，于是「关页 / 刷新」这一笔保存会静默变成 401 ——
- * 用户看得到的是「刚才翻到的那一页又回去了」。
- *
- * 改用注入页面的 fetch 补丁 + `keepalive: true`：
- *   · 走的是同一个 fetch，令牌自动带上，服务端认得；
- *   · keepalive 让请求在文档卸载后继续送达，正是 sendBeacon 原本的作用；
- *   · 体积上限同样是 64KB —— 超了会 reject，被 catch 兜住，不会把页面搞挂。
- */
 function saveOnUnload(url, text) {
   try {
     fetch(url, {

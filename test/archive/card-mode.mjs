@@ -1,28 +1,3 @@
-/**
- * 面板「应用内卡片」模式回归套件（取代测已废止的系统级独立窗口的 panel-detach-state /
- * panel-window-layout 两套）。
- *
- *   cd test && node card-mode.mjs
- *
- * 背景：用户实测「鼠标移到屏幕顶边出现一块遮挡，左右两边都有」，追到最后的结论是
- * **旧的全屏面板窗口模式（`?window=panel&panel=<id>`）**：那种页面会把某一个面板撑满整个窗口，
- * 旧窗口/旧书签一旦再打开，就成了覆盖在阅读区上的大块。
- * 处理：`panelWindow.enabled` 恒为 false（`Object.freeze({enabled:false})`），
- * Rust 侧也不再创建 Tao 子窗口（`NewWindowResponse::Deny`）；
- * 面板的「拖出 / 打开」全部改成阅读器内部的浮层卡片（`#floatLayer`）。
- *
- * 本套件只断言**现在真正生效的契约**：
- *   ① 旧 URL 必须退化成普通阅读器（不能整页变成某一个面板）
- *   ② 浮出面板 = 应用内卡片：进 #floatLayer、是 fixed、尺寸 ≥260×180、且被钳在窗口内
- *   ③ 全程不许再调用 window.open()（不再弹系统窗口）
- *   ④ 点正文 / 侧栏不会把卡片关掉；只有卡片的收回按钮、面板管理器、Esc 能收回
- *   ⑤ 收回后回到原停靠区，且 visible 保持
- *   ⑥ 旧存档里的 reader.detachedWindows 在启动时被清掉，不留残留态
- *   ⑦ 卡片不许压住阅读区超过一半（防「大块遮挡」复发）
- *
- * 隔离：自起 node server.js（PORT=8919，PRT_DATA_DIR / PRT_PAPERS_DIR 指向 mkdtemp），
- * 跑完删临时目录、杀服务；开头结尾比对真实 data/config.json 的 SHA256 证明只读。
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -112,7 +87,6 @@ async function launchBrowser(exe) {
   return { error: errors.join('\n  ') };
 }
 
-/* ══════════════════════════ 页面探针 ══════════════════════════ */
 const PROBE = () => {
   window.__c = {
     /** 一次性取齐：面板模型 + 卡片 DOM + 窗口命中 */
@@ -202,7 +176,6 @@ const PROBE = () => {
   };
 };
 
-/* ══════════════════════════ 主流程 ══════════════════════════ */
 try {
   if (!browserPath) throw new Error('找不到 Edge / Chrome 可执行文件');
   if (!fs.existsSync(FIXTURE_PDF)) throw new Error(`缺少 fixture PDF：${FIXTURE_PDF}`);
@@ -340,12 +313,6 @@ try {
     `dock=${afterOutside.dock} isFloat=${afterOutside.isFloat}`);
 
   section('四、Esc 能收回卡片');
-  /**
-   * ⚠️ 先**真实点一下卡片**再按 Esc。
-   * 产品契约是「焦点在浮窗里（或最近碰过某个浮窗）时 Esc 才收回」——`focusedFloatPanel()`
-   * 读的是 `currentPanelId()`。程序化 `detachPanelToWindow()` 打开的卡片并不因此获得焦点，
-   * 直接按 Esc 属于「测试没按产品契约操作」，不是缺陷（实测：不点卡片 Esc 不收回，点了就收）。
-   */
   const cardRect = await page.evaluate(() => {
     const box = document.querySelector('#floatLayer [data-panel="chat"], #floatLayer [data-shell="chat"]');
     if (!box) return null;
@@ -366,11 +333,6 @@ try {
   await sleep(900);
   check('前置：第五段开始时卡片已打开', reopen5 === true, `detachPanelToWindow 返回 ${reopen5}`);
 
-  /* ⚠️ 浮出的卡片有两种形态：
-       ① 单节点卡片：节点自己带 data-panel + .panel-float（如 chat）
-       ② 带 shell 的卡片：外层 .panel-shell[data-shell] 负责定位，内部块带 data-panel
-     所以「卡片盒子」用后代选择器同时覆盖两种形态；写成 `> [data-panel=...]` 对形态 ② 会落空
-     （实测：现场里 #floatLayer 的子节点是 .panel-shell[data-shell=files] 与 .ai-block[data-panel=chat]）。 */
   const CARD_SEL = '#floatLayer .panel-shell[data-shell="chat"], #floatLayer .panel-float[data-panel="chat"], #floatLayer [data-shell="chat"], #floatLayer [data-panel="chat"]';
   const cardProbe = await page.evaluate((sel) => {
     const box = document.querySelector(sel);
@@ -385,11 +347,6 @@ try {
   }, CARD_SEL);
   console.log(`   （现场）卡片盒=${cardProbe && cardProbe.cls} rect=${fmt(cardProbe && cardProbe.rect)} 抓手=${cardProbe && cardProbe.hasGrip}`);
 
-  /* ⚠️ 不要用「拖到 (x+4000, y+4000)」来测越界：
-     那一步松手时指针落在**最右侧停靠带**里，产品会按设计把卡片收回右栏
-     （「拖到最右 18px 回栏」是明确契约）。实测：拖出窗口后卡片直接回栏，
-     于是「卡片仍在浮层里」这条断言必然假红 —— 是测试选错了手段。
-     改成断言两条真实契约：① 落在停靠带 → 回栏；② 窗口内正常拖动 → 仍是可见浮卡片。 */
   await page.evaluate((sel) => {
     const box = document.querySelector(sel);
     const head = box ? box.querySelector('.ai-head, .sec-head, .side-head') : null;

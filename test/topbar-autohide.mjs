@@ -1,32 +1,3 @@
-/**
- * 顶栏自动隐藏回归套件。
- *
- *   cd test && node topbar-autohide.mjs
- *
- * 用户口径（2026-10-03，原话）：
- *   「在阅读的时候，最上面那一栏应该是鼠标悬停在上面才出现，鼠标移走就收起。」
- *   「控件需要下移的可以跟着下移，文章不动。」
- *
- * 判定的是**几何关系**，不是观感：
- *   T1 静息态：顶栏不在屏幕里（translateY(-100%)、top = -46）
- *   T2 鼠标进顶部热区：顶栏滑出（top = 0）
- *   T3 鼠标移开：顶栏收回
- *   T4 **文章不动**：正文区上沿在「收起 / 展开 / 再收起」三个时刻完全相同
- *   T5 顶栏展开时盖在正文上，而不是把正文往下推（正文高度三态不变）
- *   T6 悬停组：鼠标从热区移进顶栏里（y 落在 0..46）顶栏保持展开 ——
- *      否则一离开那 6px 热区就收回，按钮一个都点不到
- *   T7 键盘：焦点进顶栏（Tab）保持展开；焦点离开后能收起
- *   T8 键盘焦点在顶栏内部的输入控件上时**不自动收起**（打字打到一半顶栏滑走最烦人）
- *   T9 底部严丝合缝：状态栏底边 = 视口底边，且不出现页面滚动条
- *   T10 正文顶到屏幕上沿（顶栏收起时不留 46px 白带）
- *   T11 窄窗 520px：顶栏仍常驻并贴屏幕上沿（T11b 是窄窗正文被压到 0 宽的已知缺陷标记）
- *   T12 全程零 JS 报错
- *
- * 注：T1–T10 / T6–T8 的判据已在 2026-10-04 按「顶栏 = 应用内常驻标题栏」的新契约重写过，
- * 上面那段「悬停才出现」的措辞是旧契约的原文，留着当变更缘由看，不再是断言口径。
- * T11 原来验的是 `?window=panel` 旧 URL 模式 + `#topbarHot` 热区，两者都在 2026-10 删减里
- * 被删除，那半条断言已撤掉。
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -172,14 +143,6 @@ try {
     await sleep(2600);   // 开场那 1.2s 的「亮一下」已经结束
 
     section('T1–T3 顶栏常驻（2026-10-04 新契约：不再「悬停才出现」）');
-    /**
-     * 契约变更（用户口径 2026-10-04）：
-     *   「不做那个浮动栏了，就一直显示；把最上面那一栏（最小化/关闭按钮那一行）
-     *     做进应用内部，完全模仿 VS Code」。
-     * 于是顶栏从「浮层滑入滑出」变成**应用内标题栏**：常驻、35px、贴着屏幕上沿，
-     * 窗口按钮就挂在它最右边。旧的那套断言（静息在屏幕外 / 触发带 8px / 移开就收）
-     * 测的是已退役的行为，这里整套换成「常驻」的判据。
-     */
     const rest = await page.evaluate(GEO);
     check('T1 静息态顶栏就贴在屏幕上沿、高度 35px（应用内标题栏）',
       rest.bar && rest.bar.top === 0 && rest.bar.h === 35 && rest.bodyCls.includes('topbar-static'),
@@ -216,14 +179,6 @@ try {
       Math.abs((rest.viewer?.top ?? -1) - (rest.bar?.h ?? -2)) <= 1,
       `viewer.top=${rest.viewer?.top} 顶栏 h=${rest.bar?.h}`);
 
-    /**
-     * T13 顶栏不能盖住正文内容 —— 这是用户实测反馈过的缺陷：
-     *   上一版为了「顶栏收起时不留白带」，把正文区整体上提了 46px（margin-top 负值），
-     *   结果**第一页的上沿跑到 y=−26**，页面顶上那几十像素被浮层顶栏压住，
-     *   翻到正文开头正好看不见（用户原话「桌面端全都被挡住了」）。
-     * 新契约下顶栏常驻、正文区从它下沿开始，判据简化成：**页面上沿必须在顶栏下边之下**，
-     * 而且鼠标状态不影响它（文章不动）。
-     */
     const pageGeo = await page.evaluate(() => {
       const pg = document.querySelector('.page');
       const bar = document.querySelector('.topbar');
@@ -242,21 +197,6 @@ try {
       !!hotPage && hotPage.pageTop >= hotPage.barBottom - 2 && hotPage.pageTop === pageGeo?.pageTop,
       `barBottom=${hotPage?.barBottom} pageTop=${hotPage?.pageTop}（静息时 pageTop=${pageGeo?.pageTop}）`);
 
-    /**
-     * T14 用户实测缺陷（本轮修复）：鼠标移到屏幕顶边时，**整个阅读区消失**，
-     * 只剩顶部一条工具栏，下面一片米黄。
-     *
-     * 根因：`body` 上的状态类与热区元素的类名同名（都叫 `topbar-hot`），
-     * 而 CSS 里 `.topbar-hot { position:fixed; height:var(--topbar-hot); z-index:45;
-     * background:transparent }`。于是加状态类 = 把 **`<body>` 自己**变成一条
-     * 56px 高的透明固定条，`#main` 与 PDF 被挤出可视区。
-     * 定位手段：CDP `CSS.getMatchedStylesForNode(body)` 报出 body 命中了 `.topbar-hot`。
-     *
-     * 这条断言用**渲染结果**兜住它（不只看 DOM —— 事故当时 DOM 尺寸完全正常，
-     * 只有实际画面是空的）：
-     *   ① body 不能命中任何「定位/高度」属性 —— 它必须保持 static + 满高
-     *   ② 顶栏展开时必须真的能看到 PDF 纸面（截图里数「纸面像素」）
-     */
     const bodyBox = await page.evaluate(() => {
       const cs = getComputedStyle(document.body);
       const r = document.body.getBoundingClientRect();
@@ -337,13 +277,6 @@ try {
       afterBlur.overflowY <= 0, `overflowY=${afterBlur.overflowY}`);
 
     section('T11 窄窗（520px）：顶栏常驻、正文不被压没');
-    /**
-     * 旧写法用 `?window=panel&panel=chat` 打开「整页单面板」窗口，验它被降级成普通阅读器。
-     * 2026-10 删减把 `?window=panel` 这条 URL 模式（以及系统级子窗口那一整套）和
-     * `#topbarHot` 热区一起删掉了：再请求那个 URL 只会得到普通阅读器，
-     * 断言就退化成「自己验自己」的空转，故整条撤掉。
-     * 保留下来的只有窄窗这条**仍然活着**的契约，外加上面 T11b 那条已知缺陷标记。
-     */
     const child = await browser.newPage();
     await child.setViewport({ width: 520, height: 760 });
     await child.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
@@ -359,14 +292,6 @@ try {
     });
     check('T11 窄窗 520px 下顶栏仍在、且贴在屏幕上沿',
       childGeo.barDisplay !== 'none' && childGeo.barTop === 0, JSON.stringify(childGeo));
-    /**
-     * T11b **已知缺陷**（不是顶栏契约的一部分，本阶段未修）：
-     *   520px 窄窗下 `#viewer` 宽度被压到 **0** —— `.viewer-wrap` / `.viewer` 都是
-     *   `flex: 1 1 0; min-width: 0`，没有任何 min-width 兜底，窗口再窄就直接压没了。
-     *   改动前的基线跑里同一个数字也是 0（`viewerW:0`），**与本次顶栏改动无关**。
-     *   修法与量测见 test/artifacts/rightrail-design/REPORT.md §5.5。
-     *   这里留一条显式断言，免得这个缺陷被"忘了"。
-     */
     check('T11b［已知缺陷·本阶段未修］窄窗 520px 下正文不应被压到 0 宽',
       childGeo.viewerW > 0, `viewerW=${childGeo.viewerW}（见 rightrail-design/REPORT.md §5.5）`);
     await child.close();

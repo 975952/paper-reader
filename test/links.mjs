@@ -1,17 +1,3 @@
-/**
- * 外链点击验收：论文查找 / 联网来源 里的网页链接必须真的能点开。
- *
- *   BASE=http://127.0.0.1:8787 node test/links.mjs
- *
- * 背景（用户反馈的原话是「现在的论文查找，网页链接不能直接点」）：
- * 桌面版是 WebView2 外壳，页面里的 `<a target="_blank">` 默认什么都不会发生；
- * 而不加 target 直接跳又会把应用界面顶掉换成外站。所以所有 http(s) 链接统一
- * 拦下来，交给后端 /api/open-url 用系统浏览器打开。
- *
- * 这个测试把 /api/open-url 拦下来记录调用（否则每跑一次都会在真实桌面上
- * 弹一个浏览器窗口），验证的是「点一下 → 正确地把地址交给了后端 → 应用本身没被顶走」。
- * 后端那一侧的正向能力由 test/node-search.mjs（校验规则）和真机手测覆盖。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import { setScope } from './_scope.mjs';
@@ -198,27 +184,11 @@ if (citeInfo.pt) {
   }
 }
 
-/* ═══════════ 二、联网来源列表里的链接 ═══════════ */
 console.log('\n-- 联网来源里的链接');
-/**
- * 2026-10：发送范围搬进设置页（`#cfgUseFullText` / `#cfgUseWeb`），不再是输入框旁边
- * 那个「范围」菜单（`#optScope` → `#scopeMenu`）。口径没变，只是入口和语义变了：
- * 这两个现在是全局偏好，默认都开着，改一次就一直算数。
- * 联网来源列表要验的是「开着联网」，所以这里关整篇、开联网。
- */
 await setScope(page, { full: false, web: true });
-/**
- * 2026-10：右栏在「译文 / 问答一块都没开」时会收成右侧活动栏（`body.right-empty`），
- * 输入框 `#chatInput` 跟着变成 0×0 —— 直接 `page.click('#chatInput')` 会抛
- * 「Node is either not clickable or not an Element」。想打字必须先点活动栏把右栏拉回来。
- */
 async function ensureComposer() {
   const visible = await page.evaluate(() => (document.getElementById('chatInput')?.getBoundingClientRect().width || 0) > 0);
   if (visible) return;
-  // 2026-10：右侧那条小的活动栏（#railRightBtn）已按用户要求删除，
-  // 而顶栏的 #topbarRightToggle 只切「右栏这一整条的展开/收起」，
-  // 右栏展开后**仍然可能一块面板都没开**（问答块 visible=false）→ 输入框还是 0×0。
-  // 所以直接走面板 API 把「问答」显出来，语义与当年点活动栏一致（与 context.mjs 同法）。
   await page.evaluate(() => {
     window.__ctx.setPanelVisible('chat', true);
     document.body.classList.remove('no-right');
@@ -233,12 +203,6 @@ await page.keyboard.press('Enter');
 await page.waitForFunction(() => document.querySelectorAll('#aiArea .msg.assistant .acts:not(.hidden)').length > 0, { timeout: 30000 });
 await sleep(400);
 
-/**
- * 取**最后一条带来源列表的助手消息**，不要用 `#aiArea .msg.assistant .src-list a`。
- * 会话恢复会把上一批套件留下的消息连同它们的来源一起重新渲染出来
- * （context.mjs 的联网来源是 arxiv 链接），所以「第一个 .src-list a」很可能属于更早的消息，
- * 断言就会拿错的 URL 去比对 —— 实测过：点的是 arxiv，期望的是 SOURCE_URL。
- */
 const lastSrcList = () => page.evaluate(() => {
   const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')];
   for (let i = msgs.length - 1; i >= 0; i--) {
@@ -296,7 +260,6 @@ check('回答下面列出了来源', srcInfo.n >= 1 && /^https?:/.test(srcInfo.h
     opened[n1] || '(没调用)');
 }
 
-/* ═══════════ 汇总 ═══════════ */
 check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 check('没有控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '));
 check('没有 4xx/5xx 请求', badResponses.length === 0, badResponses.slice(0, 3).join(' | '));

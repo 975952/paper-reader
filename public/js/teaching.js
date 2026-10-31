@@ -1,15 +1,3 @@
-/**
- * 「读懂论文」四项能力：目录、提示词、prt 协议、页面对象识别。
- *
- * 与旧 `ops.js` 的分工：
- *   · 本文件 = 菜单里的四项教学能力（先给我讲明白 / 我需要先懂什么 / 带我一步步读 / 讲懂图表与公式）；
- *   · `ops.js` = 不进菜单的「深入阅读」两条（实验够不够支撑结论 / 局限），只由回答末尾的按钮触发。
- *
- * prt 隐藏块：回答正文最后一行的 ```prt JSON，程序用它生成后续按钮；学习记忆独立在后台处理；
- * 模型不输出时一切照旧（静态按钮兜底），解析失败也不会影响正文。
- *
- * 说明：这里刻意只放纯数据与纯函数（不 import DOM），方便 node 直接 import 做单元断言。
- */
 
 /** 提示词版本号：改了提示词就 +1，让教学类回答的缓存自动失效 */
 export const TEACHING_PROMPT_VERSION = 't2';
@@ -271,7 +259,7 @@ const ITEM_HEADING_BLOCKLIST = new Set([
 
 /**
  * 从「我需要先懂什么」的回答里提取清单项（prt chips 缺失时的兜底按钮来源）。
- * 支持 `**名称（English）**` 单独成行、以及 `- **名称**` 两种写法。
+ * 支持 `名称（English）` 单独成行、以及 `- 名称` 两种写法。
  */
 export function parsePrereqItems(text, max = 6) {
   const out = [];
@@ -293,7 +281,7 @@ const cleanSnippet = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 const FORMULA_HINT = /[=＝^_∑√]|softmax|attention|^\s*[A-Za-z]\s*[（(]/i;
 
 /**
- * 从**一页**文本里识别图 / 表 / 算法 / 公式编号，供「讲懂图表与公式」选择器用。
+ * 从一页文本里识别图 / 表 / 算法 / 公式编号，供「讲懂图表与公式」选择器用。
  * 抽取文本经常把标题拆行，所以宁可多列一点候选，让人来选。
  * @returns {Array<{kind:'figure'|'table'|'algorithm'|'formula', label:string, title:string, page:number|null, snippet:string}>}
  */

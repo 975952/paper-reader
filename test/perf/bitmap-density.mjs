@@ -1,19 +1,3 @@
-/**
- * 位图密度调研（不做断言，只打印数字）：**屏幕上一个 CSS 像素分到几个位图像素**。
- *   node test/perf/bitmap-density.mjs              # 夹具（快）
- *   DPR=2 node test/perf/bitmap-density.mjs        # 只看 2× 屏（触摸屏笔记本多半是 2×）
- *   PAPER=attention-arxiv.pdf node test/perf/bitmap-density.mjs   # 换你的论文（只读拷贝，慢）
- *
- * 为什么要专门量这个：2026-10-10 用户口径「怎么放大之后就不太清晰了」。
- * 密度 < dpr 就说明浏览器在把位图放大 = 糊。当时的实测（修复前）：
- *   dpr=1：scale 5/6 → 0.75；dpr=2：fit 宽度 1.53、3.5× 1.01、5× 之后 0.75。
- * 根因不是渲染不动，而是像素预算**按整页面积**算：整页一大就把倍率压到 0.75，
- * 再交给切片逻辑 —— 切片明明放得下也继承了 0.75。修好之后：
- *   dpr=1 全档 1.0；dpr=2 fit 宽度 1.87（整页、滚动不重画）、3.5× 起 2.0（切片）。
- * 永久断言在 `test/zoom.mjs`（「放大之后的清晰度」一节），这里只是给人看的数字。
- * 密度只取决于「屏幕 + 缩放比例」，与论文内容无关，所以默认用夹具 —— 有真论文时
- * 每个 scale 要等重画，跑完一遍要好几分钟。
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';

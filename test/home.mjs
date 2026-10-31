@@ -1,17 +1,3 @@
-/**
- * 首页 / 书架页验收（A1–A8）。
- *
- *   BASE=http://127.0.0.1:8971 node test/home.mjs
- *
- * 八条用例覆盖产品负责人指定的状态：
- *   A1 首次启动、没有论文          A5 点「继续阅读」才进入阅读页
- *   A2 有论文但没有阅读记录        A6 带 ?open= 启动直接进阅读页
- *   A3 有最近论文                  A7 从首页列表 / 双击 PDF 直接进阅读页
- *   A4 普通启动不自动进上次论文     A8 文件已删除 + 移除最近记录
- *
- * 注意：本套件会**改写隔离目录里的 state.json**（那是它自己的沙箱），
- * 真实 data/ 与 papers/ 由 _env 的 assertIsolatedDataDir 拦着，碰不到。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 
@@ -54,7 +40,7 @@ const open = async (query = '') => {
 };
 
 /**
- * ⚠️ 不能读 `window.__ctx.state` —— 那个对象**没有导出 state**（只导出了函数与常量）。
+ * ⚠️ 不能读 `window.__ctx.state` —— 那个对象没有导出 state（只导出了函数与常量）。
  * 判断「打开了哪一篇」要用 DOM 上的可观测信号：#docName（顶栏标题）
  * 与 #fileList li.active（左栏当前项）。
  */
@@ -117,12 +103,6 @@ console.log('\nA2 有论文、state.json 空');
 /* ═══ A3 + A4 ═══ */
 console.log('\nA3 有最近论文 + A4 普通启动不自动打开');
 {
-  /**
-   * ⚠️ 必须挑一篇**真的多于 1 页**的夹具来验「恢复页码」：
-   * papers 列表按 mtime 倒序，image-sample.pdf 是单页纯图夹具，
-   * 给它存「第 5 页」永远恢复不出来（会被夹到第 1 页），
-   * 那是**测试选错夹具**，不是产品缺陷。
-   */
   const p0 = papers.find((p) => /multipage/i.test(p.name)) || papers[0];
   const wantPage = 5;
   await setState({
@@ -220,7 +200,6 @@ console.log('\nA8 最近文件已被移动/删除 + 移除最近记录');
   await page.close();
 }
 
-/* ═══ 右栏布局（2026-10 用户口径）═══ */
 console.log('\n右栏布局：切换器在顶部、结果块无标题栏');
 {
   await clearAll();

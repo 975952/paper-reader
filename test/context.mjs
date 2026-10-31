@@ -1,17 +1,3 @@
-/**
- * 「全文」与「联网」两个开关的端到端测试。
- *
- *   node test/context.mjs                       （默认打 http://127.0.0.1:8787）
- *   BASE=http://127.0.0.1:8790 node test/context.mjs
- *
- * 只拦截两样东西：
- *   /api/chat        —— 免得真花钱，同时把发出去的 prompt 抓下来断言
- *   /api/web-search  —— 可切换「正常 / 失败」，免得测试依赖外网抖动
- * PDF 本身、pdf.js、全文抽取都是真的，所以「全文」这条链路是真跑通的。
- *
- * 注意：这个文件是 UTF-8，别用 PowerShell 的 Get-Content/Set-Content 去改它
- * （pwsh 会按 ANSI 代码页解码，中文和 ✅ 会当场变成乱码写回去）。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import fs from 'node:fs';
@@ -29,7 +15,6 @@ const check = (name, ok, detail = '') => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* ─────────── 准备服务端状态 ─────────── */
 const papers = await fetch(`${BASE}/api/papers`).then((r) => r.json()).catch(() => ({ papers: [] }));
 // 列表按 mtime 倒序，别直接取 [0]：刚上传的小测试文件会排在真论文前面，
 // 而「全文」相关用例需要一篇有正经正文的多页论文。挑体积最大的那篇。
@@ -44,7 +29,6 @@ const postJson = (url, obj) => fetch(url, {
 await postJson(`${BASE}/api/config`, { apiKey: 'sk-ctx-test-key', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-flash' });
 await postJson(`${BASE}/api/state`, { lastDoc: null, lastName: null, lastUrl: null, docs: {} });
 
-/* ─────────── 浏览器 ─────────── */
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: 'shell',
@@ -113,7 +97,6 @@ page.on('request', (req) => {
   return req.continue();
 });
 
-/* ─────────── 打开论文 ─────────── */
 await page.goto(`${BASE}/?topbar=static`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('#fileList li', { timeout: 20000 });
 await page.evaluate((id) => {
@@ -128,10 +111,6 @@ check('PDF 打开成功', numPages > 0, `${numPages} 页`);
 
 /* 默认状态（全新 profile，localStorage 是空的） */
 const defaults = await page.evaluate(() => ({
-  // 2026-10-05 第 2 步（用户拍板）：范围**回到发送框**，四选项上拉栏；
-  // 设置页那两个勾仍然是**默认值**（只决定初始值）。所以这里同时钉住：
-  //   · 偏好默认都开 → 范围初始值 = 「整篇论文 + 联网搜索」；
-  //   · 范围以「芯片 + 上拉栏」的形式出现在发送框，不再是右栏那行只读文字。
   f: !!window.__state.useFullText,
   w: !!window.__state.useWeb,
   range: window.__ctx.scopeRange,
@@ -151,12 +130,6 @@ check('发送框上写着当前范围（一眼看得见，不用猜）',
 check('上拉栏里是四个互斥选项（含「只联网」，没丢能力）',
   defaults.options.join('|') === 'current|paper|web|paper-web', defaults.options.join(' | '));
 
-/**
- * 把「发送范围」开关拨到想要的状态 —— 走**设置页**（默认值会变，所以不能盲目 click）。
- * 2026-10 之前是输入框旁边的范围菜单（`#optScope` → `#scopeMenu`），现在是设置里的
- * `#cfgUseFullText` / `#cfgUseWeb`：打开设置、点勾选框、点保存。
- * 行为口径变了：这两个不再是「本次发送」的一次性开关，而是全局偏好，改一次就一直算数。
- */
 async function setScope(which, want) {
   return page.evaluate(async (w, on) => {
     const id = w === 'full' ? 'cfgUseFullText' : 'cfgUseWeb';
@@ -173,7 +146,6 @@ async function setScope(which, want) {
   }, which, want);
 }
 
-/* ═══════════ 一、纯逻辑：相关段落检索 ═══════════ */
 console.log('\n-- 相关段落检索（词频打分）');
 const pick = await page.evaluate(() => {
   const pages = [];
@@ -202,7 +174,6 @@ check('完全没有匹配词时兜底给前几页', pickEmpty > 0 && pickEmpty <
 const pickNone = await page.evaluate(() => window.__ctx.pickRelevantPages('一段没有页码标记的纯文本', 'abc', 3).length);
 check('没有页码标记时不崩', pickNone > 0, `${pickNone} 字`);
 
-/* ═══════════ 二、整篇论文上下文 ═══════════ */
 console.log('\n-- 「整篇」单次范围');
 check('打开论文默认不预读整篇', await page.evaluate(() => !window.__state.docText && !window.__state.docTextDoc));
 const fullCtx = await page.evaluate(async () => {
@@ -225,12 +196,6 @@ check('同一份文档第二次调用用的是缓存',
   await page.evaluate(() => window.__state.docTextDoc === window.__state.doc?.docId));
 
 const chip = await page.evaluate(async () => {
-  /**
-   * 2026-10-05 第 2 步（用户拍板）：`#cfgUseFullText` 现在是**默认发送范围**，
-   * 改它 = 改「初始值」。它同时是即时生效控件（input 事件），所以这里必须派发 input —— 
-   * 只改 checked 不派发，界面不会动（这正是之前 setScope() 靠「点保存」蒙对的地方）。
-   * 三条一起钉：① 勾选框反映状态；② 取消勾选立刻关掉整篇；③ 偏好仍然写进 reader.ui 存档。
-   */
   document.getElementById('settingsBtn').click();
   const box = document.getElementById('cfgUseFullText');
   const ui = JSON.parse(localStorage.getItem('reader.ui') || '{}').style || {};
@@ -291,7 +256,6 @@ check('生成索引只发了一次请求', chatRequests.filter((r) => r.sys.incl
   `${chatRequests.filter((r) => r.sys.includes('阅读索引')).length} 次`);
 check('索引请求里带了论文正文', /【正文】/.test(chatRequests.find((r) => r.sys.includes('阅读索引'))?.userText || ''));
 
-/* ═══════════ 四、联网开关 ═══════════ */
 console.log('\n-- 「联网」开关');
 // 先把查询串的构造逻辑过一遍：整句中文问句直接丢给搜索引擎会被当成单字查询，
 // 真实事故是 Bing 返回了一堆「这」字的字典释义。
@@ -324,23 +288,8 @@ check('设置里勾上「联网」后立刻是开启态',
 /* ═══════════ 五、发一条真实的问题，检查真正送出去的 prompt ═══════════ */
 console.log('\n-- 送出去的 prompt');
 const i1 = chatRequests.length;   // 上一节生成索引已经花掉一次请求，这里按相对位置取
-/**
- * 等「这一条新回答」必须按**增量**等：
- * restoreSession() 会把同一篇论文上一批套件留下的消息连同已完成的动作条一起重放出来，
- * 写死 `> 0` 在脏 data 下会立刻满足，于是后面全部断言都跑在回答到达之前。
- * 同理，状态基线（历史条数）也要先量一次再比增量。
- */
 const done1 = await page.evaluate(() => document.querySelectorAll('#aiArea .msg.assistant .acts:not(.hidden)').length);
 const histBefore = await page.evaluate(() => window.__state.history.length);
-/**
- * 2026-10：右栏在「译文 / 问答一块都没开」时会收成右侧活动栏（`body.right-empty`），
- * 输入框 `#chatInput` 跟着变成 0×0 —— 直接 `page.click('#chatInput')` 会抛
- * 「Node is either not clickable or not an Element」。想打字必须先把右栏拉回来。
- *
- * ⚠️ 这里**不再点 `#railRightBtn`**：那个按钮已随「右侧活动栏」一起删除
- * （见 app.js 里 `#railRightBtn` 的说明，2026-10 口径），点了必然 selectors 失败。
- * 改用面板 API 把「问答」块显出来 —— 与当年点活动栏的语义完全一样，只是走现在的入口。
- */
 async function ensureComposer() {
   const visible = await page.evaluate(() => (document.getElementById('chatInput')?.getBoundingClientRect().width || 0) > 0);
   if (visible) return;
@@ -379,7 +328,7 @@ check('送出去的查询串是关键词而不是整句',
 /* ═══════════ 六、界面：来源列表与元信息 ═══════════ */
 console.log('\n-- 界面呈现');
 const ui = await page.evaluate(() => {
-  // 取**最后一条**助手消息，不要拿「第一条 .msg.assistant」：会话恢复会把旧回答一起重放出来，
+  // 取最后一条助手消息，不要拿「第一条 .msg.assistant」：会话恢复会把旧回答一起重放出来，
   // 而且分块之后 DOM 顺序 ≠ 时间顺序（要看 dataset.seq），第一条很可能属于上一批套件。
   const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')]
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
@@ -407,7 +356,6 @@ check('回答正文渲染正常', await page.evaluate(() => {
   return (msgs.at(-1)?.querySelector('.text')?.textContent || '').includes('注意力机制');
 }));
 
-/* ═══════════ 七、历史对话 ═══════════ */
 // 只断言「这次问答新增了一问一答两条」：脏 data 下 restoreSession() 会把旧历史一并恢复，
 // 写死 === 2 会在有历史时假红。
 const histLen = await page.evaluate(() => window.__state.history.length);
@@ -514,11 +462,6 @@ try {
     // 这里要验的语义没变 ——「打开论文之后不该还停在首页」。
     reading: document.body.classList.contains('reading'),
     homeHidden: document.getElementById('home')?.classList.contains('hidden'),
-    // 2026-10：常驻的 `#optFull` 没了，「整篇论文」项在「范围」菜单里（点开才渲染）。
-    // 这里仍然用它的 disabled 当「文档状态是好的」的探针 —— 语义没变，只是要先把菜单点开。
-    // 2026-10：范围菜单整个撤掉了（发送范围搬进设置页），原来拿 `#optScope` 里「整篇论文」项的
-    // disabled 当「文档状态是好的」探针就没得点了。换成同样语义、但更直接的探针：
-    // 输入框可用 —— 文档没打开成功时它是被禁用的（界面还停在「未打开文档」）。
     chatUsable: !document.getElementById('chatInput').disabled,
     pages: document.querySelectorAll('.page canvas').length,
   }));
@@ -533,7 +476,6 @@ try {
 
 await page.screenshot({ path: path.join(OUT, 'context.png'), fullPage: false });
 
-/* ═══════════ 汇总 ═══════════ */
 check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 check('没有控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '));
 

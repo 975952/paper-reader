@@ -133,14 +133,6 @@ try {
   const docA = await page.evaluate(() => window.__state.doc.docId);
   check('打开合成多页论文并提取全文', !!docA);
 
-  /**
-   * 2026-10 删减：设置弹窗只剩六项 —— API Key / 模型名 / 接口地址 / 主题 / 阅读字号 / 恢复默认设置。
-   * 「结果密度 / 顶栏行为」和整块「更多样式」（界面字号 / 控件大小 / 行高 / 代码大小 /
-   * 结果最大宽度 / 结果透明度 / PDF 纸张 / 三个显示开关）都下架了，
-   * 所以这里不再验「展开 / 折叠」那套，改成验：
-   *   ① 留下的两项（主题、阅读字号）可见；② 下架的控件确实不在；
-   *   ③ 恢复默认只剩一个入口；④ 留下的两项**真的还能用**（改一下立刻生效）。
-   */
   await page.click('#settingsBtn');
   await page.waitForSelector('#settingsModal:not(.hidden)', { timeout: 6000 });
   const REMOVED_STYLE_IDS = ['advancedStyles', 'uiDensity', 'uiTopbar', 'uiUiFontSize', 'uiControlSize',
@@ -216,14 +208,6 @@ try {
   await wait(700);
   const historyForA = await page.evaluate((id) => window.__state.jumpHistory.get(id)?.length || 0, docA);
   check('连续目录跳转各自记录阅读位置', historyForA === 2, `${historyForA} 个位置`);
-  /**
-   * ⚠️ 2026-10：顶栏那个 `#returnPosition`（返回原位置）按钮按用户要求删掉了。
-   * 但**能力本身还在** —— `returnToPreviousPosition()` 仍导出在 `window.__ctx` 上，
-   * 跳转历史也仍由 recordReaderJump 维护。所以这里改成直接调那个函数，
-   * 验的还是同一件事（逐步回退能恢复具体滚动位置与缩放），没有削弱断言。
-   * 原来那两条「按钮是否 hidden」的断言换成「跳转历史栈是否为空」——
-   * 语义完全相同（没有历史 = 无可返回），只是不再依赖一个已删除的按钮。
-   */
   await page.evaluate(() => window.__ctx.returnToPreviousPosition());
   await page.waitForFunction((top, scale) => Math.abs(window.__viewer.container.scrollTop - top) < 2 && Math.abs(window.__viewer.scale - scale) < 0.005, {}, afterFirst.scrollTop, afterFirst.scale);
   await page.evaluate(() => window.__ctx.returnToPreviousPosition());
@@ -347,18 +331,6 @@ try {
     ctx.addToChat({ cleanText: 'selection alpha', page: 1 });
     ctx.addToChat({ cleanText: 'selection beta', page: 1 });
   });
-  /**
-   * ⚠️ 2026-10：顶栏的 `#regionBtn`（框选截图）入口按用户要求删掉了，
-   * 截图改由问答栏里的「＋」（#clipBtn，也就是输入框边上那个 ✂）与快捷键 R 提供。
-   *
-   * 这里**不能**用快捷键 R：上一步 `addToChat` 之后焦点落在 `#chatInput` 里，
-   * 而 `initShortcuts` 对无修饰键的单键有一条 typing 保护（`if (typing) return`）——
-   * 那是**故意**的（否则 Ctrl+A 全选会被当成「问」真的发一次付费请求）。
-   * 所以按 R 没反应是正确行为，不是缺陷。
-   *
-   * 改成点那个 ✂ 按钮 —— 它是产品里真实存在的截图入口，验的还是同一件事
-   * （框选 → 加到对话 → 图片附件）。
-   */
   await page.click('#clipBtn');
   await page.waitForFunction(() => !document.querySelector('#regionOverlay').classList.contains('hidden'));
   const crop = await page.evaluate(() => {
@@ -463,7 +435,7 @@ try {
   await page.screenshot({ path: layoutPath, fullPage: false });
   const layout = await page.evaluate(() => {
     const rect = (id) => { const r = document.querySelector(id).getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height, right: r.right, bottom: r.bottom }; };
-    // `#returnPosition` 已删（2026-10），改量新加的底栏 —— 它也必须落在视口内、不越界。
+    // `#returnPosition` 已删，改量新加的底栏 —— 它也必须落在视口内、不越界。
     return { search: rect('#searchBar'), viewer: rect('#viewer'), body: rect('.ai-body'), composer: rect('#composer'), scope: rect('#sendScope'), foot: rect('#viewerFoot'), topbar: rect('.topbar'), scopeText: document.querySelector('#sendScope').textContent };
   });
   check('界面提示和输入区在布局内且没有重叠', layout.search.bottom <= layout.viewer.y + 2 && layout.body.bottom <= layout.composer.y + 2 && layout.scope.bottom <= layout.composer.bottom + 1 && layout.foot.x >= 0 && layout.foot.right <= 1500 && layout.topbar.bottom <= 47, layoutPath);
@@ -489,12 +461,6 @@ try {
   await page.waitForFunction(() => !window.__state.busy, { timeout: 15000 });
   const stopped = await page.evaluate(() => {
     const row = [...document.querySelectorAll('#aiArea .msg.assistant')].at(-1);
-    /**
-     * 2026-10：消息动作里的「复制 / 回到第 N 页」改成**图标按钮**了
-     * （用户口径：「复制 / 回到第8页用图标表示不要用文字」），
-     * 所以它们的 `textContent` 是空的。这里读**可访问名**（aria-label / title）——
-     * 对图标按钮就是它的名字，对纯文字按钮仍是文字，两种都能覆盖。
-     */
     const label = (b) => (b.getAttribute('aria-label') || b.getAttribute('title') || b.textContent || '').trim();
     return {
       text: row.querySelector('.text').textContent,

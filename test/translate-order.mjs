@@ -1,16 +1,3 @@
-/**
- * 译文块「最近的在最上面」
- *   node test/translate-order.mjs
- *
- * 用户口径（2026-10）：「最近的翻译应该要放在最上面」。
- * 原来是按时间往下堆（新条目追加在底部），只有「必要时滚过去」——
- * 结果区一长，观感就是新的沉在下面。现在译文块整块反转（column-reverse）：
- *   ① 视觉顺序是「新 → 旧」，最新一条永远在最上面（不用滚动就能看见）；
- *   ② DOM 顺序仍然是「旧 → 新」（appendChild 没改）—— 会话存档 / 重放 / dataset.seq 都不受影响；
- *   ③ 滚动条「最新」那一端是 scrollTop = 0；重开面板、流式跟随都往那一端去；
- *   ④ 溢出提示（渐隐）在译文块挪到**顶边**；
- *   ⑤ 问答流**不受影响**：仍然是时间顺序（问题在上、回答在下）。
- */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';

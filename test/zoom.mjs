@@ -1,14 +1,3 @@
-/**
- * 缩放不能闪灰条。
- *
- *   BASE=http://127.0.0.1:8787 node test/zoom.mjs
- *
- * 背景：`.page.placeholder::after` 是一条灰色斜条纹。旧实现里 setScale / _renderVisible(true)
- * 每次都把所有页 _teardownPage() 掉，于是拖动缩放时那几条灰纹一直在闪（用户反馈）。
- * 现在改成双缓冲：旧位图先留着当预览，新的画好再换。
- *
- * 这里在**缩放过程中连续采样**，数「视口内有多少页处于 placeholder / 没有画布」。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import fs from 'node:fs';
@@ -98,15 +87,6 @@ check('拖动缩放全程没有出现灰条（placeholder）', z1.greyFrames ===
 check('拖动缩放全程页面没有空白（画布一直在）', z1.blankFrames === 0,
   `空白帧 ${z1.blankFrames}，最多 ${z1.maxBlank} 页`);
 
-/**
- * ⚠️ 这里**轮询等待**，不用固定 sleep（2026-10-09 第二次修正）。
- * 重画现在是「排队 + 一页一页让帧」的（为了「松手之后不顿一下」，见
- * pdfview.js 的 _runRerenderPass），代价是「全部变清晰」的总时间比以前并行开工更长：
- * 视口内两页要 2×~250ms，机器忙的时候单页能到 400~500ms。
- * 之前写死 2500ms，在同时开着 exe 的机器上偶发假红（实测 20/21）。
- * 改成「最多等 10 秒、每 150ms 看一次」，判据一点没放松（视口内必须一页不剩地清晰），
- * 只是不再把「机器多快」写进断言 —— 顺便把实际等了多久打出来当参考。
- */
 const waitUntilCrisp = async (maxMs = 10000) => {
   const t0 = Date.now();
   let last = null;
@@ -189,11 +169,6 @@ check('把队列外的页滚进视口后会立刻重画成清晰版', scrolled.s
 /* ── 二、工具条按钮 / 键盘缩放 ── */
 console.log('\n-- 按钮与快捷键缩放');
 await startWatch();
-/**
- * 2026-10：翻页与缩放整组从顶栏搬到了**底栏**，id 也随之改名
- * （`#zoomIn` → `#footZoomIn`，以此类推；用户口径：「底栏有的功能上面的一栏就不要了」）。
- * 这里改点底栏那几个按钮 —— 验的还是同一件事：点这些按钮不闪灰条、不出空白。
- */
 for (const sel of ['#footZoomIn', '#footZoomIn', '#footZoomOut', '#footFitWidth', '#footZoomIn']) {
   // eslint-disable-next-line no-await-in-loop
   await page.click(sel);
@@ -204,13 +179,6 @@ const z2 = await stopWatch();
 check('点缩放按钮 / 适应宽度都不闪灰条', z2.greyFrames === 0 && z2.blankFrames === 0,
   `灰条帧 ${z2.greyFrames}，空白帧 ${z2.blankFrames}`);
 
-/**
- * 底栏那个缩放滑块走的是 `previewScale()` **不带指针坐标**这条分支
- * （见 app.js 的 `#zoomRange` input 监听）：锚点取阅读区中心，松手时 commit。
- * 2026-10-08 重写了锚点算法（原先每帧 elementFromPoint + 两次 getBoundingClientRect），
- * 这条分支没有别的覆盖，所以在这里补一段：拖滑块不许闪灰条、不许出空白、
- * 停下后要回到清晰位图，而且**阅读区中心那一页不许跳**。
- */
 console.log('\n-- 拖底栏缩放滑块');
 await page.evaluate(() => window.__viewer.fitWidth());
 await sleep(700);
@@ -315,11 +283,6 @@ check('页面宽度仍然铺满阅读区（fitWidth 后）',
   Math.abs(sharp.pageW - (sharp.containerW - 32)) <= 3, `页宽 ${sharp.pageW} / 阅读区 ${sharp.containerW}`);
 
 /* ── 六、缩放之后仍然能选文字 ── */
-/**
- * 回归：双缓冲换帧时曾经给新画布设 z-index:2 想压住旧画布，
- * 但文本层没有 z-index（靠 DOM 顺序盖在画布上），结果画布盖住了文本层 ——
- * 鼠标点不到文字，选取直接失效。改成靠 DOM 顺序插在旧画布后面。
- */
 console.log('\n-- 缩放后选文字');
 await page.evaluate(() => window.__viewer.fitWidth());
 await sleep(1400);
@@ -361,21 +324,12 @@ if (probe.first && probe.last) {
   check('选中后气泡正常弹出', sel.bubble && !!sel.state, sel.state.slice(0, 24));
 }
 
-/* ── 七、放大之后的清晰度：位图密度必须跟上屏幕 ──
-   2026-10-10 用户口径：「怎么放大之后就不太清晰了」。
-   根因不是渲染不动，而是**像素预算按整页算**：整页面积一大就把倍率压到 0.75，
-   再交给切片逻辑 —— 切片明明放得下也继承了 0.75。实测（test/artifacts/sharpness.mjs）：
-     dpr=1：scale 5/6 密度 0.75（浏览器放大位图 = 糊）
-     dpr=2：fit 宽度 1.53、3.5× 1.0、5× 之后 0.75
-   现在改成「先按 dpr 定画哪一块，再按这块的面积分配预算」。
-   这里断言的就是那条不变量：**屏幕上一个 CSS 像素至少分到 0.9×min(dpr,2) 个位图像素**，
-   另外位图不许超过 10 MP（曾经有一版离屏页回退成整页，一张 48 MP，浏览器直接卡死）。 */
 console.log('\n-- 放大之后的清晰度（位图密度）');
 const densityAt = (scale) => page.evaluate(async (s) => {
   const v = window.__viewer;
   v.setScale(s, { keepCenter: true });
   /* 等「清晰态」：视口里那一页不再 dirty、也没有 soft-zoom 拉伸标记。
-     不等的话量到的是**上一版位图被拉伸中**的中间态（密度会算出 0.46 这种假数字），
+     不等的话量到的是上一版位图被拉伸中的中间态（密度会算出 0.46 这种假数字），
      那不是"画得不清楚"，是"还没画完" —— 两种东西必须分开看。 */
   for (let t = 0; t < 60; t++) {
     // eslint-disable-next-line no-await-in-loop
@@ -392,7 +346,7 @@ const densityAt = (scale) => page.evaluate(async (s) => {
   for (const [i, e] of v.rendered) {
     if (!e.canvas) continue;
     const r = e.canvas.getBoundingClientRect();
-    // 只有**真在视口里**的位图才算（同一页的切片也只算露出来的那块）
+    // 只有真在视口里的位图才算（同一页的切片也只算露出来的那块）
     const ovW = Math.min(r.right, vr.right) - Math.max(r.left, vr.left);
     const ovH = Math.min(r.bottom, vr.bottom) - Math.max(r.top, vr.top);
     if (ovW < 200 || ovH < 200) continue;

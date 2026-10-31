@@ -1,29 +1,3 @@
-// 手机版阅读器回归套件。
-//
-//   cd test && node mobile.mjs
-//
-// 用户口径（2026-10-03，原话）：
-//   「阅读的时候要只显示 pdf 本身。pdf 字体如果能放大就很好，图片的大小不变。
-//     或者说图片长按可以单独放大查看。然后也是长按选词。然后界面就不要做伸缩了，
-//     字体在设置调节。手机版的。」
-//
-// 判定的是可量的东西，不是观感：
-//   M1  打开 PDF：页数 / 文本层 / canvas 都正常
-//   M2  只显示 PDF：阅读区铺满整屏，顶栏与底栏都是 fixed 浮层、不占布局高度
-//   M3  界面不做伸缩：320 / 390 / 430 三种宽度都铺满、无横向滚动、页面不溢出
-//   M4  字号只改文字：调到 150% 后 span 字号变大，而 canvas 像素尺寸一个像素不变
-//       （图片是画在 canvas 上的，canvas 不变 = 图片尺寸不变）
-//   M5  字号持久化
-//   M6  长按选词：长按正文选中的是一个词，不是一整行/一整块
-//   M7  长按图片区域 -> 全屏查看器（纯文字页不误触发；带图页能触发）
-//   M8  顶栏：默认收起、点一下出现、滚动自动收起
-//   M9  页面底色 / 阅读区底色可切换且真的生效
-//   M10 file:// 下也能加载并打开本地 PDF（APK 就是这么加载的）
-//   M11 零 JS 报错
-//
-// 写入纪律：本文件曾被 PowerShell 的 Set-Content 写坏过两次（UTF-8 被按 ANSI 读、
-// 中文变乱码且部分字节不可逆丢失），最后只能整体重写。改这个文件请只用编辑工具，
-// 千万不要用 Set-Content / Out-File / > 写它。
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -126,7 +100,6 @@ try {
     args: ['--no-first-run', '--no-default-browser-check', '--allow-file-access-from-files'],
   });
 
-  // ============ M1 / M2 ============
   section('M1-M2 打开 PDF，并且阅读时只有 PDF 本身');
   const main = await openMobile(browser, BASE + '/mobile/?open=mobile-sample.pdf', MAIN);
   const m1 = await main.evaluate(() => {
@@ -165,7 +138,6 @@ try {
     !m1.hasDesktopChrome && m1.extraInViewer.length === 0,
     'desktopChrome=' + m1.hasDesktopChrome + ' extra=' + fmt(m1.extraInViewer));
 
-  // ============ M4 ============
   section('M4 字号只放大文字，canvas 位图一个像素都不变（= 图片尺寸不变）');
   const m4 = await main.evaluate(async () => {
     const canvas = document.querySelector('.page canvas');
@@ -201,7 +173,6 @@ try {
   }));
   check('M5 刷新后仍是 150%', m5.boost === '1.5' && m5.slider === '150', fmt(m5));
 
-  // ============ M6 ============
   section('M6 长按选词：选中的是一个词，不是一整块');
   const m6 = await main.evaluate(async () => {
     const spans = [...document.querySelectorAll('.page[data-page="1"] .textLayer span:not(.markedContent)')]
@@ -237,7 +208,6 @@ try {
   check('M6c 操作条里显示了选中的文字',
     m6.ok === true && m6.sheetText === m6.text, 'sheet="' + m6.sheetText + '" sel="' + m6.text + '"');
 
-  // ============ M7a 纯文字页不误触发 ============
   section('M7a 纯文字页：长按不会被误判成图片');
   const m7a = await main.evaluate(async () => {
     document.getElementById('mSelectSheet').classList.add('hidden');
@@ -270,7 +240,6 @@ try {
   check('M7a 纯文字页上长按不开图（文字优先走选词）',
     m7a.opened === false, '试了 ' + m7a.hits.length + ' 个位置都没开图 = 正确');
 
-  // ============ M7b 带图页能触发 ============
   section('M7b 带图 PDF：长按图像区域 -> 全屏查看器');
   if (!fs.existsSync(IMAGE_PDF)) {
     check('M7b 前置：有带图的 fixture', false, '缺少 test/fixtures/image-sample.pdf（跑 node fixtures/make-image-pdf.mjs 生成）');
@@ -338,7 +307,6 @@ try {
     await pi.close();
   }
 
-  // ============ M8 ============
   section('M8 顶栏：默认收起 / 点一下出现 / 滚动自动收起');
   await main.evaluate(() => {
     const iv = document.querySelector('.m-imgview');
@@ -362,7 +330,6 @@ try {
     m8a === false && m8b === true && m8c.on === false,
     '默认=' + m8a + ' 点击后=' + m8b + ' 滚动后=' + m8c.on + '（top=' + m8c.top + '）');
 
-  // ============ M9 ============
   section('M9 页面底色 / 阅读区底色');
   const m9 = await main.evaluate(async () => {
     const pageBg = () => getComputedStyle(document.querySelector('.page')).backgroundColor;
@@ -386,7 +353,6 @@ try {
   check('M9b 切回纸白恢复原色', m9.paper.page === m9.base.page, m9.warm.page + ' -> ' + m9.paper.page);
   check('M9c 阅读区底色切到深色真的生效', m9.deep.view !== m9.base.view, m9.base.view + ' -> ' + m9.deep.view);
 
-  // ============ M3 ============
   section('M3 界面不做伸缩：320 / 390 / 430 三种宽度都铺满且无横向滚动');
   for (const size of PHONES) {
     const p = await openMobile(browser, BASE + '/mobile/?open=mobile-sample.pdf', size);
@@ -410,7 +376,6 @@ try {
     await p.close();
   }
 
-  // ============ M10 ============
   section('M10 file:// 下也能加载并打开本地 PDF（APK 就是这么加载的）');
   {
     const fileUrl = 'file:///' + path.join(ROOT, 'public', 'mobile', 'index.html').replace(/\\/g, '/');

@@ -1,23 +1,3 @@
-/**
- * 「松手之后那 200ms 到底花在哪」——缩放提交逐段计时（调研工具，不是断言套件）。
- *
- *   node test/perf/zoom-commit-timeline.mjs
- *
- * 用法：本脚本自己起一个隔离的 node server.js + 无头 Chrome，模拟触摸板捏合
- * （ctrl+wheel，30 步），然后把「最后一次滚轮之后」的每个阶段打在时间轴上：
- *   softRescale / layout / renderPage / pdf.js paint / 文本层三件套。
- *
- * 2026-10-08 修复前的实测（16 页夹具、视口内 2 页）：
- *   softRescale   0.3ms
- *   layout        22~27ms
- *   paint ×2      23~76ms
- *   文本层        91ms（TextLayer.render）+ 100~125ms（_bindRealFonts）×2
- *   长任务        233ms + 74ms
- *   → 「松手之后顿一下」就是这几段叠出来的。
- * 修复后（读写分离 + 文本流只取一次）：
- *   _bindRealFonts 8~10ms（原来 95~125ms）、_normalizeTextScale 2ms、_nudgeTextLayer 5ms
- *   长任务 217ms + 56ms，视口内 1 页时「松手 → 清晰」约 420ms。
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';

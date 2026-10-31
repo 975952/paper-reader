@@ -1,16 +1,4 @@
 #!/usr/bin/env node
-/**
- * 假 OpenAI 服务 —— 只用来验收 /api/chat 的转发行为（不参与正式运行）。
- *
- *   node mock-openai.js [port]
- *
- * 行为：
- *   POST /v1/chat/completions
- *     model=boom      → 401 + OpenAI 风格错误体（验证非 2xx 透传）
- *     model=stall     → 先发一片，然后永远不再发（验证 idleMs 空闲超时）
- *     stream:false    → 一次性 JSON（验证非流式分支）
- *     其它            → 每 400ms 发一片 SSE（验证真·流式，不是整体缓冲）
- */
 'use strict';
 
 const http = require('http');

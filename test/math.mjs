@@ -1,13 +1,3 @@
-/**
- * 公式渲染验收。
- *
- *   BASE=http://127.0.0.1:8787 node test/math.mjs
- *
- * 背景：之前 renderMarkdown 里写着「行内公式保留原样，交给用户看」，
- * 于是模型给的 \text{Attention}(Q,K,V)=\text{softmax}(\frac{QK^T}{\sqrt{d_k}})V
- * 原样显示成 LaTeX 源码 = 用户说的「一些符号渲染不了」。
- * 现在内置 KaTeX（public/vendor/katex，不联网）。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import { setScope } from './_scope.mjs';
@@ -207,18 +197,10 @@ check('只有竖线、没有分隔行的不会被误判成表格', !notTable.has
 
 /* ── 四、走一遍真实问答，确认消息里也渲染 ── */
 console.log('\n-- 走一遍问答');
-/**
- * 2026-10：发送范围搬进设置页（`#cfgUseFullText` / `#cfgUseWeb`），默认都开着。
- * 这一节只要「不要带整篇」——所以去设置里把它关掉（全局偏好，关一次一直算数）。
- */
 await setScope(page, { full: false });
-// 等「这一条新回答」按**增量**等：会话恢复会把旧消息连同已完成的动作条一起重放出来，
+// 等「这一条新回答」按增量等：会话恢复会把旧消息连同已完成的动作条一起重放出来，
 // 写死 `> 0` 在脏 data 下会立刻满足，断言就会读到上一批套件留下的旧消息。
 const doneBefore = await page.evaluate(() => document.querySelectorAll('#aiArea .msg.assistant .acts:not(.hidden)').length);
-/**
- * 2026-10：右栏在「一块都没开」时会收成右侧活动栏（`body.right-empty`），`#chatInput`
- * 跟着变成 0×0 —— `page.click('#chatInput')` 会抛「Node is either not clickable」。
- */
 async function ensureComposer() {
   const visible = await page.evaluate(() => (document.getElementById('chatInput')?.getBoundingClientRect().width || 0) > 0);
   if (visible) return;
@@ -236,7 +218,7 @@ await page.waitForFunction((n) => document.querySelectorAll('#aiArea .msg.assist
   { timeout: 30000 }, doneBefore);
 await sleep(600);
 const inMsg = await page.evaluate(() => {
-  // 取**最后一条**助手消息（分块之后 DOM 顺序 ≠ 时间顺序，按 dataset.seq 取最大）
+  // 取最后一条助手消息（分块之后 DOM 顺序 ≠ 时间顺序，按 dataset.seq 取最大）
   const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')]
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0));
   const t = msgs.at(-1)?.querySelector('.text');

@@ -1,21 +1,3 @@
-/**
- * 论文导入 + 文献关系整理 验收。
- *
- *   BASE=http://127.0.0.1:8787 node test/relations.mjs
- *
- * 真实部分：/api/import-pdf 的输入校验、真正的下载（arXiv 上的小 PDF，
- *   下载完写进 test 的临时 papers 目录，跑完删掉，不动用户的书架）。
- * 浏览器部分：参考文献面板的解析与渲染（/api/ref-search 用桩，免得依赖外网节奏）。
- *
- * 2026-10 新契约（本套件按它改写）：
- *   · 参考文献**按需解析** —— 打开论文本身不再后台跑全文引用抽取，只有用户真的打开
- *     「参考文献」这一块（标题栏展开 / 左栏图标）才开始整理；
- *   · 面板标题与活动栏文案都叫**参考文献**（原来叫「文献关系」）；
- *   · `#relFilter`（状态筛选）、`#relSort`（排序）、`#relFindPdf`（批量找未入库 PDF）、
- *     `#relScanLib`（扫描库内引用）四个控件整体下架 —— 查找改成**逐条**触发
- *     （行上的「查 PDF / 重查」+ 详情卡片里的「找这篇的 PDF」），库内引用结论跟着解析结果一起给；
- *   · `#relSearch` 搜索框保留。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import fs from 'node:fs';
@@ -98,7 +80,6 @@ try {
   check('真实下载导入（联网）', false, String(e.message).slice(0, 90));
 }
 
-/* ═══════════ 三、浏览器：参考文献面板 ═══════════ */
 console.log('\n-- 参考文献面板');
 const browser = await puppeteer.launch({
   executablePath: CHROME, headless: 'shell',
@@ -138,10 +119,6 @@ await page.evaluate((id) => {
 await page.waitForFunction(() => window.__viewer?.pdf, { timeout: 40000 });
 await sleep(1200);
 
-/**
- * 2026-10 新契约：参考文献是**按需解析**的 —— 打开论文本身不再后台跑全文引用抽取。
- * 先断言「打开论文后 refs 还是空的、摘要行在提示用户打开这一块」，再展开面板触发解析。
- */
 const lazy = await page.evaluate(() => ({
   collapsed: document.getElementById('relSec').classList.contains('panel-collapsed'),
   refs: (window.__state.refs || []).length,
@@ -196,16 +173,6 @@ check('条目里能找到它真正引用过的经典工作',
   await page.evaluate(() => (window.__state.refs || []).some((r) => /Attention Is All You Need|Vaswani/i.test(r.text))),
   'Attention Is All You Need');
 
-/**
- * 参考文献条目前的 [n] 不能伪装成正文引用；否则在文献列表点它只会回到同一页。
- *
- * ⚠️ 判据在 2026-10 被收窄过一次（原来要求「参考文献所在的这一页上不许有任何 .cite-link」）。
- * 那个写法对合成夹具是错的：夹具每页都重复同一段正文，第 16 页既有参考文献条目
- * **也有**带行内引用的正文（实测压着文字层的 span 是
- * 「A citation to the original architecture appears here [1].」和
- *  「A reference marker [3-5] tests clickable citation detection.」）——
- * 那两条本来就该可点。真正要守的是：**参考文献条目本身**不许被当成正文引用。
- */
 const refPage = await page.evaluate(() => window.__state.refs?.[0]?.page || 0);
 if (refPage) {
   await page.evaluate((p) => window.__viewer.goToPage(p), refPage);
@@ -380,7 +347,6 @@ if (citePt) {
   check('找得到可点的 [n] 引用', false, '页面上没有可见的 [n]');
 }
 
-/* ═══════════ 汇总 ═══════════ */
 check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 check('没有控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '));
 

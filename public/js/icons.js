@@ -1,36 +1,3 @@
-/**
- * icons.js —— 「论文阅读器」唯一的一套 24×24 线性图标。
- *
- *   import { ICONS, ICON_IDS, iconEl, iconHTML } from './icons.js';
- *   btn.replaceChildren(iconEl('close'));                       // 装饰性：按钮自己带 aria-label
- *   btn.replaceChildren(iconEl('send', { title: '发送' }));      // 语义性：图标自带名字
- *
- * ─────────────────────────────────────────────────────────────────────────
- * 【唯一口径】这套图标的视觉参数只在本文件里定义，调用方**不得**覆盖：
- *   viewBox      "0 0 24 24"        尺寸以 viewBox 为单位，靠 width/height 缩放
- *   fill         "none"             全部线性描边，没有实心块（"点"用 r≈0.95 的圆实现）
- *   stroke       "currentColor"     颜色一律跟随 CSS color，图标本身不写死颜色
- *   stroke-width 1.8                —— 唯一的粗细来源，见下面的 strokeWidth 选项说明
- *   linecap      "round"
- *   linejoin     "round"
- *   aria-hidden  "true"             默认装饰性；给了 title 就换成 role="img"+aria-label
- *   focusable    "false"            避免 IE/旧 Edge 把 svg 拉进 Tab 序列
- *
- * 为什么不用字符图标（译/问/✕/⧉/⇱ …）：字符图标实际长什么样取决于系统装了哪个字体，
- * 同一个符号在 Windows/macOS/Linux 上字重、字面大小、基线全不一样，一排按钮看过去
- * 轻重不齐；而且 Emoji 类符号（🗑 📖 🔗）会被系统按彩色 Emoji 字体渲染，与线性图标
- * 混在一起更乱。SVG 把这些全部固定下来。
- *
- * 【无障碍口径】"图标本身不能承担唯一语义"：
- *   - 图标只是装饰（父元素已有可见文字或 aria-label）→ 用 iconEl(id)，svg 是 aria-hidden。
- *   - 图标是唯一可见内容（纯图标按钮）→ 必须让控件有可访问名，两种写法二选一：
- *       a) iconEl(id, { title: '含义' })    → svg 自带 <title> + role="img" + aria-label
- *       b) 调用方给按钮写 aria-label / 可见文字，图标保持装饰性（推荐，避免读屏念两遍）
- *   注意 title 属性（鼠标悬停提示）**不能**替代 aria-label，两者都要给。
- *
- * 【零依赖 / 无副作用】纯 ESM，不 import 任何东西，模块顶层不碰 document / window，
- * 可以在主页面、独立浮窗页面、甚至 Node 里 import（只有 iconEl/iconHTML 需要 DOM）。
- */
 
 /** 统一描边粗细。**唯一的定义处**，业务代码不要改。 */
 export const ICON_STROKE = 1.8;
@@ -41,14 +8,7 @@ export const ICON_VIEWBOX = '0 0 24 24';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-/**
- * id → viewBox 内部标记字符串（不含外层 <svg>）。
- * 只允许几何元素：path / circle / rect / line / polyline / polygon。
- * **不要**放 <text>、<tspan>、<image>、<foreignObject> —— 那等于把字体依赖又请回来了，
- * 而且 verify-icons.mjs 会直接断言「元素内不含 <text>」。
- */
 export const ICONS = {
-  /* ══════════════ 基础语义：面板与操作 ══════════════ */
 
   // 译文：文档（带两行文字）+ 字母 A —— 对应现在的「译」
   translate: '<rect x="3" y="4" width="10.4" height="16" rx="1.7"/><path d="M5.9 8.5h4.6"/><path d="M5.9 11.7h4.6"/><path d="M15.1 20.2 18.5 10.6l3.4 9.6"/><path d="M16.4 17.1h4.2"/>',
@@ -117,7 +77,6 @@ export const ICONS = {
   // 刷新：重新解析参考文献 / 重新整理
   refresh: '<path d="M20.4 11.2a8.4 8.4 0 0 0-14.1-5L3.6 8.9"/><path d="M3.6 3.4v5.5h5.5"/><path d="M3.6 12.8a8.4 8.4 0 0 0 14.1 5l2.7-2.7"/><path d="M20.4 20.6v-5.5h-5.5"/>',
 
-  /* ══════════════ 导航与箭头 ══════════════ */
 
   // 上一页 / 下一页（顶部翻页 ‹ ›）
   'chevron-left': '<path d="M15 4.8 7.8 12 15 19.2"/>',
@@ -143,7 +102,6 @@ export const ICONS = {
   // 上下换位（⇅）：拖动调整顺序
   'drag-vertical': '<path d="M12 4.4v15.2"/><path d="m8.2 8.2 3.8-3.8 3.8 3.8"/><path d="m8.2 15.8 3.8 3.8 3.8-3.8"/>',
 
-  /* ══════════════ 面板停靠 / 浮窗 ══════════════ */
 
   // 浮出（⇱）：从停靠区升成浮窗 —— 底边 + 向上箭头
   float: '<path d="M4 20.4h16"/><path d="M12 16V4"/><path d="m6.9 9.1 5.1-5.1 5.1 5.1"/>',
@@ -164,7 +122,6 @@ export const ICONS = {
   // 收起左栏：左栏 + 向右（推回去）的箭头
   'panel-collapse-left': '<rect x="3.8" y="3.4" width="17.2" height="15.2" rx="2.2"/><path d="M9.8 3.4v15.2"/><path d="M5.6 10.4 7.4 12 5.6 13.6"/>',
 
-  /* ══════════════ 操作 ══════════════ */
 
   // 放大（+）/ 缩小（−）
   'zoom-in': '<circle cx="10.8" cy="10.8" r="6.4"/><path d="M15.6 15.6 20.8 20.8"/><path d="M10.8 7.9v5.8"/><path d="M7.9 10.8h5.8"/>',
@@ -181,14 +138,9 @@ export const ICONS = {
   // 试过 stroke-dasharray 的虚线框：圆角矩形的虚线段会在拐角处断成很脏的形状，16px 下像坏图，
   // 换成角括号后既干净又能和「截图」的实线裁剪明确区分
   region: '<path d="M3.6 8.8V6a2.4 2.4 0 0 1 2.4-2.4h2.8"/><path d="M15.2 3.6H18a2.4 2.4 0 0 1 2.4 2.4v2.8"/><path d="M20.4 15.2V18a2.4 2.4 0 0 1-2.4 2.4h-2.8"/><path d="M8.8 20.4H6a2.4 2.4 0 0 1-2.4-2.4v-2.8"/>',
-  // 附件 / 图片：回形针。**只要 3 道平行笔画**：加到 4 道在 16px 下会变成一把梳子
+  // 附件 / 图片：回形针。只要 3 道平行笔画：加到 4 道在 16px 下会变成一把梳子
   attach: '<path d="M20.2 10.6 11.4 19.4a5.2 5.2 0 0 1-7.4-7.4l8.8-8.8a3.5 3.5 0 0 1 4.9 4.9l-8.8 8.8a1.7 1.7 0 0 1-2.5-2.5"/>',
 
-  /* ── 回答存笔记（2026-10 用户拍板：不新建存储，复用现有笔记条目） ──────────
-     同一张「纸张折角」，未保存是加号、已保存是对勾：
-       · 加号 / 对勾都压在下半张纸上（y 14.2–19.2），折角线在上半张（y 5.2–10.6），
-         两者不重叠；横竖各 4.6 单位，16px 下约 3px，抗锯齿后仍然看得清是「加」还是「勾」。
-       · 纸高 16 单位、纸宽 14 单位，与旁边 copy（11.4 单位方框）分量相当，一排里不显突兀。 */
   'note-plus': '<path d="M19 11.2V6.6a1.4 1.4 0 0 0-1.4-1.4H6.4A1.4 1.4 0 0 0 5 6.6v11a1.4 1.4 0 0 0 1.4 1.4h4.3"/><path d="M9.1 5.2v5.4l2.5-1.6 2.5 1.6V5.2"/><path d="M17.2 14.6v4.4"/><path d="M15 16.8h4.4"/>',
   'note-check': '<path d="M19 11.2V6.6a1.4 1.4 0 0 0-1.4-1.4H6.4A1.4 1.4 0 0 0 5 6.6v11a1.4 1.4 0 0 0 1.4 1.4h4.3"/><path d="M9.1 5.2v5.4l2.5-1.6 2.5 1.6V5.2"/><path d="m14.9 16.7 1.8 1.9 3.4-3.7"/>',
 };
@@ -218,19 +170,6 @@ function toClassList(cls) {
   return Array.isArray(cls) ? cls.filter(Boolean).join(' ') : String(cls);
 }
 
-/**
- * 建一个 <svg> 图标元素。
- *
- * @param {string} id  ICONS 里的 id；未知 id 直接抛错（宁可炸在开发期，也别静默留白）
- * @param {object} [opts]
- * @param {number|string} [opts.size=16]        宽高（数字按 px）
- * @param {string} [opts.title]                 语义名。给了就写 <title> + role="img" + aria-label，
- *                                              并**不再** aria-hidden；不给就是纯装饰（aria-hidden）
- * @param {string|string[]} [opts.cls]          附加 class
- * @param {number} [opts.strokeWidth=1.8]       仅供本文件/极端尺寸做光学补偿。**业务代码不要传**：
- *                                              整套图标的粗细一致性靠这个常量，逐处覆盖就散了
- * @returns {SVGSVGElement}
- */
 export function iconEl(id, opts = {}) {
   assertIcon(id);
   const { size = ICON_SIZE, title, cls, strokeWidth = ICON_STROKE } = opts;
@@ -249,7 +188,7 @@ export function iconEl(id, opts = {}) {
   if (className) svg.setAttribute('class', className);
 
   if (title) {
-    // 图标是唯一可见内容：给它一个可访问名，同时**不能** aria-hidden
+    // 图标是唯一可见内容：给它一个可访问名，同时不能 aria-hidden
     svg.setAttribute('role', 'img');
     svg.setAttribute('aria-label', String(title));
     const t = document.createElementNS(SVG_NS, 'title');

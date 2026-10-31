@@ -1,14 +1,3 @@
-/**
- * 把「P」图标嵌进 exe。
- *
- * 为什么需要它：窗口图标（window.rs）只在程序运行时才画上去，
- * exe 文件本身没有图标资源 —— 资源管理器里是白板，快捷方式也是白板。
- * 这里在编译期生成一个多尺寸 .ico 并用 winres 编译进 PE 资源，
- * 于是 exe、桌面快捷方式、任务栏、Alt+Tab 全都有图标了，**不需要安装程序**。
- *
- * 形状不在这里重复定义：直接 include 运行时的那份 icon_geometry.rs，
- * 保证「网页 logo / 窗口图标 / exe 图标」永远是同一个图。
- */
 use std::env;
 use std::fs;
 use std::path::PathBuf;

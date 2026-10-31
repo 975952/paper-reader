@@ -1,11 +1,3 @@
-/**
- * 选区行为验收 —— 用户反馈「选中文字在翻页或者有些地方有 bug」。
- *
- *   BASE=http://127.0.0.1:8787 node test/selection.mjs
- *
- * 覆盖：翻页前后、翻页按钮、松手位置、取消选择的三种方式、缩放后重新对齐、
- *       跨页选区、送出去的文本与选中的文本是否一致。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import fs from 'node:fs';
@@ -31,12 +23,6 @@ await fetch(`${BASE}/api/state`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ lastDoc: null, lastName: null, lastUrl: null, docs: {} }),
 });
-/**
- * 划词翻译那一条要用「假模型」验「送出去的就是选中的」。
- * 不写配置的话 `ensureReady()` 直接拦下，请求根本发不出去 ——
- * 这条断言以前恒红（不是产品问题，是套件少了一步环境准备）。
- * baseURL 指向 127.0.0.1:1，请求会被 page 的拦截器换成假 SSE，不会真的联网。
- */
 await fetch(`${BASE}/api/config`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ baseURL: 'http://127.0.0.1:1/v1', model: 'mock', apiKey: 'sel-test-key' }),
@@ -108,7 +94,6 @@ const st = () => page.evaluate(() => ({
   live: (window.getSelection()?.toString() || '').slice(0, 30),
 }));
 
-/* ═══════════ 一、基础划选 ═══════════ */
 console.log('\n-- 基础划选');
 const s1 = await selectIn(1, 1, 5);
 await sleep(500);
@@ -164,7 +149,6 @@ const fidelity = await page.evaluate(() => {
 check('送去处理的文字和实际选中的完全一致（没有错位/丢字）', fidelity.same,
   fidelity.same ? '' : `选中「${fidelity.live}」 vs 记录「${fidelity.clean}」`);
 
-/* ═══════════ 二、翻页 ═══════════ */
 console.log('\n-- 翻页');
 const keptText = a1.stateSel;
 await page.evaluate(() => window.__viewer.goToPage(10));
@@ -178,7 +162,7 @@ await sleep(1800);
 const back = await st();
 check('翻回来时选中方块被重新画出来（不会凭空消失）', back.selMarks > 0, `${back.selMarks} 块 · ${JSON.stringify(back.marksByPage)}`);
 
-// 用工具条按钮翻页：这是真实点击，但**不该**把选区弄没 ——
+// 用工具条按钮翻页：这是真实点击，但不该把选区弄没 ——
 // 选区会记着，翻回来还能看到方块（原生阅读器就是这个行为）
 // 2026-10：翻页按钮从顶栏搬到底栏，id 由 `#nextPage` 改成 `#footNextPage`。
 await page.click('#footNextPage');
@@ -191,7 +175,6 @@ await sleep(1600);
 const backAgain = await st();
 check('用按钮翻走再翻回来，方块还在', backAgain.selMarks > 0, `${backAgain.selMarks} 块`);
 
-/* ═══════════ 三、松手位置 ═══════════ */
 console.log('\n-- 松手位置');
 await page.evaluate(() => window.__viewer.goToPage(1));
 await sleep(1200);
@@ -218,7 +201,6 @@ const outside = await st();
 check('拖到正文区外松手，气泡照样弹出来', outside.bubble === true && !!outside.stateSel,
   `bubble=${outside.bubble} sel=${outside.stateSel}`);
 
-/* ═══════════ 四、取消选择的三种方式 ═══════════ */
 console.log('\n-- 取消选择');
 const before = await st();
 check('（前置）此刻有选区', before.stateSel !== null && before.selMarks > 0);
@@ -255,7 +237,6 @@ const panel = await st();
 check('点右侧问答区也会清掉选区', panel.stateSel === null && panel.selMarks === 0,
   `state=${panel.stateSel} marks=${panel.selMarks}`);
 
-/* ═══════════ 五、缩放后重新对齐 ═══════════ */
 console.log('\n-- 缩放后重新对齐');
 await page.evaluate(() => window.__viewer.goToPage(1));
 await sleep(1200);
@@ -270,7 +251,6 @@ check('缩放后方块仍然跟着选中的文字（没有跑位）',
   alignAfter.ratio >= 0.75 && alignAfter.marks > 0,
   `命中 ${alignAfter.hit}/${alignAfter.total}（缩放前 ${alignBefore.hit}/${alignBefore.total}）· ${alignAfter.marks} 块`);
 
-/* ═══════════ 六、跨页选区 ═══════════ */
 console.log('\n-- 跨页选区');
 await page.evaluate(() => window.__viewer.fitWidth());
 await sleep(1000);
@@ -307,7 +287,6 @@ if (cross.ok) {
   check('两页上都画出了方块', pagesWithMarks.length >= 2, JSON.stringify(marks2));
 }
 
-/* ═══════════ 七、整页选区的方块形态 ═══════════ */
 console.log('\n-- 整页选区');
 await page.evaluate(() => window.__viewer.goToPage(1));
 await sleep(1600);
@@ -328,7 +307,6 @@ check('整页选中时只覆盖正文行、不覆盖整页',
   gAll.covered < 0.55 && gAll.count > 10,
   `覆盖 ${(gAll.covered * 100).toFixed(1)}% 页面积 · ${gAll.count} 块`);
 
-/* ═══════════ 八、送给模型的文本 ═══════════ */
 console.log('\n-- 送给模型的文本');
 await page.evaluate(() => window.__viewer.goToPage(1));
 await sleep(1200);
@@ -344,7 +322,6 @@ const sentMsg = chatBodies.length ? JSON.stringify(chatBodies[0].messages) : '';
 check('翻译请求里带的就是刚才选的那段', chatBodies.length === 1 && sentMsg.includes(expectText.slice(0, 40)),
   chatBodies.length ? `选中「${expectText.slice(0, 32)}」` : '(没发出请求)');
 
-/* ═══════════ 汇总 ═══════════ */
 check('没有未捕获的页面异常', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 check('没有控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '));
 

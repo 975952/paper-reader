@@ -1,22 +1,3 @@
-/**
- * 回答保存为笔记（第 1 步验收）
- *   node test/answer-note.mjs
- *
- * 只验这一件事：把右侧回答存成笔记，覆盖它的四种状态 ——
- *   ① 未保存：回答动作条上出现「纸张折角 + 加号」图标
- *   ② 编辑标题：点一下出现一条窄标题行，默认标题是用户的问题，右侧只有确认 / 取消
- *   ③ 已保存：图标原地把加号换成对勾，写进 /api/notes，刷新后仍在
- *   ④ 列表同步：左栏笔记列表 +1、计数 (1)，并标出「来自回答」
- *
- * 口径（用户 2026-10 拍板）：
- *   · 不新建存储 —— 就是 state.highlights[] 里多一个 { source: 'answer' } 分支
- *   · 只记一个主依据页（rects 必须是空数组，不参与 PDF 页边书签）
- *   · 正文划选产生的老笔记（无 source）行为一字不改
- *
- * 为什么不走真实流式回答：那条路会先 `viewer.getContextAround()` 抽当前页上下文，
- * 在 headless shell 下不返回（与本步改动无关，stream/ux 套件在真实链路上覆盖它）。
- * 这里只驱动「回答已经收尾」这一步之后的笔记流程，聚焦本步要验的东西。
- */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -244,7 +225,7 @@ try {
     await page.evaluate(() => document.querySelectorAll('#viewer .hl-pin').length === 0), '');
 
   /* ── 持久化：刷新后笔记仍在，回答上仍能对上「已在笔记中」 ──
-     注意：重开页面后回答是**会话恢复**出来的，它的 __noteId 只有走一遍
+     注意：重开页面后回答是会话恢复出来的，它的 __noteId 只有走一遍
      restoreSession 才会被填上（真实链路里由重放负责）。这里显式补一次对齐，
      验的是「恢复后按笔记 id 能对上、图标显示已保存」。 */
   await load();

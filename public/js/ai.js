@@ -1,9 +1,3 @@
-/**
- * AI 层：设置、OpenAI 兼容接口客户端（流式）、各类提示词
- *
- * 所有请求都发到本机 /api/chat，由 server.js 转发。
- * 好处：绕开浏览器 CORS；API Key 存在本机 data/config.json，不进 localStorage。
- */
 import { resolveReadingRequest, historyMessages, stripPageLabels } from './reading-context.js';
 import { nowContext, buildProfileBlock } from './profile.js';
 import { CONDENSE_SYS } from './teaching.js';
@@ -99,12 +93,6 @@ export function targetLangFor(text) {
   return cjk / Math.max(1, s.length) > 0.15 ? 'English' : '中文';
 }
 
-/**
- * 流式对话。返回完整文本。
- * 带「空闲看门狗」：一段时间收不到任何数据就主动中止，避免界面像卡死一样一直转。
- * @param {{messages:Array, model?:string, onDelta?:Function, onReasoning?:Function,
- *          signal?:AbortSignal, temperature?:number, idleMs?:number, onTick?:Function}} opts
- */
 export async function streamChat(opts) {
   const {
     messages,
@@ -352,7 +340,7 @@ export function askMessages({ question, selection, context, page, docTitle, full
     '5. 用户纠正或设定默认讲解方式时，简短确认后落实到当前阅读对象；「？」若附有新选区就解释新选区，否则围绕上一回答纠正或换个具体说法。不要凭空编造自己检索了什么、拿到了什么或内部运行原因。',
     '6. 用中文和短段落，术语首次出现保留英文；数学公式用 $...$ 或 $$...$$。不要客套、无关扩写或例行邀请用户继续提问。',
     request.guidance ? `读者持续的讲解偏好：${request.guidance}` : '',
-    // 用户口径（2026-10）：「现在的时间在后续过程中要交给模型」——每次回答都带上，
+    // 用户口径：「现在的时间在后续过程中要交给模型」——每次回答都带上，
     // 模型才能判断「最近 / 今年 / 几个月前」这类说法。
     nowContext(),
     profileBlock ?? buildProfileBlock(undefined, `${docTitle || ''}\n${selection || ''}\n${context || ''}`, question),
@@ -395,12 +383,6 @@ export function digestMessages({ text, docTitle }) {
   ];
 }
 
-/**
- * 「论文操作」的请求体：一次带独立 system prompt 的调用。
- *
- * 文档上下文沿用和提问完全一样的格式（【论文全文】带页码标记 / 【阅读索引】），
- * 这样操作和问答看到的是同一份材料，也共用同一套抽取、降级与缓存逻辑。
- */
 export function opMessages(op, { docTitle, fullText, digest, extra, history = [], profileBlock = null } = {}) {
   const parts = [];
   if (docTitle) parts.push(`【论文】${docTitle}`);
@@ -418,14 +400,6 @@ export function opMessages(op, { docTitle, fullText, digest, extra, history = []
   ];
 }
 
-/**
- * 「读懂论文」四项教学能力的请求体。
- *
- * 和 opMessages 的区别：
- *   · 学习档案块由调用方先按「当前论文 + 问题」筛好再传进来（不整份塞）；
- *   · 支持 extraUser（例如图表题对象、点开的清单项）与 history（续讲时带已讲内容）；
- *   · 「当前时间」固定注入，供模型判断档案条目新旧与「最近 / 今年」这类说法。
- */
 export function teachMessages(op, {
   docTitle, fullText, digest, extraUser = '', profileBlock = '', history = [], ask = '',
 } = {}) {
@@ -457,14 +431,6 @@ export function condenseMessages({ answer, docTitle }) {
   ];
 }
 
-/**
- * 联网搜索该用什么样的查询串。
- *
- * 这里踩过一个坑：直接把「这篇论文的核心贡献是什么？另外帮我查一下 Transformer
- * 架构最近有什么重要进展。」整句丢给 cn.bing.com，Bing 会把它当成单字查询，
- * 返回一堆「这」字的字典释义 —— 点开全是百科/汉典，跟问题毫无关系。
- * 所以先把口水话剔掉，只留真正能搜的词。
- */
 
 // 中文口水词 / 提问套话。必须按长度从长到短替换，否则「查一下」会先被「查」吃掉
 const ZH_FILLER = [

@@ -1,11 +1,3 @@
-/**
- * 验收两件事（用户 2026-10-09 评审提出的）：
- *   ① 提交时文本层是不是被「双倍缩放」了（_softRescale 的 scale(k) + layout 改 --total-scale-factor）
- *   ② 提交那一帧锚点的屏幕坐标有没有跳（视觉连续性）
- * 调研工具（打印数字，不做断言），自带隔离服务。
- *
- * 跑法：node test/perf/commit-continuity.mjs
- */
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import { assertIsolatedDataDir, resolveDataDir } from '../_env.mjs';
@@ -70,7 +62,6 @@ await sleep(2500);
 await page.evaluate(() => { document.getElementById('viewer').scrollTop = 0; window.__viewer.goToPage(1); });
 await sleep(2500);
 
-/* ══════════ ① 文本层双倍缩放 ══════════ */
 const r1 = await page.evaluate(() => {
   const v = window.__viewer;
   // 找一个「已经渲染好且真的有 span」的页，别假设 current 就是它

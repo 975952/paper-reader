@@ -1,24 +1,3 @@
-/**
- * 手机版阅读器（public/mobile/mobile.js）
- *
- * 用户口径（2026-10-03）：
- *   「阅读的时候要只显示 pdf 本身。pdf 字体如果能放大就很好，图片的大小不变。
- *     或者说图片长按可以单独放大查看。然后也是长按选词。然后界面就不要做伸缩了，
- *     字体在设置调节。手机版的。」
- *
- * 这个模块**只做阅读**，故意不引入桌面版的任何 AI 代码（app.js / ai.js / ops.js 都不 import）：
- *   · 打开 PDF（本地选择的文件优先，其次 URL 上的 ?open=）
- *   · 上下滚动阅读；底部页码切页
- *   · 点屏幕中间唤出 / 收起顶栏（手机没有 hover）
- *   · **长按选词**：长按落在哪个词上就选哪个词，并弹出操作条（复制 / 选一个词 / 整段）
- *   · **字号只改文字**：--m-text-boost 作用在文本层的 span 上，canvas 位图不动，
- *     所以图片、表格、公式的尺寸一个像素都不变
- *   · 页面底色 / 阅读区底色 / 翻页方向
- *
- * 不复用桌面版 app.js 的原因：那里面有 8000 行围绕「右栏 AI / 面板 / 独立窗口」的逻辑，
- * 在手机上全是死代码；而 PdfViewer（pdfview.js）本身是干净的、可以独立使用的，
- * 所以这里只复用它 + util.js 的两个小工具。
- */
 import { $, el, cleanText } from '../js/util.js';
 import { PdfViewer, initPdfjs } from '../js/pdfview.js';
 
@@ -35,7 +14,6 @@ const save = (k, v) => { try { localStorage.setItem(k, String(v)); } catch { /* 
 let viewer = null;
 let lastSel = null;
 
-/* ────────────────────────────── 小提示条 ────────────────────────────── */
 let toastTimer = 0;
 function tip(msg, ms = 1800) {
   const node = $('#mToast');
@@ -46,13 +24,6 @@ function tip(msg, ms = 1800) {
   toastTimer = setTimeout(() => node.classList.add('hidden'), ms);
 }
 
-/* ────────────────────────────── 顶栏开关 ────────────────────────────── */
-/**
- * 手机没有 hover，所以顶栏用「点了才出来」：
- *   · 点顶栏以外的任何地方 → 切换（出来时收起、收起时出来）
- *   · 任何滚动 → 立刻收起（阅读时不该被顶栏压着）
- * 顶栏与操作条都是 fixed 覆盖层，不占布局高度，所以正文区域永远是整屏。
- */
 function initTopbar() {
   const bar = $('#mTopbar');
   const show = (on) => bar.classList.toggle('on', on);
@@ -79,32 +50,11 @@ function initTopbar() {
   bar.addEventListener('pointerdown', (e) => e.stopPropagation());
 }
 
-/* ────────────────────── 长按看图片（PDF 里的图长按放大） ────────────────────── */
-/**
- * 判定「这一下是落在文字上，还是落在图上」。
- *
- * **为什么最终不用 pdf.js 的算子列表来算图像框**（试过、放弃，留个记录别再走一遍）：
- *   `page.getOperatorList()` 能拿到图像算子与它的 CTM，但把 CTM 正确映射到「页面 CSS 像素」
- *   需要把用户空间矩阵和 `viewport.transform` 复合对，而这两种顺序在任何一种下都会算出
- *   26253×13638 这种离谱框（实测两轮、写了独立脚本核对过），继续调下去收益也不对等 ——
- *   我们真正需要的不是「图的精确外接框」，而是**这一下到底该选词还是该看图**这个二选一。
- *
- * 所以改成用**已经可靠可用的信息**来判：
- *   · 长按点能不能取到一个「词」？能 → 选词（走 wordRangeFromPoint，这条已实测选中一个词）。
- *   · 取不到词 → 说明这一下不在正文文字上；再看它像不像图（像素启发式），像就放大看那一块。
- * 这条判据不依赖任何坐标系换算，误判代价也小：判成图 = 看到那一块被放大，判错也不会损坏数据。
- */
 function pageElAtPoint(x, y) {
   const el = document.elementFromPoint(x, y);
   return el?.closest?.('.page') || null;
 }
 
-/**
- * 像素启发式：这一块像不像图。
- * 文字行的特征是「大片纸色 + 少量墨色、几乎没有彩色」；图/表/公式通常是
- * 大面积着色、或者暗像素占比很高。阈值刻意放宽 —— 宁可多给一次「放大看看」，
- * 也别让长按图完全没反应。
- */
 function looksLikeImageByPixels(pageEl, x, y) {
   const canvas = pageEl.querySelector('canvas');
   if (!canvas) return false;
@@ -138,13 +88,6 @@ function closeImageView() {
   imgViewEl.remove();
   imgViewEl = null;
 }
-/**
- * 把长按的那一块从 canvas 裁出来，全屏看：双指缩放 + 拖动。
- * 裁的是「长按点周围的一个窗口」：约半页宽 × 三分之一页高。
- * 为什么不按「图的精确外接框」裁：PDF 的图是画进位图里的，DOM 里没有边界可查；
- * 算过 pdf.js 的算子列表，坐标系换算不可靠（见文件上方那段说明），
- * 而「以长按点为中心裁一块」对手指操作反而更符合直觉 —— 放大后能拖动、能再缩放。
- */
 async function openImageView(pageEl, x, y) {
   const pr = pageEl.getBoundingClientRect();
   const w = Math.max(80, Math.round(pr.width * 0.55));
@@ -155,7 +98,7 @@ async function openImageView(pageEl, x, y) {
     w,
     h,
   };
-  // ⚠️ captureRegion 返回的是**对象** `{ dataUrl, width, height }`（桌面版拿它去做视觉识别，
+  // ⚠️ captureRegion 返回的是对象 `{ dataUrl, width, height }`（桌面版拿它去做视觉识别，
   // 所以没直接给字符串）。这里必须取 .dataUrl —— 直接把对象赋给 img.src 会得到
   // src="[object Object]"，页面不报错、图就是不出来（实测踩过）。
   const shot = await viewer?.captureRegion?.(Number(pageEl.dataset.page), rect, { maxDim: 2200 })
@@ -202,14 +145,6 @@ async function openImageView(pageEl, x, y) {
   apply();
 }
 
-/* ────────────────────────────── 长按选词 ────────────────────────────── */
-/**
- * 长按选词的实现要点（移动端最容易做坏的一块）：
- *   ① 移动端**不能**依赖浏览器的长按菜单：用户要的是「选一个词」，而系统给的是整段选择手柄。
- *   ② 也不能只 setStart/setEnd —— 系统会在 touchend 后用原生选区把手柄位置覆盖回来。
- *      所以：只要用户还在拖那两只手柄，我们就不动；一旦松手（touchend）就立刻按我们的口径重设一次。
- *   ③ 「选一个词」的边界要按字符类判断：汉字一个字就是一个词，拉丁字母/数字连成一串才算一个词。
- */
 const isCJK = (ch) => /[\u3400-\u4DBF\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(ch);
 const isWordChar = (ch) => /[A-Za-z0-9_'’\-]/.test(ch);
 /** 「点在文字上」的容差（CSS 像素）：手指精度就这么大，超出这个范围就算点在图上 */
@@ -266,16 +201,6 @@ function wordRangeFromPoint(x, y) {
     if (!host) return null;
     const word = wordRangeAt(node, r.startOffset);
     if (!word) return null;
-    /**
-     * ⚠️ 关键：**必须看这个词离长按点有多近**。
-     *
-     * `wordRangeAt` 对落在空白处的点会「往左右找最近的非空白字符」，于是
-     * 手指点在图上、而图上方 20px 处有一行标题时，它会顺手把标题里那个词选出来 ——
-     * 表现就是「长按图片，结果选了个词」，图片放大的入口永远轮不到（实测两次都栽在这里）。
-     *
-     * 所以这里给一个很小的容差：只有当那个词的外接框离长按点足够近（手指精度范围内）
-     * 才算「点在文字上」；否则返回 null，把判断让给「这一块像不像图」。
-     */
     const box = word.node.parentElement?.getBoundingClientRect?.();
     if (box) {
       const near = px >= box.left - WORD_SLOP && px <= box.right + WORD_SLOP
@@ -454,9 +379,8 @@ function initSelectSheet() {
   });
 }
 
-/* ────────────────────────────── 设置 ────────────────────────────── */
 /**
- * 字号：只放大 PDF 里的**文字**。
+ * 字号：只放大 PDF 里的文字。
  * 做法是在文本层每个 span 上加一个只有字形的缩放（见 reader.css 的说明），
  * canvas 位图完全不动 —— 所以图片/表格/公式的尺寸不变，这正是用户要的。
  */
@@ -524,7 +448,6 @@ function refreshTextLayerNotes() {
 }
 const saveNote = refreshTextLayerNotes;
 
-/* ────────────────────────────── 打开 PDF 与翻页 ────────────────────────────── */
 function setPager(cur, total) {
   $('#mPageCur').textContent = String(cur || '–');
   $('#mPageAll').textContent = String(total || '–');
@@ -584,7 +507,6 @@ function initPager() {
   };
 }
 
-/* ────────────────────────────── 启动 ────────────────────────────── */
 (async function boot() {
   await initPdfjs();
   viewer = new PdfViewer($('#mViewer'), {
@@ -602,7 +524,7 @@ function initPager() {
   initOpen();
   refreshTextLayerNotes();
 
-  // 自动化探针（只读，不改变任何行为）：套件要能**分别**验证
+  // 自动化探针（只读，不改变任何行为）：套件要能分别验证
   // 「图像框算得对不对」与「长按有没有走对分支」，否则一旦红了我只能猜。
   window.__mobile = {
     looksLikeImageByPixels,

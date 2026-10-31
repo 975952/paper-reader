@@ -5,7 +5,6 @@
 
 use serde_json::{json, Map, Value};
 
-/* ============================================================ 聊天请求体 */
 
 /// `/api/chat` 允许出现在请求体里的字段（审计 §P0：只允许 messages / stream /
 /// 受限 temperature / max_tokens / 上下文范围）。
@@ -19,7 +18,6 @@ pub const CHAT_FORBIDDEN: [&str; 7] = [
     "baseURL", "baseUrl", "apiKey", "apikey", "model", "visionModel", "endpoint",
 ];
 
-/* ============================================================ 数值范围 */
 
 pub const TEMPERATURE_MIN: f64 = 0.0;
 pub const TEMPERATURE_MAX: f64 = 2.0;
@@ -37,7 +35,6 @@ pub const MAX_MODEL_LEN: usize = 256;
 pub const MAX_TARGET_LANG_LEN: usize = 32;
 pub const MAX_GLOSSARY_LEN: usize = 100_000;
 
-/* ============================================================ 请求体上限 */
 
 /// 与 security.js 的 BODY_LIMITS 一致。
 /// `BODY_CHAT` 就是 server.rs 里的 `MAX_BODY`（通用默认值），列在这里是为了和 Node 对齐。
@@ -68,7 +65,6 @@ pub const SESSION_MAX_ITEMS: usize = 5_000;
 pub const SESSION_MAX_CHARS: usize = 8 * 1024 * 1024;
 pub const SESSION_MAX_BYTES: usize = 4 * 1024 * 1024;
 
-/* ============================================================ 配置白名单 */
 
 /// `/api/config` 只接受这些字段（审计 §P1）
 pub const CONFIG_FIELDS: [&str; 11] = [
@@ -146,7 +142,7 @@ pub fn valid_url_string(raw: &str) -> Option<String> {
 
 /// 过滤后的 patch + 被忽略的字段名 + 超长（被拒）的字段
 ///
-/// `capped` 非空时调用方**必须返回 400 并且不写盘** —— 审计 §验收 要求
+/// `capped` 非空时调用方必须返回 400 并且不写盘 —— 审计 §验收 要求
 /// 「超限返回 413/400，不截断后静默保存」。绝不静默截断。
 pub struct ConfigPatch {
     pub patch: Map<String, Value>,
@@ -161,7 +157,7 @@ pub struct ConfigPatch {
 ///   * 未知字段 → 忽略；
 ///   * `temperature` / `idleMs` / `fontSize` → 夹到范围内（设置页是滑块，
 ///     不能因为一个越界值把用户其它改动一起丢掉）；
-///   * 字符串字段超长 → 记进 `capped`（调用方回 400，**不截断**）；
+///   * 字符串字段超长 → 记进 `capped`（调用方回 400，不截断）；
 ///   * `baseURL` → 必须是合法 http(s) URL，非法则忽略；
 ///   * `apiKey` 空串 → 由调用方保留原值。
 pub fn sanitize_config_patch(raw: &Value) -> ConfigPatch {
@@ -360,10 +356,6 @@ fn is_iso_like(s: &str) -> bool {
         && rest[5].is_ascii_digit()
 }
 
-/// `/api/profile` 的校验：版本 / 条目数 / 字符串长度 / 时间格式。
-///
-/// 与 `security.js` 的 `checkProfile()`、前端 `public/js/profile.js` 的
-/// `validateProfile()` 保持同一口径。**校验失败绝不落盘**（旧档案原样保留）。
 pub fn check_profile(raw: &Value) -> Result<Value, String> {
     let obj = match raw {
         Value::Object(m) => m,
@@ -752,7 +744,7 @@ mod tests {
     }
 
     /// 审计 §验收：「超限返回 413/400，不截断后静默保存」。
-    /// 5000 字的 model 必须出现在 capped 里、**不能**被截成 256 字写进 patch。
+    /// 5000 字的 model 必须出现在 capped 里、不能被截成 256 字写进 patch。
     #[test]
     fn oversized_strings_are_rejected_not_truncated() {
         let long_model = "m".repeat(5000);

@@ -1,9 +1,3 @@
-/**
- * 端到端测试：用无头 Chrome 真跑一遍阅读器
- *   node e2e.mjs                  （默认打 http://127.0.0.1:8787）
- *   BASE=http://127.0.0.1:8790 node e2e.mjs
- * AI 请求会被拦截并返回假回复，不需要 API Key。
- */
 import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import fs from 'node:fs';
@@ -44,7 +38,6 @@ const postConfig = (patch) => postJson(`${BASE}/api/config`, patch);
 await postConfig({ baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-flash', apiKey: 'sk-e2e-fake-key', idleMs: 60000 });
 await postJson(`${BASE}/api/state`, { lastDoc: null, lastName: null, lastUrl: null, docs: {} });
 
-/* ══════════════ 浏览器 ══════════════ */
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: 'shell',
@@ -66,13 +59,7 @@ page.on('requestfailed', (r) => {
   failedRequests.push(`${r.url()} :: ${r.failure()?.errorText}`);
 });
 
-/* ══════════════ 拦截后端：AI 与文献检索 ══════════════ */
 let mockMode = 'sse';   // 'sse' | 'json' | 'hang' | '401' | 'region'
-/**
- * 每次 /api/chat 被拦下时，把当时的 mock 模式记下来。
- * 这一条是给「地区限制」那条断言用的：它历史上假红过两次，两次都是**没发出请求**或
- * **读到了别的条目**，而不是产品提示写错了。有这份流水就能一眼看出是哪一种。
- */
 const mockLog = [];
 const ANSWER = '这是假的流式回复：注意力机制（attention）让模型并行处理序列。\n\n```\nQKV = XW\n```\n\n- 要点一\n- 要点二';
 const IMAGE_ANSWER = '【图片区域】这是一个公式：$$E = mc^2$$。\n\n- 含义：质能方程';
@@ -144,7 +131,6 @@ page.on('request', (req) => {
   return req.continue();
 });
 
-/* ══════════════ 工具 ══════════════ */
 const selectSpans = (from = 1, to = 5) => page.evaluate((f, t) => {
   const v = document.getElementById('viewer');
   const vr = v.getBoundingClientRect();
@@ -196,12 +182,6 @@ const waitIdle = () => page.waitForFunction(
   { timeout: 25000 },
 ).catch(() => {});
 
-/**
- * 强制回到空闲：先点产品自己的停止入口，再等停止按钮隐藏。
- * 与 waitIdle()（只等）的区别在这里**先复位** —— 「上游卡死」那条用例走超时分支后会留下 busy，
- * 不清就发下一条请求会被「上次回答尚未完成」挡回，后续断言读到的是上一条错误文案。
- * （定义必须放在这里：它是 const，下面用到它的地方在文件后半段，放晚了会 TDZ 报错。）
- */
 const forceIdle = async () => {
   await page.evaluate(() => { const b = document.getElementById('stopBtn'); if (b) b.click(); });
   try {
@@ -213,7 +193,6 @@ const forceIdle = async () => {
   await sleep(400);
 };
 
-/* ══════════════ 1. 打开论文 ══════════════ */
 console.log('\n▶ 打开论文…');
 await loadDoc();
 const doc = await page.evaluate(() => ({
@@ -264,10 +243,6 @@ const opened = await page.evaluate(() => ({
 }));
 check('点开关能打开块', opened.blocks.length === 1 && opened.on === 1, opened.blocks.join(','));
 const hintInfo = await page.evaluate(() => {
-  // 空态文案 2026-10-03 起从 `.ai-hint` 换成了 `.ai-empty`（renderCol 重构为「结果会出现在这里 /
-  // 从下面这一排图标打开译文 / 问答…」那一组）。
-  // 判据是「这个块写清了用途」，不是「此刻必须可见」：`.ai-hint` 在块里**有消息时会被隐藏**
-  // （applyPanels 里按条数 toggle），此时可见性为 false 是**正确行为**，旧断言把它当成失败。
   const block = document.querySelector('.ai-block[data-block="chat"]');
   const hint = block?.querySelector('.ai-hint');
   const empty = document.querySelector('#aiArea > .ai-empty');
@@ -287,13 +262,6 @@ check('块里写清了用途',
   `${hintInfo.source}: 可见=${hintInfo.visible} 有消息故隐藏=${!!hintInfo.hiddenByDesign} 消息数=${hintInfo.msgs} · ${JSON.stringify(hintInfo.text.slice(0, 40))}`);
 await page.evaluate(() => document.querySelectorAll('#aiBar .aibar-btn')[1].click());
 await sleep(300);
-/**
- * ⚠️ 2026-10-10 修：这条原来断言「再点一次能关掉块」= `.ai-block` 数量为 0，
- * 但**现行语义恰好相反**，而且那是用户明确要求的（见 app.js `renderAiBar` 的注释）：
- *   「右侧的两个选择也是这样点击已开的图标也不会关闭侧栏，而是不做反应」。
- * 所以再点一次是 **no-op**：块还在、还是选中态；收起右栏由顶栏那个按钮负责。
- * 断言改成钉住这个语义（顺手把「点另一个能切过去」也钉上）。
- */
 const toggleAgain = await page.evaluate(() => {
   document.querySelectorAll('#aiBar .aibar-btn')[1].click();
   return {
@@ -310,7 +278,6 @@ const switched = await page.evaluate(() => {
 });
 check('点另一个切换器能切过去（一栏只开一个）', switched.join() === 'translate', switched.join(','));
 
-/* ══════════════ 3. 清晰度（重点） ══════════════ */
 console.log('\n▶ 放大清晰度…');
 const sharp = () => page.evaluate(() => {
   const c = document.querySelector('.page[data-page="1"] canvas');
@@ -323,24 +290,10 @@ const sharp = () => page.evaluate(() => {
     zoom: document.getElementById('zoomLabel').textContent,
   };
 });
-/**
- * ⚠️ 2026-10-10 修：这两条原来要求密度 ≥ 1.99（**无条件 2 倍超采样**），
- * 那是 2026-10-08 之前的策略。第四轮（2026-10-09）已经改成**按屏幕的 dpr** 渲染：
- * 1× 屏上 ratio=1 时「1 个 CSS 像素正好 1 个物理像素」，既不糊也不浪费 4 倍像素
- * （实测 10.3 MP → 2.6 MP，滚动长任务 1329ms → 54ms）。
- * 第七轮（2026-10-10）又保证放大后仍然是满 dpr（密度不再掉到 0.75）。
- * 所以判据改成现行契约：**密度 ≥ 0.9×min(dpr, 2)**，并加一条「单张位图 ≤ 10 MP」。
- */
 const minDensity = (dpr) => 0.9 * Math.min(dpr, 2);
 const fit = await sharp();
 check('适应宽度下像素密度跟得上屏幕（≥ 0.9×dpr）',
   fit && fit.density >= minDensity(fit.dpr) - 1e-6, JSON.stringify(fit));
-/**
- * ⚠️ 2026-10-10 修：缩放按钮早就从顶栏搬到**底栏**了（`#zoomIn` → `#footZoomIn`，
- * 用户口径「底栏有的功能上面的一栏就不要了」；`test/zoom.mjs` 里记着这次改名）。
- * 这条断言没跟着改，于是 `getElementById('zoomIn')` 拿到 null 直接抛错、
- * 整个 e2e 从这里崩掉（后面一百多条断言一条都没跑）—— 这也是为什么它一直没人发现。
- */
 await page.evaluate(() => { for (let i = 0; i < 8; i++) document.getElementById('footZoomIn').click(); });
 await sleep(2500);
 const zoomed = await sharp();
@@ -361,7 +314,6 @@ const raceOk = await page.evaluate(() => {
 });
 check('渲染中缩放不会留下空白页', raceOk.has && raceOk.n > 0, `可见页 canvas=${raceOk.has}`);
 
-/* ══════════════ 4. 缩放滑块 ══════════════ */
 console.log('\n▶ 独立的大小调节…');
 await page.evaluate(() => {
   const r = document.getElementById('zoomRange');
@@ -375,7 +327,6 @@ check('滑块上限够用', slider.max >= 300, `${slider.max}%`);
 await page.click('#footFitWidth');
 await sleep(1500);
 
-/* ══════════════ 5. 划词 + 选区不重叠 ══════════════ */
 console.log('\n▶ 划词与选区…');
 await selectSpans(1, 5);
 await sleep(300);
@@ -450,7 +401,6 @@ check('鼠标拖选命中精度正常（误差不超过 5%）',
   dragError <= Math.max(2, dragTarget.text.length * 0.05),
   `选中 ${dragged.length}/${dragTarget.text.length} 字符（期望约 ${Math.round(dragTarget.text.length * 0.35)}）`);
 
-/* ══════════════ 6. 译 ══════════════ */
 console.log('\n▶ 译…');
 await selectSpans(1, 5);
 await sleep(250);
@@ -472,19 +422,10 @@ await page.waitForFunction(() => document.querySelector('#rightCols').getBoundin
 await page.click('#aiBar .aibar-btn[data-block="translate"]');
 await page.waitForFunction(() => document.querySelector('#aiArea .msg .text')?.innerText.includes('注意力机制'));
 const tEntry = await lastEntry();
-/**
- * 类型标签是**内部标记**：public/style.css 里 `.msg .tag { display: none; }`，
- * 用户看不到它。写入的词法是 translation / explanation / answer（论文操作写的是中文 op.title）。
- * 页码在结果区是「第N页」；`p.N` 只出现在左栏文献关系、搜索结果和笔记里。
- * 旧断言按 `/译/` + `/p\.\d/` 写，是在标签可见、页码统一成 p.N 的旧构建下成立的，
- * 现在必然失败。这里改成与当前实现一致；「标签要不要显示」「页码词法要不要统一」
- * 留给后续视觉/排版阶段决定，不在基线阶段改产品行为。
- */
 check('打开右栏后仍能在「译文」块找到结果（带页码）', tEntry.tag === 'translation' && /^第\d+页$/.test(tEntry.page), `${tEntry.tag} ${tEntry.page}`);
 check('动作条里没有多余的 null', !tEntry.acts.some((a) => a === 'null'), tEntry.acts.join('/'));
 check('译文块按需打开', (await page.evaluate(() => [...document.querySelectorAll('#aiArea .ai-block')].map((b) => b.dataset.block))).includes('translate'));
 
-/* ══════════════ 7. 释（只在右栏） ══════════════ */
 console.log('\n▶ 释…');
 await selectSpans(2, 6);
 await sleep(250);
@@ -500,7 +441,6 @@ check('「释」只在右栏出结果（就地浮层已删除）',
 check('「释」确实发了一次请求', chatRequests.length === beforeExplain + 1, `${chatRequests.length - beforeExplain} 次`);
 check('「释」用的是解释提示词', /讲明白/.test(chatRequests[chatRequests.length - 1].sys || ''));
 
-/* ══════════════ 8. ＋对话：可加多个 ══════════════ */
 console.log('\n▶ ＋对话（可加多段）…');
 const beforeAdd = chatRequests.length;
 await selectSpans(3, 6);
@@ -632,7 +572,6 @@ check('带图提问的回复已渲染（公式渲染成了 KaTeX）', await page
 }));
 check('助手消息里显示了截图缩略图', (await page.evaluate(() => document.querySelectorAll('#aiArea .msg .shot-img').length)) > 0);
 
-/* ══════════════ 10. 修饰键 ══════════════ */
 console.log('\n▶ 修饰键…');
 await selectSpans(1, 4);
 await sleep(250);
@@ -648,7 +587,6 @@ await page.keyboard.up('Control');
 await sleep(400);
 check('Ctrl+R 不会打开框选遮罩', await page.evaluate(() => document.getElementById('regionOverlay').classList.contains('hidden')));
 
-/* ══════════════ 11. 非流式上游回退 ══════════════ */
 console.log('\n▶ 非流式回退…');
 mockMode = 'json';
 await selectSpans(11, 13);
@@ -659,7 +597,6 @@ check('上游回普通 JSON 也能出结果', /非流式回退成功/.test((awai
 mockMode = 'sse';
 await sleep(200);
 
-/* ══════════════ 12. 正文引用 → 参考文献 ══════════════ */
 console.log('\n▶ 正文引用跳转…');
 const citeInfo = await page.evaluate(async () => {
   const v = window.__viewer;
@@ -739,7 +676,6 @@ if (citeInfo.pt) {
   check('已返回后不再显示返回位置入口', !returned.returnButtonVisible);
 }
 
-/* ══════════════ 13. 搜索 ══════════════ */
 console.log('\n▶ 全文搜索…');
 await page.click('#searchBtn');
 await page.type('#searchInput', 'attention');
@@ -757,7 +693,6 @@ check('只标命中的词，不是整行变黄', hitP.ratio < 0.25, `最宽 ${(h
 await page.evaluate(() => document.getElementById('searchClose').click());
 await sleep(300);
 
-/* ══════════════ 14. 翻页 ══════════════ */
 console.log('\n▶ 翻页…');
 await page.evaluate(() => { document.getElementById('pageInput').value = '3'; document.getElementById('pageInput').dispatchEvent(new Event('change')); });
 await sleep(1500);
@@ -768,7 +703,6 @@ const jump = await page.evaluate(() => {
 });
 check('跳页真的滚过去了', jump.page === '3' && jump.visible && Math.abs(jump.top) < 220, `p3 距顶 ${jump.top}px`);
 
-/* ══════════════ 15. 笔记 ══════════════ */
 console.log('\n▶ 笔记…');
 await selectSpans(1, 3);
 await sleep(250);
@@ -816,24 +750,9 @@ const reopened = await page.evaluate(() => ({
   open: !document.getElementById('noteBox').classList.contains('hidden'),
   text: document.getElementById('noteText').value,
 }));
-/**
- * ⚠️ 2026-10 实测**真缺陷**（不是断言过期，别删这条）：
- *   右栏开着时 `.hl-pin` 的坐标落在阅读区可见范围之外 ——
- *   实测 viewer=[215,1135]、`.page` 右边界 1282、书签 rect.x=1272（中心 x=1275），
- *   于是 `elementFromPoint(1275,216)` 命中的是右栏里的 `.ai-body`，真实鼠标点不到书签。
- *   节点本身是活的（`document.querySelector('.hl-pin').click()` 能正常打开笔记框），
- *   所以问题在**书签定位 / 裁剪**，不在事件绑定。
- *   书签贴近纸面右边缘、而纸面比阅读区宽（开了右栏或放大后横向溢出）时必然复现。
- */
 check('点文中书签能重新打开这条笔记', reopened.open && reopened.text.includes('出发点'),
   `书签中心 x=${pinPt.x} · 阅读区右边界=${pinPt.viewerRight} · 命中=${pinPt.hit}（是书签=${pinPt.hitIsPin}）· 笔记框=${reopened.open}`);
 
-/**
- * 书签点不开时 `#noteBox` 是关着的，此时直接 `page.click('#noteSave')` 会抛
- * 「Node is either not clickable or not an Element」，把后面整段（修改 / 刷新持久化 /
- * 目录 / 外观 …）全部带走。这里兜一层：真失败上一条已经报过了，
- * 这一层只保证套件能继续跑完，并把级联失败也如实记下来。
- */
 if (await page.evaluate(() => !document.getElementById('noteBox').classList.contains('hidden'))) {
   await page.evaluate(() => { document.getElementById('noteText').value = '改过的笔记内容'; });
   await page.click('#noteSave');
@@ -853,7 +772,6 @@ const persisted = await page.evaluate(() => ({
 }));
 check('刷新后笔记和文中书签都在', persisted.items === 1 && persisted.pins >= 1 && persisted.note === '改过的笔记内容', `${persisted.items} 条 / ${persisted.pins} 标记`);
 
-/* ══════════════ 16. 目录 ══════════════ */
 const outline = await page.evaluate(() => document.querySelectorAll('#outlineList li:not(.empty)').length);
 check('目录已解析', outline > 0, `${outline} 项`);
 const oLook = await page.evaluate(() => {
@@ -867,7 +785,7 @@ const oLook = await page.evaluate(() => {
     maxH: getComputedStyle(sec).maxHeight,
     overflow: getComputedStyle(list).overflowY,
     // 判据要的是「这一块没有把目录关进一个小滚动框里」：
-    // 只看 overflowY 会把 `overflow:auto` 但**根本不需要滚动**（scrollH == clientH）的情况误判成失败，
+    // 只看 overflowY 会把 `overflow:auto` 但根本不需要滚动（scrollH == clientH）的情况误判成失败，
     // 所以同时量一下它到底有没有被裁掉内容。
     listClientH: list.clientHeight,
     listScrollH: list.scrollHeight,
@@ -883,7 +801,6 @@ check('目录不再被限制在小区域里',
 check('左栏整体滚动', oLook.panel === 'auto');
 check('层级靠缩进体现', oLook.indented === true);
 
-/* ══════════════ 17. 设置 ══════════════ */
 console.log('\n▶ 设置…');
 await page.click('#settingsBtn');
 await page.waitForSelector('#settingsModal:not(.hidden)', { timeout: 6000 });
@@ -908,18 +825,6 @@ const ui = await page.evaluate(() => {
     glossary: document.querySelectorAll('#cfgGlossary').length,
   };
 });
-/**
- * 2026-10 删减：设置弹窗从「核心三项 + 更多样式折叠」收成固定的几项 ——
- * API Key / 模型名 / 接口地址 / 主题 / 阅读字号 / **缩放速度** / 恢复默认设置。
- * 「结果密度」「顶栏行为」和「更多样式」里那批调试刻度（界面字号 / 控件大小 / 行高 /
- * 代码大小 / 最大宽度 / 结果透明度 / PDF 纸张 / 三个显示开关）全部下架，
- * 两个 reset 按钮并成一个 `#resetSettings`。
- * 所以判据改成：留下的项可见且**真的还能用**、下架的确实不在、恢复默认只剩一个入口。
- * 存档里的老字段仍然生效（DEFAULT_UI_STYLE 没删），只是没有界面入口了。
- *
- * 2026-10-10：`uiZoomSpeed` 是**新增**的核心项（用户口径「把缩放速度做进设置里面」），
- * 所以这里跟着加进名单 —— 它是「阅读手势」而不是「外观」，故意单独一节。
- */
 check('设置是弹窗：AI 字段与主题 / 阅读字号 / 缩放速度核心项可见',
   ui.open && ui.visible.includes('cfgApiKey') && ui.visible.includes('cfgModel')
     && ui.coreVisible.join() === 'uiTheme,uiFontSize,uiZoomSpeed',
@@ -970,18 +875,6 @@ const resetApplied = await page.evaluate(() => {
 check('「恢复默认设置」一个按钮把主题与阅读字号拨回默认',
   resetApplied.select === 'system' && resetApplied.theme === '(跟随系统)' && !!resetApplied.range,
   JSON.stringify(resetApplied));
-/**
- * 顶栏白名单：这份清单是**故意收窄**的 —— 顶栏只放用户高频、且一次点击能说清用途的控件。
- * R8 曾加入 `scanBtn`（扫描版 OCR），后按用户要求整体删除该功能。
- * 2026-10 删减又把 `panelBtn`（面板管理器入口）连同整个面板管理器一起删掉了：
- * 「打开译文 / 问答」现在只剩右栏底部那排分段切换器（`#aiBar`）一个入口。
- * 2026-10-04 顶栏又按用户口径（「完全模仿 VS Code」）变成**应用内标题栏**，
- * 于是**故意**多了左右活动栏开关（topbarLeftToggle / topbarRightToggle）与
- * 窗口按钮（windowMinimize / windowMaximize / windowClose）—— 这五个是新增的正当成员。
- * 2026-10 首页改造再加 `homeBtn`（回首页 / 书架）：启动默认停在首页之后，阅读态必须
- * 有**一个**明确的回头入口，否则用户只能靠刷新回书架。它是正当成员，
- * 不是「删掉的入口又回来了」——白名单里也仍然禁止 panelBtn / scanBtn 那些。
- */
 const topbarCore = new Set(['prevPage', 'pageInput', 'nextPage', 'returnPosition', 'zoomOut', 'zoomRange', 'zoomIn', 'fitWidth', 'homeBtn', 'opsBtn', 'regionBtn', 'searchBtn', 'settingsBtn',
   'topbarLeftToggle', 'topbarRightToggle', 'windowMinimize', 'windowMaximize', 'windowClose']);
 check('顶栏只剩核心控件 + 标题栏按钮，且删掉的入口没有回来',
@@ -994,7 +887,7 @@ await page.click('#saveSettings');
 await page.waitForFunction(() => /✅|❌/.test(document.getElementById('testResult').textContent || ''), { timeout: 20000 });
 check('保存并测试连接可用', /✅|❌/.test(await page.evaluate(() => document.getElementById('testResult').textContent)));
 await page.evaluate(() => document.getElementById('closeSettings').click());
-// 必须等弹窗**真的**关掉再往下点：设置是覆盖层，弹窗还开着时点 #settingsBtn 的坐标会先命中
+// 必须等弹窗真的关掉再往下点：设置是覆盖层，弹窗还开着时点 #settingsBtn 的坐标会先命中
 // 遮罩（它的 mousedown 会顺手把弹窗关掉），于是后面点 #saveSettings 时它已经不可见了 ——
 // 实测报的就是「Node is either not clickable or not an Element」。
 await page.waitForFunction(() => document.getElementById('settingsModal').classList.contains('hidden'), { timeout: 5000 }).catch(() => {});
@@ -1034,7 +927,6 @@ check('/api/config 不回传密钥明文，只回 hasApiKey', cfgEcho.apiKey ===
 await page.evaluate(() => document.getElementById('closeSettings').click());
 await sleep(300);
 
-/* ══════════════ 18. 侧栏拖动 ══════════════ */
 console.log('\n▶ 侧栏拖动…');
 const w0 = await page.evaluate(() => document.getElementById('leftSide').getBoundingClientRect().width);
 const sp1 = await page.evaluate(() => { const r = document.getElementById('splitLeft').getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + 200) }; });
@@ -1042,11 +934,6 @@ await page.mouse.move(sp1.x, sp1.y); await page.mouse.down(); await page.mouse.m
 await sleep(700);
 const w1 = await page.evaluate(() => document.getElementById('leftSide').getBoundingClientRect().width);
 check('左栏可以拖动调宽', Math.abs(w1 - w0) > 50, `${Math.round(w0)}px → ${Math.round(w1)}px`);
-/**
- * 2026-10：右栏在「译文 / 问答一块都没开」时会收成右侧活动栏（`body.right-empty`），
- * `#rightSide` 宽度变 0、`#splitRight` 也点不到 —— 直接量/拖只会得到「0px → 0px」的假红。
- * 先把右栏拉回来，再量再拖。
- */
 if (await page.evaluate(() => document.getElementById('rightSide').getBoundingClientRect().width === 0)) {
   await page.click('#railRightBtn');
   await sleep(500);
@@ -1066,14 +953,6 @@ await sleep(300);
 await clickBubble('translate');
 await page.waitForFunction(() => document.querySelectorAll('#aiArea .msg').length >= 1, { timeout: 15000 });
 await sleep(700);
-/**
- * 2026-10 删减后右栏**恒为 1 列**：第二栏（`#rightCol2` / `#aiArea2` / `#rightColSplit` /
- * `setPanelColumn` / `rightCols.{count,w2}`）连同上下分屏（`.ai-split`）一起删掉了。
- * 「一栏只开一个面板」这条契约仍然成立，只是现在只有一个栏位：
- *   · 文档里只有一栏（`#rightCols > .side.right` 长度 1）；
- *   · `#aiArea` 里同时最多 1 个 `.ai-block`，且它就是要显示的那一块。
- * 旧断言验的是「两块各占一栏 + 第 2 栏按需现建」，那整套契约已经不存在了。
- */
 const adj0 = await page.evaluate(() => {
   const blocks = [...document.querySelectorAll('#aiArea .ai-block')];
   return {
@@ -1124,7 +1003,6 @@ const adjBack = await page.evaluate(() => ({
 check('换块不丢消息：切回译文后原来那条还在',
   adjBack.block === 'translate' && adjBack.msgs > 0, `${adjBack.block} · msg=${adjBack.msgs}`);
 
-/* ══════════════ 20. 外观 ══════════════ */
 console.log('\n▶ 对话流外观…');
 await selectSpans(1, 4);
 await sleep(300);
@@ -1152,11 +1030,6 @@ const look = await page.evaluate(() => {
   const asst = msgs.filter((m) => m.classList.contains('assistant'))
     .sort((a, b) => Number(a.dataset.seq || 0) - Number(b.dataset.seq || 0)).pop() || null;
   return {
-    // 「折叠元素（<details>）只应该出现在设置面板里」这条契约的**正确判据**：
-    // 数「文档里 details 的总数」与「设置弹窗里的数量」，要求两者相等 ——
-    // 这样别处冒出折叠元素（比如曾经的面板管理器布局设置）仍然会红。
-    // 2026-10 删减把设置里唯一那个 <details>（「更多样式」）也去掉了，
-    // 于是两边都是 0；判据保留「不许出现在设置以外」这条不变量，不再要求「至少有一个」。
     details: document.querySelectorAll('details').length,
     detailsInSettings: document.querySelectorAll('#settingsModal details').length,
     border: cs ? `${cs.borderTopWidth}/${cs.borderLeftWidth}` : '',
@@ -1173,7 +1046,7 @@ const look = await page.evaluate(() => {
     assistantHasActs: !!asst && !!asst.querySelector('.acts'),
   };
 });
-// 折叠元素只允许出现在设置弹窗里：总数必须等于设置里的数量（2026-10 之后两边都是 0）
+// 折叠元素只允许出现在设置弹窗里：总数必须等于设置里的数量
 check('折叠元素不许出现在设置以外的地方',
   look.details === look.detailsInSettings,
   `details=${look.details} 设置内=${look.detailsInSettings}`);
@@ -1195,7 +1068,6 @@ check('跟随系统深色模式生效', (await page.evaluate(() => getComputedSt
 await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
 console.log(`\n📸 截图已保存到 ${OUT}`);
 
-/* ══════════════ 21. 卡死超时 ══════════════ */
 console.log('\n▶ 上游卡死…');
 await postConfig({ idleMs: 4000 });
 // 校验 idleMs 真的落到服务端了：没生效的话（仍是默认 60s）「上游卡死」这条断言
@@ -1213,7 +1085,7 @@ const hangPre = await page.evaluate(() => ({
   sel: (window.getSelection()?.toString() || '').slice(0, 24),
   stopHidden: document.getElementById('stopBtn').classList.contains('hidden'),
 }));
-// 先记下**发请求前**已有的最大 seq，之后只看比它大的那条 —— 断言必须盯住本次这一条。
+// 先记下发请求前已有的最大 seq，之后只看比它大的那条 —— 断言必须盯住本次这一条。
 // 旧写法用「界面上存在任意一条含『没有收到任何数据|失败』的元素」当条件，而会话恢复会把
 // 历史失败条目一起带回来，于是条件第一轮就成立、hangMs 恒为 0.0s 读到历史条目 —— 假红。
 const hangTarget = Math.max(0, ...(await page.evaluate(() => [...document.querySelectorAll('#aiArea .msg')].map((e) => Number(e.dataset.seq || 0)))));
@@ -1247,15 +1119,6 @@ check('上游卡死会明确报错，不是一直转',
   `${(hangMs / 1000).toFixed(1)}s 后报错 ‖ 本次条目=${JSON.stringify(hangEntry)} ‖ 发请求前=${JSON.stringify(hangPre)} ‖ 现场=${JSON.stringify(hangDiag)} ‖ 拦截流水=${JSON.stringify(mockLog.slice(-3))}`);
 mockMode = 'sse';
 await postConfig({ idleMs: 60000 });
-/**
- * ⚠️ 必须显式把「忙」状态清掉再往下走。
- *
- * 卡死用例走的是**超时**分支：请求被判定失败并显示「没有收到任何数据」，但这一轮的
- * `state.busy` 不保证已经复位。不清的话，下一条用例（401 / 地区限制）发请求时会被
- * 「上次回答尚未完成」挡回来 —— **请求根本没发出去**，断言读到的还是上一条错误文案，
- * 表现成两条断言的假红（实测：seq 29 = 「上次回答尚未完成」，seq 30 才是残留的 401）。
- * 这里用产品自己的停止入口（#stopBtn）把它复位，并等到真的不忙了再继续。
- */
 await page.evaluate(() => { const b = document.getElementById('stopBtn'); if (b) b.click(); });
 await page.waitForFunction(() => {
   const b = document.getElementById('stopBtn');
@@ -1263,22 +1126,12 @@ await page.waitForFunction(() => {
 }, { timeout: 10000 }).catch(() => {});
 await sleep(300);
 
-/* ══════════════ 21b. 密钥失效的提示 ══════════════ */
 /**
- * 真实遇到过一次：DeepSeek 返回 401 "Your api key: ****8593 is invalid"。
+ * 真实遇到过一次：DeepSeek 返回 401 "Your api key: 8593 is invalid"。
  * 光把那句英文甩给用户没用，得告诉他「去换 Key」。
  */
 console.log('\n▶ 密钥失效…');
 await loadDoc();
-/**
- * ⚠️ 先等应用真的「不忙」再往下走。
- *
- * 上一条用例（上游卡死）走的是超时分支：界面报「没有收到任何数据」，但这一轮可能还留着
- * `state.busy`。不清就发下一条请求会被挡回来，**请求根本没发出去**，断言读到的是上一条
- * 错误文案 —— 这就是「地区限制」那条断言反复假红的真正原因（实测拦截流水里完全没有
- * mode=region 的记录，而会话里多出一条 pending 的「上次回答尚未完成」）。
- * 这里用产品自己的停止入口复位，并且**等到 busy 真的清零**再继续。
- */
 await forceIdle();
 
 mockMode = '401';
@@ -1291,10 +1144,6 @@ check('401 会提示「API Key 无效/已失效，去换一个」',
   /API Key 无效或已失效/.test(authMsg) && /⚙/.test(authMsg), authMsg.slice(0, 90));
 mockMode = 'region';
 await forceIdle();
-// ⚠️ 必须换一段**不同的**文字再译：doTranslate 开头会按 (目标语言 + 文本) 查缓存/去重，
-// 用与上一次完全相同的选区时它会直接复用上一条结果（"这段翻译已在结果区"），
-// 于是这次请求根本没发出去，读到的还是上一条 401 的文案 —— 断言就成了假红。
-// 换选区（from/to 不同 → 文本不同）才是真正把 region 分支跑一遍。
 const regionSel = await selectSpans(2, 6);
 const regionClicks = await page.evaluate(() => ({
   bubbleHidden: document.getElementById('bubble').classList.contains('hidden'),
@@ -1309,11 +1158,6 @@ const regionBubble = await page.evaluate(() => {
   const r = btn?.getBoundingClientRect();
   return { hidden: b?.classList.contains('hidden'), hasBtn: !!btn, w: r?.width || 0, x: r?.x || 0, y: r?.y || 0 };
 });
-/**
- * 不用 clickBubble（它「先量坐标 → 再点」，量完到点下去之间有窗口期）；
- * 这里改成「取按钮中心 → 打印该点上的真实元素 → 点下去」，并把点之前的坐标留档。
- * 若 `elementFromPoint` 不是这个按钮，就说明坐标点击根本没落到按钮上 —— 那是脚手架的锅。
- */
 const regionHit = await page.evaluate(() => {
   const btn = document.querySelector('#bubble button[data-act="translate"]');
   if (!btn) return { missing: true };
@@ -1359,11 +1203,6 @@ await sleep(300);
 await postJson(`${BASE}/api/state`, { lastDoc: null, lastName: null, lastUrl: null, docs: {} });
 await page.goto(`${BASE}/?topbar=static`, { waitUntil: 'domcontentloaded' });
 await sleep(1800);
-/**
- * 契约已随首页改造更新：原来的 `#welcome`（阅读区里的空状态）升级成了独立的
- * `#home` 首页，而且**默认就停在这里**（不再自动打开上次论文，见 test/home.mjs 的 A4）。
- * 所以这里的断言是「停在首页 + 书架可见」，语义与改造前一致，只是选择器和页面结构换了。
- */
 const firstRun = await page.evaluate(() => ({
   home: !document.getElementById('home').classList.contains('hidden'),
   reading: document.body.classList.contains('reading'),
@@ -1418,14 +1257,6 @@ await page.evaluate(() => document.querySelectorAll('#fileList li')[0]?.click())
 await sleep(30);
 await (await page.$('#fileInput')).uploadFile(localPdf);
 await sleep(2500);
-/**
- * 状态栏已删除（2026-10）：PDF 下面那条只有「就绪」的 22px 横条整块去掉了，
- * 解析进度改由页码那一格的 `.busy` + title 表达。
- * 所以这里不再读 statusText，改成读**等价的真实信号**：
- *   · 页面与画布都渲染出来了（原来的 pages/canvases 判据不变）
- *   · 页码那一格不是占位符「–」（说明视图真的就绪了，而不是停在「正在打开…」）
- * 没有削弱断言，只是把已删除的 UI 换成它现在对应的观测点。
- */
 const race2 = await page.evaluate(() => ({
   pages: document.querySelectorAll('.page').length,
   canvases: document.querySelectorAll('.page canvas').length,
@@ -1435,7 +1266,6 @@ const race2 = await page.evaluate(() => ({
 check('快速切换文档状态一致', race2.pages > 0 && race2.canvases >= 1 && race2.pageLabel !== '–' && race2.pageLabel !== '',
   `${race2.canvases}/${race2.pages} 已渲染 · 页码=${race2.pageLabel} busy=${race2.busy}`);
 
-/* ══════════════ 汇总 ══════════════ */
 console.log('\n──────── 错误汇总 ────────');
 const realConsole = consoleErrors.filter((t) => !/favicon|Failed to load resource: net::ERR_/i.test(t));
 if (pageErrors.length) console.log('页面异常:\n' + pageErrors.map((e) => '  ! ' + e).join('\n'));
