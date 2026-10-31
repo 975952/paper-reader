@@ -1,0 +1,13 @@
+# Keep source text consistent across Windows and Unix checkouts.
+* text=auto
+*.bat text eol=crlf
+*.md text
+*.js text
+*.mjs text
+*.rs text
+*.toml text
+*.json text
+*.png binary
+*.svg text
+*.bcmap binary
+*.wasm binary
