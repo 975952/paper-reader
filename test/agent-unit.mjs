@@ -9,6 +9,7 @@
 import {
   AGENT_MAX_ROUNDS, AGENT_MAX_CALLS_PER_ROUND, AGENT_TOOL_SPECS, AGENT_SYSTEM_NOTE,
   validateToolCall, parseModelResponse, executeToolCall, runAgentLoop, agentStats,
+  toolStepLabel, summarizeToolResult,
 } from '../public/js/agent.js';
 
 let pass = 0;
@@ -173,7 +174,58 @@ const baseMessages = [{ role: 'system', content: 'sys' }, { role: 'user', conten
   check('abort 后不继续循环', run.reason === 'aborted', run.reason);
 }
 
-/* ── 6. 只读保证 ── */
+/* ── 6. 过程展示（右侧「一条一条列出干了什么」） ── */
+console.log('\n▶ 过程展示（步骤标签 / 结果摘要 / onStep 事件）');
+check('读取页步骤文案', toolStepLabel({ name: 'read_page', args: { page: 3 } }) === '读取第 3 页');
+check('检索步骤文案带查询词', /检索「注意力机制」/.test(toolStepLabel({ name: 'search_paper', args: { query: '注意力机制' } })));
+check('阅读状态步骤文案', toolStepLabel({ name: 'get_reading_state', args: {} }) === '查看当前阅读状态');
+const sumSearch = summarizeToolResult({ name: 'search_paper', args: { query: 'BLEU' } }, { ok: true, value: { pages: [{ page: 2 }, { page: 5 }] } });
+check('检索结果摘要列出命中页', /命中 p\.2、p\.5/.test(sumSearch), sumSearch);
+const sumRead = summarizeToolResult({ name: 'read_page', args: { page: 4 } }, { ok: true, value: { page: 4, text: 'x'.repeat(1234) } });
+check('读取结果摘要带页码与字数', /读取第 4 页/.test(sumRead) && /1,234/.test(sumRead), sumRead);
+const sumState = summarizeToolResult({ name: 'get_reading_state', args: {} }, { ok: true, value: { numPages: 18, currentPage: 4, scanned: false } });
+check('阅读状态摘要带总页数/当前页', /共 18 页/.test(sumState) && /当前第 4 页/.test(sumState), sumState);
+const sumFail = summarizeToolResult({ name: 'read_page', args: { page: 9 } }, { ok: false, error: 'page 超出总页数' });
+check('失败摘要说明原因', /失败：page 超出总页数/.test(sumFail), sumFail);
+
+{
+  // onStep 事件顺序：round → tools → tool_start → tool_done ×2 → round → ready
+  const script = [
+    { choices: [{ message: { content: '', tool_calls: [
+      { id: 'c1', function: { name: 'get_reading_state', arguments: '{}' } },
+      { id: 'c2', function: { name: 'read_page', arguments: '{"page":2}' } },
+    ] } }] },
+    { choices: [{ message: { content: '最终回答' } }] },
+  ];
+  const events = [];
+  const run = await runAgentLoop({
+    messages: baseMessages, runtime,
+    callModel: async () => script.shift(),
+    onStep: (ev) => events.push(ev),
+  });
+  check('onStep 收到过程事件', events.length >= 7, `${events.length} 个事件`);
+  check('事件顺序 round→tools→tool_start/done→round→ready',
+    events[0]?.type === 'round' && events[1]?.type === 'tools'
+    && events[2]?.type === 'tool_start' && events[3]?.type === 'tool_done'
+    && events[4]?.type === 'tool_start' && events[5]?.type === 'tool_done'
+    && events[6]?.type === 'round' && events[7]?.type === 'ready',
+    events.map((e) => e.type).join(','));
+  check('tool_done 带可读摘要', events[3]?.summary === '阅读状态：共 9 页，当前第 2 页' && /读取第 2 页/.test(events[5]?.summary || ''),
+    `${events[3]?.summary} / ${events[5]?.summary}`);
+  check('循环结果不受 onStep 影响', run.ok && run.rounds === 2);
+}
+
+{
+  // onStep 抛错不能打断 Agent（界面 DOM 异常也不能让回答失败）
+  const run = await runAgentLoop({
+    messages: baseMessages, runtime,
+    callModel: async () => ({ choices: [{ message: { content: '答案' } }] }),
+    onStep: () => { throw new Error('ui boom'); },
+  });
+  check('onStep 抛错不影响循环', run.ok && run.reason === 'done');
+}
+
+/* ── 7. 只读保证 ── */
 console.log('\n▶ 只读边界');
 check('agent.js 没有任何写接口（fetch / localStorage / document）',
   !/fetch\(|localStorage|document\./.test((await import('node:fs')).readFileSync(new URL('../public/js/agent.js', import.meta.url), 'utf8')));

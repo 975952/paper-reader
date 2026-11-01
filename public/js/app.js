@@ -19,7 +19,7 @@ import {
 import { resolveReadingRequest, resolvePageRole, snapshotReadingRequest, snapshotHistory, readingTurn,
   restoreReadingHistory, citedSources, stripPageLabels } from './reading-context.js';
 import { validateCitations, collectAvailablePages, planFor, pagesFromText, formatPageList } from './citation-validator.js';
-import { runAgentLoop, agentStats, AGENT_TOOL_SPECS, AGENT_SYSTEM_NOTE } from './agent.js';
+import { runAgentLoop, agentStats, AGENT_TOOL_SPECS, AGENT_SYSTEM_NOTE, toolStepLabel } from './agent.js';
 import { lastPromptDebug as __promptDebug } from './prompts/index.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
@@ -829,12 +829,21 @@ function chatSigOf(sid, entries) {
   const last = entries.length ? entries[entries.length - 1] : null;
   return `${sid || ''}|${entries.length}|${last ? `${last.kind || ''}:${String(last.text || '').slice(-40)}` : ''}`;
 }
+/* B 线 P3.1：问答块是**全局共用**的，切换论文时不重绘它。
+   chatDomSig = 当前聊天 DOM 里已经渲染的全局会话指纹；冷切换文档时只有指纹变了才重放整块（其余情况 DOM 原样保留）。 */
+let chatDomSig = '';
+const currentChatSig = () => chatSigOf(
+  state.doc ? activeSidFor(state.doc.docId) : '',
+  (state.sessionEntries || []).filter((e) => e && e.block === 'chat'),
+);
 
 /** 切走前：停放当前文档的右栏 DOM + 会话状态 + 目录/笔记 HTML + 滚动位置 */
 function parkDocView(docId) {
   if (!docId || !state.doc || state.doc.docId !== docId) return;
   const blocks = {};
   for (const block of AI_BLOCKS) {
+    // 问答块是全局会话共用的，切换论文时 DOM 原样保留（不参与停放/挂回，也就不会重绘）
+    if (block.id === 'chat') continue;
     const meta = state.blockMeta?.[block.id];
     if (!meta?.body) continue;
     blocks[block.id] = {
@@ -876,6 +885,8 @@ function unparkDocView(docId) {
     return false;
   }
   for (const block of AI_BLOCKS) {
+    // 问答块不参与停放（全局共用）；只把这篇的译文块 DOM 挂回去
+    if (block.id === 'chat') continue;
     const saved = view.blocks?.[block.id];
     const meta = state.blockMeta?.[block.id];
     if (!saved || !meta?.body) continue;
@@ -3512,7 +3523,8 @@ async function openDocColdSwitch({ name, url, docId, path }) {
   $('#docName').title = name;
   // 注意：这里不切视图。真正切到阅读态是在 viewer.load() 成功之后 ——
   // 加载失败要能退回首页，中间过程也不该先露出一个空白正文区。
-  clearAllBlocks();
+  // 换论文：只清译文块（每篇各自一份）；问答块是全局会话共用的，保留 DOM 不重绘
+  clearTranslateBlock();
   state.attachments = [];
   renderAttachments();
   viewer.paintSelection(null);
@@ -4422,7 +4434,7 @@ function showTranslationCard(sel) {
   const card = $('#translationCard');
   const body = $('#translationCardText');
   $('#translationCardQuote').textContent = sel.cleanText || sel.text || '';
-  body.innerHTML = '<span class="cursor"></span>';
+  body.innerHTML = '';
   card.classList.remove('hidden');
   const box = sel.box || { left: window.innerWidth / 2, right: window.innerWidth / 2, top: 80, bottom: 80 };
   const w = card.offsetWidth;
@@ -4638,12 +4650,21 @@ function initTextEdgeHandle() {
 
 function clearAllBlocks() {
   for (const meta of Object.values(state.blockMeta)) meta.body.innerHTML = '';
+  chatDomSig = '';
+  refreshCounts();
+}
+
+/** 换论文时只清译文块：问答块是全局会话共用的，切换论文不重绘它 */
+function clearTranslateBlock() {
+  const meta = state.blockMeta.translate;
+  if (meta) meta.body.innerHTML = '';
   refreshCounts();
 }
 
 function clearChatBlock() {
   const meta = state.blockMeta.chat;
   if (meta) meta.body.innerHTML = '';
+  chatDomSig = '';
   refreshCounts();
 }
 
@@ -4974,7 +4995,7 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
     : null;
   const textEl = el('div', {
     class: 'text',
-    html: text !== undefined ? renderAnswerHTML(text) : '<span class="cursor"></span>',
+    html: text !== undefined ? renderAnswerHTML(text) : '',
   });
   const acts = el('div', { class: 'acts hidden' });
   const root = el('div', { class: `msg ${isUser ? 'user' : 'assistant'}`, dataset: { operation: tag || '', page: page || '' } }, role, ref, shot, textEl, acts);
@@ -4990,9 +5011,16 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   root.__sessionRecord = record;
   if (!restore) {
     // 只有真正新增的问答消息才算全局会话变化（回放历史不算，否则停放的 DOM 会被误判过期）
-    if (block === 'chat') chatVersion += 1;
-    state.sessionEntries.push(record);
-    scheduleSessionSave();
+    if (block === 'chat') {
+      chatVersion += 1;
+      state.sessionEntries.push(record);
+      // 聊天 DOM 刚同步追加了一条：记下新指纹，切论文时不会因为「DOM 与磁盘不一致」再重放一次
+      chatDomSig = currentChatSig();
+      scheduleSessionSave();
+    } else {
+      state.sessionEntries.push(record);
+      scheduleSessionSave();
+    }
   }
   // 新结果进入时把它放到结果区顶部，用户可以继续向上滚查看更早的结果。
   scrollEntryToTop(bodyEl, root);
@@ -5555,6 +5583,12 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     const sig = chatSigOf(sid, chatEntries);
     if (only === 'chat' || (globalChatSig && sig !== globalChatSig)) chatVersion += 1;
     globalChatSig = sig;
+    /* 问答块是全局共用的：切换论文时**不重绘**它。只有两种情况才重放问答：
+       ① 换会话（only='chat'）：会话内容换了；② 聊天 DOM 和磁盘上的全局会话对不上（首次打开/迁移过）。
+       译文块永远是按文档的：换论文时清空后重放，换会话时原样保留。 */
+    const replayChat = only === 'chat' || chatDomSig !== sig;
+    if (replayChat) clearChatBlock();
+    if (only !== 'chat') clearTranslateBlock();
     // 换会话（only='chat'）只重放问答：译文 DOM 没被清，不能再插一遍（下面重放循环按 only 过滤）。
     // 但译文条目必须留在内存与文件缓存里，否则下一次保存会把文档级译文（__translate）覆盖成空。
     const combined = [...chatEntries, ...translateEntries];
@@ -5597,10 +5631,11 @@ async function restoreSession(docId, { only = 'all' } = {}) {
       let row = state.sessionEntries[rowIndex];
       if (!row || typeof row !== 'object') continue;
       /**
-       * 换会话时（`only: 'chat'`）只重放问答：译文那一块的 DOM 没被清，
-       * 再插一遍就会重复。换论文时（默认）两块都清过，所以全部重放。
+       * 换会话时（`only: 'chat'`）只重放问答：译文那一块的 DOM 没被清，再插一遍就会重复。
+       * 换论文时：译文块清空后重放；问答块只在「聊天 DOM 与全局会话对不上」时才重放（否则保留 DOM 不重绘）。
        */
       if (only === 'chat' && row.block !== 'chat') continue;
+      if (row.block === 'chat' && !replayChat) continue;
       const safeBlock = AI_BLOCKS.some((b) => b.id === row.block) ? row.block : 'chat';
       // 右栏按需创建：恢复历史不能因为默认 hidden 就访问不存在的 blockMeta。
       ensureBlock(safeBlock);
@@ -5651,6 +5686,8 @@ async function restoreSession(docId, { only = 'all' } = {}) {
       // 教学类条目：补回「继续下一步 / 讲第 N 项 / 这个我懂了」等按钮
       if (row.kind !== 'user' && row.status !== 'pending' && row.status !== 'failed') restoreTeachingEntry(entry, row);
     }
+    // 问答 DOM 已与磁盘上的全局会话对齐，记下指纹：下次切论文时不需要再重放
+    if (replayChat) chatDomSig = sig;
   } catch (e) { toast(`读取当前论文会话失败：${e.message}`, 'err', 5000); }
 }
 
@@ -7614,11 +7651,67 @@ function createAgentRuntime(pending, { scannedDoc = false } = {}) {
   };
 }
 
+/** Agent 过程列表：在回答正文上方逐条显示「正在思考 / 正在检索 / 读取第 N 页 / 命中结果」。
+ *  用户口径：像 agent 工具调用那样把模型干活的过程直接列出来；不想要闪烁的光标。 */
+function createAgentProgress(entry) {
+  if (!entry?.root || !entry?.body) return null;
+  entry.root.querySelectorAll('.agent-steps').forEach((node) => node.remove());
+  const box = el('div', { class: 'agent-steps', 'aria-live': 'polite' });
+  entry.root.insertBefore(box, entry.body);
+  const bodyEl = entry.body.closest('.ai-body');
+  let current = null;
+  const addItem = (text, cls = 'running') => {
+    const item = el('div', { class: `as-item ${cls}` },
+      el('span', { class: 'as-ico', 'aria-hidden': 'true' }),
+      el('span', { class: 'as-text', text }));
+    box.append(item);
+    scrollEntryToTop(bodyEl, entry.root);
+    return item;
+  };
+  const finishItem = (item, text, ok = true) => {
+    if (!item) return;
+    item.className = `as-item ${ok ? 'done' : 'fail'}`;
+    const label = item.querySelector('.as-text');
+    if (label) label.textContent = text;
+  };
+  return {
+    onStep(ev) {
+      if (!ev || !box.isConnected) return;
+      if (ev.type === 'round') {
+        current = addItem(ev.round > 1 ? `正在思考（第 ${ev.round} 轮）…` : '正在思考…');
+      } else if (ev.type === 'tools') {
+        const n = Array.isArray(ev.names) ? ev.names.length : 0;
+        finishItem(current, n ? `决定先查资料（${n} 个工具）` : '决定先查资料');
+        current = null;
+      } else if (ev.type === 'tool_start') {
+        current = addItem(`正在${toolStepLabel(ev.call)}…`);
+      } else if (ev.type === 'tool_done') {
+        finishItem(current, ev.summary || '完成', !!ev.ok);
+        current = null;
+      } else if (ev.type === 'ready') {
+        // 最后一轮模型不再调工具：把「正在思考」那条收尾成「材料够了」，不要留一条一直转的运行态
+        if (current) {
+          finishItem(current, '材料够了，开始回答');
+        } else {
+          finishItem(addItem('材料够了，开始回答'), '材料够了，开始回答');
+        }
+        current = null;
+      }
+    },
+    finish() {
+      if (current) finishItem(current, '完成');
+      current = null;
+      if (!box.children.length) box.remove();
+    },
+    remove() { box.remove(); },
+  };
+}
+
 /**
  * 跑一次「AI 自己决定读哪些页」：成功返回 { messages, pages, imagePages, basis, stats }；
  * 不支持 tools / 超时 / 任何异常 → 返回 null（调用方静默回退 P1.5 预装路径）。
  */
-async function runAgentReadPath({ pending, reading, context, references, sources, images, scannedDoc, baseMaterials, signal }) {
+async function runAgentReadPath({ pending, reading, context, references, sources, images, scannedDoc, baseMaterials, signal, onStep }) {
   // 允许测试注入更短的超时，避免用例等 25 秒
   const limits = window.__agentTestLimits && typeof window.__agentTestLimits === 'object' ? window.__agentTestLimits : {};
   const totalTimeoutMs = Math.max(1000, Number(limits.totalTimeoutMs) || 25000);
@@ -7633,6 +7726,7 @@ async function runAgentReadPath({ pending, reading, context, references, sources
       runtime,
       callModel: agentModelCall,
       signal,
+      onStep,
       totalTimeoutMs,
       callTimeoutMs,
     });
@@ -7866,7 +7960,6 @@ function streamTarget(node) {
   let pending = null;
   let rawNode = null;
   let paintedText = '';
-  let cursorNode = null;
   const scan = { cursor: 0, safe: 0, fence: '', inMath: false };
   let raf = 0;
   let timer = 0;
@@ -7877,8 +7970,7 @@ function streamTarget(node) {
   const ensureTail = () => {
     if (rawNode?.parentNode === node) return;
     rawNode = document.createTextNode('');
-    cursorNode = el('span', { class: 'cursor' });
-    node.append(rawNode, cursorNode);
+    node.append(rawNode);
   };
   const paint = () => {
     stopTimers();
@@ -7892,7 +7984,6 @@ function streamTarget(node) {
     if (!display.startsWith(paintedText)) {
       node.replaceChildren();
       rawNode = null;
-      cursorNode = null;
       paintedText = '';
       scan.cursor = 0; scan.safe = 0; scan.fence = ''; scan.inMath = false;
     }
@@ -7918,14 +8009,14 @@ function streamTarget(node) {
       stopTimers();
       pending = null;
       node.innerHTML = renderAnswerHTML(finalText);
-      rawNode = null; cursorNode = null; paintedText = '';
+      rawNode = null; paintedText = '';
       scrollEntryToTop(node.closest('.ai-body'), node.closest('.msg'));
     },
     fail(msg) {
       stopTimers();
       pending = null;
       node.innerHTML = `<span style="color:var(--err)">${esc(msg)}</span>`;
-      rawNode = null; cursorNode = null; paintedText = '';
+      rawNode = null; paintedText = '';
       scrollEntryToTop(node.closest('.ai-body'), node.closest('.msg'));
     },
   };
@@ -9049,7 +9140,7 @@ async function send(retryPending = null) {
     pending.entry.acts.replaceChildren();
     pending.entry.acts.classList.add('hidden');
     pending.entry.root.classList.remove('err', 'error');
-    pending.entry.root.querySelectorAll('.entry-meta, .source-details, .src-list').forEach((node) => node.remove());
+    pending.entry.root.querySelectorAll('.entry-meta, .source-details, .src-list, .agent-steps').forEach((node) => node.remove());
     const record = pending.entry.root.__sessionRecord;
     if (record) { record.text = ''; record.meta = ''; record.status = 'pending'; }
   }
@@ -9159,12 +9250,16 @@ async function send(retryPending = null) {
     const agentAllowed = agentReadEnabled() && !shotOnly && !pending.attachments.length && !scannedDoc
       && !!pending.docId && !!state.doc && !!viewer?.pdf;
     let agentRun = null;
+    let agentProgress = null;
     if (agentAllowed) {
       setHint('AI 正在自己找材料…');
+      // 过程列表：把「正在思考 / 检索 / 读第 N 页 / 命中」一条条列在回答上方（用户要求像 agent 工具一样可见）
+      agentProgress = createAgentProgress(pending.entry);
       agentRun = await runAgentReadPath({
         pending, reading, context, references, sources,
         images, scannedDoc,
         signal: ctl.signal,
+        onStep: (ev) => agentProgress?.onStep(ev),
         baseMaterials: {
           question: pending.question, selection: reading.selection,
           selectionSource: pending.selectionSource || (reading.focus?.source === 'right' ? 'right' : ''),
@@ -9175,6 +9270,9 @@ async function send(retryPending = null) {
         },
       });
       setHint('');
+      // 静默回退：模型不支持工具 / 超时 / 出错时，把过程列表整块撤掉，用户只看到正常回答
+      if (agentRun) agentProgress?.finish();
+      else agentProgress?.remove();
       if (!readingRequestCurrent(pending)) return;
     }
     // ② 上下文。扫描件：页面图片（+ 整篇类问题的采样页）；普通论文：整篇全文 / 索引 + 相关段落。

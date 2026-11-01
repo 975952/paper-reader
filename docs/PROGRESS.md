@@ -3588,3 +3588,42 @@ P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放�
 - `tabs` **47/47**：热切换仍复用 DOM（marks=2/2、0 次 /api/session、p95=169ms，未退化）。
 - exe 重新编译：**10,800,128 B**，SHA256 `D6552395…`；desktop 验收 **75/75**、`translation-layout` 复核通过。
 - 用户侧：桌面副本更新后**已丢失的旧聊天会自动补回**（v2 重迁移，去重不重复）；升级需**完全退出应用再启动**（运行中无法覆盖 exe）。
+
+---
+
+## 67. 交互细化：切换论文不重绘右栏 + Agent 过程可见 + 去掉流式闪烁光标（2026-11-01 深夜）
+
+### 67.1 用户提出的三点
+
+1. 每次切换论文**不应该重绘右侧侧栏**；
+2. 模型工作的过程要像 agent 工具一样**一条条列出来**（正在干什么 / 干完了什么）；
+3. 模型输出时不要让光标在最上面闪动，**不要那个光标**。
+
+### 67.2 实现
+
+1. **右侧问答栏跨论文不重绘**（问答块是全局会话共用的）：
+   - `parkDocView` / `unparkDocView` 跳过 `chat` 块：切换论文只停放/挂回**译文块**，问答块 DOM 原地不动；
+   - `openDocColdSwitch` 的 `clearAllBlocks()` 改成 `clearTranslateBlock()`；
+   - `restoreSession` 新增聊天 DOM 指纹 `chatDomSig`：与磁盘上的全局会话一致就**不重放**问答；只在换会话、首次打开、迁移改过全局会话时才重放；
+   - `addEntry` 新增问答消息后同步更新指纹。净效果：切换论文（含冷切打开新标签）时右栏问答栏的 DOM 节点、滚动位置、内容全部原样。
+2. **Agent 过程列表**（右侧回答正文上方，逐条）：
+   - `agent.js`：`runAgentLoop` 新增 `onStep` 事件（`round` / `tools` / `tool_start` / `tool_done` / `ready`），
+     并导出 `toolStepLabel`（正在做什么）/ `summarizeToolResult`（做完后的结果摘要，如「检索「x」→ 命中 p.1、p.3」「读取第 3 页（5,766 字）」）；
+     事件回调抛错不会影响 Agent 循环；
+   - `app.js`：新增 `createAgentProgress()` 把过程渲染成 `.agent-steps` 列表：`◌ 正在思考…` → `✓ 决定先查资料（2 个工具）` →
+     `◌ 正在检索「x」…` → `✓ 检索「x」→ 命中 p.1、p.3` → … → `✓ 材料够了，开始回答`；
+     静默回退（模型不支持 tools / 超时）时整块撤掉，用户只看到正常回答；
+   - `style.css`：`.agent-steps` 样式（浅苔绿底、运行态旋转圈、完成 ✓、失败 !）。
+3. **去掉流式闪烁光标**：删除 `.cursor` span 与 `▍ blink` CSS；`streamTarget` 只追加文本节点；译文浮卡占位也不再放光标。
+
+### 67.3 验收
+
+- `agent-unit` **54/54**：新增步骤文案 / 结果摘要 / onStep 事件顺序（round→tools→tool_start/done×2→round→ready）/ onStep 抛错不影响循环；
+- `agent-read` **32/32**：过程列表 ≥5 条、收尾无残留运行态、能看出检索/读页/命中、静默回退撤掉列表、全页无 `.cursor`；
+- `tabs` **49/49**：新增「切换论文不重绘右侧问答栏（DOM 节点原样保留）」「右侧问答栏没有闪烁光标节点」；
+  热切换仍 marks=2/2、0 次 /api/session、p95<350ms；
+- `global-session` **42/42**，其余回归：`qa`、`session-bar`、`memory-session` 13/13、`teaching-isolated` 39/39+13/13、
+  `context-page` 21/21、`citation-quote` 38/38、`scan-pdf` 20/20、`profile`、`fullscreen` 14/14、`ai-send-regression` 全过
+  （`ops` 单跑需要外部 `BASE` 服务，属运行方式，不是回归）。
+- exe 重新编译（含桌面前端全部改动）：**10,808,832 B**，SHA256 `80C8B9C2…`；`desktop` 验收 **75/75**、`translation-layout` 通过；
+  这次桌面副本也更新成功（应用未运行）—— 更新前需**完全退出应用**，否则运行中的副本无法覆盖。

@@ -229,6 +229,24 @@ try {
     JSON.stringify(agentDom.lastAgent?.stats));
   check('citationStats 记录了被拦截的页', (agentDom.stats?.dropped || 0) >= 1, JSON.stringify(agentDom.stats));
   check('最终回答正文渲染了读过的原文', /核心方法是自注意力/.test(agentDom.texts));
+  const progressDom = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('#aiArea .msg.assistant')].at(-1);
+    const items = [...(row?.querySelectorAll('.agent-steps .as-item') || [])];
+    return {
+      items: items.length,
+      done: items.filter((n) => n.classList.contains('done')).length,
+      running: items.filter((n) => n.classList.contains('running')).length,
+      texts: items.map((n) => n.textContent || ''),
+      cursorCount: document.querySelectorAll('#aiArea .cursor').length,
+      allCursorCount: document.querySelectorAll('.cursor').length,
+    };
+  });
+  check('回答上方逐条列出 Agent 过程（≥5 条）', progressDom.items >= 5, JSON.stringify(progressDom.texts.slice(0, 8)));
+  check('过程条目收尾后全部是完成态（无残留运行态）', progressDom.done >= 4 && progressDom.running === 0, JSON.stringify(progressDom));
+  check('过程里能看出检索 / 读页 / 命中',
+    progressDom.texts.some((t) => /检索/.test(t)) && progressDom.texts.some((t) => /读取第 3 页/.test(t)) && progressDom.texts.some((t) => /命中 p/.test(t)),
+    JSON.stringify(progressDom.texts));
+  check('流式输出没有闪烁光标（.cursor 已删除）', progressDom.cursorCount === 0 && progressDom.allCursorCount === 0, JSON.stringify({ a: progressDom.cursorCount, b: progressDom.allCursorCount }));
 
   /* ── 3. 不支持 tools → 静默回退预装路径 ── */
   mode = 'unsupported';
@@ -239,6 +257,10 @@ try {
   check('不支持 tools 时回退请求不带 tools', fallbackLog.filter((row) => row.hasTools).length === 1 && fallbackLog.at(-1)?.hasTools === false,
     JSON.stringify(fallbackLog.map((r) => r.hasTools)));
   check('回退后回答照常渲染', await page.evaluate(() => [...document.querySelectorAll('#aiArea .msg.assistant .text')].some((n) => n.textContent.includes('回退后的回答'))));
+  check('静默回退时过程列表被撤掉', await page.evaluate(() => {
+    const row = [...document.querySelectorAll('#aiArea .msg.assistant')].at(-1);
+    return !row?.querySelector('.agent-steps');
+  }));
   check('回退后没有 Agent 依据回执（走的是 P1.5 路径）',
     await page.evaluate(() => !/AI 自行读取/.test([...document.querySelectorAll('#aiArea .msg.assistant .entry-basis')].at(-1)?.textContent || '')));
 

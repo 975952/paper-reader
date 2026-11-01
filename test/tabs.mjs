@@ -371,6 +371,32 @@ try {
     times.sort((a, b) => a - b);
     const p95 = times[Math.max(0, Math.ceil(times.length * 0.95) - 1)];
     check('热切换 p95 < 350ms', p95 < 350, `p95=${p95}ms（全部：${times.join(',')}）`);
+
+    // 用户口径：每次切换论文都不应该重绘右侧问答栏（全局会话共用，聊天 DOM 应原样保留、节点身份不变）
+    const chatRedraw = await page.evaluate(async () => {
+      const chatBody = () => document.querySelector('[data-block="chat"] .ai-body');
+      const first = window.__ctx.activeTab;
+      const other = window.__ctx.tabs.map((t) => t.docId).find((id) => id !== first);
+      const beforeNodes = [...chatBody().querySelectorAll('.msg')];
+      beforeNodes.forEach((n, i) => { n.__noRedraw = i + 1; });
+      const sizeBefore = beforeNodes.length;
+      await window.__ctx.activateTab(other);
+      await new Promise((r) => setTimeout(r, 250));
+      await window.__ctx.activateTab(first);
+      await new Promise((r) => setTimeout(r, 250));
+      const afterNodes = [...chatBody().querySelectorAll('.msg')];
+      return {
+        sizeBefore,
+        sizeAfter: afterNodes.length,
+        sameNodes: afterNodes.length === beforeNodes.length && afterNodes.every((n, i) => n === beforeNodes[i]),
+        marks: afterNodes.filter((n) => n.__noRedraw).length,
+      };
+    });
+    check('切换论文不重绘右侧问答栏（DOM 节点原样保留）',
+      chatRedraw.sameNodes && chatRedraw.marks === chatRedraw.sizeBefore && chatRedraw.sizeAfter === chatRedraw.sizeBefore,
+      JSON.stringify(chatRedraw));
+    // 流式输出不再有闪烁光标
+    check('右侧问答栏没有闪烁光标节点', await page.evaluate(() => document.querySelectorAll('.cursor').length === 0));
   }
 
   check('操作期间没有页面错误', pageErrors.length === 0, pageErrors.join(' | '));

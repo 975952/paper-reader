@@ -181,6 +181,49 @@ export async function executeToolCall(call, runtime) {
   }
 }
 
+/** 某次工具调用「正在做什么」的一句话（给右侧过程列表用；不含结果） */
+export function toolStepLabel(call) {
+  const name = String(call?.name || '');
+  const args = call?.args || {};
+  const q = clip(args.query, 40);
+  if (name === 'get_reading_state') return '查看当前阅读状态';
+  if (name === 'search_paper') return `检索「${q}」`;
+  if (name === 'read_page') return `读取第 ${toInt(args.page) || '?'} 页`;
+  if (name === 'read_scan_page') return `读取扫描页第 ${toInt(args.page) || '?'} 页`;
+  if (name === 'read_page_image') return `加入第 ${toInt(args.page) || '?'} 页原图`;
+  if (name === 'read_memory') return `读取学习记忆：${clip(args.topic, 30)}`;
+  return name || '调用工具';
+}
+
+/** 某次工具调用「做完了什么」的一句话（给右侧过程列表用；失败时说明原因） */
+export function summarizeToolResult(call, result) {
+  const name = String(call?.name || '');
+  const args = call?.args || {};
+  if (!result?.ok) return `${toolStepLabel(call)}失败：${clip(result?.error || '未知错误', 120)}`;
+  const v = result.value || {};
+  if (name === 'get_reading_state') {
+    const scans = v.scanned ? '（扫描件）' : '';
+    const pages = Number.isFinite(Number(v.numPages)) ? `共 ${v.numPages} 页` : '页数未知';
+    const cur = Number.isFinite(Number(v.currentPage)) ? `，当前第 ${v.currentPage} 页` : '';
+    return `阅读状态：${pages}${cur}${scans}`;
+  }
+  if (name === 'search_paper') {
+    const pages = (Array.isArray(v.pages) ? v.pages : []).map((p) => toInt(p?.page)).filter((p) => p !== null);
+    return pages.length ? `检索「${clip(args.query, 40)}」→ 命中 ${pages.map((p) => `p.${p}`).join('、')}` : `检索「${clip(args.query, 40)}」→ 没有命中`;
+  }
+  if (name === 'read_page' || name === 'read_scan_page') {
+    const page = toInt(v.page) || toInt(args.page);
+    const chars = String(v.text || '').length;
+    return `读取第 ${page || '?'} 页（${chars.toLocaleString()} 字）`;
+  }
+  if (name === 'read_page_image') return `加入第 ${toInt(v.page) || toInt(args.page) || '?'} 页原图`;
+  if (name === 'read_memory') {
+    const hits = Number(v.hits ?? v.items?.length ?? v.entries?.length ?? 0);
+    return `读取学习记忆（${Number.isFinite(hits) ? hits : 0} 条）`;
+  }
+  return `${toolStepLabel(call)}完成`;
+}
+
 /**
  * 有界 Agent 循环。
  * @param {object} opts
@@ -188,16 +231,18 @@ export async function executeToolCall(call, runtime) {
  * @param {object} opts.runtime 工具实现
  * @param {(req:{messages:Array, tools:Array, timeoutMs:number, signal?:AbortSignal})=>Promise<object>} opts.callModel
  *        返回 **原始上游 JSON**（内部用 parseModelResponse 解析）
+ * @param {(ev:object)=>void} [opts.onStep] 过程回调（给界面逐条展示「正在干什么 / 干完了什么」；抛错不影响循环）
  * @param {AbortSignal} [opts.signal]
  * @returns {Promise<{ok:boolean, messages:Array, calls:Array, rounds:number, pages:number[], imagePages:number[], reason:string}>}
  */
 export async function runAgentLoop({
-  messages = [], runtime = {}, callModel, signal = null,
+  messages = [], runtime = {}, callModel, signal = null, onStep = null,
   maxRounds = AGENT_MAX_ROUNDS,
   maxCallsPerRound = AGENT_MAX_CALLS_PER_ROUND,
   totalTimeoutMs = AGENT_TOTAL_TIMEOUT_MS,
   callTimeoutMs = AGENT_CALL_TIMEOUT_MS,
 } = {}) {
+  const emit = (ev) => { try { onStep?.(ev); } catch { /* 界面异常不影响 Agent */ } };
   const work = messages.map((m) => ({ ...m }));
   const calls = [];
   const pages = new Set();
@@ -208,6 +253,7 @@ export async function runAgentLoop({
     if (signal?.aborted) return { ok: false, messages: work, calls, rounds, pages: [...pages], imagePages: [...imagePages], reason: 'aborted' };
     const left = deadline - Date.now();
     if (left <= 500) return { ok: false, messages: work, calls, rounds, pages: [...pages], imagePages: [...imagePages], reason: 'timeout' };
+    emit({ type: 'round', round: round + 1 });
     let json;
     try {
       json = await callModel({
@@ -224,9 +270,11 @@ export async function runAgentLoop({
     const parsed = parseModelResponse(json);
     if (!parsed.toolCalls.length) {
       // 模型认为材料够了：结束循环；调用方会用这些消息再流式生成最终回答
+      emit({ type: 'ready', round: rounds });
       return { ok: true, messages: work, calls, rounds, pages: [...pages], imagePages: [...imagePages], reason: 'done', directContent: parsed.content };
     }
     const batch = parsed.toolCalls.slice(0, maxCallsPerRound);
+    emit({ type: 'tools', round: rounds, names: batch.map((c) => c.name) });
     work.push({
       role: 'assistant',
       content: parsed.content || '',
@@ -237,8 +285,14 @@ export async function runAgentLoop({
       })),
     });
     for (const call of batch) {
+      emit({ type: 'tool_start', round: rounds, call: { name: call.name, args: call.args } });
       const result = await executeToolCall(call, runtime);
       calls.push({ name: call.name, args: call.args, ok: result.ok, error: result.error || '' });
+      emit({
+        type: 'tool_done', round: rounds,
+        call: { name: call.name, args: call.args },
+        ok: !!result.ok, error: result.error || '', summary: summarizeToolResult(call, result),
+      });
       if (result.ok) {
         const v = result.value || {};
         if (Number.isInteger(v.page)) pages.add(v.page);
