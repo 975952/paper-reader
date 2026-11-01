@@ -434,7 +434,7 @@ function checkProfile(raw) {
         capability: typeof it.source.capability === 'string' ? it.source.capability.slice(0, 40) : '',
       } : null,
       note: typeof it.note === 'string' ? it.note.slice(0, PROFILE_LIMITS.maxNote) : '',
-      memory: it.memory && ['knowledge', 'preference'].includes(it.memory.kind)
+      memory: it.memory && ['knowledge', 'preference', 'identity'].includes(it.memory.kind)
         && ['self_report', 'needs_help', 'demonstrated', 'inferred', 'preference'].includes(it.memory.signal) ? {
           kind: it.memory.kind,
           scope: it.memory.scope === 'paper' ? 'paper' : 'global',

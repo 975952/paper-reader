@@ -54,6 +54,7 @@ const mock = http.createServer(async (req, res) => {
       if (q === '请忘记我会矩阵乘法这条记录') output = [record('矩阵乘法', q, 'self_report', { action: 'forget', id: input.已有相关记忆.find((i) => i.topic === '矩阵乘法')?.id })];
       if (q === '矩阵乘法的梯度该怎么算') output = [record('梯度计算', '我已经掌握所有梯度计算', 'demonstrated')];
       if (q === '我会卷积') output = [record('卷积', q, 'self_report')];
+      // 身份自述故意让 mock 返回 []：验证「我叫 Cyan，请记住」走确定性路径也能记住
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] })); return;
     }
@@ -191,6 +192,16 @@ try {
   check('非法保存没有破坏已有数据', (await json('/api/profile')).revision === beforeInvalid.revision);
   check('没有页面脚本错误或意外请求失败', errors.length === 0 && failures.length === 0);
   check('后台记忆没有切换当前论文', await page.evaluate((id) => window.__state.doc.docId === id, firstDoc));
+  /* 身份自述（名字/称呼）也属于后台长期记忆：跨论文、与论文关键词无关也注入，但不冒充掌握证据 */
+  await send('我叫Cyan请记住');
+  await until(async () => (await json('/api/profile')).items.some((i) => i.memory?.kind === 'identity' && /Cyan/.test(i.level)));
+  const identitySaved = (await json('/api/profile')).items.find((i) => i.memory?.kind === 'identity');
+  check('身份自述写入后台记忆（kind=identity / confirmed）',
+    !!identitySaved && identitySaved.memory.signal === 'self_report' && identitySaved.status === 'confirmed');
+  await send('继续');
+  check('身份记忆注入下一次请求（与论文关键词无关）', system().includes('Cyan') && system().includes('用户自述身份'));
+  await open('memory-other.pdf'); await send('换个话题：卷积是什么');
+  check('身份记忆跨论文仍生效', system().includes('Cyan'));
   await page.screenshot({ path: path.join(scratch, 'reader.png') });
   fs.writeFileSync(path.join(scratch, 'evidence.json'), JSON.stringify({ backend, count, pid: reader.pid, mainRequests: mainBodies,
     memoryRequests: memoryBodies, profile: await json('/api/profile'), errors, failures }, null, 2), 'utf8');

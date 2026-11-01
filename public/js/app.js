@@ -8,7 +8,7 @@ import {
   pageTextOf, collectDocObjects, sanitiseChips,
 } from './teaching.js';
 import { profileStore, buildProfileBlock, nowISO, nowContext, findItem } from './profile.js';
-import { createLearningMemory, parseMemorySuggestions } from './learning-memory.js';
+import { createLearningMemory, parseMemorySuggestions, explicitIdentityFacts, withMemoryObservations } from './learning-memory.js';
 import {
   Settings, streamChat, testConnection, targetLangFor,
   translateMessages, askMessages, explainMessages, regionMessages,
@@ -5509,10 +5509,22 @@ const learningMemory = createLearningMemory({
   },
 });
 
+/** 用户明确说「记住」的身份自述：确定性写入，不等模型提取（失败静默） */
+function rememberExplicitIdentity(question, source = null) {
+  if (!Settings.ready || !profileStore.enabled) return Promise.resolve();
+  const facts = explicitIdentityFacts(question);
+  if (!facts.length) return Promise.resolve();
+  const src = source || { docId: state.doc?.docId || '', paper: state.doc?.name || '', capability: 'chat' };
+  return profileStore.update((current) => withMemoryObservations(current, facts, { source: src, at: nowISO() }) || current)
+    .catch(() => {});
+}
+
 function scheduleMemoryExtraction({ question = '', answer = '', history = [], topic = '', source = null, capability = 'chat' } = {}) {
   if (!Settings.ready || !profileStore.enabled) return Promise.resolve();
-  return learningMemory.observe({ question, answer, history, topic,
-    source: source || { docId: state.doc?.docId || '', paper: state.doc?.name || '', capability } });
+  const src = source || { docId: state.doc?.docId || '', paper: state.doc?.name || '', capability };
+  // 「我叫 Cyan，请记住」这类：先确定性记住称呼，再跑常规后台提取
+  rememberExplicitIdentity(question, src);
+  return learningMemory.observe({ question, answer, history, topic, source: src });
 }
 
 /** 反馈直接走正常追问，由后台从用户的明确原话更新理解边界。 */
@@ -7532,6 +7544,10 @@ async function send(retryPending = null) {
 
   const ctl = makeController();
   if (!ctl) return;
+  // 「我叫 Cyan，请记住」这类明确要求：发送当时就确定性记住，不依赖回答成功或模型提取
+  rememberExplicitIdentity(pending.question, {
+    docId: pending.docId || '', paper: pending.docTitle || '', capability: 'chat',
+  });
   dropSentAttachments(pending);
   // 这条待发记录的范围固定下来：state 的两个标记跟着它走（重试时 pending 原样复用，不会串范围）
   applyRangeForSend(pending.scopeRange || currentRange());

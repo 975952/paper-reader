@@ -436,7 +436,7 @@ pub fn check_profile(raw: &Value) -> Result<Value, String> {
             _ => format!("kp-{}", idx),
         };
         let memory = match io.get("memory").and_then(Value::as_object) {
-            Some(m) if matches!(m.get("kind").and_then(Value::as_str), Some("knowledge" | "preference"))
+            Some(m) if matches!(m.get("kind").and_then(Value::as_str), Some("knowledge" | "preference" | "identity"))
                 && matches!(m.get("signal").and_then(Value::as_str),
                     Some("self_report" | "needs_help" | "demonstrated" | "inferred" | "preference")) => json!({
                 "kind": m["kind"],
@@ -725,6 +725,36 @@ fn redact_paths(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 身份类记忆（kind=identity）与 Node 同契约：双端都接受；未知 kind 降级为 null（不整份拒绝）。
+    #[test]
+    fn profile_accepts_identity_memory_kind() {
+        let profile = json!({
+            "version": 1, "revision": 0, "updatedAt": "", "selfReport": "", "selfReportAt": "",
+            "items": [
+                {
+                    "id": "mem-1", "topic": "称呼", "aliases": [], "level": "称呼：Cyan", "boundary": "",
+                    "basis": "user_self_report", "status": "confirmed",
+                    "createdAt": "2026-11-01T10:00:00+08:00", "updatedAt": "2026-11-01T10:00:00+08:00",
+                    "lastConfirmedAt": "2026-11-01T10:00:00+08:00",
+                    "source": { "docId": "paper-a", "paper": "x", "capability": "chat" },
+                    "note": "",
+                    "memory": { "kind": "identity", "scope": "global", "signal": "self_report", "evidence": "我叫Cyan请记住" }
+                },
+                {
+                    "id": "mem-2", "topic": "旧条目", "aliases": [], "level": "", "boundary": "",
+                    "basis": "model_inferred", "status": "pending",
+                    "createdAt": "2026-11-01T10:00:00+08:00", "updatedAt": "2026-11-01T10:00:00+08:00",
+                    "memory": { "kind": "unknown-kind", "scope": "global", "signal": "inferred", "evidence": "x" }
+                }
+            ]
+        });
+        let got = check_profile(&profile).expect("identity memory 必须被接受");
+        let items = got["items"].as_array().unwrap();
+        assert_eq!(items[0]["memory"]["kind"], json!("identity"));
+        assert_eq!(items[0]["memory"]["evidence"], json!("我叫Cyan请记住"));
+        assert!(items[1]["memory"].is_null(), "未知 kind 应该降级为 null，而不是整份拒绝");
+    }
 
     #[test]
     fn config_whitelist_blocks_unknown_and_clamps() {

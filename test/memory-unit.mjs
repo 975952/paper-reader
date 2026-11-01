@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyProfile, validateProfile, buildProfileBlock, selectProfileItems, profileStore, MAX_ITEMS } from '../public/js/profile.js';
-import { parseMemorySuggestions, withMemoryObservations, shouldExtractMemory, createLearningMemory, memoryExtractMessages } from '../public/js/learning-memory.js';
+import { parseMemorySuggestions, withMemoryObservations, shouldExtractMemory, createLearningMemory, memoryExtractMessages, explicitIdentityFacts } from '../public/js/learning-memory.js';
 import security from '../security.js';
 
 const source = { docId: 'paper-a', paper: 'Attention paper', capability: 'chat' };
@@ -74,6 +74,68 @@ test('长期偏好自动保留，临时要求不扩大成跨会话偏好', () =>
   assert.equal(parse('这次讲简单点', { kind: 'preference', signal: 'preference' }).length, 0);
   const next = apply(emptyProfile(), '以后先给例子再讲公式', { topic: '讲解顺序', kind: 'preference', signal: 'preference', level: '先例子后公式' });
   assert.match(buildProfileBlock(next, '', '解释卷积'), /先例子后公式/);
+});
+
+test('身份自述（称呼/名字）会被记住，且与论文问题无关也始终注入', () => {
+  const question = '我叫Cyan请记住';
+  const identity = (extras = {}) => ({ topic: '称呼', aliases: [], kind: 'identity', scope: 'global',
+    signal: 'self_report', level: '称呼：Cyan', boundary: '', evidence: question, ...extras });
+  const parsed = parseMemorySuggestions(JSON.stringify([identity()]), question);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].kind, 'identity');
+  assert.equal(parsed[0].scope, 'global');
+  // 身份必须来自本轮原话、必须像自我介绍、不许夹带敏感信息；拆成 paper 也强制 global
+  assert.equal(parseMemorySuggestions(JSON.stringify([identity({ evidence: '我叫Alice' })]), question).length, 0);
+  assert.equal(parseMemorySuggestions(JSON.stringify([identity({ evidence: '请记住' })]), question).length, 0);
+  assert.equal(parseMemorySuggestions(JSON.stringify([identity({ evidence: '我叫Cyan，我的邮箱 cyan@example.com' })]),
+    '我叫Cyan，我的邮箱 cyan@example.com').length, 0);
+  assert.equal(parseMemorySuggestions(JSON.stringify([identity({ scope: 'paper' })]), question)[0].scope, 'global');
+  // 写入 → 双端校验 → 注入：问题里没有「Cyan / 称呼」也必须带上
+  const profile = withMemoryObservations(emptyProfile(), parsed, { source, at });
+  assert.equal(profile.items[0].memory.kind, 'identity');
+  assert.equal(profile.items[0].status, 'confirmed');
+  assert.equal(profile.items[0].basis, 'user_self_report');
+  assert.equal(security.checkProfile(profile).error, undefined);
+  const block = buildProfileBlock(profile, '', '细胞生物学的问题');
+  assert.match(block, /Cyan/);
+  assert.match(block, /用户自述身份/);
+});
+
+test('身份记忆不会从普通提问里推断，也不和知识/偏好混用', () => {
+  const fromElsewhere = JSON.stringify([{ topic: '称呼', evidence: '我叫Cyan', kind: 'identity', scope: 'global',
+    signal: 'self_report', level: '称呼：Cyan' }]);
+  assert.equal(parseMemorySuggestions(fromElsewhere, '请解释注意力机制').length, 0);
+  assert.equal(parse('我叫Cyan请记住', { kind: 'preference', signal: 'preference' }).length, 0);
+  assert.equal(parse('我叫Cyan请记住', { kind: 'knowledge', signal: 'self_report' }).length, 0);
+  assert.match(security.checkProfile(emptyProfile()).error || '', /^$/); // 空档案本身可校验
+});
+
+test('明确说「请记住」的名字/称呼走确定性路径，不依赖模型提取', () => {
+  assert.deepEqual(explicitIdentityFacts('我叫Cyan请记住').map((o) => [o.kind, o.topic, o.level]),
+    [['identity', '称呼', '称呼：Cyan']]);
+  assert.deepEqual(explicitIdentityFacts('我的名字是 小明，请记住').map((o) => o.level), ['称呼：小明']);
+  assert.deepEqual(explicitIdentityFacts('请记住称呼我 Bob').map((o) => o.level), ['称呼：Bob']);
+  assert.deepEqual(explicitIdentityFacts('我叫Cyan'), [], '没有明确要求记住时不走确定性路径');
+  assert.deepEqual(explicitIdentityFacts('请记住这个公式叫注意力机制'), [], '不是自述身份的不记');
+  assert.deepEqual(explicitIdentityFacts('请记住我的邮箱 cyan@example.com'), [], '敏感信息不记');
+  // 确定性提取的观察同样要过严格校验（写入后 confirmed、跨论文常驻）
+  const facts = explicitIdentityFacts('我叫Cyan请记住');
+  const profile = withMemoryObservations(emptyProfile(), facts, { source, at });
+  assert.equal(profile.items[0].status, 'confirmed');
+  assert.match(buildProfileBlock(profile, '', '完全无关的问题'), /Cyan/);
+});
+
+test('身份记忆可以自然语言删除，删除后不再注入', () => {  const question = '我叫Cyan请记住';
+  const profile = withMemoryObservations(emptyProfile(), parseMemorySuggestions(JSON.stringify([{
+    topic: '称呼', kind: 'identity', scope: 'global', signal: 'self_report', level: '称呼：Cyan', evidence: question,
+  }]), question), { source, at });
+  assert.match(buildProfileBlock(profile, '', '无关问题'), /Cyan/);
+  const removed = withMemoryObservations(profile, parseMemorySuggestions(JSON.stringify([{
+    topic: '称呼', kind: 'identity', scope: 'global', signal: 'self_report', level: '称呼：Cyan',
+    evidence: '忘记我的称呼记录', action: 'forget', id: profile.items[0].id,
+  }]), '忘记我的称呼记录'), { source, at });
+  assert.equal(removed.items.length, 0);
+  assert.equal(buildProfileBlock(removed, '', '无关问题'), '');
 });
 
 test('忘记只删除指定条目，表达自己忘了知识点不会触发删除', () => {

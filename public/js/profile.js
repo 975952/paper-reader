@@ -102,7 +102,7 @@ export function validateProfile(raw) {
         capability: str(it.source.capability).slice(0, 40),
       } : null,
       note: str(it.note).trim().slice(0, 2000),
-      memory: isObject(it.memory) && ['knowledge', 'preference'].includes(it.memory.kind)
+      memory: isObject(it.memory) && ['knowledge', 'preference', 'identity'].includes(it.memory.kind)
         && ['self_report', 'needs_help', 'demonstrated', 'inferred', 'preference'].includes(it.memory.signal) ? {
           kind: it.memory.kind,
           scope: it.memory.scope === 'paper' ? 'paper' : 'global',
@@ -243,6 +243,8 @@ export function selectProfileItems(profile, docText = '', question = '', limit =
   const q = String(question || '').toLowerCase();
   const scored = profile.items.map((item) => {
     if (item.memory?.scope === 'paper' && (!docId || item.source?.docId !== docId)) return { item, score: 0 };
+    // 身份自述（称呼 / 方向 / 目标）和持续偏好与论文内容无关，永远优先带上
+    if (item.memory?.kind === 'identity') return { item, score: 6 };
     if (item.memory?.kind === 'preference') return { item, score: 5 };
     let score = 0;
     for (const token of tokensOf(item)) {
@@ -261,6 +263,7 @@ const PROFILE_RULES = [
   '只在具体理解边界内调整讲解。自述理解不证明能独立实现；一次正确表现不证明全面掌握。依据有限时不要跳过关键步骤，也不要强制用户确认档案。',
   '仍需讲解的部分要补基础。讲过、继续、阅读时长都不证明掌握；时间久了也不等于遗忘，可按需要简短回顾。',
   '偏好只影响表达。记忆不影响论文事实、引用或忠实翻译；不相关的不要使用。',
+  '身份类记录（称呼/方向/目标）只用于称呼与选例子、选语气，不能当成论文事实或用户能力证据；不要向用户解释记忆系统，也不要承诺“永久记住”之类超出事实的说法。',
 ].join('\n');
 
 /** 只注入相关知识和持续讲解偏好；论文范围的观察不得跨论文使用。 */
@@ -274,7 +277,8 @@ export function buildProfileBlock(profile = profileStore.data, docText = '', que
   for (const { item } of chosen) {
     const signal = item.memory?.signal || (item.status === 'confirmed' ? 'self_report' : 'inferred');
     const line = JSON.stringify({
-      主题: item.topic, 观察: labels[signal],
+      主题: item.topic,
+      观察: item.memory?.kind === 'identity' ? '用户自述身份（可用来称呼，不代表论文事实）' : labels[signal],
       情况: item.level.slice(0, 110), 边界: item.boundary.slice(0, 160),
       原话依据: (item.memory?.evidence || '').slice(0, 100), 时间: item.updatedAt || item.createdAt,
     });
