@@ -5328,6 +5328,31 @@ function teachingCacheSet(docId, opId, value) {
   state.teachingCache.set(teachingCacheKey(docId, opId), value);
 }
 
+/**
+ * 「先给我讲明白」交给 AI 自己定讲法：把读者位置、当前页对象、选中文字交给它，
+ * 讲解偏好 / 理解边界 / 长期记忆 / 论文旧讨论 / 会话摘要都在 profileBlock 里，
+ * 最近几轮对话在 history 里——它据此判断这次该从哪儿讲、讲什么、怎么讲。
+ */
+async function buildAutoTeachExtra(page) {
+  const total = Number(viewer?.numPages) || 0;
+  const pct = total ? Math.round((Number(page) / total) * 100) : 0;
+  const lines = [
+    `【读者当前阅读位置】第 ${page} 页${total ? ` / 共 ${total} 页（约 ${pct}%）` : ''}`,
+    '【讲法由你判断】结合上面的材料、记忆与阅读位置自己决定怎么讲（入门总览 / 先补前置 / 接着当前进度 / 讲当前页图表公式…），'
+      + '开头可用一句说明选择，然后直接开始；不要问读者想听哪种。',
+  ];
+  try {
+    const docText = await ensureDocTextForObjects();
+    const objects = detectPageObjects(pageTextOf(docText || '', page), page);
+    if (objects.length) {
+      lines.push(`【当前页识别出的图表公式】${objects.map((o) => `${o.label}${o.title ? `（${o.title.slice(0, 40)}）` : ''}`).join('、')}`);
+    }
+  } catch { /* 对象识别失败不影响讲解 */ }
+  const sel = state.selection?.cleanText || '';
+  if (sel) lines.push(`【正文里当前选中的文字】${sel.slice(0, 500)}`);
+  return lines.join('\n');
+}
+
 
 async function runTeaching(opId, {
   force = false, retryEntry = null, extraUser = '', ask = '', history = [],
@@ -5340,24 +5365,39 @@ async function runTeaching(opId, {
 
   const docId = state.doc.docId;
   const entryTag = tag || op.title;
+  // 「先给我讲明白」= AI 自己定讲法：依赖论文内容 + 阅读位置 + 记忆，不能套模板缓存
+  //（用户口径：让 AI 根据实际的内容、根据记忆这些背景信息来判断应该如何讲解）。
+  const autoDirected = opId === 'intro';
+  const teachPage = autoDirected ? (viewer?.currentVisiblePage?.() ?? viewer.current) : viewer.current;
 
-  // 缓存只给「一次生成、内容稳定」的三项；图表公式依赖页/对象，不缓存
-  if (!force && opId !== 'visual' && !retryEntry && !history.length) {
-    const hit = teachingCacheGet(docId, opId);
-    // 恢复出来的会话里已经有这条结果（跨重启的「已生成」）：直接定位过去，不重新花钱
-    const existing = teachingEntryFor(opId);
-    if (existing) {
-      showAiBlock('chat');
-      existing.root?.scrollIntoView?.({ block: 'nearest' });
-      toast(`「${op.title}」已在结果区，点「重新生成」可以重跑`, 'ok', 3000);
-      return hit || { text: String(existing.text || '') };
-    }
-    if (hit) {
-      // 缓存有、DOM 没有（清过问答区）：直接把缓存内容补回一条结果，不重新花钱
-      const restored = addEntry({ block: 'chat', tag: entryTag, text: hit.text, kind: 'assistant', retry: { kind: 'teaching', docId, opId, block: 'chat', ask, extraUser: extraUser.slice(0, 4000), ...(teaching ? { teaching } : {}) } });
-      finishEntry(restored, hit.text, { page: hit.page || null, retryLabel: '重新生成', onRetry: () => runTeaching(opId, { force: true, retryEntry: restored, extraUser, ask, tag, teaching }) });
-      renderTeachingExtras(restored, { opId, chips: hit.chips || [], teaching: hit.teaching || teaching });
-      return hit;
+  // 缓存只给「一次生成、内容稳定」的三项；图表公式依赖页/对象，autoDirected 依赖位置与记忆，都不缓存
+  if (!force && !retryEntry && !history.length) {
+    if (autoDirected) {
+      // 本次会话里已经有一条讲解：直接定位过去，不重复花钱（点「重新生成」才会按最新位置与记忆重讲）
+      const existing = teachingEntryFor(opId);
+      if (existing) {
+        showAiBlock('chat');
+        existing.root?.scrollIntoView?.({ block: 'nearest' });
+        toast('「先给我讲明白」已在结果区；点「重新生成」会结合最新阅读位置和记忆重讲', 'ok', 3200);
+        return { text: String(existing.text || '') };
+      }
+    } else if (opId !== 'visual') {
+      const hit = teachingCacheGet(docId, opId);
+      // 恢复出来的会话里已经有这条结果（跨重启的「已生成」）：直接定位过去，不重新花钱
+      const existing = teachingEntryFor(opId);
+      if (existing) {
+        showAiBlock('chat');
+        existing.root?.scrollIntoView?.({ block: 'nearest' });
+        toast(`「${op.title}」已在结果区，点「重新生成」可以重跑`, 'ok', 3000);
+        return hit || { text: String(existing.text || '') };
+      }
+      if (hit) {
+        // 缓存有、DOM 没有（清过问答区）：直接把缓存内容补回一条结果，不重新花钱
+        const restored = addEntry({ block: 'chat', tag: entryTag, text: hit.text, kind: 'assistant', retry: { kind: 'teaching', docId, opId, block: 'chat', ask, extraUser: extraUser.slice(0, 4000), ...(teaching ? { teaching } : {}) } });
+        finishEntry(restored, hit.text, { page: hit.page || null, retryLabel: '重新生成', onRetry: () => runTeaching(opId, { force: true, retryEntry: restored, extraUser, ask, tag, teaching }) });
+        renderTeachingExtras(restored, { opId, chips: hit.chips || [], teaching: hit.teaching || teaching });
+        return hit;
+      }
     }
   }
 
@@ -5381,14 +5421,20 @@ async function runTeaching(opId, {
   setBusy(true, `0s · ${entryTag}`);
   let received = '';
   try {
-    const ctx = await buildDocContext(op.ask, extraUser || '', { forTeaching: true, page: viewer.current });
+    // 「先给我讲明白」：最近几轮对话算记忆，读者的当前位置、当前页对象也算材料
+    const convHistory = autoDirected ? (history.length ? history : snapshotHistory(state.history)) : history;
+    const autoExtra = autoDirected ? await buildAutoTeachExtra(teachPage).catch(() => '') : '';
+    const mergedExtra = [extraUser, autoExtra].filter(Boolean).join('\n\n');
+    // 讲法判断需要「整篇论文的主线」；拿单个问题的相关段落会把讲解带偏
+    const ctxQuery = autoDirected ? '研究问题 核心方法 关键公式 图表 实验 结论 论文整体' : op.ask;
+    const ctx = await buildDocContext(ctxQuery, mergedExtra, { forTeaching: true, page: teachPage });
     const messages = teachMessages(op, {
       docTitle: state.doc?.name,
       fullText: ctx?.text,
       digest: state.docDigest,
-      extraUser,
+      extraUser: mergedExtra,
       ask,
-      history,
+      history: convHistory,
       pageImages: ctx?.pageImages || [],
       profileBlock: teachingProfileBlock(ask || op.ask),
     });
@@ -5405,12 +5451,17 @@ async function runTeaching(opId, {
     const clean = split.text || full;
     target.done(clean);
     finishEntry(entry, clean, {
-      page: viewer.current, retryLabel: '重新生成',
+      page: teachPage, retryLabel: '重新生成',
       onRetry: () => runTeaching(opId, { force: true, retryEntry: entry, extraUser, ask, tag, teaching }),
     });
     renderTeachingExtras(entry, { opId, chips: split.chips, teaching });
     if (opId === 'walk' && !history.length) startWalkSession(clean, entry);
-    if (opId !== 'visual' && !history.length) {
+    if (autoDirected) {
+      // 本轮讲解进会话记忆：之后的追问（「继续」「这里没懂」）和下一次讲解都能接上
+      const request = resolveReadingRequest({ question: op.ask, page: teachPage });
+      state.history = snapshotHistory([...state.history, ...readingTurn(request, clean)]);
+      scheduleSessionSummary();
+    } else if (opId !== 'visual' && !history.length) {
       teachingCacheSet(docId, opId, { text: clean, at: Date.now(), page: viewer.current, chips: split.chips, teaching });
     }
     state.teaching.current = teaching || null;
@@ -5421,7 +5472,7 @@ async function runTeaching(opId, {
     if (isAbort(e)) {
       target.done(received);
       finishEntry(entry, received, {
-        page: viewer.current, status: 'stopped',
+        page: teachPage, status: 'stopped',
         onRetry: () => runTeaching(opId, { force: true, retryEntry: entry, extraUser, ask, tag, teaching }),
       });
     } else {

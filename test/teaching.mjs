@@ -120,7 +120,9 @@ check('菜单标题是「读懂论文」', menu.head.includes('读懂论文'), m
 check('菜单正好 4 项教学能力', menu.items.length === 4 && menu.items.join('|').includes('先给我讲明白') && menu.items.join('|').includes('讲懂图表与公式'), menu.items.join(' / '));
 check('菜单没有档案编辑入口', menu.profile === '');
 
-/* 2. 先给我讲明白 */
+/* 2. 先给我讲明白：讲法由 AI 结合论文内容、阅读位置与记忆判断 */
+await page.evaluate(() => window.__viewer.goToPage(3));
+await sleep(600);
 let before = bodies.length;
 await page.evaluate(() => { [...document.querySelectorAll('#opsMenu .ops-item')].find((b) => /先给我讲明白/.test(b.textContent)).click(); });
 await page.waitForFunction(() => !window.__state.busy && window.__state.sessionEntries.some((e) => e.tag === '先给我讲明白' && e.status === 'complete'), { timeout: 20000 });
@@ -129,7 +131,18 @@ check('点「先给我讲明白」发出一次请求', bodies.length === before 
 const req0 = bodies.at(-1);
 check('system 里有当前时间', /【当前时间】\d{4}-\d{2}-\d{2}/.test(req0.messages[0].content));
 check('空记忆不伪造用户背景', !/【后台学习记忆/.test(req0.messages[0].content));
+check('讲法交给 AI 判断，不再套固定五段模板', /怎么讲由你判断/.test(req0.messages[0].content)
+  && /读者记忆/.test(req0.messages[0].content) && !/\*\*它要解决什么问题\*\*/.test(req0.messages[0].content));
 check('user 里带论文全文与本次任务', /【论文全文】/.test(req0.messages.at(-1).content) && /【本次任务】/.test(req0.messages.at(-1).content));
+check('请求带读者当前阅读位置', /【读者当前阅读位置】第 3 页/.test(req0.messages.at(-1).content),
+  String(req0.messages.at(-1).content).slice(-160));
+const introMem = await page.evaluate(() => ({
+  history: window.__state.history.length,
+  hasIntro: window.__state.history.some((m) => m.role === 'assistant' && /它要解决什么问题/.test(String(m.content))),
+  hasAsk: window.__state.history.some((m) => m.role === 'user' && /先给我讲明白/.test(String(m.content))),
+}));
+check('本轮讲解进入会话记忆（之后追问能接上）', introMem.history >= 2 && introMem.hasIntro && introMem.hasAsk,
+  `history=${introMem.history}`);
 const introUi = await page.evaluate(() => {
   const msgs = [...document.querySelectorAll('#aiArea .msg.assistant')];
   const last = msgs.at(-1);
@@ -163,6 +176,20 @@ before = bodies.length;
 await page.evaluate(() => { [...document.querySelectorAll('#opsMenu .ops-item')].find((b) => /先给我讲明白/.test(b.textContent)).click(); });
 await sleep(800);
 check('再点同一能力命中缓存，不再请求', bodies.length === before, `${bodies.length - before} 次`);
+
+/* 5.5 换阅读位置重讲：位置 + 最近对话都进请求（AI 据此判断怎么讲） */
+mode = 'intro';
+await page.evaluate(() => window.__viewer.goToPage(4));
+await sleep(600);
+before = bodies.length;
+await page.evaluate(() => window.__ctx.runTeaching('intro', { force: true }));
+await page.waitForFunction(() => !window.__state.busy, { timeout: 20000 });
+await sleep(350);
+check('重讲带上新的阅读位置', bodies.length === before + 1
+  && /【读者当前阅读位置】第 4 页/.test(bodies.at(-1).messages.at(-1).content),
+  String(bodies.at(-1)?.messages?.at(-1)?.content || '').slice(-120));
+check('重讲带上最近几轮对话（作为记忆上下文）',
+  bodies.at(-1).messages.some((m) => m.role === 'assistant' && /它要解决什么问题/.test(String(m.content))));
 
 /* 6. 我需要先懂什么 → 点开一项 → 这个我懂了 */
 mode = 'prereq';
