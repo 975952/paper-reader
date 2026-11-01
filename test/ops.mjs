@@ -81,7 +81,11 @@ console.log('\n-- 深入阅读入口');
 await page.evaluate(() => window.__ctx.runTeaching('intro', {}));
 await page.waitForFunction(() => !window.__state.busy && [...window.__state.sessionEntries].some((e) => e.tag === '先给我讲明白' && e.status === 'complete'), { timeout: 20000 });
 await sleep(300);
-const deepActs = await page.evaluate(() => [...[...document.querySelectorAll('#aiArea .msg.assistant')].at(-1).querySelectorAll('.acts button')].map((b) => b.textContent));
+// P3：问答会话改成全局后，列表里可能还有别的条目；明确取「先给我讲明白」那一条来验收深入按钮
+const deepActs = await page.evaluate(() => {
+  const intro = [...document.querySelectorAll('#aiArea .msg.assistant')].find((m) => m.querySelector('.tag')?.textContent === '先给我讲明白');
+  return [...(intro?.querySelectorAll('.acts button') || [])].map((b) => b.textContent);
+});
 check('回答末尾有「看实验够不够」「它有什么局限」', deepActs.includes('看实验够不够') && deepActs.includes('它有什么局限'), deepActs.join(' / '));
 const before = chatBodies.length;
 await page.evaluate(() => {

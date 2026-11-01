@@ -256,19 +256,31 @@ export function createTabBar({ mount, onActivate, onClose, onOpenDoc, onReorder,
     const folder = currentFolder();
     const unopened = folderDocs.filter((d) => !list.some((t) => t.docId === d.docId)
       && (!folder || String(d.folder || '') === folder));
+    const makeDocItem = (doc) => {
+      const item = document.createElement('button');
+      item.className = 'tab-menu-item';
+      item.textContent = doc.name || doc.docId;
+      item.title = doc.path || doc.name || doc.docId;
+      item.onclick = () => { closeMenu(); onOpenDoc?.(doc); };
+      return item;
+    };
     if (unopened.length) {
+      // 默认范围：当前文件夹里未打开的文档（用户在问「外面也能看」时，下面还有全库组）
       const t2 = document.createElement('div');
       t2.className = 'tab-menu-title';
       t2.textContent = folder ? `当前文件夹（${unopened.length} 篇未打开）` : '书架（未打开的论文）';
       menu.append(t2);
-      for (const doc of unopened.slice(0, 30)) {
-        const item = document.createElement('button');
-        item.className = 'tab-menu-item';
-        item.textContent = doc.name || doc.docId;
-        item.title = doc.path || doc.name || doc.docId;
-        item.onclick = () => { closeMenu(); onOpenDoc?.(doc); };
-        menu.append(item);
-      }
+      for (const doc of unopened.slice(0, 20)) menu.append(makeDocItem(doc));
+    }
+    // 全部已导入文件（跨文件夹，按需打开）：所有导入的论文都能看，只是一次不铺满菜单
+    const others = folderDocs.filter((d) => !list.some((t) => t.docId === d.docId)
+      && (!folder || String(d.folder || '') !== folder));
+    if (others.length) {
+      const t3 = document.createElement('div');
+      t3.className = 'tab-menu-title';
+      t3.textContent = `全部已导入文件（其他文件夹 ${others.length} 篇，按需打开）`;
+      menu.append(t3);
+      for (const doc of others.slice(0, 20)) menu.append(makeDocItem(doc));
     }
   }
   function openMenu() {
