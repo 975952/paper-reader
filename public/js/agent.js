@@ -59,7 +59,7 @@ export const AGENT_TOOL_SPECS = [
     type: 'function',
     function: {
       name: 'read_scan_page',
-      description: '读取扫描件某一页的图片阅读索引转写文本（没有文本层的 PDF 用这个）。',
+      description: '把扫描件某一页的原图加入本次回答材料（直接读图，不做 OCR 转写）。没有文本层的 PDF 用这个或 read_page_image。',
       parameters: {
         type: 'object',
         properties: { page: { type: 'integer', description: '页码，从 1 开始' } },
@@ -140,6 +140,8 @@ export const AGENT_TOOL_SPECS = [
 /** 放进 system 末尾的「工具模式」说明（简短，不改变原有规则） */
 export const AGENT_SYSTEM_NOTE = [
   '【工具模式】你可以使用只读工具自己决定读哪些材料，最多 3 轮、每轮最多 3 个工具。',
+  '读当前打开的论文：get_reading_state 看进度，search_paper 找页再 read_page 读正文；',
+  '**扫描件没有文本层**：直接用 read_page_image（或 read_scan_page，效果一样：把该页原图给模型看），不要用 read_page，也不要等 OCR 转写。',
   '【能看的材料】除了当前打开的论文（read_page / search_paper / get_reading_state），你还可以看 papers 文件夹里**所有已导入的论文**：',
   '先用 list_papers 找到目标文件（返回顺序 = 左侧文件树顺序；用户说「第 N 篇」时按这个序号数），',
   '再用 read_other_paper({name, page}) 读指定页、用 read_other_paper({name, query}) 在整篇里检索；扫描件/无文本层时用 read_other_paper_image 取页图。',
@@ -285,6 +287,11 @@ export function summarizeToolResult(call, result) {
   if (name === 'search_paper') {
     const pages = (Array.isArray(v.pages) ? v.pages : []).map((p) => toInt(p?.page)).filter((p) => p !== null);
     return pages.length ? `检索「${clip(args.query, 40)}」→ 命中 ${pages.map((p) => `p.${p}`).join('、')}` : `检索「${clip(args.query, 40)}」→ 没有命中`;
+  }
+  if (name === 'read_scan_page') {
+    const page = toInt(v.page) || toInt(args.page) || '?';
+    if (v.imageAttached) return `已加入第 ${page} 页原图（直接读图）`;
+    return `已读取扫描页第 ${page} 页`;
   }
   if (name === 'read_page' || name === 'read_scan_page') {
     const page = toInt(v.page) || toInt(args.page);

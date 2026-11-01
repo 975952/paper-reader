@@ -7715,9 +7715,16 @@ function createAgentRuntime(pending, { scannedDoc = false } = {}) {
     },
     async readScanPage(page) {
       if (!scannedDoc) return { page, error: '这不是扫描件，请用 read_page' };
-      const digest = await ensureScanDigest(state.doc.docId, state.docProfile).catch(() => '');
-      const text = pageTextFromScanDigest(digest, page);
-      return { page, chars: text.length, text: text.slice(0, 6000), note: text ? '' : '这一页的图片阅读索引里没有可核对文本，可以用 read_page_image 看原图' };
+      // 用户口径（2026-11-02）：扫描件**直接读图**，不再逐页 AI 转写（旧路径要串行 8 次调用，慢）
+      const n = Number(page) || 1;
+      if (other.images.length >= 4) return { page: n, error: '本次已加入 4 张页图，先用它们回答' };
+      try {
+        const shot = await viewer.capturePageImage(n, { maxDim: 1400 });
+        other.images.push({ ...shot, page: n, label: `第 ${n} 页` });
+        return { page: n, imageAttached: true, chars: 0, text: '', note: '已把这一页的原图加入回答材料（直接读图，不做转写），最终回答会附上这张图' };
+      } catch (e) {
+        return { page: n, error: `取第 ${n} 页页图失败：${e?.message || e}` };
+      }
     },
     async readPageImage(page) {
       if (!Number.isInteger(page)) return { error: 'page 必须是整数' };
@@ -8896,16 +8903,22 @@ function pickScanPages(profile, { question = '', page = null, whole = false } = 
   return [...set].sort((a, b) => a - b).slice(0, SCAN_PAGES_MAX);
 }
 
-/** 逐页渲染成图片（串行，失败跳过该页） */
+/** 逐页渲染成图片（并发 3 张，页数少所以很快；失败跳过该页） */
 async function renderScanPages(pages = []) {
-  const shots = [];
-  for (const p of pages) {
-    try {
-      const shot = await viewer.capturePageImage(p, { maxDim: 1400 });
-      shots.push({ page: p, ...shot });
-    } catch { /* 单页渲染失败不挡整次请求 */ }
-  }
-  return shots;
+  const list = [...new Set((pages || []).map((p) => Number(p)).filter((p) => Number.isInteger(p) && p >= 1))];
+  const out = [];
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < list.length) {
+      const p = list[cursor++];
+      try {
+        const shot = await viewer.capturePageImage(p, { maxDim: 1400 });
+        out.push({ page: p, ...shot });
+      } catch { /* 单页渲染失败不挡整次请求 */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, list.length) }, worker));
+  return out.sort((a, b) => a.page - b.page);
 }
 
 /** 把页面图片追加到本轮最后一条 user 消息（文本 + image_url 多段内容） */
@@ -8948,8 +8961,10 @@ function sampleScanPages(profile) {
 }
 
 /**
- * 扫描件的「图片阅读索引」：逐页转写 → 拼成可当作全文用的文本。
- * 首次在扫描件上触发教学能力时跑一次，按文件指纹缓存；失败返回空串（降级为只带页图）。
+ * 扫描件的「图片阅读索引」：逐页 AI 转写 → 拼成可当作全文用的文本。
+ * @deprecated 2026-11-02：用户口径「直接读图，本来就能看图」——扫描件不再做逐页 AI 转写
+ *   （旧路径首次要串行 8 次视觉模型调用，十几秒到一分钟）。教学与 Agent 都已改为直接带页图，
+ *   这里保留实现 + 页级缓存，仅作为以后「模型不支持看图」时的兜底；当前没有调用点。
  */
 async function ensureScanDigest(docId, profile) {
   const myDoc = docId || state.doc?.docId;
@@ -9052,20 +9067,14 @@ async function buildDocContext(question, selection, { page = null, forTeaching =
   if (!stillCurrent()) throw stale();
   if (profile?.scanned) {
     const targetPage = Number(page) || viewer?.current || 1;
-    if (forTeaching) {
-      setHint('扫描件：正在准备页面图片与阅读索引…');
-      const digest = await ensureScanDigest(myDoc, profile);
-      if (!stillCurrent()) throw stale();
-      const pageImages = await renderScanPages([targetPage]);
-      if (!stillCurrent()) throw stale();
-      setHint('');
-      return {
-        text: digest ? `【图片阅读索引】\n${digest}` : '',
-        mode: 'scan-digest', chars: digest.length, profile, pageImages,
-      };
-    }
+    /* 用户口径（2026-11-02）：扫描件**直接读图**，不再逐页调视觉模型做 OCR 转写
+       （旧路径要串行 8 次 AI 调用，第一遍要十几秒到一分钟）。教学类也直接带页图。 */
     setHint('扫描件：正在准备页面图片…');
-    const pages = pickScanPages(profile, { question, page: targetPage, whole });
+    const pages = pickScanPages(profile, {
+      question: forTeaching ? '整篇' : question,
+      page: targetPage,
+      whole: forTeaching || whole,
+    });
     const pageImages = await renderScanPages(pages);
     if (!stillCurrent()) throw stale();
     setHint('');
