@@ -2096,30 +2096,55 @@ function renderHome() {
     contWrap.append(go);
   }
 
-  // ── 最近列表 ──
+  // ── 书架：**按文件夹分组**列出 papers 里全部论文（用户口径：不要全部散着铺开） ──
   list.replaceChildren();
-  if (title) title.textContent = rows.length ? `最近打开（${rows.length}）` : '最近打开';
-  if (!rows.length) {
+  const allPapers = state.papers || [];
+  if (title) title.textContent = allPapers.length ? `书架（按文件夹，共 ${allPapers.length} 篇）` : '书架';
+  if (!allPapers.length) {
     list.append(el('li', { class: 'home-empty' },
-      el('div', { text: state.papers.length ? '还没有阅读记录' : '还没有论文' }),
-      el('div', { class: 'home-empty-sub', text: state.papers.length
-        ? '点上面「打开 PDF」，或从左边文件列表里挑一篇'
-        : '点「打开 PDF」选一个，或直接把 PDF 拖进来' })));
+      el('div', { text: '还没有论文' }),
+      el('div', { class: 'home-empty-sub', text: '点「打开 PDF」选一个，或直接把 PDF 拖进来' })));
     return;
   }
-  for (const row of rows) {
-    const item = el('li', { class: 'home-item', dataset: { id: row.docId } },
-      el('button', { type: 'button', class: 'home-item-go', title: row.name },
-        el('span', { class: 'hi-name', text: row.name.replace(/\.pdf$/i, '') }),
-        el('span', { class: 'hi-meta', text: `第 ${row.page} 页 · ${relTime(row.ts)}` })),
-      el('button', {
-        type: 'button', class: 'home-item-x', text: '×',
-        title: `移除「${row.name}」的最近记录（不删除文件）`,
-        'aria-label': `移除「${row.name}」的最近记录`,
-        onclick: (e) => { e.stopPropagation(); removeRecent(row.docId); },
-      }));
-    item.querySelector('.home-item-go').onclick = () => openDoc({ name: row.name, url: row.url, docId: row.docId });
-    list.append(item);
+  const recById = new Map(rows.map((r) => [r.docId, r]));
+  const groups = [];
+  const rootFiles = allPapers.filter((p) => !p.folder);
+  if (rootFiles.length) groups.push({ path: '', name: 'papers/', files: rootFiles });
+  for (const f of (state.folders || [])) {
+    const files = allPapers.filter((p) => p.folder === f.path);
+    if (files.length) groups.push({ path: f.path, name: f.name, files });
+  }
+  // 兜底：papers 的 folder 不在 folders 清单里（理论上不会）→ 归到「其它」
+  const grouped = new Set(groups.flatMap((g) => g.files));
+  const restFiles = allPapers.filter((p) => !grouped.has(p));
+  if (restFiles.length) groups.push({ path: '?', name: '其它', files: restFiles });
+  for (const group of groups) {
+    const depth = group.path && group.path !== '?' ? group.path.split('/').length - 1 : 0;
+    list.append(el('li', {
+      class: 'home-folder',
+      style: `--depth:${depth}`,
+      title: group.path === '?' ? '其它' : `papers/${group.path ? `${group.path}/` : ''}（${group.files.length} 篇）`,
+    },
+    el('span', { class: 'hf-ico', 'aria-hidden': 'true', html: FOLDER_ICON_SVG }),
+    el('span', { class: 'hf-name', text: group.name }),
+    el('span', { class: 'hf-count', text: String(group.files.length) })));
+    for (const paper of group.files) {
+      const rec = recById.get(paper.docId);
+      const page = rec ? Math.max(1, Number(rec.page) || 1) : 0;
+      const meta = rec ? `第 ${page} 页 · ${relTime(rec.ts)}` : '未读';
+      const item = el('li', { class: 'home-item', dataset: { id: paper.docId }, style: `--depth:${depth}` },
+        el('button', { type: 'button', class: 'home-item-go', title: paper.name },
+          el('span', { class: 'hi-name', text: paper.name.replace(/\.pdf$/i, '') }),
+          el('span', { class: 'hi-meta', text: meta })),
+        rec ? el('button', {
+          type: 'button', class: 'home-item-x', text: '×',
+          title: `移除「${paper.name}」的最近记录（不删除文件）`,
+          'aria-label': `移除「${paper.name}」的最近记录`,
+          onclick: (e) => { e.stopPropagation(); removeRecent(paper.docId); },
+        }) : null);
+      item.querySelector('.home-item-go').onclick = () => openDoc({ name: paper.name, url: paper.url, docId: paper.docId, path: paper.path });
+      list.append(item);
+    }
   }
 }
 

@@ -1067,6 +1067,17 @@ body.reading .home { display: none; }
 .home-item { display: flex; align-items: stretch; gap: 4px; border-radius: 9px; }
 .home-item + .home-item { margin-top: 2px; }
 .home-item:hover { background: var(--bg-elev); }
+/* 首页按文件夹分组：文件夹行 + 缩进的文件行 */
+.home-folder {
+  display: flex; align-items: center; gap: 6px;
+  padding: 12px 8px 4px calc(8px + var(--depth, 0) * 16px);
+  color: var(--fg-dim); font-size: var(--ui-fs-sm); font-weight: 600; user-select: none;
+}
+.home-folder:first-child { padding-top: 4px; }
+.home-folder .hf-ico { display: inline-flex; flex: 0 0 auto; color: var(--fg-faint); }
+.home-folder .hf-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-folder .hf-count { flex: 0 0 auto; margin-left: auto; color: var(--fg-faint); font-size: var(--ui-fs-2xs); font-weight: 400; }
+.home-item { padding-left: calc(var(--depth, 0) * 16px); }
 .home-item-go {
   flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 10px;
   padding: 10px 8px; border: 0; background: none; cursor: pointer; text-align: left;

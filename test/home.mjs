@@ -72,6 +72,10 @@ const view = (page) => page.evaluate(() => {
       hasX: !!li.querySelector('.home-item-x'),
     })),
     emptyText: document.querySelector('#homeList .home-empty')?.innerText?.replace(/\s+/g, ' ').trim() || '',
+    folderHeaders: [...document.querySelectorAll('#homeList .home-folder')].map((li) => ({
+      name: li.querySelector('.hf-name')?.textContent || '',
+      count: li.querySelector('.hf-count')?.textContent || '',
+    })),
     openBtn: !!document.querySelector('#homeOpen'),
     dropZone: !!document.querySelector('#homeDrop'),
     statusbar: document.querySelectorAll('.statusbar').length,
@@ -102,8 +106,8 @@ console.log('\nA2 有论文、state.json 空');
   const v = await view(page);
   check('停在首页', !v.reading && v.homeVisible);
   check('没有继续阅读卡片', v.continueCards === 0);
-  check('阅读记录为空 → 列表是空态（不是列出全部论文）', v.items.length === 0 && !!v.emptyText,
-    `items=${v.items.length} empty=${JSON.stringify(v.emptyText)}`);
+  check('阅读记录为空 → 也按文件夹列出全部论文', v.items.length === papers.length && v.folderHeaders.length >= 1 && !v.emptyText,
+    `items=${v.items.length}/${papers.length} folders=${JSON.stringify(v.folderHeaders)} empty=${JSON.stringify(v.emptyText)}`);
   check('零页面报错', errs.length === 0);
   await page.close();
 }
@@ -125,9 +129,10 @@ console.log('\nA3 有最近论文 + A4 普通启动不自动打开');
   check('A3 出现继续阅读卡片', v.continueCards === 1, `cards=${v.continueCards}`);
   check('A3 卡片显示文件名与页码', v.continueText.includes(p0.name.replace(/\.pdf$/i, '')) && v.continueText.includes(`第 ${wantPage} 页`),
     JSON.stringify(v.continueText));
-  check('A3 最近列表有这一条且带页码', v.items.length === 1 && new RegExp(`第 ${wantPage} 页`).test(v.items[0].meta),
-    JSON.stringify(v.items));
-  check('每条记录带「移除」按钮', v.items[0]?.hasX === true);
+  const recItem = v.items.find((i) => i.id === p0.docId);
+  check('首页按文件夹列出全部论文，这一篇带页码', v.items.length === papers.length && !!recItem && new RegExp(`第 ${wantPage} 页`).test(recItem.meta),
+    JSON.stringify({ total: v.items.length, rec: recItem }));
+  check('有阅读记录的条目带「移除」按钮', recItem?.hasX === true);
   check('零页面报错', errs.length === 0, errs.slice(0, 2).join(' | '));
 
   /* ═══ A5 点「继续阅读」才进入，且恢复页码 ═══ */
@@ -167,7 +172,7 @@ console.log('\nA7 从首页列表进入阅读页（等价于双击 PDF）');
   const { page, errs } = await open();
   const before = await view(page);
   check('首页列出了这篇', before.items.some((i) => i.id === p1.docId), JSON.stringify(before.items));
-  await page.click('#homeList .home-item-go');
+  await page.click(`#homeList .home-item[data-id="${p1.docId}"] .home-item-go`);
   await sleep(4500);
   const v = await view(page);
   check('进入阅读态并打开正确论文', v.reading && v.docName === p1.name, `reading=${v.reading} docName=${v.docName}`);
@@ -196,7 +201,7 @@ console.log('\nA8 最近文件已被移动/删除 + 移除最近记录');
   check('失效记录已被清出 state.json', !st.docs?.['ghost-docid-0000'], JSON.stringify(Object.keys(st.docs || {})));
 
   const target = real.docId;
-  await page.click('#homeList .home-item-x');
+  await page.click(`#homeList .home-item[data-id="${target}"] .home-item-x`);
   await sleep(1400);
   const st2 = await getState();
   check('点「×」后该记录从 state.json 消失', !st2.docs?.[target], JSON.stringify(Object.keys(st2.docs || {})));
