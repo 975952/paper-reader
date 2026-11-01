@@ -427,10 +427,10 @@ body.dragging .viewer { pointer-events: none; }
 .filelist li .file-grip {
   flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
   width: calc(13px * var(--ctl-scale)); height: 100%;
-  color: var(--fg-faint); opacity: 0; cursor: grab; transition: opacity .12s;
+  color: var(--fg-faint); opacity: 0; cursor: crosshair; transition: opacity .12s;
 }
-.filelist li:hover .file-grip, .filelist li.active .file-grip { opacity: .7; }
-.filelist li .file-grip:active { cursor: grabbing; }
+.filelist li:hover .file-grip, .filelist li.active .file-grip, .filelist li.selected .file-grip { opacity: .7; }
+.filelist li .file-grip:active { cursor: crosshair; }
 .filelist li .file-name {
   flex: 1 1 auto; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
@@ -449,6 +449,17 @@ body.dragging .viewer { pointer-events: none; }
 .filelist li.dragging { opacity: .4; }
 .filelist li.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .filelist li.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+/* 多选（Ctrl/Shift 点击、左侧细条框选）：与当前打开行（.active）区分开 */
+.filelist li.selected { background: var(--accent-soft); color: var(--accent); }
+.filelist li.selected:hover { background: var(--accent-soft); }
+.filelist li.selected .file-grip { opacity: .9; }
+/* 拖框的矩形（fixed，跟随鼠标） */
+.file-marquee {
+  position: fixed; z-index: 60; pointer-events: none;
+  border: 1px solid var(--accent); border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.file-marquee.hidden { display: none; }
 /* 禁区（拖文件夹到自身/子孙）：不弹红框不显示 no-drop，drop 时 toast 拒绝 */
 .filelist li.drag-no { cursor: default; }
 

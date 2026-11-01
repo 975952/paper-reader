@@ -209,7 +209,9 @@ fn papers_list(rq: Request) {
     let rank: std::collections::HashMap<String, usize> =
         order.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
 
-    // 扫描一层目录：返回直接子项（文件夹 + PDF），已按 order / mtime 排序
+    // 扫描一层目录：返回直接子项（文件夹 + PDF），已按 order 排序。
+    // 没排过序的**保持目录扫描顺序、排在已排序项之后**（用户口径：左侧文档不做自动排序，
+    // 不再按 mtime 倒序）；随后在 papers_list 末尾把看到的顺序冻结进 papers-order.json。
     fn scan_dir(dir: &std::path::Path, rel: &str, rank: &std::collections::HashMap<String, usize>) -> Vec<(bool, String, String, u64, u64)> {
         // (is_folder, name, rel, mtime, size)
         let mut items: Vec<(bool, String, String, u64, u64)> = Vec::new();
@@ -251,9 +253,10 @@ fn papers_list(rq: Request) {
             let ra = rank.get(&a.2);
             let rb = rank.get(&b.2);
             match (ra, rb) {
-                (None, None) => b.3.cmp(&a.3),
-                (None, Some(_)) => std::cmp::Ordering::Less,
-                (Some(_), None) => std::cmp::Ordering::Greater,
+                // 都没排过：保持 readdir 顺序（sort_by 是稳定排序）
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
                 (Some(x), Some(y)) => x.cmp(y),
             }
         });
@@ -289,6 +292,31 @@ fn papers_list(rq: Request) {
     let mut folders: Vec<Value> = Vec::new();
     let mut papers: Vec<Value> = Vec::new();
     collect_tree(dir, "", &rank, &mut folders, &mut papers);
+
+    // 「不做自动排序」：把这次看到的完整顺序冻结进 order 文件（已有条目保持原顺序，
+    // 新出现的按显示位置追加），之后只有用户手动拖拽才会改变顺序。
+    let mut seen: Vec<String> = Vec::new();
+    for f in &folders {
+        if let Some(p) = f.get("path").and_then(|v| v.as_str()) {
+            seen.push(p.to_string());
+        }
+    }
+    for p in &papers {
+        if let Some(path) = p.get("path").and_then(|v| v.as_str()) {
+            seen.push(path.to_string());
+        }
+    }
+    {
+        let seen_set: std::collections::HashSet<&str> = seen.iter().map(|s| s.as_str()).collect();
+        let kept: Vec<String> = order.iter().filter(|rel| seen_set.contains(rel.as_str())).cloned().collect();
+        let kept_set: std::collections::HashSet<&str> = kept.iter().map(|s| s.as_str()).collect();
+        let missing: Vec<&String> = seen.iter().filter(|rel| !kept_set.contains(rel.as_str())).collect();
+        if !missing.is_empty() || kept.len() != order.len() {
+            let mut next = kept;
+            next.extend(missing.into_iter().cloned());
+            let _ = write_paper_order(&next);
+        }
+    }
 
     // count = 直接子 PDF 数（不含子文件夹里的）
     let mut by_dir: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();

@@ -729,6 +729,9 @@ const state = {
   opsDoc: null,
   teaching: { walk: null, current: null },
   teachingCache: new Map(),
+  /** 左栏文件多选（批量删除 / 批量移动）；存相对路径，仅 PDF，不含文件夹 */
+  fileSel: new Set(),
+  fileSelAnchor: null,
 };
 
 let viewer = null;
@@ -1978,16 +1981,22 @@ const FOLDER_ARROW_CLOSED_SVG = '<svg viewBox="0 0 24 24" width="11" height="11"
 /** 一个 PDF 行；flat=true 表示筛选扁平视图（名称前缀所在文件夹） */
 function paperRow(p, flat) {
   const display = (flat && p.folder ? `${p.folder}/${p.name}` : p.name).replace(/\.pdf$/i, '');
+  const path = p.path || p.name;
   const li = el('li', {
-    title: `${flat && p.folder ? p.folder + '/' : ''}${p.name}\n${fmtSize(p.size)}\n按住拖动：同目录调整顺序，拖到文件夹行移入`,
-    dataset: { id: p.docId, name: p.name, path: p.path || p.name },
+    title: `${flat && p.folder ? p.folder + '/' : ''}${p.name}\n${fmtSize(p.size)}\n按住拖动：同目录调整顺序，拖到文件夹行移入；Ctrl/Shift 点击可多选`,
+    dataset: { id: p.docId, name: p.name, path },
     draggable: 'true',
     onclick: (e) => {
       if (e.target.closest?.('.file-row-x, .file-grip')) return;
-      openDoc({ name: p.name, url: p.url, docId: p.docId, path: p.path || p.name });
+      // Ctrl/⌘ 点：加选/取消；Shift 点：从锚点整段选（都不会打开论文）
+      if (e.ctrlKey || e.metaKey) { e.preventDefault(); toggleFileSelection(path); return; }
+      if (e.shiftKey) { e.preventDefault(); selectFileRangeTo(path); return; }
+      if (state.fileSel.size) clearFileSelection();
+      openDoc({ name: p.name, url: p.url, docId: p.docId, path });
     },
   },
-    el('span', { class: 'file-grip', title: '按住拖动', 'aria-hidden': 'true', html: PAPER_GRIP_SVG }),
+    // 左侧细条 = 框选起点（文件管理器式：按住拖出矩形批量选文件）
+    el('span', { class: 'file-grip', title: '按住拖动框选多个文件', 'aria-hidden': 'true', html: PAPER_GRIP_SVG }),
     el('span', { class: 'file-name', text: display }),
     el('button', {
       type: 'button', class: 'file-row-x', html: PAPER_X_SVG,
@@ -1996,21 +2005,21 @@ function paperRow(p, flat) {
       onclick: (e) => { e.stopPropagation(); deletePaper(p); },
     }));
   if (state.doc?.docId === p.docId) li.classList.add('active');
+  if (state.fileSel.has(path)) li.classList.add('selected');
   return li;
 }
 
 /**
- * 渲染某一层的子项（文件夹按名称序在前 + PDF 按服务端顺序在后）。
+ * 渲染某一层的子项（顺序完全由服务端 papers-order 决定；文件夹与 PDF 都不在前端重排，
+ * 用户口径：左侧文件夹里的文档不做自动排序）。
  * 返回 DocumentFragment；无任何子项返回 null。
  */
 function renderTreeLevel(folderPath, depth) {
   const prefix = folderPath ? `${folderPath}/` : '';
-  const subs = (state.folders || [])
-    .filter((f) => {
-      if (folderPath === '') return !f.path.includes('/');
-      return f.path.startsWith(prefix) && !f.path.slice(prefix.length).includes('/');
-    })
-    .sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  const subs = (state.folders || []).filter((f) => {
+    if (folderPath === '') return !f.path.includes('/');
+    return f.path.startsWith(prefix) && !f.path.slice(prefix.length).includes('/');
+  });
   const pdfs = (state.papers || []).filter((p) => p.folder === folderPath);
   if (!subs.length && !pdfs.length) return null;
 
@@ -2069,18 +2078,22 @@ function renderPaperList() {
         class: 'empty',
         text: state.papers.length ? '没有匹配的文件' : 'papers/ 里还没有 PDF',
       }));
+      syncFileSelection();
       return;
     }
     for (const p of hits) list.append(paperRow(p, true));
+    syncFileSelection();
     return;
   }
 
   const frag = renderTreeLevel('', 0);
   if (!frag) {
     list.append(el('li', { class: 'empty', text: 'papers/ 里还没有 PDF' }));
+    syncFileSelection();
     return;
   }
   list.append(frag);
+  syncFileSelection();
 }
 
 /* ───────────────── 文件列表：批量导入 / 拖拽排序 / 删除（2026-10） ───────────────── */
@@ -2088,6 +2101,188 @@ function renderPaperList() {
 /** 从 FileList / DataTransfer 里挑出 PDF（大小写不敏感） */
 function pdfFilesFrom(files) {
   return Array.from(files || []).filter((f) => f && /\.pdf$/i.test(f.name));
+}
+
+/* ───────────────── 文件列表：多选（Ctrl/Shift 点击、左侧细条拖框）+ 批量操作 ───────────────── */
+
+function fileRowPath(li) { return li?.dataset?.path || li?.dataset?.name || ''; }
+/** 当前可见的 PDF 行（筛选/文件夹展开后的 DOM 顺序） */
+function fileSelRows() { return $$('#fileList li[data-path]:not(.folder)'); }
+
+function syncFileSelection() {
+  for (const li of fileSelRows()) li.classList.toggle('selected', state.fileSel.has(fileRowPath(li)));
+  document.body.classList.toggle('files-multi', state.fileSel.size > 0);
+}
+
+function clearFileSelection() {
+  if (!state.fileSel.size) return;
+  state.fileSel.clear();
+  state.fileSelAnchor = null;
+  syncFileSelection();
+}
+
+function setFileSelection(paths, { anchor = null } = {}) {
+  state.fileSel = new Set(paths.filter(Boolean));
+  if (anchor !== null) state.fileSelAnchor = anchor;
+  syncFileSelection();
+}
+
+function toggleFileSelection(path) {
+  if (!path) return;
+  if (state.fileSel.has(path)) state.fileSel.delete(path);
+  else state.fileSel.add(path);
+  state.fileSelAnchor = path;
+  syncFileSelection();
+}
+
+/** Shift+点击：从锚点到这一行的可见范围整段选中（只选 PDF，文件夹不参与批量操作） */
+function selectFileRangeTo(path) {
+  const rows = fileSelRows();
+  const to = rows.findIndex((li) => fileRowPath(li) === path);
+  if (to < 0) return;
+  let from = rows.findIndex((li) => fileRowPath(li) === state.fileSelAnchor);
+  if (from < 0) from = to;
+  const [a, b] = from <= to ? [from, to] : [to, from];
+  setFileSelection(rows.slice(a, b + 1).map(fileRowPath), { anchor: state.fileSelAnchor || path });
+}
+
+/** 批量删除所选 PDF（只删 papers/ 文件；笔记 / 会话保留） */
+async function deleteSelectedFiles() {
+  const paths = [...state.fileSel];
+  if (!paths.length) return;
+  if (!confirm(`删除所选的 ${paths.length} 个 PDF？\n只删 papers/ 里的文件，笔记和会话保留。`)) return;
+  let ok = 0;
+  let failed = 0;
+  for (const rel of paths) {
+    try {
+      const r = await fetch(`/api/papers?path=${encodeURIComponent(rel)}`, { method: 'DELETE' });
+      if (r.ok) ok += 1; else failed += 1;
+    } catch { failed += 1; }
+  }
+  clearFileSelection();
+  await refreshPaperList();
+  toast(`已删除 ${ok} 个文件${failed ? `（${failed} 个失败）` : ''}`, failed ? 'err' : 'ok', 3200);
+}
+
+/** 批量移动所选 PDF 到某个文件夹（''=根目录） */
+async function moveSelectedFiles(to) {
+  const paths = [...state.fileSel];
+  if (!paths.length) return;
+  let ok = 0;
+  let failed = 0;
+  for (const rel of paths) {
+    try {
+      const r = await fetch('/api/move', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: rel, to: to || '' }),
+      });
+      if (r.ok) ok += 1; else failed += 1;
+    } catch { failed += 1; }
+  }
+  clearFileSelection();
+  await refreshPaperList();
+  toast(`已移动 ${ok} 个文件到「${to || '根目录'}」${failed ? `（${failed} 个失败）` : ''}`, failed ? 'err' : 'ok', 3200);
+}
+
+/**
+ * 框选多个文件（文件管理器式）：
+ *  - 按住某一行**左侧的细条**（.file-grip）拖动，或从列表空白处拖动，拉出矩形；
+ *  - 矩形碰到的 PDF 行即被选中（按住 Ctrl/⌘ 是追加选择）；
+ *  - 选好后右键 / Delete 做批量删除、批量移动。
+ */
+function initFileMarquee() {
+  const box = el('div', { class: 'file-marquee hidden' });
+  document.body.append(box);
+  let start = null;
+
+  const hitRow = (rect, row) => {
+    const r = row.getBoundingClientRect();
+    return r.right > rect.left && r.left < rect.right && r.bottom > rect.top && r.top < rect.bottom;
+  };
+  const update = (x, y) => {
+    const left = Math.min(start.x, x);
+    const top = Math.min(start.y, y);
+    const w = Math.abs(x - start.x);
+    const h = Math.abs(y - start.y);
+    box.style.left = `${left}px`;
+    box.style.top = `${top}px`;
+    box.style.width = `${w}px`;
+    box.style.height = `${h}px`;
+    const rect = { left, top, right: left + w, bottom: top + h };
+    const picked = start.base.slice();
+    for (const row of fileSelRows()) if (hitRow(rect, row)) picked.push(fileRowPath(row));
+    const unique = [...new Set(picked)];
+    setFileSelection(unique, { anchor: state.fileSelAnchor || unique[0] || null });
+  };
+  const finish = () => {
+    if (!start) return;
+    const moved = Math.hypot(start.lastX - start.x, start.lastY - start.y) > 3;
+    start = null;
+    box.classList.add('hidden');
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('mouseup', onUp, true);
+    if (!moved) {
+      // 只是点了一下细条/空白：不当作「点到别处」，否则会把之前的选择清掉
+      state._fileMarqueeJustEnded = true;
+      setTimeout(() => { state._fileMarqueeJustEnded = false; }, 0);
+    }
+  };
+  const onMove = (e) => {
+    if (!start) return;
+    e.preventDefault();
+    start.lastX = e.clientX;
+    start.lastY = e.clientY;
+    update(e.clientX, e.clientY);
+  };
+  const onUp = (e) => {
+    if (!start) return;
+    e.preventDefault();
+    update(e.clientX, e.clientY);
+    finish();
+  };
+
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (!e.target.closest?.('#fileList')) return;
+    const grip = e.target.closest?.('.file-grip');
+    const row = e.target.closest?.('li');
+    if (row && !grip) return;            // 点在行体上：交给点击打开 / 拖拽排序
+    e.preventDefault();                  // 细条或空白：开始框选，并阻止原生拖拽
+    const additive = e.ctrlKey || e.metaKey;
+    start = {
+      x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY,
+      base: additive ? [...state.fileSel] : [],
+    };
+    if (!additive) clearFileSelection();
+    state._fileMarqueeJustEnded = false;
+    box.classList.remove('hidden');
+    box.style.left = `${e.clientX}px`;
+    box.style.top = `${e.clientY}px`;
+    box.style.width = '0px';
+    box.style.height = '0px';
+    document.addEventListener('mousemove', onMove, true);
+    document.addEventListener('mouseup', onUp, true);
+  }, true);
+
+  // 框选结束浏览器还会补一个 click：别让它把刚选中的结果清掉
+  document.addEventListener('click', (e) => {
+    if (!state._fileMarqueeJustEnded) return;
+    if (e.target.closest?.('#fileList')) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+  // 点列表以外 / 右键菜单以外 → 清空多选
+  document.addEventListener('mousedown', (e) => {
+    if (e.target.closest?.('#fileList') || e.target.closest?.('#fileCtx')) return;
+    clearFileSelection();
+  }, true);
+  // Esc 清空多选；Delete 批量删除
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && state.fileSel.size) { clearFileSelection(); return; }
+    const typing = /^(input|textarea|select)$/i.test(e.target.tagName || '') || e.target.isContentEditable;
+    if (!typing && (e.key === 'Delete' || e.key === 'Backspace') && state.fileSel.size) {
+      e.preventDefault();
+      deleteSelectedFiles();
+    }
+  });
 }
 
 function initFiles() {
@@ -2159,6 +2354,7 @@ function initFiles() {
   }
 
   bindPaperDrag($('#fileList'));
+  initFileMarquee();
   initFileContextMenu();
 
   // 左栏拖拽接管（与 #fileList 处理「完全连起来」）：内部拖拽经过左栏任意位置
@@ -2221,6 +2417,7 @@ function dropTargetFolder(e) {
 function bindPaperDrag(list) {
   if (!list) return;
   let from = null; // { path, kind }
+  let startPt = null; // 拖拽起点（判断「轻轻一拖」用）
   const clearMarks = () => {
     for (const n of list.querySelectorAll('li')) {
       n.classList.remove('dragging', 'drop-before', 'drop-after', 'folder-target', 'drag-no');
@@ -2242,6 +2439,7 @@ function bindPaperDrag(list) {
     if (!path) return;
     const kind = li.classList.contains('folder') ? 'folder' : 'file';
     from = { path, kind };
+    startPt = { x: Number(e.clientX) || 0, y: Number(e.clientY) || 0 };
     li.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
     try {
@@ -2249,7 +2447,7 @@ function bindPaperDrag(list) {
       e.dataTransfer.setData('text/plain', path);
     } catch { /* 忽略 */ }
   });
-  list.addEventListener('dragend', () => { from = null; clearMarks(); });
+  list.addEventListener('dragend', () => { from = null; startPt = null; clearMarks(); });
 
   list.addEventListener('dragover', (e) => {
     // 无条件 preventDefault + 显式 dropEffect：fileList 内部任何位置都不弹 no-drop。
@@ -2313,8 +2511,16 @@ function bindPaperDrag(list) {
     const targetFolder = folderLi ? folderLi.dataset.path : dropTargetFolder(e);
     if (payload.kind === 'file') {
       const li = e.target.closest?.('li[data-path]:not(.folder)');
+      // 拖到自己身上 = 位置没变：必须 no-op。旧实现会「移除后找不到 target」把它 append 到最末尾
+      //（用户实测：选中一个文档轻轻拖一点、松手，文件直接跑到列表最下面）。
+      if (li && fileRowPath(li) === payload.path) return;
       // 拖到「自己所在的文件夹」行：无操作（服务端也会 no-op，前端先拦省一次请求）
       if (targetFolder && targetFolder === folderOf(payload.path)) return;
+      // 落在列表空白处：距离不够近（轻轻一拖）或本来就在根目录 → 视为取消，避免文件被甩到最下面
+      if (!targetFolder && !li) {
+        const moved = startPt ? Math.hypot((Number(e.clientX) || 0) - startPt.x, (Number(e.clientY) || 0) - startPt.y) : 999;
+        if (moved < 60 || folderOf(payload.path) === '') return;
+      }
       // 同目录 + 落在 PDF 行上 → 排序；其余一律移动
       if (!targetFolder && li && folderOf(li.dataset.path) === folderOf(payload.path)) {
         const r = li.getBoundingClientRect();
@@ -2366,14 +2572,18 @@ async function moveItem(from, to) {
 }
 
 let paperOrderSave = Promise.resolve();
-/** 同目录排序：order 升级为相对路径数组，未排序项按 mtime 倒序排最前（服务端行为） */
+/** 同目录排序：order 升级为相对路径数组，未排序项保持原有位置（不再被挤到末尾） */
 function applyPaperOrder(from, target, after) {
+  // 拖到自己身上 = 没有移动：必须直接返回，否则「移除后找不到 target」会把它塞到最下面
+  //（用户实测：轻轻拖一点、松手落在自己那一行，文件直接跑到列表最下面）。
+  if (!from || from === target) return;
   const paths = (state.papers || []).map((p) => p.path || p.name);
   const i = paths.indexOf(from);
   if (i < 0) return;
   paths.splice(i, 1);
   const t = paths.indexOf(target);
-  if (t < 0) paths.push(from);
+  // 目标不在了（被删/被移走）：放回原来的位置，绝不 append 到末尾
+  if (t < 0) paths.splice(i, 0, from);
   else paths.splice(after ? t + 1 : t, 0, from);
   const by = new Map((state.papers || []).map((p) => [p.path || p.name, p]));
   state.papers = paths.map((n) => by.get(n)).filter(Boolean);
@@ -2416,6 +2626,14 @@ function initFileContextMenu() {
     e.preventDefault();
     const folderLi = e.target.closest?.('li.folder[data-path]');
     const fileLi = e.target.closest?.('li[data-path]:not(.folder)');
+    // 已多选：右键落在某个已选文件上（或在多选状态里右键别的文件）→ 批量菜单
+    if (fileLi && state.fileSel.size > 1) {
+      const path = fileLi.dataset.path;
+      if (!state.fileSel.has(path)) setFileSelection([path], { anchor: path });
+      else syncFileSelection();
+      showBatchFileCtx(e.clientX, e.clientY);
+      return;
+    }
     const target = folderLi
       ? { kind: 'folder', path: folderLi.dataset.path, name: folderLi.dataset.folder }
       : fileLi
@@ -2423,6 +2641,41 @@ function initFileContextMenu() {
         : { kind: 'blank' };
     showFileCtx(e.clientX, e.clientY, target);
   });
+}
+
+/** 多选后的右键菜单：批量删除 / 批量移动 / 取消选择 */
+function showBatchFileCtx(x, y) {
+  const menu = $('#fileCtx');
+  if (!menu) return;
+  const paths = [...state.fileSel];
+  menu.hidden = false;
+  menu.innerHTML = '';
+  const item = (label, fn, danger) => el('button', {
+    type: 'button',
+    class: `ctx-item${danger ? ' danger' : ''}`,
+    text: label,
+    onclick: (e) => { e.stopPropagation(); menu.hidden = true; fn(); },
+  });
+  menu.append(el('div', { class: 'ctx-title', text: `已选 ${paths.length} 个文件` }));
+  menu.append(item(`删除所选（${paths.length}）`, () => deleteSelectedFiles(), true));
+  menu.append(item('移动到…', () => showBatchMoveTargets(menu, paths)));
+  menu.append(item('取消选择', () => clearFileSelection()));
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+}
+
+/** 批量移动的目标文件夹列表（根 + 所有文件夹） */
+function showBatchMoveTargets(menu, paths) {
+  menu.innerHTML = '';
+  menu.append(el('div', { class: 'ctx-title', text: `移动 ${paths.length} 个文件到` }));
+  const pick = (to) => { menu.hidden = true; moveSelectedFiles(to); };
+  menu.append(el('button', { type: 'button', class: 'ctx-item', text: '根目录', onclick: () => pick('') }));
+  for (const f of state.folders || []) {
+    menu.append(el('button', { type: 'button', class: 'ctx-item', text: f.path, onclick: () => pick(f.path) }));
+  }
+  const r = menu.getBoundingClientRect();
+  menu.style.top = `${Math.min(parseFloat(menu.style.top) || 0, window.innerHeight - r.height - 8)}px`;
 }
 
 function showFileCtx(x, y, target) {

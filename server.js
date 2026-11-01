@@ -347,7 +347,9 @@ function normalizeRel(p) {
 
 /** 递归收集 papers/ 的文件夹树。rel 统一用 '/' 分隔，根目录 rel = ''。
  *  返回 { folders: [{name,path,count}], papers: [{name,folder,path,size,mtime,docId,url}] }
- *  排序：每个目录内，进过 order 的按数组顺序，未进过的按 mtime 倒序排最前（沿用旧规则）。 */
+ *  排序：手动排过序（papers-order.json）的按它；没排过的**保持目录扫描顺序、排在已排序项之后**，
+ *  并且首次列目录时把看到的顺序写进 order 冻结下来 —— 用户口径「左侧文档不应该做自动排序」，
+ *  新导入的文件因此追加在末尾，不会因为修改时间被自动插到最前面。 */
 async function listPapers() {
   const folders = [];
   const papers = [];
@@ -374,12 +376,13 @@ async function listPapers() {
         items.push({ kind: 'file', name: e.name, rel: childRel, mtime: st.mtimeMs, size: st.size });
       }
     }
+    items.forEach((it, i) => { it.__i = i; });
     items.sort((a, b) => {
       const ra = rank.has(a.rel) ? rank.get(a.rel) : -1;
       const rb = rank.has(b.rel) ? rank.get(b.rel) : -1;
-      if (ra === -1 && rb === -1) return b.mtime - a.mtime;
-      if (ra === -1) return -1;
-      if (rb === -1) return 1;
+      if (ra === -1 && rb === -1) return a.__i - b.__i;   // 都没排过：保持扫描顺序（不按时间重排）
+      if (ra === -1) return 1;                             // 新出现的排到已排序项之后
+      if (rb === -1) return -1;
       return ra - rb;
     });
     return items;
@@ -410,6 +413,19 @@ async function listPapers() {
   const byDir = new Map();
   for (const p of papers) byDir.set(p.folder, (byDir.get(p.folder) || 0) + 1);
   for (const f of folders) f.count = byDir.get(f.path) || 0;
+
+  /* 「不做自动排序」：把这次看到的完整顺序冻结进 order 文件（已有的条目保持原顺序，
+     新条目按它们出现的位置追加到末尾）。之后只有用户手动拖拽才会改变顺序。 */
+  const seen = [...folders.map((f) => f.path), ...papers.map((p) => p.path)];
+  const seenSet = new Set(seen);
+  const kept = order.filter((rel) => seenSet.has(rel));
+  const keptSet = new Set(kept);
+  const missing = seen.filter((rel) => !keptSet.has(rel));
+  if (missing.length || kept.length !== order.length) {
+    const next = [...kept, ...missing];
+    await writePaperOrder(next).catch(() => {});
+    next.forEach((rel, i) => rank.set(rel, i));
+  }
   return { folders, papers };
 }
 

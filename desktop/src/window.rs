@@ -286,6 +286,9 @@ pub fn run(url: String, background: bool) -> ! {
         .unwrap_or_else(Instant::now);
     let mut last_max = window.is_maximized();
     let mut last_full = is_fullscreen(&window);
+    // 从「最大化」直接进全屏时，Windows 会留下任务栏位置的黑条 / 一圈白边；
+    // 先进全屏前先还原窗口，退出全屏后再恢复最大化（用户实测的修复方式）。
+    let mut fs_restore_max = false;
 
     event_loop.run(move |event, _event_loop, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -311,7 +314,19 @@ pub fn run(url: String, background: bool) -> ! {
                     // 全屏：页面传 on 就按它执行（Esc 退出走这条），不传就切换。
                     WindowAction::Fullscreen(on) => {
                         let want = on.unwrap_or_else(|| !is_fullscreen(&window));
-                        set_fullscreen(&window, want);
+                        if want && !is_fullscreen(&window) {
+                            fs_restore_max = window.is_maximized();
+                            if fs_restore_max {
+                                window.set_maximized(false);
+                            }
+                            set_fullscreen(&window, true);
+                        } else if !want && is_fullscreen(&window) {
+                            set_fullscreen(&window, false);
+                            if fs_restore_max {
+                                window.set_maximized(true);
+                                fs_restore_max = false;
+                            }
+                        }
                     }
                     WindowAction::Close => {
                         let logical = window.inner_size().to_logical::<f64>(window.scale_factor());
