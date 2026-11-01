@@ -1,6 +1,6 @@
 import { $, $$, el, appendAll, toast, toastAction, cleanText, renderMarkdown, escapeHtml, debounce, throttle, clamp, fmtSize } from './util.js';
 import { iconEl, iconHTML, hasIcon } from './icons.js';
-import { PdfViewer, clampZoomSpeed, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX } from './pdfview.js';
+import { PdfViewer, clampZoomSpeed, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX, readPdfPages, renderPdfPageImage } from './pdfview.js';
 import { tabsFeatureEnabled, loadWorkspace, saveWorkspace, createTabBar, pushClosedTab, popClosedTab, TABS_MAX } from './tabs.js';
 import { OPS, opById } from './ops.js';
 import {
@@ -7605,8 +7605,82 @@ function agentSearchPages(text, query, k = 4) {
 function createAgentRuntime(pending, { scannedDoc = false } = {}) {
   const numPages = Number(viewer?.numPages) || 0;
   const reading = pending.reading || null;
+  /* 跨论文读取：papers 文件夹里所有已导入论文（懒加载一次；图片材料收集起来随最终回答一起发） */
+  const other = { papers: null, images: [] };
+  const loadPapers = async () => {
+    if (other.papers) return other.papers;
+    const r = await fetch('/api/papers');
+    if (!r.ok) throw new Error(`读取 papers 文件夹失败 HTTP ${r.status}`);
+    const j = await r.json();
+    other.papers = (Array.isArray(j.papers) ? j.papers : []).map((p, i) => ({
+      index: i + 1, name: p.name, folder: p.folder || '', path: p.path || p.name,
+      docId: p.docId || '', url: p.url || `/api/pdf?path=${encodeURIComponent(p.path || p.name)}`,
+    }));
+    return other.papers;
+  };
+  const findPaper = (nameArg) => {
+    const raw = String(nameArg || '').replace(/\s+/g, ' ').trim();
+    const q = raw.toLowerCase();
+    const list = other.papers || [];
+    const exact = list.find((p) => p.name.toLowerCase() === q || p.path.toLowerCase() === q);
+    if (exact) return exact;
+    const hit = list.find((p) => p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q));
+    return hit || null;
+  };
+  const paperBrief = (p) => ({ name: p.name, folder: p.folder, path: p.path, index: p.index });
   return {
     numPages,
+    /** 跨论文：已加入页图材料（send() 会把它们附到最终回答） */
+    extraImages: other.images,
+    async listPapers() {
+      const list = await loadPapers();
+      return {
+        count: list.length,
+        papers: list.slice(0, 80).map((p) => ({ index: p.index, name: p.name, folder: p.folder, path: p.path, docId: p.docId })),
+        current: state.doc?.name || '',
+        note: '顺序与左侧文件树一致；用户说「第 N 篇」按 index 数。',
+      };
+    },
+    async readOtherPaper(args = {}) {
+      await loadPapers();
+      const paper = findPaper(args.name);
+      if (!paper) return { error: `没有找到论文「${String(args.name || '').slice(0, 60)}」，请先用 list_papers 看有哪些文件`, papers: (other.papers || []).slice(0, 20).map(paperBrief) };
+      if (args.query) {
+        const got = await readPdfPages(paper.url, { maxPages: 30 });
+        const terms = searchTerms(args.query).map((t) => t.toLowerCase()).filter((t) => t.length >= 2);
+        const hits = [];
+        for (const row of got.pages) {
+          const lower = row.text.toLowerCase();
+          if (!lower) continue;
+          const at = terms.length ? Math.min(...terms.map((t) => { const i = lower.indexOf(t); return i < 0 ? Number.POSITIVE_INFINITY : i; })) : lower.indexOf(String(args.query).toLowerCase());
+          if (!Number.isFinite(at) || at < 0) continue;
+          const start = Math.max(0, at - 100);
+          hits.push({ page: row.page, snippet: row.text.slice(start, start + 420).replace(/\s+/g, ' ').trim() });
+          if (hits.length >= 6) break;
+        }
+        return { name: paper.name, folder: paper.folder, numPages: got.numPages, query: args.query, hits, note: hits.length ? '' : '没有命中，可以换个词或直接给 page 读那一页' };
+      }
+      const page = Number(args.page) || 1;
+      const got = await readPdfPages(paper.url, { pages: [page] });
+      const row = got.pages[0] || { page, text: '' };
+      const text = String(row.text || '').slice(0, 8000);
+      return {
+        name: paper.name, folder: paper.folder, index: paper.index, page, numPages: got.numPages,
+        chars: text.length, text,
+        scanned: text.length < 40,
+        note: text.length < 40 ? '这一页几乎没有文本层（可能是扫描件），可用 read_other_paper_image 取页图' : '',
+      };
+    },
+    async readOtherPaperImage(args = {}) {
+      await loadPapers();
+      const paper = findPaper(args.name);
+      if (!paper) return { error: `没有找到论文「${String(args.name || '').slice(0, 60)}」，请先用 list_papers` };
+      const page = Number(args.page) || 1;
+      if (other.images.length >= 4) return { error: '本次已加入 4 张页图，先用它们回答' };
+      const shot = await renderPdfPageImage(paper.url, page);
+      other.images.push({ ...shot, label: `《${paper.name}》第 ${page} 页` });
+      return { name: paper.name, page, attached: true, count: other.images.length, note: '已加入页图材料，最终回答会附上这张图' };
+    },
     async getReadingState() {
       return {
         docTitle: state.doc?.name || '',
@@ -7714,8 +7788,9 @@ function createAgentProgress(entry) {
 async function runAgentReadPath({ pending, reading, context, references, sources, images, scannedDoc, baseMaterials, signal, onStep }) {
   // 允许测试注入更短的超时，避免用例等 25 秒
   const limits = window.__agentTestLimits && typeof window.__agentTestLimits === 'object' ? window.__agentTestLimits : {};
-  const totalTimeoutMs = Math.max(1000, Number(limits.totalTimeoutMs) || 25000);
-  const callTimeoutMs = Math.max(500, Number(limits.callTimeoutMs) || 12000);
+  // 跨论文读取要临时打开别的 PDF，比只看当前文档慢，总预算放宽
+  const totalTimeoutMs = Math.max(1000, Number(limits.totalTimeoutMs) || 40000);
+  const callTimeoutMs = Math.max(500, Number(limits.callTimeoutMs) || 15000);
   try {
     const base = askMessages({ ...baseMaterials, availablePages: baseMaterials.availablePages || [], scopeLabel: 'AI 自行读取', objectLabel: objectLabelFor(pending, reading) });
     const system = String(base[0]?.content || '');
@@ -7743,6 +7818,8 @@ async function runAgentReadPath({ pending, reading, context, references, sources
       directContent: String(run.directContent || '').trim().length >= 120 ? String(run.directContent).trim() : '',
       pages: basisPages,
       imagePages: run.imagePages || [],
+      /* 跨论文读取时加入的其它论文页图（已渲染好 dataURL，交给 send() 附到最终请求） */
+      extraImages: runtime.extraImages || [],
       basis: `本次依据：AI 自行读取 ${basisPages.length ? `p.${basisPages.join('、')}` : '（未读页）'}（${run.rounds} 轮 / ${stats.calls} 次工具）`,
       stats,
     };
@@ -9247,7 +9324,7 @@ async function send(retryPending = null) {
     // P2.5 v1 边界：只对「纯文本问题 + 文本型 PDF」启用 Agent；
     // 带附件（截图/加进来的文字）或扫描件时，P1.5 的精确材料已经够用，
     // 再让模型自己翻页只会多花一轮工具（且扫描件页图走视觉路径更稳）。
-    const agentAllowed = agentReadEnabled() && !shotOnly && !pending.attachments.length && !scannedDoc
+    const agentAllowed = agentReadEnabled() && !shotOnly && !pending.attachments.length
       && !!pending.docId && !!state.doc && !!viewer?.pdf;
     let agentRun = null;
     let agentProgress = null;
@@ -9277,8 +9354,9 @@ async function send(retryPending = null) {
     }
     // ② 上下文。扫描件：页面图片（+ 整篇类问题的采样页）；普通论文：整篇全文 / 索引 + 相关段落。
     // 只发截图（没写问题）时不吃「整篇」范围：截图本身就是材料，塞整篇只会让模型顺势扩写整个讲义。
-    // Agent 成功时不再预装材料（它自己读过的页就是材料）。
-    if (!agentRun && scannedDoc) {
+    // Agent 成功时不再预装文本材料（它自己读过的页就是材料）；但扫描件仍带上页图：
+    // 页型是扫描件时 Agent 工具可能只读到空文本，保留 P1.5 的页图材料才不至于退步（跨论文读取也照样可用）。
+    if (scannedDoc) {
       try {
         docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text, {
           page: pending.firstPage || reading.page,
@@ -9363,6 +9441,8 @@ async function send(retryPending = null) {
         if (extraPages.length) pageImages = [...pageImages, ...await renderScanPages(extraPages.slice(0, 5))];
       } catch { /* 取页图失败不影响回答 */ }
     }
+    // 跨论文读取：其它论文的页图（read_other_paper_image 拿到的 dataURL，带label标明是哪篇）
+    if (agentRun?.extraImages?.length) pageImages = [...pageImages, ...agentRun.extraImages.slice(0, 4)];
     if (images.length || pageImages.length) {
       const last = messages[messages.length - 1];
       const parts = [{ type: 'text', text: last.content }];
@@ -9371,7 +9451,7 @@ async function send(retryPending = null) {
       }
       for (const im of images) parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
       if (pageImages.length) {
-        parts[0].text = `${parts[0].text}\n\n${pageImages.map((im) => `【第${im.page}页原图】见附图`).join('\n')}`;
+        parts[0].text = `${parts[0].text}\n\n${pageImages.map((im) => (im.label ? `【${im.label}原图】见附图` : `【第${im.page}页原图】见附图`)).join('\n')}`;
         for (const im of pageImages) parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
       }
       last.content = parts;

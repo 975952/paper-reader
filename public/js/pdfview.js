@@ -125,6 +125,88 @@ export async function extractPdfText(url, { maxPages = 40, onProgress } = {}) {
   }
 }
 
+/* ── 跨论文读取（Agent 的 list_papers / read_other_paper 用）：打开**任意** PDF，不动当前文档 ── */
+async function openPdfDocument(url) {
+  const lib = await initPdfjs();
+  const task = lib.getDocument({
+    url,
+    cMapUrl: '/vendor/cmaps/',
+    cMapPacked: true,
+    standardFontDataUrl: '/vendor/standard_fonts/',
+    wasmUrl: '/vendor/wasm/',
+    useSystemFonts: true,
+    isEvalSupported: false,
+  });
+  return { lib, pdf: await task.promise };
+}
+
+function textOfContent(tc) {
+  let out = '';
+  for (const it of tc.items) {
+    if (typeof it.str !== 'string') continue;
+    out += it.str;
+    if (it.hasEOL) out += '\n';
+  }
+  return out.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n');
+}
+
+/** 读任意 PDF 的若干页（pages 不传就按顺序读前 maxPages 页），返回 { numPages, pages:[{page,text}] } */
+export async function readPdfPages(url, { pages = [], maxPages = 30, onProgress } = {}) {
+  const { pdf } = await openPdfDocument(url);
+  try {
+    const total = pdf.numPages;
+    const wanted = (Array.isArray(pages) ? pages : [])
+      .map((n) => Number(n))
+      .filter((n) => Number.isInteger(n) && n >= 1 && n <= total)
+      .slice(0, 20);
+    const list = wanted.length ? wanted : Array.from({ length: Math.min(total, maxPages) }, (_, i) => i + 1);
+    const out = [];
+    for (const n of list) {
+      try {
+        const page = await pdf.getPage(n);
+        const tc = await page.getTextContent();
+        out.push({ page: n, text: textOfContent(tc) });
+      } catch {
+        out.push({ page: n, text: '' });
+      }
+      onProgress?.(n, total);
+    }
+    return { numPages: total, pages: out };
+  } finally {
+    try { pdf.destroy(); } catch { /* 忽略 */ }
+  }
+}
+
+/** 把任意 PDF 的某一页渲染成图片（扫描件跨论文阅读用），返回 { dataUrl, width, height, page } */
+export async function renderPdfPageImage(url, pageNum, { maxDim = 1400, quality = 0.82 } = {}) {
+  const { pdf } = await openPdfDocument(url);
+  try {
+    const n = Number(pageNum) || 1;
+    if (n < 1 || n > pdf.numPages) throw new Error(`页码超出范围（1–${pdf.numPages}）`);
+    const page = await pdf.getPage(n);
+    const base = page.getViewport({ scale: 1 });
+    const scale = Math.min(2.2, Math.max(0.5, maxDim / Math.max(base.width, base.height)));
+    const viewport = page.getViewport({ scale });
+    const width = Math.max(1, Math.floor(viewport.width));
+    const height = Math.max(1, Math.floor(viewport.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const paper = paperColor();
+    ctx.fillStyle = paper;
+    ctx.fillRect(0, 0, width, height);
+    await page.render({ canvasContext: ctx, viewport, background: paper }).promise;
+    let dataUrl = canvas.toDataURL('image/jpeg', quality);
+    if (dataUrl.length > 900_000) dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+    canvas.width = 0;
+    canvas.height = 0;
+    return { dataUrl, width, height, page: n, numPages: pdf.numPages };
+  } finally {
+    try { pdf.destroy(); } catch { /* 忽略 */ }
+  }
+}
+
 export class PdfViewer {
   /**
    * @param {HTMLElement} container 滚动容器 .viewer

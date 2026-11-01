@@ -94,12 +94,58 @@ export const AGENT_TOOL_SPECS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'list_papers',
+      description: '列出 papers 文件夹里所有已导入的论文（顺序与左侧文件树一致）：序号、文件名、所在文件夹。不需要参数。',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_other_paper',
+      description: '读取 papers 文件夹里**其它论文**（不是当前打开的这篇）的正文：给文件名和页码读那一页，或给 query 在整篇里检索关键词。用于回答关于其它论文的问题（例如「第一篇论文的第二句话是什么」）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '论文文件名（可只给唯一片段，如 1512.03385v1 或 ResNet）' },
+          page: { type: 'integer', description: '页码，从 1 开始；不给则按 query 检索' },
+          query: { type: 'string', description: '在论文整篇里检索的关键词（2–200 字）' },
+        },
+        required: ['name'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_other_paper_image',
+      description: '把 papers 文件夹里某一篇论文的某一页原图加入本次回答材料（该页没有文本层/扫描件时用）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '论文文件名（可只给唯一片段）' },
+          page: { type: 'integer', description: '页码，从 1 开始' },
+        },
+        required: ['name', 'page'],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 /** 放进 system 末尾的「工具模式」说明（简短，不改变原有规则） */
 export const AGENT_SYSTEM_NOTE = [
-  '【工具模式】你可以使用只读工具自己决定读哪些页，最多 3 轮、每轮最多 3 个工具。',
-  '先看 get_reading_state；不确定去哪页就先 search_paper 再 read_page；扫描件用 read_scan_page / read_page_image。',
+  '【工具模式】你可以使用只读工具自己决定读哪些材料，最多 3 轮、每轮最多 3 个工具。',
+  '【能看的材料】除了当前打开的论文（read_page / search_paper / get_reading_state），你还可以看 papers 文件夹里**所有已导入的论文**：',
+  '先用 list_papers 找到目标文件（返回顺序 = 左侧文件树顺序；用户说「第 N 篇」时按这个序号数），',
+  '再用 read_other_paper({name, page}) 读指定页、用 read_other_paper({name, query}) 在整篇里检索；扫描件/无文本层时用 read_other_paper_image 取页图。',
+  '用户问「某篇论文的第 N 句话 / 第几段」时：先把那一页正文读出来，再按句号/问号/感叹号/分号等完整句子边界**准确数出第 N 句**，原样引用，并说明出自哪篇论文第几页；不要凭印象改写。',
+  '**不要说「我拿不到 papers 文件夹」「看不到其它论文」**——你有 list_papers / read_other_paper 工具，先查再读。',
+  '回答**其它论文**时不要用〔p.N〕这种引用格式标它的页码（那会跳到当前打开的论文）；用「《文件名》第 N 页」的文字说明。',
   '只依据实际读到的材料回答；引用页码只能来自你读过的页或材料里出现的页。',
   '材料够了就直接给最终回答（不要再调用工具）；工具调用失败时基于已有材料作答，不要编造。',
 ].join('\n');
@@ -132,6 +178,23 @@ export function validateToolCall(call, { numPages = 0 } = {}) {
     const topic = clip(args.topic, 100).trim();
     if (!topic) return { error: 'topic 不能为空' };
     return { name, args: { topic } };
+  }
+  if (name === 'list_papers') return { name, args: {} };
+  if (name === 'read_other_paper') {
+    const paper = clip(args.name, 200).trim();
+    if (!paper) return { error: 'name 不能为空（论文文件名或片段）' };
+    const page = toInt(args.page);
+    const query = clip(args.query, 200).trim();
+    if (page === null && !query) return { error: 'read_other_paper 需要 page 或 query 之一' };
+    if (page !== null && page < 1) return { error: 'page 必须是 ≥1 的整数' };
+    return { name, args: { name: paper, ...(page !== null ? { page } : {}), ...(query ? { query } : {}) } };
+  }
+  if (name === 'read_other_paper_image') {
+    const paper = clip(args.name, 200).trim();
+    const page = toInt(args.page);
+    if (!paper) return { error: 'name 不能为空（论文文件名或片段）' };
+    if (page === null || page < 1) return { error: 'page 必须是 ≥1 的整数' };
+    return { name, args: { name: paper, page } };
   }
   return { error: `工具参数不合法：${name}` };
 }
@@ -175,6 +238,9 @@ export async function executeToolCall(call, runtime) {
     if (name === 'read_scan_page') return { ok: true, value: await runtime.readScanPage(args.page) };
     if (name === 'read_page_image') return { ok: true, value: await runtime.readPageImage(args.page) };
     if (name === 'read_memory') return { ok: true, value: await runtime.readMemory(args.topic) };
+    if (name === 'list_papers') return { ok: true, value: await runtime.listPapers() };
+    if (name === 'read_other_paper') return { ok: true, value: await runtime.readOtherPaper(args) };
+    if (name === 'read_other_paper_image') return { ok: true, value: await runtime.readOtherPaperImage(args) };
     return { ok: false, error: `未知工具：${name}` };
   } catch (e) {
     return { ok: false, error: `工具执行失败：${e?.message || e}` };
@@ -192,6 +258,14 @@ export function toolStepLabel(call) {
   if (name === 'read_scan_page') return `读取扫描页第 ${toInt(args.page) || '?'} 页`;
   if (name === 'read_page_image') return `加入第 ${toInt(args.page) || '?'} 页原图`;
   if (name === 'read_memory') return `读取学习记忆：${clip(args.topic, 30)}`;
+  if (name === 'list_papers') return '查看 papers 文件夹';
+  if (name === 'read_other_paper') {
+    const paper = clip(args.name, 40);
+    const page = toInt(args.page);
+    if (page) return `读取《${paper}》第 ${page} 页`;
+    return `在《${paper}》里检索「${clip(args.query, 40)}」`;
+  }
+  if (name === 'read_other_paper_image') return `读取《${clip(args.name, 40)}》第 ${toInt(args.page) || '?'} 页原图`;
   return name || '调用工具';
 }
 
@@ -221,6 +295,23 @@ export function summarizeToolResult(call, result) {
     const hits = Number(v.hits ?? v.items?.length ?? v.entries?.length ?? 0);
     return `读取学习记忆（${Number.isFinite(hits) ? hits : 0} 条）`;
   }
+  if (name === 'list_papers') {
+    const list = Array.isArray(v.papers) ? v.papers : [];
+    const head = list.slice(0, 6).map((p) => `${p.index}. ${p.name}${p.folder ? `（${p.folder}/）` : ''}`).join('；');
+    return `papers 文件夹共 ${v.count ?? list.length} 篇：${head}${list.length > 6 ? ' …' : ''}`;
+  }
+  if (name === 'read_other_paper') {
+    const paper = clip(v.name || args.name, 40);
+    if (Array.isArray(v.hits)) {
+      const pages = v.hits.map((h) => `p.${h.page}`).join('、');
+      return v.hits.length
+        ? `在《${paper}》检索「${clip(args.query, 40)}」→ ${pages}`
+        : `在《${paper}》检索「${clip(args.query, 40)}」→ 没有命中`;
+    }
+    if (v.scanned) return `《${paper}》第 ${v.page || args.page} 页没有文本层（可改用页图）`;
+    return `《${paper}》第 ${v.page || args.page} 页（${String(v.text || '').length.toLocaleString()} 字，共 ${v.numPages || '?'} 页）`;
+  }
+  if (name === 'read_other_paper_image') return `加入《${clip(v.name || args.name, 40)}》第 ${v.page || args.page} 页原图`;
   return `${toolStepLabel(call)}完成`;
 }
 
@@ -295,9 +386,13 @@ export async function runAgentLoop({
       });
       if (result.ok) {
         const v = result.value || {};
-        if (Number.isInteger(v.page)) pages.add(v.page);
-        for (const row of Array.isArray(v.pages) ? v.pages : []) {
-          if (Number.isInteger(row?.page)) pages.add(row.page);
+        // 只把「当前打开论文」的页码收进依据白名单：其它论文的页码当普通文字，不做跳页按钮
+        const currentDocPageTool = call.name === 'read_page' || call.name === 'read_scan_page' || call.name === 'read_page_image';
+        if (currentDocPageTool && Number.isInteger(v.page)) pages.add(v.page);
+        if (call.name === 'search_paper') {
+          for (const row of Array.isArray(v.pages) ? v.pages : []) {
+            if (Number.isInteger(row?.page)) pages.add(row.page);
+          }
         }
         if (call.name === 'read_page_image' && Number.isInteger(v.page)) imagePages.add(v.page);
       }
