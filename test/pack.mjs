@@ -106,6 +106,9 @@ const REQUIRED_PUBLIC = [
   'public/js/app.js',
   'public/js/ai.js',
   'public/js/teaching.js',
+  // B 线 P1：多标签工作区（tabs.css 是新增样式文件，同样必须进包）
+  'public/js/tabs.js',
+  'public/tabs.css',
 ];
 const missingPublic = REQUIRED_PUBLIC.filter((rel) => !files.some((f) => f.rel.replace(/\\/g, '/') === rel));
 if (missingPublic.length) {

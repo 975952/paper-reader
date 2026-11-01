@@ -1,6 +1,7 @@
 import { $, $$, el, appendAll, toast, toastAction, cleanText, renderMarkdown, escapeHtml, debounce, throttle, clamp, fmtSize } from './util.js';
 import { iconEl, iconHTML, hasIcon } from './icons.js';
 import { PdfViewer, clampZoomSpeed, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX } from './pdfview.js';
+import { tabsFeatureEnabled, loadWorkspace, saveWorkspace, createTabBar, pushClosedTab, popClosedTab, TABS_MAX } from './tabs.js';
 import { OPS, opById } from './ops.js';
 import {
   TEACHING_OPS, teachingOpById, TEACHING_PROMPT_VERSION, WALK_CONTINUE_SYS, walkReteachSys,
@@ -792,10 +793,38 @@ let serverState = {};
   const migrated = applyPanelMigration();
   if (migrated) { applyPanels(); applyResponsiveLayout(); }
   await refreshPaperList();
-  await maybeReopenLast();
+  initTabs();
+  if (tabsFeatureEnabled()) await bootTabWorkspace();
+  else await maybeReopenLast();
   checkConfigWarning();
 })();
 
+
+/* ------------------------------------------------------------ B 线：多标签工作区（P1 冷切换） */
+const tabsStore = { tabs: [], active: '', bar: null, booted: false };
+
+function tabsPersist() {
+  saveWorkspace({ tabs: tabsStore.tabs, active: tabsStore.active });
+}
+
+function syncHomeBtnVisibility() {
+  const home = $('#homeBtn');
+  if (home) home.classList.toggle('hidden', tabsFeatureEnabled() && tabsStore.tabs.length > 0);
+}
+
+function tabsSyncBar() {
+  if (tabsStore.bar) tabsStore.bar.render(tabsStore.tabs, tabsStore.active);
+  syncHomeBtnVisibility();
+}
+
+function tabFor(target) {
+  return {
+    docId: String(target.docId || ''),
+    name: String(target.name || ''),
+    url: String(target.url || ''),
+    path: String(target.path || target.name || ''),
+  };
+}
 
 const VIEWER_MIN = 420;
 const RAIL_W = 40;
@@ -1635,6 +1664,11 @@ function initViewer() {
     // 引用定位：〔p.N‖原文片段〕 → 跳页 + 橙色高亮 + 取消
     jumpToQuote, clearQuoteHighlight, decoratePageRefs,
     get quoteState() { return { ...quoteState }; },
+    // B 线多标签工作区（P1）：标签列表 / 活动标签 / 开关 / 直接操作
+    get tabs() { return tabsStore.tabs.slice(); },
+    get activeTab() { return tabsStore.active; },
+    get tabsEnabled() { return tabsFeatureEnabled(); },
+    openDoc, closeTab, activateTab, moveTab, reopenClosedTab, goWelcome,
     // P2.5 Agent 读取：开关（写 localStorage）、默认值、最近一次运行统计
     get agentRead() { return agentReadEnabled(); },
     setAgentRead(on) { writeFlag('reader.agentRead', !!on); return agentReadEnabled(); },
@@ -3105,7 +3139,217 @@ async function importLocalFiles(files) {
   if (failed.length) console.warn('[import] 导入失败的 PDF：', failed);
 }
 
-async function openDoc({ name, url, docId, path }) {
+
+/**
+ * 打开文档（多标签包装）：B 线 P1 的冷切换 —— 真正的加载/状态清理仍由 openDocColdSwitch 完成，
+ * 这里只维护「工作区标签列表 + 活动标签 + 持久化」。
+ */
+async function openDoc(target = {}) {
+  if (!tabsFeatureEnabled() || !tabsStore.booted) return openDocColdSwitch(target);
+  const docId = String(target.docId || '');
+  if (!docId) return openDocColdSwitch(target);
+  if (tabsStore.tabs.some((t) => t.docId === docId)) {
+    if (state.doc?.docId === docId) {
+      tabsStore.active = docId;
+      tabsSyncBar();
+      tabsPersist();
+      return;
+    }
+    await openDocColdSwitch(target);
+    if (state.doc?.docId === docId) {
+      tabsStore.active = docId;
+      tabsSyncBar();
+      tabsPersist();
+    }
+    return;
+  }
+  if (tabsStore.tabs.length >= TABS_MAX) {
+    toast('最多同时打开 ' + TABS_MAX + ' 篇论文，先关掉一个标签再打开', 'err', 4000);
+    return;
+  }
+  await openDocColdSwitch(target);
+  if (state.doc?.docId !== docId) return;   // 打开失败：不动工作区
+  tabsStore.tabs.push(tabFor(target));
+  tabsStore.active = docId;
+  tabsSyncBar();
+  tabsPersist();
+}
+
+/** 关闭标签：删列表 → 有邻居就切过去（冷切换）→ 最后一个回 Welcome */
+async function closeTab(docId) {
+  const id = String(docId || '');
+  const idx = tabsStore.tabs.findIndex((t) => t.docId === id);
+  if (idx < 0) return;
+  const [tab] = tabsStore.tabs.splice(idx, 1);
+  pushClosedTab(tab);
+  const wasActive = state.doc?.docId === id;
+  if (!tabsStore.tabs.length) {
+    await goWelcome();
+    return;
+  }
+  const next = tabsStore.tabs[Math.min(idx, tabsStore.tabs.length - 1)];
+  if (wasActive) {
+    tabsStore.active = next.docId;
+    await openDocColdSwitch({ name: next.name, url: next.url, docId: next.docId, path: next.path });
+    if (state.doc?.docId !== next.docId) tabsStore.tabs = tabsStore.tabs.filter((t) => t.docId !== next.docId);
+  }
+  if (!tabsStore.tabs.length) {
+    await goWelcome();
+    return;
+  }
+  if (!tabsStore.tabs.some((t) => t.docId === state.doc?.docId)) tabsStore.active = tabsStore.tabs[0].docId;
+  tabsSyncBar();
+  tabsPersist();
+}
+
+/** 激活标签（与 openDoc 同一条路：已打开就只激活，切文档走冷切换） */
+async function activateTab(docId) {
+  const tab = tabsStore.tabs.find((t) => t.docId === docId);
+  if (tab) await openDoc({ name: tab.name, url: tab.url, docId: tab.docId, path: tab.path });
+}
+
+/** 拖拽排序 */
+function moveTab(docId, index) {
+  const from = tabsStore.tabs.findIndex((t) => t.docId === docId);
+  if (from < 0) return;
+  const [tab] = tabsStore.tabs.splice(from, 1);
+  const to = Math.max(0, Math.min(Number(index) || 0, tabsStore.tabs.length));
+  tabsStore.tabs.splice(to, 0, tab);
+  tabsSyncBar();
+  tabsPersist();
+}
+
+/** Ctrl+Shift+T：重开最近关闭的标签 */
+async function reopenClosedTab() {
+  const tab = popClosedTab();
+  if (!tab) return;
+  await openDoc({ name: tab.name, url: tab.url, docId: tab.docId, path: tab.path });
+}
+
+/** 关掉全部标签 → Welcome（现有 #home 书架页；文档对象保留，只是不在工作区里） */
+async function goWelcome() {
+  cancelSearch({ clearInput: true, close: true, focus: false });
+  abortStream('document-switch');
+  if (state.doc) {
+    try { await saveSessionNow(); } catch { /* 保存失败不挡回首页 */ }
+  }
+  tabsStore.active = '';
+  tabsStore.tabs = [];
+  tabsSyncBar();
+  tabsPersist();
+  cleanStaleLastDoc();
+  setView('home');
+  $('#docName').textContent = '未打开文档';
+  $('#docName').title = '';
+  document.title = '论文阅读器';
+  refreshReturnButton();
+  renderScopeMenu();
+  checkConfigWarning();
+}
+
+/** 标签条 + 快捷键（boot 调用；没挂载点或开关关掉就退回旧行为） */
+function initTabs() {
+  const mount = $('#tabBarMount');
+  if (!mount || !tabsFeatureEnabled()) {
+    if (mount) mount.remove();
+    tabsStore.booted = true;
+    syncHomeBtnVisibility();
+    return;
+  }
+  tabsStore.bar = createTabBar({
+    mount,
+    onActivate: (docId) => activateTab(docId),
+    onClose: (docId) => closeTab(docId),
+    onReorder: (docId, index) => moveTab(docId, index),
+    onOpenDoc: (doc) => openDoc({ name: doc.name, url: doc.url, docId: doc.docId, path: doc.path }),
+    listFolderDocs: () => (state.papers || []).map((paper) => ({
+      ...paper,
+      folder: String(paper.path || '').includes('/') ? String(paper.path).slice(0, String(paper.path).lastIndexOf('/')) : '',
+    })),
+  });
+  tabsStore.bar.render([], '');
+  installTabsShortcuts();
+  tabsStore.booted = true;
+  syncHomeBtnVisibility();
+}
+
+/** 快捷键：Ctrl+W 关闭 / Ctrl+Shift+T 重开 / Ctrl+Tab·PageUp/Down 切换 / Ctrl+1..9 直达 */
+function installTabsShortcuts() {
+  document.addEventListener('keydown', (e) => {
+    if (!tabsFeatureEnabled() || !tabsStore.booted) return;
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const list = tabsStore.tabs;
+    const key = String(e.key || '').toLowerCase();
+    if (key === 'w' && !e.shiftKey && !e.altKey) {
+      const id = state.doc?.docId || tabsStore.active;
+      if (id && list.some((t) => t.docId === id)) { e.preventDefault(); e.stopPropagation(); closeTab(id); }
+      return;
+    }
+    if (key === 't' && e.shiftKey) { e.preventDefault(); e.stopPropagation(); reopenClosedTab(); return; }
+    if (key === 'tab' || e.key === 'PageDown' || e.key === 'PageUp') {
+      if (list.length < 2) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const cur = list.findIndex((t) => t.docId === (state.doc?.docId || tabsStore.active));
+      const step = (e.shiftKey || e.key === 'PageUp') ? -1 : 1;
+      const next = list[(cur + step + list.length) % list.length];
+      if (next && next.docId !== state.doc?.docId) activateTab(next.docId);
+      return;
+    }
+    if (/^[1-9]$/.test(e.key) && !e.shiftKey && !e.altKey) {
+      const num = Number(e.key);
+      const target = num === 9 ? list[list.length - 1] : list[num - 1];
+      if (target && target.docId !== state.doc?.docId) { e.preventDefault(); e.stopPropagation(); activateTab(target.docId); }
+    }
+  }, true);
+}
+
+/** boot：恢复工作区（有标签就打开活动标签；空工作区 = Welcome，不按 lastDoc 自动打开） */
+async function bootTabWorkspace() {
+  cleanStaleLastDoc();
+  const ws = loadWorkspace();
+  const url = new URL(location.href);
+  const openName = url.searchParams.get('open');
+  const papers = state.papers || [];
+  const byId = new Map(papers.map((paper) => [paper.docId, paper]));
+  const named = openName
+    ? papers.find((paper) => paper.name === openName || paper.name.replace(/\.pdf$/i, '') === openName) || null
+    : null;
+  if (openName && !named) toast('papers/ 里没有找到 ' + openName, 'err', 4000);
+
+  // ① 先恢复上次的工作区（文件还在的标签才恢复；打开顺序不变）
+  const restorable = ws.tabs.filter((t) => byId.has(t.docId));
+  if (restorable.length) {
+    tabsStore.tabs = restorable.map((t) => {
+      const paper = byId.get(t.docId);
+      return { docId: t.docId, name: paper.name, url: paper.url, path: paper.path || paper.name };
+    }).slice(0, TABS_MAX);
+    tabsStore.active = '';
+    tabsSyncBar();
+  }
+  // ② 这次要打开哪篇：?open 指定 > 上次活动标签 > 第一个标签
+  const wanted = named
+    ? (tabsStore.tabs.find((t) => t.docId === named.docId) || tabFor({ ...named, path: named.path || named.name }))
+    : (tabsStore.tabs.find((t) => t.docId === ws.active) || tabsStore.tabs[0] || null);
+  if (!wanted) { await goWelcome(); return; }
+  if (!tabsStore.tabs.some((t) => t.docId === wanted.docId)) {
+    if (tabsStore.tabs.length >= TABS_MAX) { await goWelcome(); return; }
+    tabsStore.tabs.push(wanted);
+    tabsSyncBar();
+  }
+  await openDocColdSwitch({ name: wanted.name, url: wanted.url, docId: wanted.docId, path: wanted.path });
+  if (state.doc?.docId !== wanted.docId) {
+    tabsStore.tabs = tabsStore.tabs.filter((t) => t.docId !== wanted.docId);
+    if (!tabsStore.tabs.length) await goWelcome();
+    else { tabsSyncBar(); tabsPersist(); }
+    return;
+  }
+  tabsStore.active = wanted.docId;
+  tabsSyncBar();
+  tabsPersist();
+}
+
+async function openDocColdSwitch({ name, url, docId, path }) {
   cancelSearch({ clearInput: true, close: true, focus: false });
   abortStream('document-switch');
   if (state.doc && state.sessionEntries.length) {
@@ -9368,22 +9612,27 @@ async function maybeReopenLast() {
     toast(`papers/ 里没有找到 ${openName}`, 'err', 4000);
   }
 
-  // 停在首页。顺手清掉「上次那篇已经被删掉/移走」的陈旧标记，
-  // 免得它一直挂在 state.json 里、下次又被当成有效记录（对应设计里的状态 5）。
+  // 停在首页。顺手清掉「上次那篇已经被删掉/移走」的陈旧标记（多标签 Welcome 路径共用）。
+  cleanStaleLastDoc();
+  setView('home');
+}
+
+/**
+ * 清掉「上次那篇已经被删掉/移走」的陈旧标记（对应设计里的状态 5）。
+ * B 线 P1：多标签模式不再走 maybeReopenLast，但这条清理必须照常执行，所以抽成函数。
+ */
+function cleanStaleLastDoc() {
   const stale = serverState.lastDoc
     && !state.papers.some((p) => p.docId === serverState.lastDoc || p.name === serverState.lastName);
-  if (stale) {
-    // 被删掉的那篇在 docs 里的阅读记录也要一起清：留着一个指向不存在文件的记录没有意义
-    const docs = { ...(serverState.docs || {}) };
-    delete docs[serverState.lastDoc];
-    serverState = { ...serverState, docs, lastDoc: null, lastUrl: null, lastName: null };
-    fetch('/api/state', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(serverState),
-    }).catch(() => { /* 清不掉也不影响首页显示：recentDocs() 本来就会过滤掉它 */ });
-  }
-  setView('home');
+  if (!stale) return;
+  const docs = { ...(serverState.docs || {}) };
+  delete docs[serverState.lastDoc];
+  serverState = { ...serverState, docs, lastDoc: null, lastUrl: null, lastName: null };
+  fetch('/api/state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(serverState),
+  }).catch(() => { /* 清不掉也不影响首页显示：recentDocs() 本来就会过滤掉它 */ });
 }
 
 function saveOnUnload(url, text) {

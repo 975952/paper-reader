@@ -1,0 +1,148 @@
+/* 多标签工作区（B 线 P1）：标签条 / 溢出菜单 / 插入线。
+   颜色只用主题变量，别硬编码（浅色/深色/全屏/窄窗都要能看）。 */
+
+.tab-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  height: 32px;
+  flex: 0 0 32px;
+  padding: 0 6px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+.tab-bar.hidden { display: none; }
+
+.tab-strip {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.tab-strip::-webkit-scrollbar { display: none; }
+
+.doc-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  min-width: 88px;
+  padding: 0 6px 0 10px;
+  margin: 3px 0;
+  border: 1px solid transparent;
+  border-radius: 7px 7px 0 0;
+  color: var(--fg-dim);
+  font-size: var(--ui-fs-sm);
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+}
+.doc-tab:hover { background: var(--bg-elev); color: var(--fg); }
+.doc-tab.active {
+  background: var(--bg-elev);
+  border-color: var(--border);
+  border-bottom-color: var(--bg-elev);
+  color: var(--fg);
+  font-weight: 600;
+}
+.doc-tab.dragging { opacity: .45; }
+.tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-close {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-faint);
+  font-size: 13px;
+  line-height: 15px;
+  cursor: pointer;
+  opacity: 0;
+}
+.doc-tab:hover .tab-close, .doc-tab.active .tab-close { opacity: 1; }
+.tab-close:hover { background: var(--accent-soft); color: var(--fg); }
+
+.tab-insert-line {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.tab-insert-line.hidden { display: none; }
+
+.tab-more {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+.tab-more:hover { background: var(--bg-elev); border-color: var(--border); color: var(--fg); }
+
+/* 溢出菜单：全部标签 + 当前文件夹未打开文档 */
+.tab-menu {
+  position: fixed;
+  z-index: 90;
+  width: min(300px, 86vw);
+  max-height: 60vh;
+  overflow: auto;
+  padding: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  font-size: var(--ui-fs-sm);
+}
+.tab-menu.hidden { display: none; }
+.tab-menu-title {
+  padding: 6px 8px 4px;
+  color: var(--fg-faint);
+  font-size: var(--ui-fs-2xs);
+  letter-spacing: .3px;
+}
+.tab-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  text-align: left;
+  font-size: var(--ui-fs-sm);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab-menu-item:hover { background: var(--accent-soft); color: var(--fg); }
+.tab-menu-item.active { color: var(--fg); font-weight: 600; }
+.tab-menu-empty { padding: 8px; color: var(--fg-faint); font-size: var(--ui-fs-sm); }
+
+/* 有标签时正文高度要给标签条让 32px（#main 原本是 calc(100vh - 顶栏)） */
+body.tabs-open #main { height: calc(100vh - var(--topbar-h) - 32px); }
+
+/* 全屏时标签条隐藏（全屏是「专心读这篇」，不显示工作区），正文高度回到原口径 */
+body.window-fullscreen .tab-bar { display: none; }
+body.tabs-open.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
+/* 窄窗：标签更短，关闭按钮常显，避免点不到 */
+@media (max-width: 900px) {
+  .doc-tab { max-width: 130px; min-width: 64px; padding-left: 7px; }
+  .tab-close { opacity: .8; }
+}

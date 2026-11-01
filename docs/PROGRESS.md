@@ -3284,3 +3284,62 @@ Agent 开/关各跑一遍；不看密钥、不写仓库。
 `cargo test --release` **32/32**（新增 tools 透传契约用例）；既有套件在开关默认关闭前后行为一致
 （P1.5 回归数字见 §58）；exe 重编包含 `agent.js` / `citation-validator.js`（assets.rs 内嵌单测兜底）。
 
+
+## 60. B 线 P0 + P1：多标签工作区骨架 + Welcome（2026-11-01 晚）
+
+### 60.1 P0 准备（与 P1 同批落地）
+
+- **功能开关骨架**：`public/js/tabs.js` 的 `tabsFeatureEnabled()` 读 `localStorage['reader.tabs']`：
+  默认开启；`reader.tabs=0` 可整体退回旧的单文档行为（应急/回归用，`__ctx.tabsEnabled` 可查）。
+- **工作区存储**：`localStorage['reader.workspace.v1']` = `{tabs:[{docId,name,url,path}], active, updatedAt}`；
+  读入时清洗/去重/截到 10 个，坏数据当空工作区；`saveWorkspace()` 写回。
+  刷新恢复时只恢复「papers/ 里还存在的文件」，被删/被移走的标签不恢复（设计 §7.2/§10.1）。
+- **测试基线**：沿用 A 线 §56 的隔离 harness 数字（30/42 通过、12 条既有红），
+  B 线改动后逐套件对比「不得新增红」。
+
+### 60.2 P1 交付（多标签可开可切可关可拖 + Welcome）
+
+- **标签条**（`index.html` 新增 `#tabBarMount`，`tabs.js` 运行时建 `#tabBar` / `#tabStrip` / `#tabMoreBtn`；
+  `public/tabs.css` 新增样式）：标签条只在有文档标签时出现，`body.tabs-open` 时正文高度让出 32px；
+  活动标签高亮 + 悬停显示关闭按钮；标题过长省略；窄窗标签收窄。
+- **打开 / 激活 / 去重 / 顺序**：所有打开入口都走 app.js 的 `openDoc()` 包装 →
+  `openDocColdSwitch()`（原 openDoc 原样保留，冷切换语义不变：保存当前会话 → 清理状态 → 加载 PDF →
+  恢复该文档会话）。已打开的文档再打开 = 只激活（必须先冷切换回来），不新增标签；顺序 = 打开顺序。
+- **关闭 / Welcome**：中键、标签 ×、`Ctrl+W` 都能关；关掉当前标签时自动切到邻居（冷切换）；
+  **关掉最后一个标签 = Welcome**：回到现有 `#home` 书架页、两侧栏收起、底栏禁用、标签条隐藏、顶栏首页按钮隐藏；
+  从 Welcome 再打开文档 → 标签条回来。`Ctrl+Shift+T` 重开最近关闭的标签（内存栈）。
+- **快捷键**：`Ctrl+W` 关闭、`Ctrl+Shift+T` 重开、`Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+PageDown|Up` 顺序切换、
+  `Ctrl+1..9` 直达（9 = 最后一个）；输入框里打字时这些组合仍然生效，且阻止浏览器默认关窗/切换。
+- **拖拽排序**：Pointer Events 自绘插入线（不用 HTML5 DnD），松手写入工作区顺序并持久化；
+  拖到自己身上 = 不动。
+- **溢出菜单**：`⌄` 按钮 → 「全部标签（N/10）」+「当前文件夹（未打开）」/「书架（未打开的论文）」两组；
+  点未打开文档直接开新标签（按需打开）。
+- **上限**：第 11 个标签被拒绝（toast，不新增），上限 `TABS_MAX = 10`。
+- **持久化**：刷新恢复标签列表与活动标签；空工作区刷新后仍是 Welcome（不再按 `lastDoc` 自动打开）；
+  `?open=` 与已保存工作区共存（先恢复列表，再激活/追加 `?open` 指定的那篇）。
+- **全屏**：`body.window-fullscreen` 时标签条隐藏、正文高度回到原口径（全屏 = 专心读这篇）。
+- **首页按钮**：标签模式下 `#homeBtn` 加 `.hidden`（DOM 保留，e2e 顶栏控件清单断言仍能过）。
+- **兼容**：旧 `maybeReopenLast()` 路径在 `reader.tabs=0` 时原样生效；「上次那篇已被删掉」的陈旧记录清理
+  抽成 `cleanStaleLastDoc()`，两条路径都执行。
+
+### 60.3 验收
+
+- **新增 `test/tabs.mjs` 37/37**：打开/激活/去重/顺序；Ctrl+Tab / Ctrl+PageDown / Ctrl+2；拖拽排序 +
+  顺序落盘；中键关闭 / Ctrl+W / Ctrl+Shift+T 重开；关最后一个 → Welcome（`#home` 可见、`body.reading` 移除、
+  标签条隐藏、底栏禁用）；空工作区刷新仍 Welcome；溢出菜单列出全部标签 + 当前文件夹/书架分组；
+  第 11 个被拒且仍有提示；刷新恢复 10 个标签与活动标签；全屏隐藏标签条；无页面错误。
+- **既有套件（标签默认开启下）**：citation-quote 38/38、context-page 21/21、qa 43/43、session-bar、
+  teaching-isolated 13/13、fullscreen **13/13**（断言按「全屏隐藏 32px 标签条、主区高度相应收回」更新）、
+  home **40/40**（无 `?open` 用例先清工作区=Welcome；陈旧 lastDoc 清理断言通过）。
+  e2e/ux 等已知旧断言仍按 §56 基线口径（非本次回归引入）。
+- **打包/内嵌**：`desktop/src/assets.rs` 的内嵌抽查加入 `js/tabs.js` / `tabs.css`；
+  `test/pack.mjs` 前端白名单抽查加入同样两个文件。
+- exe 重编在 A P2.5 + B P1 全部源码上执行（`desktop\build.bat`，build.bat 会 touch assets.rs 触发重嵌）。
+
+### 60.4 与设计文档的边界（P1 只做到这里）
+
+以下按设计留给后续阶段，**本次未做**：P2 热切换（当前切标签仍是冷切换：重新 load PDF，页码/缩放从
+state.json 恢复）、P3 右栏结构 / 文件夹级会话 / 文档级译文存档 / 后台任务、P4 多文档参考与分屏。
+本地拖入的临时文件（blob URL）标签刷新后不恢复（不在 papers/ 里，按设计 §7.2 过滤）；已打开的
+本地文件仍可在当次会话内正常切换。
+

@@ -56,6 +56,9 @@ mod tests {
             // A 线 P1.5 / P2.5 新增的独立模块（同样靠 build.bat touch 才会重编）
             "js/citation-validator.js",
             "js/agent.js",
+            // B 线 P1：多标签工作区
+            "js/tabs.js",
+            "tabs.css",
         ] {
             assert!(contains(path), "exe 缺少前端文件：{path}（重新跑 desktop\\build.bat）");
         }

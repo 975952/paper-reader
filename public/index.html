@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>论文阅读器</title>
 <link rel="stylesheet" href="/style.css" />
+<link rel="stylesheet" href="/tabs.css" />
 <!-- 公式渲染：本地内置 KaTeX，不联网 -->
 <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
 <link rel="icon" type="image/svg+xml" href="/icon.svg" />
@@ -49,6 +50,9 @@
     </button>
   </div>
 </header>
+
+<!-- B 线 P1：多标签工作区标签条（由 tabs.js 创建；Welcome 时隐藏） -->
+<div id="tabBarMount"></div>
 
 <main id="main">
   <!-- 左活动栏：只在左栏收起时出现（CSS 由 body.no-left 控制）。

@@ -94,6 +94,8 @@ try {
       foot: foot ? getComputedStyle(foot).display : 'missing',
       footBottom: foot ? foot.getBoundingClientRect().bottom : 0,
       mainH: main ? main.getBoundingClientRect().height : 0,
+  // B 线 P1：多标签标签条的高度（普通状态占 32px，全屏时隐藏）
+  tabBar: (() => { const n = document.getElementById('tabBar'); if (!n) return 0; const s = getComputedStyle(n); return s.display === 'none' ? 0 : n.getBoundingClientRect().height; })(),
       innerH: window.innerHeight,
       btnVisible: !!btn && getComputedStyle(btn).display !== 'none',
       pressed: btn?.getAttribute('aria-pressed') || '',
@@ -113,7 +115,10 @@ try {
   check('点按钮进入全屏（页面状态 + 请求了 Fullscreen API）', full.fullscreen && full.requested >= 1, JSON.stringify(full));
   check('全屏时顶栏与底栏保持显示（不再隐藏上方那一栏）', full.topbar !== 'none' && full.foot !== 'none', `${full.topbar}/${full.foot}`);
   check('底栏贴住窗口底边、最下面没有白条', Math.abs(full.footBottom - full.innerH) < 2, `${full.footBottom} vs ${full.innerH}`);
-  check('全屏时光标区域未被压缩（主区高度与普通状态一致）', Math.abs(full.mainH - before.mainH) < 2, `${before.mainH} → ${full.mainH}`);
+  // B 线 P1：普通状态有 32px 标签条；全屏隐藏标签条后主区应恰好收回这段高度（不再要求绝对相等）
+  check('全屏时标签条隐藏', full.tabBar === 0, `tabBar=${full.tabBar}`);
+  check('全屏时光标区域未被压缩（主区高度 = 普通 + 标签条高度）',
+    Math.abs(full.mainH - (before.mainH + before.tabBar)) < 3, `${before.mainH}+${before.tabBar} → ${full.mainH}`);
   check('全屏按钮切换到「退出全屏」态', full.pressed === 'true' && /退出全屏/.test(full.title), `${full.pressed} ${full.title}`);
 
   /* ── 2. Esc 退出全屏 ── */

@@ -34,7 +34,15 @@ const open = async (query = '') => {
   const errs = [];
   page.on('pageerror', (e) => errs.push(String(e.message)));
   page.on('console', (m) => { if (m.type() === 'error') errs.push(m.text()); });
-  await page.goto(`${BASE}/${query}`, { waitUntil: 'domcontentloaded' });
+  // B 线 P1：多标签工作区会把上次打开的标签写进 localStorage，刷新会恢复；
+  // 首页（Welcome）用例要求「无标签」状态，所以不带 ?open 的用例先清掉工作区再进入。
+  if (query) {
+    await page.goto(`${BASE}/${query}`, { waitUntil: 'domcontentloaded' });
+  } else {
+    await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
+    await page.evaluate(() => { try { localStorage.removeItem('reader.workspace.v1'); } catch { /* ignore */ } });
+    await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
+  }
   await sleep(2600);
   return { page, errs };
 };
