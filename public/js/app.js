@@ -7752,10 +7752,10 @@ function createAgentProgress(entry) {
     onStep(ev) {
       if (!ev || !box.isConnected) return;
       if (ev.type === 'round') {
-        current = addItem(ev.round > 1 ? `正在思考（第 ${ev.round} 轮）…` : '正在思考…');
+        current = addItem('正在思考…');
       } else if (ev.type === 'tools') {
-        const n = Array.isArray(ev.names) ? ev.names.length : 0;
-        finishItem(current, n ? `决定先查资料（${n} 个工具）` : '决定先查资料');
+        // 用户口径：不要「决定先查资料」这类编排话术；把「思考中」撤掉，下面只逐条列实际动作
+        current?.remove();
         current = null;
       } else if (ev.type === 'tool_start') {
         current = addItem(`正在${toolStepLabel(ev.call)}…`);
@@ -7763,12 +7763,7 @@ function createAgentProgress(entry) {
         finishItem(current, ev.summary || '完成', !!ev.ok);
         current = null;
       } else if (ev.type === 'ready') {
-        // 最后一轮模型不再调工具：把「正在思考」那条收尾成「材料够了」，不要留一条一直转的运行态
-        if (current) {
-          finishItem(current, '材料够了，开始回答');
-        } else {
-          finishItem(addItem('材料够了，开始回答'), '材料够了，开始回答');
-        }
+        current?.remove();
         current = null;
       }
     },
@@ -7971,9 +7966,29 @@ function decoratePageRefs(html) {
     });
 }
 
+/** 其它论文的引用：〔《文件名》p.N‖原文片段〕 → 可点击标签。
+ *  点击会自动打开那篇论文（没打开过就先打开）、跳到第 N 页，有原文片段就画高亮。
+ *  注意：必须在 decoratePageRefs 之后跑 —— 当前论文的 〔p.N〕 已经先被处理掉，两边不会互相抢。 */
+const OTHER_PAPER_REF_RE = /〔\s*《([^》]{1,160})》\s*p\.\s*(\d{1,4})(?:\s*(?:\|\||‖|｜)\s*([^〕]{1,8000}))?\s*〕/g;
+function decorateOtherPaperRefs(html) {
+  return String(html || '').replace(OTHER_PAPER_REF_RE, (raw, name, page, frag) => {
+    const p = Number(page);
+    const paper = String(name || '').trim();
+    if (!paper || !Number.isInteger(p) || p < 1) return raw;
+    const parts = frag ? quoteFragmentParts(frag) : null;
+    const fragment = parts?.text || '';
+    const short = escapeHtml(paper.replace(/\.pdf$/i, '').slice(0, 28));
+    const title = `打开《${paper}》并跳到第 ${p} 页${fragment ? `，定位原文：${fragment.slice(0, 80)}` : ''}`;
+    return `<button type="button" class="page-ref other-paper-ref" data-paper="${escapeHtml(paper)}" data-page="${p}"`
+      + `${fragment ? ` data-fragment="${escapeHtml(fragment.slice(0, 600))}"` : ''}`
+      + ` title="${escapeHtml(title)}">《${short}》p.${p}</button>`
+      + (fragment ? ` <span class="quote-inline">${parts.html}</span>` : '');
+  });
+}
+
 function renderAnswerHTML(text) {
   const split = splitPrtBlock(String(text || ''));
-  return decoratePageRefs(renderMarkdown(split.text || ''));
+  return decorateOtherPaperRefs(decoratePageRefs(renderMarkdown(split.text || '')));
 }
 
 /** 引用高亮的当前状态（点正文 / Esc / 再点同一引用 / 翻页 / 切文档时清空） */
@@ -8015,6 +8030,26 @@ function jumpAndHighlight(page, text) {
   else jumpToPageWithHistory(p, { smooth: true });
 }
 
+/** 点其它论文的页码标签：自动打开那篇论文（没打开过就先打开）→ 跳到第 N 页 → 有原文片段就高亮 */
+async function openOtherPaperRef(name, page, fragment) {
+  const q = String(name || '').trim().replace(/^《|》$/g, '').toLowerCase();
+  const papers = Array.isArray(state.papers) ? state.papers : [];
+  const target = papers.find((p) => String(p?.name || '').toLowerCase() === q)
+    || papers.find((p) => String(p?.name || '').toLowerCase().includes(q) || String(p?.path || '').toLowerCase().includes(q));
+  if (!target) {
+    toast(`找不到《${name}》这篇论文（可能已移出 papers 文件夹）`, 'err', 4500);
+    return;
+  }
+  if (state.doc?.docId !== target.docId) {
+    try {
+      await openDoc({ name: target.name, url: target.url, docId: target.docId, path: target.path || target.name });
+    } catch { /* openDoc 内部已有失败提示 */ }
+    if (state.doc?.docId !== target.docId) return;
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  }
+  jumpAndHighlight(page, fragment || '');
+}
+
 /** 页码按钮：按住委托，流式重绘也不用重绑 */
 function initPageRefs() {
   document.addEventListener('click', (e) => {
@@ -8028,6 +8063,8 @@ function initPageRefs() {
     if (!Number.isInteger(page) || page < 1) return;
     e.preventDefault();
     const fragment = btn.dataset.fragment || '';
+    // 其它论文的引用：自动打开那篇论文再跳页/高亮（当前论文的引用不会有 data-paper）
+    if (btn.dataset.paper) { openOtherPaperRef(btn.dataset.paper, page, fragment); return; }
     if (fragment) { jumpToQuote(page, fragment, btn); return; }
     jumpToPageWithHistory(page, { smooth: true });
   });
@@ -9462,8 +9499,12 @@ async function send(retryPending = null) {
 
     setHint('');
     // P2.5：Agent 最后一轮已经给出完整回答时直接采用，不再重复一次流式请求（省一次 LLM 往返）。
-    const full = agentRun?.directContent
-      ? agentRun.directContent
+    // 但如果这次有**页图材料**（扫描件页图 / Agent 读的页图 / 跨论文页图），图片只能附在下一个请求里发出去，
+    // 直接采用 directContent 会让模型根本没看到图 —— 这种情况必须再走一次最终流式请求。
+    const directAnswer = String(agentRun?.directContent || '');
+    const mustStreamForImages = !!directAnswer && (pageImages.length > 0 || images.length > 0);
+    const full = directAnswer && !mustStreamForImages
+      ? directAnswer
       : await chat({
         messages,
         signal: ctl.signal,

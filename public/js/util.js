@@ -232,6 +232,20 @@ export function renderMarkdown(src) {
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li].replace(/\s+$/, '');
     let m;
+    // 引用原文（模型用 `> 原文` 写引用）：连续 `>` 行合成一个 blockquote。
+    // 注意这里 text 已经过 escapeHtml，行首的 `>` 已经变成 `&gt;`，两种写法都要认。
+    // 之前不支持这个语法，会把 `&gt; ...` 当普通段落显示（用户反馈「引用原文没有正确渲染」）。
+    if ((m = /^\s*(?:>|&gt;)\s?(.*)$/.exec(line))) {
+      closeList();
+      const quoteLines = [m[1]];
+      const isQuoteLine = (s) => /^\s*(?:>|&gt;)\s?/.test(s);
+      while (li + 1 < lines.length && isQuoteLine(lines[li + 1])) {
+        li += 1;
+        quoteLines.push(lines[li].replace(/^\s*(?:>|&gt;)\s?/, ''));
+      }
+      out.push('', hold(`<blockquote class="md-quote">${quoteLines.join('<br />')}</blockquote>`), '');
+      continue;
+    }
     // 表格：本行是 | a | b |，下一行是 |---|---|
     if (line.includes('|') && li + 1 < lines.length && isTableSep(lines[li + 1])) {
       const head = splitTableRow(line);

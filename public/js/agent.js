@@ -145,7 +145,8 @@ export const AGENT_SYSTEM_NOTE = [
   '再用 read_other_paper({name, page}) 读指定页、用 read_other_paper({name, query}) 在整篇里检索；扫描件/无文本层时用 read_other_paper_image 取页图。',
   '用户问「某篇论文的第 N 句话 / 第几段」时：先把那一页正文读出来，再按句号/问号/感叹号/分号等完整句子边界**准确数出第 N 句**，原样引用，并说明出自哪篇论文第几页；不要凭印象改写。',
   '**不要说「我拿不到 papers 文件夹」「看不到其它论文」**——你有 list_papers / read_other_paper 工具，先查再读。',
-  '回答**其它论文**时不要用〔p.N〕这种引用格式标它的页码（那会跳到当前打开的论文）；用「《文件名》第 N 页」的文字说明。',
+  '引用**其它论文**的原文/页码时用专用格式：〔《文件名》p.N‖原文片段〕（没有原文片段就 〔《文件名》p.N〕）；程序会把它渲染成可点标签，点击自动打开那篇论文、跳到第 N 页并高亮原文。不要只写 p.N（那会跳到当前打开的论文）。',
+  '引用原文用 `> ` 引用块，不要堆成普通段落；问「第 N 句话」时先原样引用那一句再解释。',
   '只依据实际读到的材料回答；引用页码只能来自你读过的页或材料里出现的页。',
   '材料够了就直接给最终回答（不要再调用工具）；工具调用失败时基于已有材料作答，不要编造。',
 ].join('\n');
@@ -288,17 +289,16 @@ export function summarizeToolResult(call, result) {
   if (name === 'read_page' || name === 'read_scan_page') {
     const page = toInt(v.page) || toInt(args.page);
     const chars = String(v.text || '').length;
-    return `读取第 ${page || '?'} 页（${chars.toLocaleString()} 字）`;
+    return `已读取第 ${page || '?'} 页（${chars.toLocaleString()} 字）`;
   }
-  if (name === 'read_page_image') return `加入第 ${toInt(v.page) || toInt(args.page) || '?'} 页原图`;
+  if (name === 'read_page_image') return `已加入第 ${toInt(v.page) || toInt(args.page) || '?'} 页原图`;
   if (name === 'read_memory') {
     const hits = Number(v.hits ?? v.items?.length ?? v.entries?.length ?? 0);
-    return `读取学习记忆（${Number.isFinite(hits) ? hits : 0} 条）`;
+    return `已读取学习记忆（${Number.isFinite(hits) ? hits : 0} 条）`;
   }
   if (name === 'list_papers') {
     const list = Array.isArray(v.papers) ? v.papers : [];
-    const head = list.slice(0, 6).map((p) => `${p.index}. ${p.name}${p.folder ? `（${p.folder}/）` : ''}`).join('；');
-    return `papers 文件夹共 ${v.count ?? list.length} 篇：${head}${list.length > 6 ? ' …' : ''}`;
+    return `已列出 papers 文件夹：${v.count ?? list.length} 篇`;
   }
   if (name === 'read_other_paper') {
     const paper = clip(v.name || args.name, 40);
@@ -309,9 +309,9 @@ export function summarizeToolResult(call, result) {
         : `在《${paper}》检索「${clip(args.query, 40)}」→ 没有命中`;
     }
     if (v.scanned) return `《${paper}》第 ${v.page || args.page} 页没有文本层（可改用页图）`;
-    return `《${paper}》第 ${v.page || args.page} 页（${String(v.text || '').length.toLocaleString()} 字，共 ${v.numPages || '?'} 页）`;
+    return `已读取《${paper}》第 ${v.page || args.page} 页（${String(v.text || '').length.toLocaleString()} 字，共 ${v.numPages || '?'} 页）`;
   }
-  if (name === 'read_other_paper_image') return `加入《${clip(v.name || args.name, 40)}》第 ${v.page || args.page} 页原图`;
+  if (name === 'read_other_paper_image') return `已加入《${clip(v.name || args.name, 40)}》第 ${v.page || args.page} 页原图`;
   return `${toolStepLabel(call)}完成`;
 }
 

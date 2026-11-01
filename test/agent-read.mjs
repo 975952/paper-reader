@@ -241,7 +241,7 @@ try {
       allCursorCount: document.querySelectorAll('.cursor').length,
     };
   });
-  check('回答上方逐条列出 Agent 过程（≥5 条）', progressDom.items >= 5, JSON.stringify(progressDom.texts.slice(0, 8)));
+  check('回答上方逐条列出 Agent 过程（≥4 条）', progressDom.items >= 4, JSON.stringify(progressDom.texts.slice(0, 8)));
   check('过程条目收尾后全部是完成态（无残留运行态）', progressDom.done >= 4 && progressDom.running === 0, JSON.stringify(progressDom));
   check('过程里能看出检索 / 读页 / 命中',
     progressDom.texts.some((t) => /检索/.test(t)) && progressDom.texts.some((t) => /读取第 3 页/.test(t)) && progressDom.texts.some((t) => /命中 p/.test(t)),
