@@ -52,7 +52,8 @@ const upstream = http.createServer((req, res) => {
     const last = String(body.messages?.at(-1)?.content || '');
     upstreamRequests.push({ sys, last });
     let text = '这是右栏回答：注意力机制让模型并行处理序列。';
-    if (/翻译|译文/.test(sys)) text = '这是右栏译文：注意力机制。';
+    // 只认翻译请求自己的系统提示（问答规则里现在也会出现「来自右栏回答 / 译文」字样）
+    if (/学术论文翻译专家/.test(sys)) text = '这是右栏译文：注意力机制。';
     else if (/解释这段内容/.test(last)) text = '这是右栏解释：注意力就是按相关度加权求和。';
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
     for (const chunk of (text.match(/[\s\S]{1,24}/g) || [])) {
@@ -165,23 +166,26 @@ try {
   check('右栏选区弹出气泡', bubble.open && bubble.source === 'right', JSON.stringify(bubble));
   check('气泡只显示 加入问答 / 直接解释 / 复制', JSON.stringify(bubble.visible.sort()) === JSON.stringify(['add', 'copy', 'explain']), bubble.visible.join(','));
   check('「加入问答」文案和按钮标题已切换', bubble.label === '加入问答', bubble.label);
-  check('选区对象带上正文同款字段（文本 + 页码）',
-    bubble.selected.includes('注意力机制') && bubble.page !== null && bubble.page === bubble.viewerPage,
+  check('右栏选区不冒充 PDF 页码（page 为 null）',
+    bubble.selected.includes('注意力机制') && bubble.page === null,
     `p=${bubble.page} viewer=${bubble.viewerPage} scrollTop=${bubble.scrollTop}`);
 
-  /* ── 3. 点「加入问答」：进附件区、聚焦输入框、标注来源 ── */
+  /* ── 3. 点「加入问答」：进附件区、聚焦输入框、标注来源（不标页码） ── */
   await page.click('#bubble button[data-act="add"]');
   await wait(120);
   const attached = await page.evaluate(() => ({
     count: window.__state.attachments.length,
     from: window.__state.attachments[0]?.from || '',
+    page: Object.prototype.hasOwnProperty.call(window.__state.attachments[0] || {}, 'page')
+      ? window.__state.attachments[0].page : 'missing',
     text: window.__state.attachments[0]?.text || '',
     rowText: [...document.querySelectorAll('#attachRow .attach')].map((n) => n.textContent).join(' | '),
     focused: document.activeElement?.id || '',
     bubbleHidden: document.querySelector('#bubble').classList.contains('hidden'),
   }));
   check('点「加入问答」后进入附件区', attached.count === 1 && attached.text.includes('注意力机制'), JSON.stringify(attached));
-  check('附件标注来源「右栏」', attached.from === 'right' && attached.rowText.includes('右栏'), attached.rowText);
+  check('附件标注来源「右栏」且不带第 N 页', attached.from === 'right' && attached.rowText.includes('右栏')
+    && attached.page === null && !/第\d+页/.test(attached.rowText), attached.rowText);
   check('加完气泡收起、光标落在输入框', attached.bubbleHidden && attached.focused === 'chatInput', attached.focused);
   // 清掉附件，免得影响后面的「直接解释」
   await page.evaluate(() => { window.__state.attachments = []; window.__ctx.renderAttachments(); });
@@ -197,13 +201,19 @@ try {
   await page.click('#bubble button[data-act="explain"]');
   await page.waitForFunction(() => [...document.querySelectorAll('#aiArea .msg.assistant')]
     .some((n) => n.querySelector('.tag')?.textContent === 'explanation' && n.textContent.includes('按相关度加权')), { timeout: 20000 });
+  // 解释正文先到、历史在流结束后才落：等它记进去再断言，避免读早了
+  const historyOk = await page.waitForFunction(() => window.__state.history.length >= 4, { timeout: 5000 })
+    .then(() => true).catch(() => false);
   const explain = await page.evaluate(() => {
     const row = [...document.querySelectorAll('#aiArea .msg.assistant')]
       .find((n) => n.querySelector('.tag')?.textContent === 'explanation');
     return { quote: row?.querySelector('.ref')?.textContent || '', history: window.__state.history.length };
   });
   check('「直接解释」把右栏选中文本作为解释对象', explain.quote.includes('并行处理'), explain.quote);
-  check('解释进入会话历史（可继续追问）', explain.history >= 4, String(explain.history));
+  check('解释进入会话历史（可继续追问）', historyOk && explain.history >= 4, String(explain.history));
+  const explainReq = upstreamRequests.find((r) => /请解释这段内容/.test(r.last) && /并行处理/.test(r.last))?.last || '';
+  check('解释请求标明来自右栏、不冒充第 N 页原文',
+    /来自右栏回答/.test(explainReq) && !/第\s*\d+\s*页/.test(explainReq), explainReq.slice(0, 200));
 
   /* ── 5. 译文块里的文字同样能划词 ── */
   await page.evaluate(() => window.__ctx.doTranslate({

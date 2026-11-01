@@ -11,8 +11,8 @@ import { spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
 import { ROOT, SANDBOX, assertIsolatedDataDir } from './_env.mjs';
 import { spawnReader, stageExe, stopChild } from './_exe.mjs';
-import { resolveReadingRequest, readingTurn, snapshotHistory, restoreReadingHistory, citedSources } from '../public/js/reading-context.js';
-import { webQueryFor, filterWebResults } from '../public/js/ai.js';
+import { resolveReadingRequest, resolvePageRole, explicitPageIn, readingTurn, snapshotHistory, restoreReadingHistory, citedSources } from '../public/js/reading-context.js';
+import { webQueryFor, filterWebResults, askMessages } from '../public/js/ai.js';
 
 const backend = process.env.QA_BACKEND || 'node';
 const scratch = fs.mkdtempSync(path.join(SANDBOX, `qa-${backend}-`));
@@ -74,6 +74,35 @@ for (let i = 0; i < 45; i++) history = snapshotHistory([...history, ...readingTu
 check('历史截断后仍保留原文和讲解偏好', history.length === 80 && resolveReadingRequest({ question: '为什么', history }).guidance === guidance);
 const legacy = restoreReadingHistory([], [{ block: 'chat', tag: 'explanation', quote: AUTHOR, page: 1, text: '作者解释', status: 'complete' }]);
 check('老会话的解释能恢复为追问对象', resolveReadingRequest({ question: '他是谁', history: legacy }).selection === AUTHOR);
+// 所在页判定：追问沿用话题页；只有「这一页 / 这里」才吃当前屏幕页；明说页码最优先。
+const topicAsk = resolveReadingRequest({ question: '为什么？', history: legacy });
+const screenAsk = resolveReadingRequest({ question: '这一页讲了什么？', history: legacy });
+check('追问所在页 = 话题页，不被屏幕页覆盖',
+  resolvePageRole({ question: '为什么？', reading: topicAsk, screenPage: 8, numPages: 12 }).page === 1
+  && resolvePageRole({ question: '为什么？', reading: topicAsk, screenPage: 8, numPages: 12 }).role === 'topic');
+check('「这一页」不继承上一轮选区，按屏幕页取上下文',
+  screenAsk.inherited === false && screenAsk.selection === ''
+  && resolvePageRole({ question: '这一页讲了什么？', reading: screenAsk, screenPage: 8, numPages: 12 }).page === 8);
+check('问题里明说页码优先于屏幕页',
+  resolvePageRole({ question: '第 5 页讲了什么？', reading: resolveReadingRequest({ question: '第 5 页讲了什么？' }),
+    screenPage: 8, numPages: 12 }).role === 'explicit'
+  && resolvePageRole({ question: '第 5 页讲了什么？', reading: resolveReadingRequest({ question: '第 5 页讲了什么？' }),
+    screenPage: 8, numPages: 12 }).page === 5);
+check('页码超出总页数时忽略', explicitPageIn('第 99 页讲了什么？', 12) === null && explicitPageIn('第 5 页讲了什么？', 12) === 5);
+check('没有历史的新问题按屏幕页', resolvePageRole({ question: '论文用了什么方法？',
+  reading: resolveReadingRequest({ question: '论文用了什么方法？' }), screenPage: 8, numPages: 12 }).page === 8);
+// 右栏（上一轮回答/译文）里划的词不是 PDF 原文：不挂页码、明确标注来源，历史里也要保留来源。
+const rightSel = resolveReadingRequest({ question: '为什么？', selection: '上一轮回答里的解释文字',
+  selectionSource: 'right', history: legacy });
+const rightHistory = snapshotHistory(readingTurn(rightSel, '答'));
+const rightMsg = askMessages({ question: '为什么？', selection: rightSel.selection, selectionSource: 'right',
+  context: '', page: 8, pageRole: 'screen', docTitle: 'x.pdf', reading: rightSel, history: legacy });
+const rightUser = String(rightMsg.at(-1).content);
+const selLine = (rightUser.match(/【选中文本[^\n]*】/) || [''])[0];
+check('右栏选区不挂页码且标明来自右栏', rightSel.focus.page === null && rightSel.focus.source === 'right'
+  && /来自右栏回答/.test(selLine) && !/第\s*\d+\s*页/.test(selLine), selLine);
+check('会话历史保留「来自右栏」来源', rightHistory[0]?.focus?.source === 'right'
+  && resolveReadingRequest({ question: '为什么', history: rightHistory }).focus.source === 'right');
 const unused = { title: '他是谁 电视剧', snippet: '悬疑剧', url: 'https://example.com/tv' };
 const useful = { title: 'Andrew Howard research', snippet: AUTHOR, url: 'https://example.com/author' };
 check('逐条过滤无关来源', filterWebResults('Andrew Howard', [unused, useful]).length === 1);

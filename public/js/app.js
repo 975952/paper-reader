@@ -15,7 +15,7 @@ import {
   digestMessages, webQueryFor, filterWebResults, opMessages, teachMessages, condenseMessages,
   scanPageMessages, sessionSummaryMessages,
 } from './ai.js';
-import { resolveReadingRequest, snapshotReadingRequest, snapshotHistory, readingTurn,
+import { resolveReadingRequest, resolvePageRole, snapshotReadingRequest, snapshotHistory, readingTurn,
   restoreReadingHistory, citedSources, stripPageLabels } from './reading-context.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
@@ -1469,8 +1469,11 @@ const PAPER_TINT_LIGHT = (v) => {
 function applyUiStyle() {
   const root = document.documentElement;
   const style = uiStyle;
-  if (style.theme === 'system') delete root.dataset.theme;
-  else root.dataset.theme = style.theme === 'dark' ? 'dark' : 'light';
+  if (style.theme === 'system' || !['light', 'dark', 'black', 'graphite', 'mist'].includes(style.theme)) {
+    delete root.dataset.theme;
+  } else {
+    root.dataset.theme = style.theme;
+  }
   document.body.dataset.density = ['compact', 'standard', 'comfortable'].includes(style.density) ? style.density : 'standard';
   root.style.setProperty('--ai-fs', `${clamp(Number(style.fontSize) || 14, READ_FS_MIN, READ_FS_MAX)}px`);
   root.style.setProperty('--ai-lh', `${clamp(Number(style.lineHeight) || 1.72, 1.45, 2.05)}`);
@@ -1512,6 +1515,8 @@ function initViewer() {
       $('#pageCount').textContent = String(total || 0);
       syncFootPage(cur, total);
       saveProgress();
+      // 翻到别的页 = 离开引用所在页：自动清掉橙色高亮（同页内的滚动不触发这里）
+      if (quoteState.page && cur !== quoteState.page) clearQuoteHighlight();
     },
     onStatus: (s) => { $('#docName')?.setAttribute('data-status', s || ''); },
     onProgress: (done, total) => {
@@ -1563,8 +1568,6 @@ function initViewer() {
     memoryIdle: () => learningMemory.idle(),
     // 扫描件：页型扫描 / 页图 / 图片阅读索引（自动化直接验这条链路）
     startDocProfileScan, ensureScanDigest, pickScanPages, attachPageImages, sendScopeText,
-    // 扫描件 OCR：逐页转写 + 缓存（自动化直接验「生成文字版后问答用文字」）
-    runOcrDoc, ocrTextFor, loadOcrCache, ocrPages,
     get docProfile() { return state.docProfile; },
     set docProfile(v) { state.docProfile = v; },
     // 记忆：长期记忆 / 本篇讨论 / 会话滚动摘要（自动化验注入块与清理）
@@ -1574,6 +1577,9 @@ function initViewer() {
     get paperMemory() { return state.paperMemory; },
     get FULL_LIMIT() { return FULL_LIMIT; },
     jumpToPageWithHistory, jumpToDestWithHistory, returnToPreviousPosition,
+    // 引用定位：〔p.N‖原文片段〕 → 跳页 + 橙色高亮 + 取消
+    jumpToQuote, clearQuoteHighlight, decoratePageRefs,
+    get quoteState() { return { ...quoteState }; },
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
     renderAttachments, refreshReturnButton,
     // 发送范围四选项：让自动化直接验「范围 → 本次发送带什么」
@@ -2758,6 +2764,7 @@ async function openDoc({ name, url, docId, path }) {
   const myOpen = (state.openSeq = (state.openSeq || 0) + 1);
   const superseded = () => myOpen !== state.openSeq;
   hideTranslationCard();
+  clearQuoteHighlight();          // 换论文：引用高亮属于上一篇，必须清掉
   state.selection = null;
   state.doc = { name, url, docId, path: path || name };
   // 面板布局不再按论文分叉（阶段 2.2a）：换论文不重载 state.panels
@@ -3618,7 +3625,9 @@ function onRightSelectionChanged({ deselect = false } = {}) {
   const sel = {
     text,
     cleanText: text,
-    page: viewer?.current || null,
+    // 右栏文字是对话内容，不是 PDF 某页的原文：绝不能挂页码冒充「第 N 页原文」
+    //（用户实测过：把上一轮回答里划的词标成第 2 页原文，模型对着第 2 页图片才发现对不上）。
+    page: null,
     source: 'right',
     // 右栏选区没有正文那种跨页 rect 结构，直接用 DOM 选区矩形定位气泡
     box: {
@@ -4283,7 +4292,8 @@ function serialiseRetryPayload(raw) {
     };
   }
   if (kind === 'translate' || kind === 'explain') {
-    return { kind, docId: String(raw.docId || '').slice(0, 240), text: String(raw.text || '').slice(0, 6000), page: raw.page || null };
+    return { kind, docId: String(raw.docId || '').slice(0, 240), text: String(raw.text || '').slice(0, 6000), page: raw.page || null,
+      source: raw.source === 'right' ? 'right' : '' };
   }
   if (kind === 'operation') {
     return { kind, docId: String(raw.docId || '').slice(0, 240), opId: String(raw.opId || '').slice(0, 120), block: String(raw.block || 'chat').slice(0, 40) };
@@ -4522,7 +4532,8 @@ function restoreRetryCallback(row, entry, priorUser) {
       return;
     }
     if (payload.kind === 'translate' || payload.kind === 'explain') {
-      const sel = { page: payload.page || null, text: payload.text || '', cleanText: payload.text || '' };
+      const sel = { page: payload.page || null, text: payload.text || '', cleanText: payload.text || '',
+        source: payload.source === 'right' ? 'right' : '' };
       if (!sel.cleanText) { restoreComposerFallback(fallbackQuestion); return; }
       if (payload.kind === 'translate') doTranslate(sel);
       else doExplain(sel);
@@ -4579,6 +4590,8 @@ function restoreRetryCallback(row, entry, priorUser) {
       attachments,
       quoteText: String(payload.quoteText || attachments.map((a) => (a.page ? `[第${a.page}页] ` : '') + (a.text || '')).join('\n\n')),
       firstPage: payload.firstPage || attachments[0]?.page || entry.root.dataset.page || null,
+      pageRole: ['selection', 'explicit', 'topic', 'screen'].includes(payload.pageRole) ? payload.pageRole : null,
+      selectionSource: payload.selectionSource === 'right' ? 'right' : '',
       docId,
       docTitle: state.doc?.name || payload.docTitle || '',
       history: snapshotHistory(payload.history || state.history),
@@ -6393,18 +6406,27 @@ function markReversedBodies() {
 }
 
 /**
- * 回答正文渲染：先剥掉 prt 隐藏块，再把 〔p.N〕 / 〔p.N–M〕 变成可点击页码。
+ * 回答正文渲染：先剥掉 prt 隐藏块，再把 〔p.N〕 / 〔p.N–M〕 / 〔p.N‖原文片段〕 变成可点击页码。
+ * 带 ‖ 片段的引用点击后会跳到该页并高亮片段（橙色），再点同一个引用可取消。
  * 渲染失败/页码越界时保持普通文字，不影响回答本身。
  */
 function decoratePageRefs(html) {
   const pages = Number(viewer?.numPages) || 0;
-  return String(html || '').replace(/〔p\.(\d{1,4})(?:[–\-](\d{1,4}))?〕/g, (raw, a, b) => {
-    const p = Number(a);
-    if (!Number.isInteger(p) || p < 1 || (pages && p > pages)) return raw;
-    const label = b ? `p.${a}–${b}` : `p.${a}`;
-    const title = b ? `跳到第 ${a}–${b} 页` : `跳到第 ${a} 页`;
-    return `<button type="button" class="page-ref" data-page="${p}" title="${title}">${label}</button>`;
-  });
+  return String(html || '').replace(/〔p\.(\d{1,4})(?:[–\-](\d{1,4}))?(?:\|\||‖)([^〕]{1,200})〕|〔p\.(\d{1,4})(?:[–\-](\d{1,4}))?〕/g,
+    (raw, aPipe, bPipe, frag, aPlain, bPlain) => {
+      const a = aPipe || aPlain;
+      const b = aPipe ? bPipe : bPlain;
+      const p = Number(a);
+      if (!Number.isInteger(p) || p < 1 || (pages && p > pages)) return raw;
+      const label = b ? `p.${a}–${b}` : `p.${a}`;
+      const fragment = aPipe ? String(frag || '').replace(/\s+/g, ' ').trim().slice(0, 200) : '';
+      if (!fragment) {
+        const title = b ? `跳到第 ${a}–${b} 页` : `跳到第 ${a} 页`;
+        return `<button type="button" class="page-ref" data-page="${p}" title="${escapeHtml(title)}">${label}</button>`;
+      }
+      const title = `跳到第 ${p} 页并定位原文：${fragment.slice(0, 60)}`;
+      return `<button type="button" class="page-ref quote-ref" data-page="${p}" data-fragment="${escapeHtml(fragment)}" title="${escapeHtml(title)}">${label}</button>`;
+    });
 }
 
 function renderAnswerHTML(text) {
@@ -6412,14 +6434,47 @@ function renderAnswerHTML(text) {
   return decoratePageRefs(renderMarkdown(split.text || ''));
 }
 
+/** 引用高亮的当前状态（点正文 / Esc / 再点同一引用 / 翻页 / 切文档时清空） */
+let quoteState = { page: null, fragment: '', btn: null };
+
+/** 取消引用高亮（橙色块 + 按钮激活态一起清掉） */
+function clearQuoteHighlight() {
+  if (quoteState.btn) quoteState.btn.classList.remove('active');
+  const had = !!quoteState.page;
+  quoteState = { page: null, fragment: '', btn: null };
+  viewer?.clearQuoteHighlight?.();
+  return had;
+}
+
+/** 点击带原文片段的引用：跳页 + 橙色高亮；再点同一个 = 取消 */
+async function jumpToQuote(page, fragment, btn) {
+  const same = quoteState.page === page && quoteState.fragment === fragment && quoteState.btn === btn;
+  if (same) { clearQuoteHighlight(); return; }
+  clearQuoteHighlight();
+  jumpToPageWithHistory(page, { smooth: true });
+  quoteState = { page, fragment, btn: btn || null };
+  btn?.classList.add('active');
+  let ok = false;
+  try { ok = await viewer?.highlightQuote?.(page, fragment); } catch { /* 定位失败不影响跳页 */ }
+  // 期间被取消（用户又点了别处）或界面里根本找不到这段原文：别留一个假的激活态
+  if (quoteState.page !== page || quoteState.fragment !== fragment) { btn?.classList.remove('active'); return; }
+  if (!ok) clearQuoteHighlight();
+}
+
 /** 页码按钮：按住委托，流式重绘也不用重绑 */
 function initPageRefs() {
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('.page-ref');
-    if (!btn) return;
+    if (!btn) {
+      // 点正文/界面上任意处（右栏里点字不算）取消引用高亮；右栏里点其他引用按钮照常处理
+      if (quoteState.page && !e.target?.closest?.('#aiArea')) clearQuoteHighlight();
+      return;
+    }
     const page = Number(btn.dataset.page);
     if (!Number.isInteger(page) || page < 1) return;
     e.preventDefault();
+    const fragment = btn.dataset.fragment || '';
+    if (fragment) { jumpToQuote(page, fragment, btn); return; }
     jumpToPageWithHistory(page, { smooth: true });
   });
 }
@@ -6585,7 +6640,7 @@ function setBusy(on, hint = '') {
 }
 
 /** 输入框旁边那句范围提示（`#sendScope`）：只讲这次会发什么，不再讲带了几轮历史。 */
-function sendScopeText({ attachments, history, useFullText, useWeb, query, docId, fullMode, contextIncluded, scanned = false, scanPageCount = 0, docMode = '' } = {}) {
+function sendScopeText({ attachments, history, useFullText, useWeb, query, docId, fullMode, contextIncluded, contextHint = '', scanned = false, scanPageCount = 0 } = {}) {
   const rows = attachments || [];
   const quotes = rows.filter((a) => a.kind === 'text');
   const images = rows.filter((a) => a.kind === 'image');
@@ -6593,9 +6648,9 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
   if (quotes.length) parts.push(`选区 ${quotes.length} 段`);
   if (images.length) parts.push(`图片 ${images.length} 张`);
   const hasDoc = !!docId && !!viewer?.pdf && state.doc?.docId === docId && state.viewerDocId === docId;
-  if (hasDoc && scanned && docMode === 'scan-ocr') parts.push('OCR 文字版');
-  else if (hasDoc && (contextIncluded === undefined ? true : contextIncluded)) {
-    parts.push(scanPageCount ? `页图 ${scanPageCount} 张` : (quotes.length ? '附近上下文' : '当前页上下文'));
+  if (hasDoc && (contextIncluded === undefined ? true : contextIncluded)) {
+    parts.push(scanPageCount ? `页图 ${scanPageCount} 张`
+      : (quotes.length ? (contextHint || '附近上下文') : (contextHint || '当前页上下文')));
   }
   if (hasDoc && useFullText) {
     let mode = fullMode;
@@ -6604,7 +6659,7 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
     }
     if (mode === 'full') parts.push('整篇论文');
     else if (mode === 'digest') parts.push(`整篇论文索引 + ${PICK_K} 段相关原文`);
-    else if (mode === 'scan-ocr') parts.push('整篇论文（OCR 文字版）');
+    else if (mode === 'scan-digest') parts.push('整篇论文（图片阅读索引）');
     else if (mode === 'scan-digest') parts.push('整篇论文（图片阅读索引）');
     else if (mode === 'scan') parts.push('整篇论文（按页图理解）');
     else if (mode === 'unavailable') parts.push(scanned ? '整篇论文（按页图理解）' : '整篇论文暂不可提取');
@@ -6722,11 +6777,14 @@ async function doExplain(sel) {
   const openSeq = state.openSeq;
   const sid = activeSidFor(docId);
   const history = snapshotHistory(state.history);
-  const reading = resolveReadingRequest({ question: '请解释这段内容涉及的知识。', selection: text, page: sel.page, history });
+  const fromRight = sel.source === 'right';
+  const reading = resolveReadingRequest({ question: '请解释这段内容涉及的知识。', selection: text, page: sel.page, history,
+    selectionSource: fromRight ? 'right' : '' });
   // 「释」直接写在侧栏里，不弹浮层 —— 解释是要读的，不是瞄一眼的
   revealPanel('chat');
   const entry = addEntry({ block: 'chat', tag: 'explanation', page: sel.page, quote: text,
-    retry: { kind: 'explain', docId: state.doc?.docId || null, text, page: sel.page || null } });
+    retry: { kind: 'explain', docId: state.doc?.docId || null, text, page: sel.page || null,
+      source: fromRight ? 'right' : '' } });
   const target = streamTarget(entry.body);
   const ctl = makeController();
   if (!ctl) return;
@@ -6739,6 +6797,7 @@ async function doExplain(sel) {
     if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
     const full = await chat({
       messages: explainMessages({ selection: text, context, page: sel.page, docTitle: state.doc?.name, history, reading, references,
+        selectionSource: fromRight ? 'right' : '',
         profileBlock: askProfileBlock(text + "\n" + context, reading.question, { docId }) }),
       signal: ctl.signal,
       onDelta: (piece, all) => { received = all; target.push(all); },
@@ -6772,10 +6831,14 @@ function addToChat(sel) {
   if (!sel || state.busy) return;
   const text = sel.cleanText || cleanText(sel.text || '');
   if (!text) return;
+  const fromRight = sel.source === 'right';
   state.attachments.push({
-    id: uid(), kind: 'text', page: sel.page || viewer?.current, text,
+    id: uid(), kind: 'text',
+    // 右栏文字不挂页码；正文选区自带页，兜底也按屏幕实际页现算（viewer.current 有滚动节流，会慢一拍）
+    page: fromRight ? null : (sel.page || viewer?.currentVisiblePage?.() || viewer?.current || null),
+    text,
     // 来源只用于附件行的提示：正文划选 / 右栏回答或译文里划选
-    from: sel.source === 'right' ? 'right' : '',
+    from: fromRight ? 'right' : '',
   });
   renderAttachments();
   revealPanel('chat');            // 必须把「问答」切到当前标签，否则输入框是 display:none，focus 白调
@@ -7088,138 +7151,6 @@ function saveCachedScanDigest(docId, text) {
   } catch { /* 同上 */ }
 }
 
-/* ------------------------------------------------------------ 扫描件 OCR（视觉模型逐页转写，结果缓存） */
-
-const OCR_VERSION = 1;
-/** OCR 逐页转写时的页图清晰度：比问答页图高一点，小字/手写才认得出 */
-const OCR_PAGE_MAX_DIM = 1800;
-/** 一次 OCR 最多跑多少页（防止误点把 500 页扫描件全转一遍） */
-const OCR_PAGE_LIMIT = 80;
-
-function ocrCacheKey(docId) {
-  const fp = paperFingerprint(docId);
-  return fp ? `reader.ocr.v${OCR_VERSION}:${docId}:${fp}` : '';
-}
-function loadOcrCache(docId) {
-  const empty = { version: OCR_VERSION, pages: {}, at: 0 };
-  try {
-    const key = ocrCacheKey(docId);
-    if (!key) return empty;
-    const parsed = JSON.parse(localStorage.getItem(key) || 'null');
-    if (!parsed || parsed.version !== OCR_VERSION || !parsed.pages || typeof parsed.pages !== 'object') return empty;
-    return parsed;
-  } catch { return empty; }
-}
-function saveOcrCache(docId, cache) {
-  try {
-    const key = ocrCacheKey(docId);
-    if (!key) return;
-    const pages = {};
-    // 只留非空页；按页码排好，方便读和比对
-    for (const page of Object.keys(cache.pages || {}).sort((a, b) => Number(a) - Number(b))) {
-      const text = String(cache.pages[page] || '').trim();
-      if (text) pages[page] = text.slice(0, 12000);
-    }
-    localStorage.setItem(key, JSON.stringify({ version: OCR_VERSION, pages, at: Date.now() }));
-  } catch { /* localStorage 满了不影响主流程 */ }
-}
-/** 已缓存 OCR 的页码（升序） */
-function ocrPages(docId) {
-  return Object.keys(loadOcrCache(docId).pages || {}).map(Number).filter((n) => n > 0).sort((a, b) => a - b);
-}
-/** 把已缓存的 OCR 文本拼成带页码标记的整篇文本（与 getPageText 的全文格式一致） */
-function ocrTextFor(docId) {
-  const cache = loadOcrCache(docId);
-  const pages = Object.keys(cache.pages || {}).map(Number).sort((a, b) => a - b);
-  if (!pages.length) return '';
-  return pages.map((p) => `===== p.${p} =====\n${String(cache.pages[p] || '').trim()}`).join('\n\n');
-}
-
-let ocrRunPromise = null;
-/**
- * 扫描件「生成文字版」：逐页把页面图交给视觉模型转写，结果按页缓存（可中断、可续跑）。
- * 用前台 busy 状态 + 停止按钮；单页失败跳过并继续；已缓存的页默认不再花钱。
- * @returns {Promise<{pages:number[], cachedPages:number[], text:string}|null>}
- */
-async function runOcrDoc({ force = false, onProgress = null } = {}) {
-  if (!state.doc || !viewer?.pdf) { toast('先打开一篇论文', 'err'); return null; }
-  if (state.busy) { toast('正在生成中，等它跑完或者点停止', 'err', 2600); return null; }
-  if (!ensureReady()) return null;
-  if (ocrRunPromise) return ocrRunPromise;
-  warnIfNoVisionModel(true);
-  const docId = state.doc.docId;
-  const myTitle = state.doc?.name || '';
-  const profile = await startDocProfileScan(docId).catch(() => null);
-  if (state.doc?.docId !== docId) return null;
-  if (!profile?.scanned) { toast('这篇 PDF 有文本层，不需要 OCR', 'ok', 2600); return null; }
-  const allPages = (profile.scanPages || []).slice(0, OCR_PAGE_LIMIT);
-  const targets = allPages.length ? allPages : Array.from({ length: Math.min(viewer.numPages, OCR_PAGE_LIMIT) }, (_, i) => i + 1);
-  const cache = loadOcrCache(docId);
-  const todo = force ? targets : targets.filter((p) => !String(cache.pages?.[p] || '').trim());
-  if (!todo.length) {
-    const pages = ocrPages(docId);
-    toast(`文字版已存在（${pages.length} 页），直接使用缓存`, 'ok', 2600);
-    return { pages, cachedPages: pages, text: ocrTextFor(docId) };
-  }
-  const ctl = makeController();
-  if (!ctl) return null;
-  ocrRunPromise = (async () => {
-    setBusy(true, `OCR 0/${todo.length}`);
-    let done = 0;
-    let failed = 0;
-    try {
-      for (const page of todo) {
-        if (ctl.signal.aborted || state.doc?.docId !== docId) break;
-        setHint(`OCR：正在识别第 ${page} 页（${done + 1}/${todo.length}）…`);
-        setBusy(true, `OCR ${done}/${todo.length}`);
-        try {
-          const shot = await viewer.capturePageImage(page, { maxDim: OCR_PAGE_MAX_DIM });
-          if (ctl.signal.aborted || state.doc?.docId !== docId) break;
-          const text = await chat({
-            messages: attachPageImages(scanPageMessages({ page, docTitle: myTitle }), [shot]),
-            signal: ctl.signal,
-            stream: false,
-            temperature: 0,
-            idleMs: 45000,
-          });
-          const clean = String(text || '').trim();
-          if (!clean) { failed += 1; continue; }
-          cache.pages[page] = clean.slice(0, 12000);
-          saveOcrCache(docId, cache);          // 逐页落盘：中途停止也保留已识别的页
-          done += 1;
-          onProgress?.(done, todo.length, page);
-        } catch (e) {
-          if (isAbort(e)) break;
-          failed += 1;                          // 单页失败不挡后面的页
-        }
-      }
-    } finally {
-      setHint('');
-      if (state.abort === ctl) { state.abort = null; state.abortReason = ''; setBusy(false); }
-      ocrRunPromise = null;
-    }
-    if (state.doc?.docId !== docId) return null;
-    const pages = ocrPages(docId);
-    const text = ocrTextFor(docId);
-    const stopped = ctl.signal.aborted;
-    // 结果进右栏：正文显示前部（太长就读不动），复制/后续问答用完整缓存
-    const head = failed || stopped
-      ? `已识别 ${pages.length} 页${failed ? `，${failed} 页失败` : ''}${stopped ? '（已停止）' : ''}。`
-      : `已识别 ${pages.length} 页。`;
-    const shown = text.length > 18000
-      ? `${text.slice(0, 18000)}\n\n…（共 ${text.length.toLocaleString()} 字，全文已缓存；提问时会自动使用，可点下方「复制」拿到全文）`
-      : text;
-    const entry = addEntry({ block: 'chat', tag: '文字版（OCR）', kind: 'assistant', page: 1,
-      text: `${head}\n\n${shown}` });
-    finishEntry(entry, text, { page: 1, status: stopped ? 'stopped' : 'complete' });
-    toast(stopped ? `OCR 已停止，已识别 ${pages.length} 页（缓存保留）` : `文字版已生成（${pages.length} 页），之后的问答会自动使用`,
-      failed ? 'err' : 'ok', failed ? 5200 : 3600);
-    return { pages, cachedPages: pages, text };
-  })();
-  return ocrRunPromise;
-}
-
-
 /** 应用页型扫描结果：扫描件提示一次，并刷新发送范围提示 */
 function applyDocProfile(docId, profile) {
   if (state.doc?.docId !== docId) return;
@@ -7228,20 +7159,12 @@ function applyDocProfile(docId, profile) {
   updateSendScope();
   if (profile?.scanned && !state.scanNoticeShown[docId]) {
     state.scanNoticeShown[docId] = true;
-    const cachedPages = ocrPages(docId);
+    // 主模型支持视觉时（如 deepseek-flash）直接读页面图；单独配了视觉模型更稳。
     const hasVision = String(Settings.data.visionModel || '').trim();
-    if (cachedPages.length) {
-      toastAction('扫描件：已有文字版（OCR）缓存，问答与读懂论文会直接用文字；需要时可重新识别',
-        '重新识别', () => runOcrDoc({ force: true }), 'ok', 12000);
-    } else if (!hasVision) {
-      // 没有视觉模型时页面图会交给主模型，文本模型可能「假装看到了」——先把风险说清楚
-      toastAction('扫描件：没有文本层，且未配置「视觉模型」。模型可能无法真正读图（回答可能靠猜）；请先到设置里填一个支持图片的模型',
-        '去设置', () => openSettings('扫描件问答 / OCR 需要「视觉模型」：填一个能读图的模型名（如 gpt-4o、gemini-flash、Qwen-VL）'),
-        'err', 16000);
-    } else {
-      toastAction('扫描件：没有文本层，问答与「读懂论文」将按页面图片理解。可生成文字版（OCR，逐页转写）',
-        '生成文字版', () => runOcrDoc(), 'ok', 15000);
-    }
+    toast(hasVision
+      ? `扫描件：没有文本层，问答将按页面图片理解（读图模型：${hasVision}）`
+      : '扫描件：没有文本层，问答与「读懂论文」将按页面图片理解（图片交给主模型；若主模型不能读图，请到设置里配置视觉模型）',
+    'ok', 7000);
   }
 }
 
@@ -7435,38 +7358,11 @@ async function buildDocContext(question, selection, { page = null, forTeaching =
     e.name = 'AbortError';
     return e;
   };
-  // ① 扫描件：没有文本层 → 有 OCR 文字版就用文字；否则带页面图片（教学类再补图片阅读索引）
+  // ① 扫描件：没有文本层 → 带页面图片（教学类再补图片阅读索引）
   const profile = await startDocProfileScan(myDoc).catch(() => null);
   if (!stillCurrent()) throw stale();
   if (profile?.scanned) {
     const targetPage = Number(page) || viewer?.current || 1;
-    const ocrText = ocrTextFor(myDoc);
-    if (ocrText) {
-      const head = '【扫描件 OCR 文字版（可能有错字；以页面图片为准，引用原文时说明不确定）】';
-      if (forTeaching) {
-        // 教学类：OCR 文字比图片阅读索引更全，直接用；再带当前页图帮助看图表/公式
-        const pageImages = await renderScanPages([targetPage]);
-        if (!stillCurrent()) throw stale();
-        const body = ocrText.length > 24000
-          ? pickRelevantPages(ocrText, `${question}\n${selection || ''}`, PICK_K, 2400)
-          : ocrText;
-        setHint('');
-        return {
-          text: `${head}\n${body}`, mode: 'scan-ocr', chars: ocrText.length, profile, pageImages,
-        };
-      }
-      let body = '';
-      if (whole) {
-        body = ocrText.length > 60000
-          ? pickRelevantPages(ocrText, `${question}\n${selection || ''}`, PICK_K, 2400)
-          : ocrText;
-      } else {
-        const current = pageTextOf(ocrText, targetPage).trim();
-        body = current || pickRelevantPages(ocrText, `${question}\n${selection || ''}`, 2, 2400);
-      }
-      setHint('');
-      return { text: `${head}\n${body}`, mode: 'scan-ocr', chars: ocrText.length, profile, pageImages: [] };
-    }
     if (forTeaching) {
       setHint('扫描件：正在准备页面图片与阅读索引…');
       const digest = await ensureScanDigest(myDoc, profile);
@@ -7592,6 +7488,29 @@ function readingRequestCurrent({ docId, openSeq, sid }) {
     && (sid == null || activeSidFor(docId) === sid);
 }
 
+/**
+ * 所在页上下文的锚点文本：
+ * 追问 → 用上一轮原文定位到那段附近；明说页码 / 当前屏幕页 → 给整页（不拿别的页的选区硬套）。
+ */
+function contextAnchorFor(pageRole, reading) {
+  if (pageRole === 'topic' && reading?.focus?.kind === 'selection') return reading.focus.text;
+  if (pageRole === 'selection') return stripPageLabels(reading?.selection);
+  return '';
+}
+
+/** 发送范围提示里「上下文」那一段的说法，跟所在页来源一致 */
+function contextHintFor(pageRole) {
+  if (pageRole === 'topic') return '话题页上下文';
+  if (pageRole === 'explicit') return '指定页上下文';
+  return '当前页上下文';
+}
+
+/** 右栏划来的文字没有 PDF 页，语境只能按当前屏幕页算 */
+function scopeContextHintFor(pending) {
+  const rightQuote = (pending?.attachments || []).some((a) => a.kind === 'text' && a.from === 'right');
+  return rightQuote ? '当前页上下文' : contextHintFor(pending?.pageRole);
+}
+
 async function readingReferences(selection) {
   const nums = [...new Set([...String(selection || '').matchAll(/\[(\d{1,3})\]/g)].map((m) => Number(m[1])))].slice(0, 3);
   if (!nums.length || !viewer?.pdf) return [];
@@ -7654,15 +7573,30 @@ async function send(retryPending = null) {
     const quotes = attachments.filter((a) => a.kind === 'text');
     const images = attachments.filter((a) => a.kind === 'image');
     const quoteText = quotes.map((a) => (a.page ? `[第${a.page}页] ` : '') + a.text).join('\n\n');
-    const attachmentPage = quotes[0]?.page || images[0]?.page || (state.doc ? viewer?.current : null);
+    // 右栏回答 / 译文里划来的文字不是 PDF 原文：不挂页码，也别让模型当成某页原文去对照页图
+    const selectionFromRight = quotes.some((a) => a.from === 'right');
+    // 「当前页」按屏幕实际显示区域现算（不受滚动节流影响）；附件里的页码优先。
+    const screenPage = state.doc && viewer ? (viewer.currentVisiblePage?.() ?? viewer.current ?? null) : null;
+    const attachmentPage = quotes[0]?.page || images[0]?.page || null;
     const question = q || (images.length
       ? '请识别并解释我加进来的这些内容（图/表/公式/文字），说明它们在论文里的作用。'
       : '请解释我加进来的这段内容。');
     const history = snapshotHistory(state.history);
-    const reading = resolveReadingRequest({ question, selection: quoteText, page: attachmentPage, history });
-    const firstPage = reading.page;
+    const selectionSource = selectionFromRight ? 'right' : '';
+    const reading = resolveReadingRequest({ question, selection: quoteText, selectionSource,
+      page: quotes.length ? (selectionFromRight ? null : attachmentPage) : screenPage, history });
+    // 这次「所在页」：附件选区页 > 问题里明说的页码 > 追问沿用话题页 > 当前屏幕页。
+    // 追问不再被屏幕页顶掉，否则模型会把读者刚滚到的那页当成新话题（上下文跟着屏幕跑）。
+    const place = resolvePageRole({ question, reading, screenPage, attachmentPage, numPages: viewer?.numPages });
+    const firstPage = place.page || reading.page || null;
+    // 只有「问题」对象的页可以补成所在页；选区对象的页必须保持原样（右栏选区甚至必须为 null，
+    // 否则下一轮追问会把它当「第 N 页原文」去对照页图）。
+    if (reading.focus && reading.focus.kind === 'question') {
+      reading.focus = { ...reading.focus, page: firstPage };
+    }
+    reading.page = firstPage || reading.page;
     pending = {
-      inputValue, question, attachments, quoteText, firstPage, reading,
+      inputValue, question, attachments, quoteText, firstPage, pageRole: place.role, reading, screenPage, selectionSource,
       docId: state.doc?.docId || null,
       docTitle: state.doc?.name || '',
       history, openSeq: state.openSeq, sid: activeSidFor(state.doc?.docId),
@@ -7699,7 +7633,8 @@ async function send(retryPending = null) {
       retry: {
         kind: 'chat', docId: pending.docId, docTitle: pending.docTitle,
         inputValue: pending.inputValue, question: pending.question, quoteText: pending.quoteText,
-        firstPage: pending.firstPage, attachments: pending.attachments,
+        firstPage: pending.firstPage, pageRole: pending.pageRole, attachments: pending.attachments,
+        selectionSource: pending.selectionSource || '',
         useFullText: pending.useFullText, useWeb: pending.useWeb,
         scopeRange: pending.scopeRange,
         reading, history,
@@ -7736,6 +7671,7 @@ async function send(retryPending = null) {
     useWeb: pending.useWeb,
     query: pending.inputValue,
     docId: pending.docId,
+    contextHint: scopeContextHintFor(pending),
   });
   pending.scope = baseScope;
   state.activeSendScope = baseScope;
@@ -7765,19 +7701,26 @@ async function send(retryPending = null) {
     }
     const reading = pending.reading || resolveReadingRequest({ question: pending.question,
       selection: pending.quoteText, page: pending.firstPage, history: pending.history });
+    // 重试时也复用第一次发送时定下的「所在页」与话题页，不受之后滚动影响
+    if (pending.firstPage) reading.page = pending.firstPage;
     pending.reading = reading;
     // 扫描件：先判定页型（命中缓存就不花时间）；扫描件无论范围如何都要带页面图片。
     const scanProfile = pending.docId ? await startDocProfileScan(pending.docId).catch(() => null) : null;
     if (!readingRequestCurrent(pending)) return;
     const scannedDoc = !!scanProfile?.scanned;
     pending.scanned = scannedDoc;
-    // 没有选区时也带当前页上下文；扫描件没有文本层，改成带页图。
+    // 没有选区时也带所在页上下文：
+    // · 追问 → 上一轮话题所在页（让模型顺着上下说，而不是被屏幕滚到的页带跑）；
+    // · 明说「第 N 页」→ 那一页；· 其它/「这一页/这里」→ 当前屏幕页。扫描件没有文本层，改成带页图。
     const quotes = pending.attachments.filter((a) => a.kind === 'text');
+    const anchor = contextAnchorFor(pending.pageRole, reading);
     const contextParts = scannedDoc ? [] : (quotes.length ? await Promise.all(quotes.slice(0, 6).map(async (a) => {
-      const nearby = await viewer.getContextAround(a.page || pending.firstPage, a.text);
+      // 右栏划来的文字不是 PDF 原文，定位不到「原文附近」；给所在页整页当语境
+      const nearby = await viewer.getContextAround(a.page || pending.firstPage,
+        a.from === 'right' ? '' : a.text);
       return nearby ? `[第${a.page || pending.firstPage}页]\n${nearby}` : '';
     })) : [pending.firstPage && pending.docId
-      ? await viewer.getContextAround(reading.page || pending.firstPage, stripPageLabels(reading.selection)) : '']);
+      ? await viewer.getContextAround(pending.firstPage, anchor) : '']);
     const context = [...new Set(contextParts.filter(Boolean))].join('\n\n');
     const references = await readingReferences(reading.selection);
     if (!readingRequestCurrent(pending)) return;
@@ -7786,6 +7729,7 @@ async function send(retryPending = null) {
       attachments: pending.attachments, history: pending.history,
       useFullText: pending.useFullText, useWeb: pending.useWeb,
       query: pending.inputValue, docId: pending.docId, contextIncluded: !!context, scanned: scannedDoc,
+      contextHint: scopeContextHintFor(pending),
     });
     state.activeSendScope = pending.scope;
     updateSendScope();
@@ -7808,7 +7752,7 @@ async function send(retryPending = null) {
     if (scannedDoc) {
       try {
         docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text, {
-          page: reading.page || pending.firstPage,
+          page: pending.firstPage || reading.page,
           whole: pending.useFullText,
         });
       } catch (e) {
@@ -7834,10 +7778,10 @@ async function send(retryPending = null) {
       docId: pending.docId,
       scanned: scannedDoc,
       scanPageCount: docCtx?.pageImages?.length || 0,
-      docMode: docCtx?.mode || '',
       fullMode: scannedDoc ? (pending.useFullText ? (docCtx?.mode || 'scan') : null)
         : (pending.useFullText ? (docCtx?.mode || 'unavailable') : null),
       contextIncluded: !!context,
+      contextHint: scopeContextHintFor(pending),
     });
     state.activeSendScope = pending.scope;
     updateSendScope();
@@ -7851,8 +7795,11 @@ async function send(retryPending = null) {
     const messages = askMessages({
       question: pending.question,
       selection: reading.selection,
+      // 右栏文字：附件里的 from=right，或追问沿用的对象本身来自右栏
+      selectionSource: pending.selectionSource || (reading.focus?.source === 'right' ? 'right' : ''),
       context,
       page: pending.firstPage,
+      pageRole: pending.pageRole,
       docTitle: pending.docTitle,
       fullText: docCtx?.text,
       webResults: sources,
@@ -8454,6 +8401,8 @@ function initShortcuts() {
       if (!$('#searchBar').classList.contains('hidden')) { $('#searchClose').click(); return; }
       if (!$('#noteBox').classList.contains('hidden')) { saveNoteBox(); return; }
       if (state.abort) { abortStream('user'); $('#composerHint').textContent = '正在停止…'; return; }
+      // 引用高亮：Esc 先取消高亮（优先级低于正在生成的停止）
+      if (quoteState.page) { clearQuoteHighlight(); return; }
       // Esc 是明确的「不要这个选区了」：连方块和记住的选区一起清掉
       if (state.selection) { clearSelectionState(); viewer?.clearSelection(); return; }
       hideBubble();

@@ -9,7 +9,9 @@ export function stripPageLabels(text) {
 function cleanFocus(focus) {
   if (!focus || typeof focus !== 'object' || !String(focus.text || '').trim()) return null;
   return { text: String(focus.text).slice(0, MAX_FOCUS), page: pageNumber(focus.page),
-    kind: focus.kind === 'question' ? 'question' : 'selection' };
+    kind: focus.kind === 'question' ? 'question' : 'selection',
+    // 右栏回答/译文里划的词不是 PDF 原文，不能冒充某一页的原文
+    source: focus.source === 'right' ? 'right' : '' };
 }
 
 export function snapshotHistory(history = []) {
@@ -33,22 +35,63 @@ export function readingIntent(question, selection = '') {
   return 'question';
 }
 
-export function resolveReadingRequest({ question, selection = '', page, history = [] } = {}) {
+/** 问题是否明确指向「读者眼前的这一页」（而不是上一轮话题） */
+export function screenPageRequested(question) {
+  const q = String(question || '');
+  // 「第 N 页」是明确页码，交给 explicitPageIn()，不算「当前页」指代
+  if (/(?:第\s*\d{1,4}\s*页|\bp\.?\s*\d{1,4}\b)/i.test(q)) return false;
+  return /(?:当前(?:的)?页|这一?页|本页|这屏|这一屏|屏幕(?:上|里)|这里|这儿|这个位置|这一?块(?:区域)?)/.test(q);
+}
+
+/** 问题里明说的页码（第 5 页 / p.5），超出总页数则忽略 */
+export function explicitPageIn(question, numPages = null) {
+  const text = String(question || '');
+  const m = text.match(/第\s*(\d{1,4})\s*页/) || text.match(/\bp\.?\s*(\d{1,4})\b/i);
+  const n = m ? Number(m[1]) : null;
+  if (!n || n < 1) return null;
+  if (numPages && n > numPages) return null;
+  return n;
+}
+
+/**
+ * 这次提问的「所在页」到底指哪页（决定上下文与回答条目标注）：
+ * 附件选区页 > 问题里明说的页码 > 追问沿用话题页 > 当前屏幕页。
+ * 追问时不再拿屏幕页覆盖话题页——否则模型会把读者刚滚到的那页当成新话题。
+ */
+export function resolvePageRole({ question, reading = null, screenPage = null, attachmentPage = null, numPages = null } = {}) {
+  const attach = pageNumber(attachmentPage);
+  if (attach) return { page: attach, role: 'selection' };
+  const explicit = explicitPageIn(question, numPages);
+  if (explicit) return { page: explicit, role: 'explicit' };
+  if (reading?.inherited && !screenPageRequested(question)) {
+    const topic = pageNumber(reading?.focus?.page);
+    if (topic) return { page: topic, role: 'topic' };
+  }
+  return { page: pageNumber(screenPage) || pageNumber(reading?.page) || null, role: 'screen' };
+}
+
+export function resolveReadingRequest({ question, selection = '', page, history = [], screenRef = false, selectionSource = '' } = {}) {
   const q = String(question || '请解释我加进来的这段内容。').trim();
   const intent = readingIntent(q, selection);
   const previous = [...history].reverse().find((m) => m?.role === 'user');
   let priorFocus = cleanFocus(previous?.focus);
   // 老会话没有对象字段时，明确的问题本身仍可作为追问线索。
   if (!priorFocus && previous?.content && readingIntent(previous.content) === 'question') {
-    priorFocus = { text: String(previous.content).slice(0, MAX_FOCUS), page: null, kind: 'question' };
+    priorFocus = { text: String(previous.content).slice(0, MAX_FOCUS), page: null, kind: 'question', source: '' };
   }
-  const dependent = intent !== 'question';
-  const focus = selection ? { text: String(selection).slice(0, MAX_FOCUS), page: pageNumber(page), kind: 'selection' }
-    : dependent && priorFocus ? priorFocus : { text: q.slice(0, MAX_FOCUS), page: pageNumber(page), kind: 'question' };
+  // 「这一页讲了什么 / 这里怎么理解」是在问眼前的页面，不继承上一轮的选区对象。
+  const screenQuestion = !selection && (screenRef || screenPageRequested(q));
+  const dependent = intent !== 'question' && !screenQuestion;
+  // 右栏选区不挂 PDF 页码：它是对话里的文字，挂上页码就会被模型当成「第 N 页原文」
+  const fromRight = selectionSource === 'right';
+  const focus = selection ? { text: String(selection).slice(0, MAX_FOCUS),
+    page: fromRight ? null : pageNumber(page), kind: 'selection', source: fromRight ? 'right' : '' }
+    : dependent && priorFocus ? priorFocus
+      : { text: q.slice(0, MAX_FOCUS), page: pageNumber(page), kind: 'question', source: '' };
   const oldGuidance = [...history].reverse().find((m) => m?.role === 'user' && m.guidance)?.guidance || '';
   const guidance = intent === 'guidance' ? q.slice(0, 400) : String(oldGuidance).slice(0, 400);
   return { question: q, selection: selection ? String(selection) : focus.kind === 'selection' ? focus.text : '',
-    page: focus.page || pageNumber(page), focus, guidance, intent,
+    page: focus.page || (fromRight ? null : pageNumber(page)), focus, guidance, intent,
     inherited: !selection && dependent && !!priorFocus };
 }
 

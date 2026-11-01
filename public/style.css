@@ -135,6 +135,55 @@
   --scroll-thumb: #5C5648; --scroll-thumb-hover: #7A7264;
 }
 
+/* ── 极简皮肤（2026-11 用户口径：多做几个皮肤，但都必须很简约；
+      纯黑是「暗色区域全部纯黑完全不发光」） ───────────────────────────────
+   纯黑只改界面的暗色表面；PDF 纸面仍然是白纸黑字（深纸黑字没法读）。
+   这套皮肤里 --shadow / --shadow-sm 一律 none：阴影就是发光感的主要来源。 */
+:root[data-theme="black"] {
+  color-scheme: dark;
+  --bg: #000000; --bg-elev: #000000; --bg-sunken: #000000; --fg: #EDEDED;
+  --fg-dim: #B4B4B4; --fg-faint: #8C8C8C;
+  --border: #242424; --border-strong: #3A3A3A;
+  --accent: #A9C4E0; --accent-soft: #101820; --accent-fg: #000000;
+  --btn: #E6E6E6; --btn-fg: #000000;
+  --ok: #7FA98C; --err: #C08E8E;
+  --ok-text: #A9D4B4; --err-text: #E2AFAF;
+  --paper: #FFFFFF;
+  --shadow: none; --shadow-sm: none;
+  --sel: rgba(169, 196, 224, .26); --hit: rgba(255, 196, 0, .34); --hl: rgba(255, 226, 84, .30);
+  --scroll-thumb: #2F2F2F; --scroll-thumb-hover: #4A4A4A;
+}
+
+/* 石墨灰：中性炭灰、低饱和，不发光的极简深色（比暖灰冷、比纯黑有层次） */
+:root[data-theme="graphite"] {
+  color-scheme: dark;
+  --bg: #111214; --bg-elev: #15171A; --bg-sunken: #0D0E10; --fg: #E8EAED;
+  --fg-dim: #B9BDC3; --fg-faint: #8B9096;
+  --border: #26292D; --border-strong: #3A3E44;
+  --accent: #9FB6C9; --accent-soft: #1A2026; --accent-fg: #0B0D0F;
+  --btn: #C9D2DB; --btn-fg: #101214;
+  --ok: #7FA98C; --err: #C08E8E;
+  --ok-text: #A9D4B4; --err-text: #E2AFAF;
+  --shadow: none; --shadow-sm: none;
+  --sel: rgba(159, 182, 201, .28); --hit: rgba(255, 196, 0, .34); --hl: rgba(255, 226, 84, .30);
+  --scroll-thumb: #2C3035; --scroll-thumb-hover: #454A50;
+}
+
+/* 纯白：明亮极简，只有灰阶层次（没有暖黄） */
+:root[data-theme="mist"] {
+  color-scheme: light;
+  --bg: #FFFFFF; --bg-elev: #FFFFFF; --bg-sunken: #F3F4F5; --fg: #1F2328;
+  --fg-dim: #5A6068; --fg-faint: #8A9099;
+  --border: #E4E6E8; --border-strong: #D2D5D9;
+  --accent: #3F6076; --accent-soft: #E8EEF3; --accent-fg: #FFFFFF;
+  --btn: #E2E6EA; --btn-fg: #2A3138;
+  --ok: #6F9678; --err: #B07A70;
+  --ok-text: #3F6B4A; --err-text: #8F4337;
+  --shadow: none; --shadow-sm: none;
+  --sel: rgba(63, 96, 118, .22); --hl: rgba(255, 200, 40, .40);
+  --scroll-thumb: #CFD3D7; --scroll-thumb-hover: #B4B9BF;
+}
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -765,6 +814,22 @@ body.dragging .viewer { pointer-events: none; }
 .search-hit { position: absolute; background: var(--hit); border-radius: 2px; mix-blend-mode: multiply; }
 .search-hit.current { outline: 2px solid var(--accent); outline-offset: 1px; z-index: 2; }
 @media (prefers-color-scheme: dark) { .search-hit { mix-blend-mode: screen; } }
+/* 引用定位：橙色半透明块 + 细描边；与搜索（黄）、选区（暖沙）区分开。
+   不参与搜索命中列表，也不自动淡出（用户可能要对着高亮读原文）。 */
+.quote-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.quote-hit {
+  position: absolute; border-radius: 2px;
+  background: rgba(255, 150, 50, .26);
+  border: 1px solid rgba(226, 120, 26, .55);
+  box-sizing: border-box;
+  mix-blend-mode: multiply;
+}
+:root[data-theme="dark"] .quote-hit,
+:root[data-theme="black"] .quote-hit,
+:root[data-theme="graphite"] .quote-hit { mix-blend-mode: screen; }
+@media (prefers-color-scheme: dark) { .quote-hit { mix-blend-mode: screen; } }
+/* 点中引用按钮的激活态（再点同一下即取消高亮） */
+.page-ref.active { background: rgba(226, 120, 26, .22); border-color: rgba(226, 120, 26, .6); }
 .hl-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 .hl-mark { position: absolute; background: var(--hl); border-radius: 2px; }
 

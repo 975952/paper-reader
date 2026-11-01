@@ -479,6 +479,8 @@ export class PdfViewer {
     if (gen !== this._gen) return;
     // 补齐后修正尺寸
     this.layout({ keepAnchor: true });
+    // 尺寸补齐前 _handleScroll 可能把页码停在保守值；补齐后立刻按真实偏移再同步一次
+    this._handleScroll();
     this.opts.onProgress?.(total, total);
   }
 
@@ -904,7 +906,7 @@ export class PdfViewer {
   /** 四个覆盖层整层 scale(k)：里面全是渲染比例下的绝对 px（见上面的单位铁律） */
   _softRescaleLayers(entry, k) {
     const tf = Math.abs(k - 1) < 0.0005 ? '' : `scale(${k})`;
-    for (const layer of [entry.textDiv, entry.hlLayer, entry.hitLayer, entry.pinLayer]) {
+    for (const layer of [entry.textDiv, entry.hlLayer, entry.hitLayer, entry.quoteLayer, entry.pinLayer]) {
       if (!layer) continue;
       layer.style.transformOrigin = '0 0';
       layer.style.transform = tf;
@@ -914,7 +916,7 @@ export class PdfViewer {
   _resetLayerScale(entry) {
     if (!entry) return;
     entry.canvas?.classList.remove('soft-zoom');
-    for (const layer of [entry.textDiv, entry.hlLayer, entry.hitLayer, entry.pinLayer]) {
+    for (const layer of [entry.textDiv, entry.hlLayer, entry.hitLayer, entry.quoteLayer, entry.pinLayer]) {
       if (layer) layer.style.transform = '';
     }
   }
@@ -1051,13 +1053,32 @@ export class PdfViewer {
     let first = 1;
     let last = this.numPages;
     for (let i = 1; i <= this.numPages; i++) {
-      if (this.offsets[i] + this.heights[i] >= top) { first = i; break; }
+      if (this.offsets[i] === undefined) continue;   // 尺寸还没补齐：跳过，别把范围算成整篇
+      if (this.offsets[i] + (this.heights[i] ?? 0) >= top) { first = i; break; }
     }
     for (let i = first; i <= this.numPages; i++) {
+      if (this.offsets[i] === undefined) { last = Math.max(first, i - 1); break; }
       if (this.offsets[i] > bottom) { last = Math.max(first, i - 1); break; }
       last = i;
     }
     return [first, last];
+  }
+
+  /**
+   * 当前屏幕显示区域对应的页码（与状态栏页码同一口径：视口上部 30% 处）。
+   * 与 `current` 的区别：这里每次按 scrollTop 现算，不受滚动事件节流影响；
+   * 用户刚滚完就点发送时也能拿到正确页。分页尺寸没补齐时退回 current。
+   */
+  currentVisiblePage() {
+    if (!this.pdf || !this.pageEls.length || !this.offsets.length) return this.current || 1;
+    const probe = (this.container.scrollTop || 0) + (this.container.clientHeight || 0) * 0.3;
+    let cur = this.current || 1;
+    let changed = false;
+    for (let i = 1; i <= this.numPages; i++) {
+      if (this.offsets[i] === undefined) break;
+      if (probe >= this.offsets[i]) { cur = i; changed = true; } else break;
+    }
+    return changed || cur ? cur : 1;
   }
 
   async _renderVisible(force = false, gen = this._gen) {
@@ -1221,13 +1242,16 @@ export class PdfViewer {
       hlLayer.className = 'hl-layer';
       const hitLayer = document.createElement('div');
       hitLayer.className = 'search-hit-layer';
+      // 引用定位高亮单独一层（橙色）；与搜索命中分开，互不覆盖，也不参与搜索跳转
+      const quoteLayer = document.createElement('div');
+      quoteLayer.className = 'quote-layer';
       // 笔记书签单独一层，z-index 必须高于文本层，否则点不到
       const pinLayer = reusePinLayer ? prevEntry.pinLayer : document.createElement('div');
       pinLayer.className = 'hl-pin-layer';
       if (!reusePinLayer) pinLayer.style.transform = '';
 
       const entry = {
-        canvas, textDiv, hlLayer, hitLayer, pinLayer, task: null, textLayer: null,
+        canvas, textDiv, hlLayer, hitLayer, quoteLayer, pinLayer, task: null, textLayer: null,
         slice, ratio, cssW, cssH,
         renderScale: this.scale,   // 这张位图是按哪个比例画的（软缩放拉伸时要用）
         dirty: false,
@@ -1243,7 +1267,7 @@ export class PdfViewer {
       if (prevCanvas) {
         prevCanvas.after(canvas);
       } else {
-        pageEl.prepend(hlLayer, hitLayer, canvas);
+        pageEl.prepend(hlLayer, hitLayer, quoteLayer, canvas);
         pageEl.append(textDiv, pinLayer);
       }
 
@@ -1289,9 +1313,10 @@ export class PdfViewer {
         prevEntry.textDiv.remove();
         prevEntry.hlLayer.remove();
         prevEntry.hitLayer.remove();
+        prevEntry.quoteLayer?.remove();
         if (!reusePinLayer) prevEntry.pinLayer?.remove();
         this.rendered.set(i, entry);
-        prevCanvas.before(hlLayer, hitLayer);
+        prevCanvas.before(hlLayer, hitLayer, quoteLayer);
         pageEl.append(textDiv, pinLayer);
         try { prevCanvas.width = 0; prevCanvas.height = 0; } catch { /* ignore */ }
         prevCanvas.remove();
@@ -1340,6 +1365,7 @@ export class PdfViewer {
       // 恢复高亮 & 搜索命中 & 当前选区
       this._paintHighlights(i);
       this._paintHits(i);
+      this._paintQuote(i);
       // 选中方块也要重画：虚拟化会把页面整个卸掉，再滚回来时
       // 浏览器那边的选区已经没了，不重画的话「选中的文字」看起来就凭空消失了
       this._paintSel(i);
@@ -1363,6 +1389,7 @@ export class PdfViewer {
     entry.textDiv.remove();
     entry.hlLayer.remove();
     entry.hitLayer.remove();
+    entry.quoteLayer?.remove();
     entry.pinLayer?.remove();
     this.rendered.delete(i);
     const el = this.pageEls[i];
@@ -1386,7 +1413,8 @@ export class PdfViewer {
     const probe = this.container.scrollTop + this.container.clientHeight * 0.3;
     let cur = first;
     for (let i = first; i <= last; i++) {
-      if (probe >= (this.offsets[i] ?? 0)) cur = i;
+      if (this.offsets[i] === undefined) break;   // 尺寸没补齐：保持当前页，别把页码算到最后一页
+      if (probe >= this.offsets[i]) cur = i;
       else break;
     }
     if (cur !== this.current) {
@@ -1670,6 +1698,98 @@ export class PdfViewer {
 
   repaintHits() {
     for (const [i] of this.rendered) this._paintHits(i);
+  }
+
+  /* ------------------------------------------------------------ 引用定位高亮（橙色，可取消） */
+
+  /** 清掉引用高亮（点击正文 / Esc / 再点同一个引用 / 翻页 / 切文档时调用） */
+  clearQuoteHighlight() {
+    this._quote = null;
+    for (const [, entry] of this.rendered) {
+      if (entry.quoteLayer) entry.quoteLayer.innerHTML = '';
+    }
+  }
+
+  hasQuoteHighlight() {
+    return !!(this._quote && this._quote.page);
+  }
+
+  /**
+   * 跳到某页并高亮「原文片段」（模型引用里的 〔p.N‖片段〕 用）。
+   * 片段先精确匹配；匹配不到时退化为最长前缀，保证「至少跳到那一页」。
+   * @returns {Promise<boolean>} 是否画出了高亮
+   */
+  async highlightQuote(pageNum, fragment) {
+    const target = clamp(Math.round(Number(pageNum) || 1), 1, this.numPages || 1);
+    const text = String(fragment || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    this._quote = { page: target, fragment: text };
+    await this.goToPage(target);
+    await this.refreshPage(target);
+    const ok = this._paintQuote(target);
+    if (ok) {
+      const entry = this.rendered.get(target);
+      const first = entry?.quoteLayer?.firstElementChild;
+      if (first) {
+        const y = parseFloat(first.style.top || '0');
+        const pageTop = this.offsets[target] ?? 0;
+        const want = Math.max(0, pageTop + y - this.container.clientHeight * 0.35);
+        this.container.scrollTo({ top: want, behavior: 'smooth' });
+      }
+    }
+    return ok;
+  }
+
+  /** 只重画某一页的引用高亮（页面重渲染后由 _renderPage 调用） */
+  _paintQuote(i) {
+    const entry = this.rendered.get(i);
+    if (!entry) return false;
+    if (entry.quoteLayer) entry.quoteLayer.innerHTML = '';
+    const quote = this._quote;
+    if (!quote?.page || quote.page !== i || !entry.textDiv) return false;
+    const pageEl = this.pageEls[i];
+    if (!pageEl) return false;
+    const pr = pageEl.getBoundingClientRect();
+    const spans = Array.from(entry.textDiv.querySelectorAll('span:not(.markedContent)'));
+    const hits = this._matchQuote(spans, quote.fragment);
+    if (!hits.length) return false;
+    let painted = 0;
+    for (const seg of hits) {
+      const span = spans[seg.spanIndex];
+      const node = span && span.firstChild;
+      if (!node || node.nodeType !== 3) continue;
+      const a = Math.min(seg.start, node.length);
+      const b = Math.min(seg.end, node.length);
+      if (b <= a) continue;
+      const range = document.createRange();
+      try { range.setStart(node, a); range.setEnd(node, b); } catch { continue; }
+      for (const r of range.getClientRects()) {
+        if (r.width < 0.5 || r.height < 0.5) continue;
+        const d = document.createElement('div');
+        d.className = 'quote-hit';
+        d.style.left = `${r.left - pr.left}px`;
+        d.style.top = `${r.top - pr.top}px`;
+        d.style.width = `${r.width}px`;
+        d.style.height = `${r.height}px`;
+        entry.quoteLayer.append(d);
+        painted += 1;
+      }
+    }
+    return painted > 0;
+  }
+
+  /** 片段匹配：整段优先，其次按最长前缀退让（容忍空白/换行差异） */
+  _matchQuote(spans, fragment) {
+    const f = String(fragment || '').trim();
+    if (!f) return [];
+    const candidates = [f];
+    for (const len of [80, 60, 40, 24, 16, 10, 6]) {
+      if (f.length > len) candidates.push(f.slice(0, len));
+    }
+    for (const cand of candidates) {
+      const hits = findInSpans(spans, cand);
+      if (hits.length) return hits;
+    }
+    return [];
   }
 
   setActiveQuery(q) {
