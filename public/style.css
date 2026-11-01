@@ -2285,6 +2285,19 @@ body.dragging .side { transition: width .07s linear; }
 .page-ref:hover { border-color: var(--accent); background: var(--accent-soft); }
 .page-ref:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+/* ── 带片段的引用：页码按钮后面把被引原句显示出来（不能只放 title 里，否则正文只剩 p.N） ── */
+.quote-inline {
+  margin: 0 1px;
+  color: var(--fg);
+  /* 极轻的底色，一眼看出这是被引原句而不是回答自己的话；不改变排版 */
+  background: var(--bg-sunken);
+  border-radius: 3px;
+  padding: 0 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.quote-inline:empty { display: none; }
+
 /* ── 教学类回答底部的按钮（比图标按钮更显眼一点，因为它们是主要交互） ── */
 .msg .acts button.act-chip {
   border: 1px solid var(--border); background: var(--bg-elev);

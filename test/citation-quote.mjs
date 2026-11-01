@@ -157,6 +157,16 @@ try {
     rendered.some((b) => b.page === '5' && b.frag.length > 20 && b.frag.startsWith(snippet.slice(0, 20))),
     JSON.stringify(rendered).slice(0, 200));
   check('旧格式 〔p.3〕 仍是纯跳页按钮', rendered.some((b) => b.page === '3' && !b.frag), JSON.stringify(rendered).slice(0, 160));
+  const visibleQuote = await page.evaluate(() => {
+    const text = [...document.querySelectorAll('#aiArea .msg.assistant .text')].at(-1);
+    return {
+      all: text?.textContent || '',
+      inline: [...(text?.querySelectorAll('.quote-inline') || [])].map((n) => n.textContent).join('\n'),
+    };
+  });
+  check('被引原文渲染后仍然可见（不会被页码按钮吞掉）',
+    visibleQuote.inline.includes(snippet.slice(0, 30)), visibleQuote.inline.slice(0, 80));
+  check('回答正文同时保留被引原文', visibleQuote.all.includes(snippet.slice(0, 30)), visibleQuote.all.slice(0, 80));
 
   /* ── 2. 点击：跳页 + 橙色高亮 + 激活态 ── */
   await clickQuoteRef();

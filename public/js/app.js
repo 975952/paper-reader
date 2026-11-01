@@ -6425,7 +6425,11 @@ function decoratePageRefs(html) {
         return `<button type="button" class="page-ref" data-page="${p}" title="${escapeHtml(title)}">${label}</button>`;
       }
       const title = `跳到第 ${p} 页并定位原文：${fragment.slice(0, 60)}`;
-      return `<button type="button" class="page-ref quote-ref" data-page="${p}" data-fragment="${escapeHtml(fragment)}" title="${escapeHtml(title)}">${label}</button>`;
+      // 片段必须跟着显示出来：之前只塞进 title，渲染后正文只剩 p.5，引用的原句被「吞掉」了
+      //（用户实测：老师手写答案变成连续四个 p.5）。文字保持普通文本，可选中复制；
+      // 只有前面的页码按钮负责跳页 + 高亮。
+      return `<button type="button" class="page-ref quote-ref" data-page="${p}" data-fragment="${escapeHtml(fragment)}" title="${escapeHtml(title)}">${label}</button>`
+        + ` <span class="quote-inline">${escapeHtml(fragment)}</span>`;
     });
 }
 
