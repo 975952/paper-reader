@@ -1563,6 +1563,8 @@ function initViewer() {
     memoryIdle: () => learningMemory.idle(),
     // 扫描件：页型扫描 / 页图 / 图片阅读索引（自动化直接验这条链路）
     startDocProfileScan, ensureScanDigest, pickScanPages, attachPageImages, sendScopeText,
+    // 扫描件 OCR：逐页转写 + 缓存（自动化直接验「生成文字版后问答用文字」）
+    runOcrDoc, ocrTextFor, loadOcrCache, ocrPages,
     get docProfile() { return state.docProfile; },
     set docProfile(v) { state.docProfile = v; },
     // 记忆：长期记忆 / 本篇讨论 / 会话滚动摘要（自动化验注入块与清理）
@@ -6583,7 +6585,7 @@ function setBusy(on, hint = '') {
 }
 
 /** 输入框旁边那句范围提示（`#sendScope`）：只讲这次会发什么，不再讲带了几轮历史。 */
-function sendScopeText({ attachments, history, useFullText, useWeb, query, docId, fullMode, contextIncluded, scanned = false, scanPageCount = 0 } = {}) {
+function sendScopeText({ attachments, history, useFullText, useWeb, query, docId, fullMode, contextIncluded, scanned = false, scanPageCount = 0, docMode = '' } = {}) {
   const rows = attachments || [];
   const quotes = rows.filter((a) => a.kind === 'text');
   const images = rows.filter((a) => a.kind === 'image');
@@ -6591,7 +6593,8 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
   if (quotes.length) parts.push(`选区 ${quotes.length} 段`);
   if (images.length) parts.push(`图片 ${images.length} 张`);
   const hasDoc = !!docId && !!viewer?.pdf && state.doc?.docId === docId && state.viewerDocId === docId;
-  if (hasDoc && (contextIncluded === undefined ? true : contextIncluded)) {
+  if (hasDoc && scanned && docMode === 'scan-ocr') parts.push('OCR 文字版');
+  else if (hasDoc && (contextIncluded === undefined ? true : contextIncluded)) {
     parts.push(scanPageCount ? `页图 ${scanPageCount} 张` : (quotes.length ? '附近上下文' : '当前页上下文'));
   }
   if (hasDoc && useFullText) {
@@ -6601,6 +6604,8 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
     }
     if (mode === 'full') parts.push('整篇论文');
     else if (mode === 'digest') parts.push(`整篇论文索引 + ${PICK_K} 段相关原文`);
+    else if (mode === 'scan-ocr') parts.push('整篇论文（OCR 文字版）');
+    else if (mode === 'scan-digest') parts.push('整篇论文（图片阅读索引）');
     else if (mode === 'scan') parts.push('整篇论文（按页图理解）');
     else if (mode === 'unavailable') parts.push(scanned ? '整篇论文（按页图理解）' : '整篇论文暂不可提取');
     else parts.push('整篇论文（将增加读取 / 请求量）');
@@ -7083,6 +7088,138 @@ function saveCachedScanDigest(docId, text) {
   } catch { /* 同上 */ }
 }
 
+/* ------------------------------------------------------------ 扫描件 OCR（视觉模型逐页转写，结果缓存） */
+
+const OCR_VERSION = 1;
+/** OCR 逐页转写时的页图清晰度：比问答页图高一点，小字/手写才认得出 */
+const OCR_PAGE_MAX_DIM = 1800;
+/** 一次 OCR 最多跑多少页（防止误点把 500 页扫描件全转一遍） */
+const OCR_PAGE_LIMIT = 80;
+
+function ocrCacheKey(docId) {
+  const fp = paperFingerprint(docId);
+  return fp ? `reader.ocr.v${OCR_VERSION}:${docId}:${fp}` : '';
+}
+function loadOcrCache(docId) {
+  const empty = { version: OCR_VERSION, pages: {}, at: 0 };
+  try {
+    const key = ocrCacheKey(docId);
+    if (!key) return empty;
+    const parsed = JSON.parse(localStorage.getItem(key) || 'null');
+    if (!parsed || parsed.version !== OCR_VERSION || !parsed.pages || typeof parsed.pages !== 'object') return empty;
+    return parsed;
+  } catch { return empty; }
+}
+function saveOcrCache(docId, cache) {
+  try {
+    const key = ocrCacheKey(docId);
+    if (!key) return;
+    const pages = {};
+    // 只留非空页；按页码排好，方便读和比对
+    for (const page of Object.keys(cache.pages || {}).sort((a, b) => Number(a) - Number(b))) {
+      const text = String(cache.pages[page] || '').trim();
+      if (text) pages[page] = text.slice(0, 12000);
+    }
+    localStorage.setItem(key, JSON.stringify({ version: OCR_VERSION, pages, at: Date.now() }));
+  } catch { /* localStorage 满了不影响主流程 */ }
+}
+/** 已缓存 OCR 的页码（升序） */
+function ocrPages(docId) {
+  return Object.keys(loadOcrCache(docId).pages || {}).map(Number).filter((n) => n > 0).sort((a, b) => a - b);
+}
+/** 把已缓存的 OCR 文本拼成带页码标记的整篇文本（与 getPageText 的全文格式一致） */
+function ocrTextFor(docId) {
+  const cache = loadOcrCache(docId);
+  const pages = Object.keys(cache.pages || {}).map(Number).sort((a, b) => a - b);
+  if (!pages.length) return '';
+  return pages.map((p) => `===== p.${p} =====\n${String(cache.pages[p] || '').trim()}`).join('\n\n');
+}
+
+let ocrRunPromise = null;
+/**
+ * 扫描件「生成文字版」：逐页把页面图交给视觉模型转写，结果按页缓存（可中断、可续跑）。
+ * 用前台 busy 状态 + 停止按钮；单页失败跳过并继续；已缓存的页默认不再花钱。
+ * @returns {Promise<{pages:number[], cachedPages:number[], text:string}|null>}
+ */
+async function runOcrDoc({ force = false, onProgress = null } = {}) {
+  if (!state.doc || !viewer?.pdf) { toast('先打开一篇论文', 'err'); return null; }
+  if (state.busy) { toast('正在生成中，等它跑完或者点停止', 'err', 2600); return null; }
+  if (!ensureReady()) return null;
+  if (ocrRunPromise) return ocrRunPromise;
+  warnIfNoVisionModel(true);
+  const docId = state.doc.docId;
+  const myTitle = state.doc?.name || '';
+  const profile = await startDocProfileScan(docId).catch(() => null);
+  if (state.doc?.docId !== docId) return null;
+  if (!profile?.scanned) { toast('这篇 PDF 有文本层，不需要 OCR', 'ok', 2600); return null; }
+  const allPages = (profile.scanPages || []).slice(0, OCR_PAGE_LIMIT);
+  const targets = allPages.length ? allPages : Array.from({ length: Math.min(viewer.numPages, OCR_PAGE_LIMIT) }, (_, i) => i + 1);
+  const cache = loadOcrCache(docId);
+  const todo = force ? targets : targets.filter((p) => !String(cache.pages?.[p] || '').trim());
+  if (!todo.length) {
+    const pages = ocrPages(docId);
+    toast(`文字版已存在（${pages.length} 页），直接使用缓存`, 'ok', 2600);
+    return { pages, cachedPages: pages, text: ocrTextFor(docId) };
+  }
+  const ctl = makeController();
+  if (!ctl) return null;
+  ocrRunPromise = (async () => {
+    setBusy(true, `OCR 0/${todo.length}`);
+    let done = 0;
+    let failed = 0;
+    try {
+      for (const page of todo) {
+        if (ctl.signal.aborted || state.doc?.docId !== docId) break;
+        setHint(`OCR：正在识别第 ${page} 页（${done + 1}/${todo.length}）…`);
+        setBusy(true, `OCR ${done}/${todo.length}`);
+        try {
+          const shot = await viewer.capturePageImage(page, { maxDim: OCR_PAGE_MAX_DIM });
+          if (ctl.signal.aborted || state.doc?.docId !== docId) break;
+          const text = await chat({
+            messages: attachPageImages(scanPageMessages({ page, docTitle: myTitle }), [shot]),
+            signal: ctl.signal,
+            stream: false,
+            temperature: 0,
+            idleMs: 45000,
+          });
+          const clean = String(text || '').trim();
+          if (!clean) { failed += 1; continue; }
+          cache.pages[page] = clean.slice(0, 12000);
+          saveOcrCache(docId, cache);          // 逐页落盘：中途停止也保留已识别的页
+          done += 1;
+          onProgress?.(done, todo.length, page);
+        } catch (e) {
+          if (isAbort(e)) break;
+          failed += 1;                          // 单页失败不挡后面的页
+        }
+      }
+    } finally {
+      setHint('');
+      if (state.abort === ctl) { state.abort = null; state.abortReason = ''; setBusy(false); }
+      ocrRunPromise = null;
+    }
+    if (state.doc?.docId !== docId) return null;
+    const pages = ocrPages(docId);
+    const text = ocrTextFor(docId);
+    const stopped = ctl.signal.aborted;
+    // 结果进右栏：正文显示前部（太长就读不动），复制/后续问答用完整缓存
+    const head = failed || stopped
+      ? `已识别 ${pages.length} 页${failed ? `，${failed} 页失败` : ''}${stopped ? '（已停止）' : ''}。`
+      : `已识别 ${pages.length} 页。`;
+    const shown = text.length > 18000
+      ? `${text.slice(0, 18000)}\n\n…（共 ${text.length.toLocaleString()} 字，全文已缓存；提问时会自动使用，可点下方「复制」拿到全文）`
+      : text;
+    const entry = addEntry({ block: 'chat', tag: '文字版（OCR）', kind: 'assistant', page: 1,
+      text: `${head}\n\n${shown}` });
+    finishEntry(entry, text, { page: 1, status: stopped ? 'stopped' : 'complete' });
+    toast(stopped ? `OCR 已停止，已识别 ${pages.length} 页（缓存保留）` : `文字版已生成（${pages.length} 页），之后的问答会自动使用`,
+      failed ? 'err' : 'ok', failed ? 5200 : 3600);
+    return { pages, cachedPages: pages, text };
+  })();
+  return ocrRunPromise;
+}
+
+
 /** 应用页型扫描结果：扫描件提示一次，并刷新发送范围提示 */
 function applyDocProfile(docId, profile) {
   if (state.doc?.docId !== docId) return;
@@ -7091,7 +7228,13 @@ function applyDocProfile(docId, profile) {
   updateSendScope();
   if (profile?.scanned && !state.scanNoticeShown[docId]) {
     state.scanNoticeShown[docId] = true;
-    toast('扫描件：没有文本层，问答与「读懂论文」将按页面图片理解', 'ok', 6000);
+    const hasOcr = ocrPages(docId).length > 0;
+    toastAction(
+      hasOcr ? '扫描件：已有文字版缓存，问答会直接用 OCR 文字' : '扫描件：没有文本层，问答与「读懂论文」将按页面图片理解。可生成文字版（OCR，需视觉模型）',
+      hasOcr ? '重新识别' : '生成文字版',
+      () => runOcrDoc({ force: hasOcr }),
+      'ok', 15000,
+    );
   }
 }
 
@@ -7285,11 +7428,38 @@ async function buildDocContext(question, selection, { page = null, forTeaching =
     e.name = 'AbortError';
     return e;
   };
-  // ① 扫描件：没有文本层 → 带页面图片（教学类先转写一份「图片阅读索引」）
+  // ① 扫描件：没有文本层 → 有 OCR 文字版就用文字；否则带页面图片（教学类再补图片阅读索引）
   const profile = await startDocProfileScan(myDoc).catch(() => null);
   if (!stillCurrent()) throw stale();
   if (profile?.scanned) {
     const targetPage = Number(page) || viewer?.current || 1;
+    const ocrText = ocrTextFor(myDoc);
+    if (ocrText) {
+      const head = '【扫描件 OCR 文字版（可能有错字；以页面图片为准，引用原文时说明不确定）】';
+      if (forTeaching) {
+        // 教学类：OCR 文字比图片阅读索引更全，直接用；再带当前页图帮助看图表/公式
+        const pageImages = await renderScanPages([targetPage]);
+        if (!stillCurrent()) throw stale();
+        const body = ocrText.length > 24000
+          ? pickRelevantPages(ocrText, `${question}\n${selection || ''}`, PICK_K, 2400)
+          : ocrText;
+        setHint('');
+        return {
+          text: `${head}\n${body}`, mode: 'scan-ocr', chars: ocrText.length, profile, pageImages,
+        };
+      }
+      let body = '';
+      if (whole) {
+        body = ocrText.length > 60000
+          ? pickRelevantPages(ocrText, `${question}\n${selection || ''}`, PICK_K, 2400)
+          : ocrText;
+      } else {
+        const current = pageTextOf(ocrText, targetPage).trim();
+        body = current || pickRelevantPages(ocrText, `${question}\n${selection || ''}`, 2, 2400);
+      }
+      setHint('');
+      return { text: `${head}\n${body}`, mode: 'scan-ocr', chars: ocrText.length, profile, pageImages: [] };
+    }
     if (forTeaching) {
       setHint('扫描件：正在准备页面图片与阅读索引…');
       const digest = await ensureScanDigest(myDoc, profile);
@@ -7657,7 +7827,8 @@ async function send(retryPending = null) {
       docId: pending.docId,
       scanned: scannedDoc,
       scanPageCount: docCtx?.pageImages?.length || 0,
-      fullMode: scannedDoc ? (pending.useFullText ? 'scan' : null)
+      docMode: docCtx?.mode || '',
+      fullMode: scannedDoc ? (pending.useFullText ? (docCtx?.mode || 'scan') : null)
         : (pending.useFullText ? (docCtx?.mode || 'unavailable') : null),
       contextIncluded: !!context,
     });

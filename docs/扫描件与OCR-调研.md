@@ -136,3 +136,19 @@ RapidOCR sidecar（用户手动下载）→ 明确提示「该页为扫描件，
 - Adobe「识别文本」：<https://helpx.adobe.com/acrobat/desktop/create-documents/scan-documents-to-pdfs/recognize-text.html>
 - Azure Document Intelligence 定价：<https://azure.microsoft.com/en-us/pricing/details/document-intelligence/>
 - Mistral OCR 3 报道：<https://korben.info/en/mistral-ocr-3-french-ocr-reads-handwriting.html>
+
+## 10. 落地记录（2026-11-01）
+
+已按首选方案 A 落地第一版，实现位置与结论一致的部分：
+
+- **页型判定**：`PdfViewer.scanDocProfile()` 用 `getTextContent()` + `getOperatorList()` 逐页统计
+  文本字符数 / 图片覆盖面积（按 CTM 的行列式估算）/ 矢量操作数，页级分类 text / scan / figure / blank；
+  结果按 docId+size+mtime 缓存在 localStorage。与本文 §5 的阈值建议一致。
+- **视觉模型 OCR**：`runOcrDoc()` 逐页渲染页图（`capturePageImage`，长边 1800）→ 视觉模型转写
+  （固定 prompt：只输出 Markdown、公式 `$$...$$`、看不清写「[看不清]」）→ 按页缓存
+  （localStorage `reader.ocr.v1:*`，逐页落盘、可中断续跑）。
+  完成后的问答 / 教学优先用 OCR 文字，不再发页图；结果进右栏「文字版（OCR）」条目。
+- **没有做的部分**：Windows.Media.Ocr 本地降级、RapidOCR sidecar、针对 OCR 文字的全文搜索 / 逐字高亮。
+  其中 Windows OCR 需要 Rust 侧 WinRT 调用（零体积但手写弱），等有「未配视觉模型」的真实需求再做。
+- **工程参数**：页图长边 1800 / JPEG、单页 ≤ 12000 字截断、一次最多 80 页、单页失败跳过继续、
+  提示模型 OCR 可能有错字。实测 3 页扫描件生成 + 缓存命中 + 问答切换在隔离测试里全绿（`test/ocr.mjs` 14/14）。
