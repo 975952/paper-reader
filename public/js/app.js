@@ -3360,6 +3360,7 @@ async function reopenClosedTab() {
 async function goWelcome() {
   cancelSearch({ clearInput: true, close: true, focus: false });
   abortStream('document-switch');
+  hideDocLoading();
   // B 线 P2：回 Welcome 也把当前文档挂起（PDF 句柄 + 右栏 DOM），之后切回来是热切换
   if (state.doc?.docId) parkDocView(state.doc.docId);
   if (state.doc?.docId && viewer?.pdf) {
@@ -3528,6 +3529,9 @@ async function openDocColdSwitch({ name, url, docId, path }) {
   state.attachments = [];
   renderAttachments();
   viewer.paintSelection(null);
+  // 换论文后上一篇的「释 / 译 / ＋对话」浮动气泡作废：否则会拿着上一篇的选区提问
+  hideBubble();
+  hideTranslationCard();
 
   state.history = [];
   state.sessionSummary = '';
@@ -3576,6 +3580,8 @@ async function openDocColdSwitch({ name, url, docId, path }) {
   let hotSwitch = false;
   const hotTrace = window.__hotTrace ? {} : null;
   const hotMark = (key, t0) => { if (hotTrace) hotTrace[key] = Math.round(performance.now() - t0); };
+  // 第一次打开这篇（没有挂起的 PDF 句柄）→ 正文区显示加载提示；热切换不显示，避免「闪一下」
+  if (!pdfHandles.get(docId)) showDocLoading(name);
   try {
     // B 线 P2：热切换 —— 先把上一篇挂起成句柄（同一篇下次切回来直接 attach）
     if (prevDocId && prevDocId !== docId && viewer?.pdf) {
@@ -3599,8 +3605,9 @@ async function openDocColdSwitch({ name, url, docId, path }) {
     if (superseded()) return;
     if (r?.stale) return;
   } catch (e) {
-    // 被后一次打开顶替了、或者这次加载本来就被中断 → 一律不动界面
+    // 被后一次打开顶替了、或者这次加载本来就被中断 → 一律不动界面（加载提示由新的那次打开接管）
     if (superseded() || isAbortish(e)) return;
+    hideDocLoading();
     toast(`打开失败：${e.message}`, 'err', 6000);
     state.doc = null;
     state.viewerDocId = null;
@@ -3636,6 +3643,8 @@ async function openDocColdSwitch({ name, url, docId, path }) {
   // B 线 P2：热切换时 attach 已经渲染了可见页，不再拆掉重画首屏（这是切换耗时的大头）
   if (!hotSwitch) await viewer.refreshPage?.(1);
   if (superseded()) return;
+  // 首屏已经画出来了：撤掉加载提示（后面的目录/笔记/会话恢复在阅读视图里继续，不挡正文）
+  hideDocLoading();
   syncZoom(viewer.scale);
   // 底栏的页码也要在打开时立刻有值：`onPageChange` 不保证在这个时点已经触发过
   //（实测首次打开时底栏还停在占位符「–」，而顶栏已经是 1/16）。直接同步一次。
@@ -4995,7 +5004,8 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
     : null;
   const textEl = el('div', {
     class: 'text',
-    html: text !== undefined ? renderAnswerHTML(text) : '',
+    // 还没有任何输出时先显示「思考中…」：用户口径「没输出在思考就显示思考中或者什么」
+    html: text !== undefined ? renderAnswerHTML(text) : '<span class="thinking">思考中…</span>',
   });
   const acts = el('div', { class: 'acts hidden' });
   const root = el('div', { class: `msg ${isUser ? 'user' : 'assistant'}`, dataset: { operation: tag || '', page: page || '' } }, role, ref, shot, textEl, acts);
@@ -8074,9 +8084,16 @@ function streamTarget(node) {
   let pending = null;
   let rawNode = null;
   let paintedText = '';
+  let started = false;
+  let active = true;
+  let following = true;
+  let followEl = null;
   const scan = { cursor: 0, safe: 0, fence: '', inMath: false };
   let raf = 0;
   let timer = 0;
+  const bodyEl = node.closest('.ai-body');
+  const blockEl = node.closest('.ai-block');
+  const entryEl = node.closest('.msg');
   const stopTimers = () => {
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
     if (timer) { clearTimeout(timer); timer = 0; }
@@ -8086,16 +8103,62 @@ function streamTarget(node) {
     rawNode = document.createTextNode('');
     node.append(rawNode);
   };
+  const reversedBody = () => {
+    if (!bodyEl) return false;
+    return bodyEl.dataset?.reversed === '1'
+      || (typeof getComputedStyle === 'function' && getComputedStyle(bodyEl).flexDirection === 'column-reverse');
+  };
+  /** 「跟随输出」的目标位置：短回答停在这一条顶部；长回答跟着消息底部一起往下走 */
+  const followTop = () => {
+    if (!bodyEl || !entryEl) return 0;
+    if (reversedBody()) return 0;
+    const visible = bodyEl.clientHeight || 0;
+    const offset = entryEl.offsetTop || 0;
+    const height = entryEl.offsetHeight || 0;
+    if (height <= visible) return Math.max(0, offset);
+    return Math.max(0, offset + height - visible + 16);
+  };
+  const scrollFollow = () => { if (bodyEl) bodyEl.scrollTop = followTop(); };
+  const ensureFollowBtn = () => {
+    if (!blockEl) return null;
+    if (!followEl) {
+      followEl = el('button', {
+        type: 'button',
+        class: 'ai-follow-btn hidden',
+        title: '继续跟随输出（跳到最新）',
+        'aria-label': '继续跟随输出',
+      }, '↓');
+      followEl.addEventListener('click', () => {
+        following = true;
+        hideFollow();
+        scrollFollow();
+      });
+      blockEl.append(followEl);
+    }
+    return followEl;
+  };
+  const showFollow = () => { ensureFollowBtn()?.classList.remove('hidden'); };
+  const hideFollow = () => { followEl?.classList.add('hidden'); };
+  /* 用户向上滚（离开跟随位置）→ 停止自动跟随并出现悬浮的「↓」按钮；点按钮回来继续跟随 */
+  const onBodyScroll = () => {
+    if (!active) return;
+    following = Math.abs((bodyEl?.scrollTop || 0) - followTop()) < 90;
+    if (following) hideFollow(); else showFollow();
+  };
+  bodyEl?.addEventListener('scroll', onBodyScroll, { passive: true });
   const paint = () => {
     stopTimers();
     if (pending === null) return;
-    const parent = node.closest('.ai-body');
-    const entry = node.closest('.msg');
-    // 新结果保持在视口顶部；一旦用户手动上滑，后续分块不再抢回滚动位置。
-    const follow = parent && entry && Math.abs(parent.scrollTop - entry.offsetTop) < 100;
     // 回答末尾的 prt 隐藏块（程序用）不能露给用户看：出现就截断
     const display = hideStreamTail(pending);
-    if (!display.startsWith(paintedText)) {
+    // 第一次真正输出：把「思考中…」占位换掉（顺便重置增量渲染状态）
+    if (!started) {
+      started = true;
+      node.replaceChildren();
+      rawNode = null;
+      paintedText = '';
+      scan.cursor = 0; scan.safe = 0; scan.fence = ''; scan.inMath = false;
+    } else if (!display.startsWith(paintedText)) {
       node.replaceChildren();
       rawNode = null;
       paintedText = '';
@@ -8110,7 +8173,7 @@ function streamTarget(node) {
       paintedText = display.slice(0, safeEnd);
     }
     rawNode.data = display.slice(paintedText.length);
-    if (follow) requestAnimationFrame(() => { parent.scrollTop = entry.offsetTop; });
+    if (following) requestAnimationFrame(() => { if (active) scrollFollow(); });
   };
   return {
     push(text) {
@@ -8122,15 +8185,23 @@ function streamTarget(node) {
     done(finalText) {
       stopTimers();
       pending = null;
+      const wasFollowing = following;
+      active = false;
       node.innerHTML = renderAnswerHTML(finalText);
       rawNode = null; paintedText = '';
-      scrollEntryToTop(node.closest('.ai-body'), node.closest('.msg'));
+      hideFollow();
+      bodyEl?.removeEventListener('scroll', onBodyScroll);
+      // 输出结束：悬浮按钮消失；一直跟随的话停在最新处，不再跳回顶部
+      if (wasFollowing) scrollFollow();
     },
     fail(msg) {
       stopTimers();
       pending = null;
+      active = false;
       node.innerHTML = `<span style="color:var(--err)">${esc(msg)}</span>`;
       rawNode = null; paintedText = '';
+      hideFollow();
+      bodyEl?.removeEventListener('scroll', onBodyScroll);
       scrollEntryToTop(node.closest('.ai-body'), node.closest('.msg'));
     },
   };
@@ -8517,6 +8588,25 @@ function flashHint(msg, ms = 3200) {
   node.textContent = msg;
   if (hintTimer) clearTimeout(hintTimer);
   hintTimer = setTimeout(() => { if (!state.busy) node.textContent = ''; }, ms);
+}
+
+/* ── 第一次打开/切换论文的加载提示（热切换不显示，避免「点了没反应」） ── */
+let docLoadingTimer = 0;
+function showDocLoading(name) {
+  const box = $('#docLoading');
+  if (!box) return;
+  const label = String(name || '').replace(/\.pdf$/i, '');
+  const text = $('#docLoadingText');
+  if (text) text.textContent = label ? `正在打开《${label}》…` : '正在打开…';
+  box.classList.remove('hidden');
+  if (docLoadingTimer) clearTimeout(docLoadingTimer);
+  // 安全兜底：任何异常路径都不能让这层一直盖着正文
+  docLoadingTimer = setTimeout(hideDocLoading, 25000);
+}
+function hideDocLoading() {
+  const box = $('#docLoading');
+  if (box) box.classList.add('hidden');
+  if (docLoadingTimer) { clearTimeout(docLoadingTimer); docLoadingTimer = 0; }
 }
 
 

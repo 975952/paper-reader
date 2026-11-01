@@ -152,6 +152,11 @@
     </section>
 
     <div class="viewer" id="viewer" tabindex="0"></div>
+    <!-- 第一次打开/切换论文时盖在正文区上方的加载提示（热切换不显示） -->
+    <div class="doc-loading hidden" id="docLoading" role="status" aria-live="polite">
+      <span class="doc-loading-spin" aria-hidden="true"></span>
+      <span class="doc-loading-text" id="docLoadingText">正在打开…</span>
+    </div>
   </section>
 
   <!-- 右栏：译文 / 问答只在这一侧，**一栏只开一个**（见 app.js 的「右栏」一节）。
