@@ -3431,3 +3431,41 @@ state.json 恢复）、P3 右栏结构 / 文件夹级会话 / 文档级译文存
 - `test/prompt-eval.mjs` **43/43**（6 条样例 × 材料/引用/对象断言）、`test/prompts-manifest.mjs` 通过；
 - 设计文档 §20 与 `PROMPT_MANIFEST` 逐条一致（工具检查，不是人工比对）。
 
+
+## 64. B 线 P2：热切换（PDF 句柄 attach/detach + 已打开内容不重复渲染，2026-11-01 晚）
+
+### 64.1 做了什么（按用户口径「已经打开的就不要每次都重新渲染了」）
+
+- **PDF 单实例 + 文档句柄挂起/恢复**：`pdfview.js` 新增 `detach()` / `attach()`：
+  - `detach()` 把当前文档挂起成句柄：**保留 pdf.js 代理**，只释放页面画布/文本缓存/DOM，记录页码、缩放、
+    适配模式与滚动位置；`attach()` 从句柄原地恢复（不重新下载、不重新解析 PDF），
+    重建页面容器→布局→恢复页码/滚动→只渲染可见页；上次没补齐的页尺寸会继续在后台补。
+  - `app.js` 侧 `pdfHandles: Map<docId, handle>`：`openDocColdSwitch()` 切走前把上一篇 detach 存句柄，
+    目标文档有句柄就 attach；上限 = 标签上限（10），超出淘汰最旧并销毁代理；关标签 / 回 Welcome 时释放或挂起。
+- **已打开内容不重复渲染（视图停放区 `docViews`）**：
+  - 切走前 `parkDocView()` 把右栏**各块的 DOM 节点整体摘下来**（chat/译文等的 `.ai-body` children）、
+    会话条目数组、history、会话摘要、教学状态、目录 HTML、笔记 HTML、会话列表数据、各块滚动位置一起停放；
+  - 切回时 `unparkDocView()` 直接把这些节点挂回、状态还原，**跳过 `restoreSession()` 重放、
+    `renderOutline()` / `renderNotes()` 重建、`loadSessionList()` 请求**（首开仍走原路径）；
+  - 停放区上限 20 份（标签 10×2），超出淘汰最旧；关闭标签 / 会话切换按需清理。
+- **结果**：热切换不再有新 `/api/pdf` 下载、不再有 `/api/session` 读取；消息 DOM 是同一批节点
+  （测试里打标记验证），页码与滚动位置逐像素保留；切换里最重的是 attach 首屏渲染（≈50ms），
+  整体单次 **72ms**、8 次来回 **p95=190ms**（门槛 <350ms）。
+- 调试：`window.__ctx.pdfHotAttaches / pdfHandleCount / docViewCount / lastHotTrace`（attach、restoreView、
+  sessionList 等阶段耗时），仅在开发者控制台可用，不做用户界面。
+
+### 64.2 验收
+
+- `test/tabs.mjs` 扩到 **47/47**：新增「切回走 attach 命中」「本次切换 0 次 /api/pdf」「消息 DOM 复用
+  （同一批节点，不重放渲染）」「0 次 /api/session」「热切换打点走恢复路径（没有 session/outline 重放）」
+  「单次热切换 <350ms（72ms）」及其 **p95=f190ms < 350ms**；
+- 既有套件（热切换改动）回归：home / citation-quote / context-page / qa / teaching-isolated / session-bar /
+  scan-pdf / memory-session / profile / fullscreen / attachments / right-select / ai-send-regression 全绿
+  （结果见 `test/artifacts/regress-b-p2.log` 与 PROGRESS 记录）。
+
+### 64.3 与设计文档的边界
+
+P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放」的**数据归属**改动留给 P3；
+本次只做「同一页面内已打开文档的 DOM 复用 + PDF 句柄热切换」——对用户可见效果是：
+切标签不再白屏重载、滚动位置和已经生成的回答都还在，右栏不会重新滚动/重排。
+

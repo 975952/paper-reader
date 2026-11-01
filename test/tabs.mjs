@@ -280,6 +280,99 @@ try {
     check('全屏时标签条隐藏', fsDisplay === 'none', fsDisplay);
   }
 
+  /* ── 11. 热切换（B 线 P2）：切回旧标签不重新下载/解析 PDF，页码/滚动保留，p95 < 350ms ── */
+  {
+    // 清到只剩 2 个标签（热切换只需两篇来回）
+    for (const t of (await tabs()).slice(2)) {
+      await page.evaluate((docId) => window.__ctx.closeTab(docId), t.docId);
+      await wait(250);
+    }
+    const remain = await tabs();
+    if (remain.length < 2) {
+      await page.evaluate(() => window.__ctx.goWelcome());
+      await wait(300);
+      await openByDom('paper-a.pdf');
+      await openByDom('paper-b.pdf');
+    }
+    const activeFirst = await page.evaluate(() => window.__state.doc.name);
+    const firstId = (await tabs()).find((t) => t.name === activeFirst)?.docId;
+    // 在第一篇里造两条已渲染的回答并打标记：热切回时必须复用同一批 DOM（不重放渲染）
+    await page.evaluate(() => {
+      window.__ctx.setPanelVisible('chat', true);
+      for (let i = 0; i < 2; i += 1) {
+        const entry = window.__ctx.addEntry({ block: 'chat', kind: 'assistant', text: `热切换前的第 ${i + 1} 条回答` });
+        window.__ctx.finishEntry(entry, `热切换前的第 ${i + 1} 条回答`, { page: 1 });
+      }
+      document.querySelectorAll('#aiArea .msg').forEach((node) => { node.__hotMark = 1; });
+    });
+    // 在第一篇里翻到第 5 页（记录页码/滚动，切回来要「看起来没动过」）
+    await page.evaluate(async () => { await window.__viewer.goToPage(5); });
+    await wait(400);
+    const before = await page.evaluate(() => ({ page: window.__viewer.current, top: document.getElementById('viewer').scrollTop }));
+    const pdfRequests = () => page.evaluate(() => performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/pdf')).length);
+    const sessionRequests = () => page.evaluate(() => performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/session')).length);
+    const attachBefore = await page.evaluate(() => window.__ctx.pdfHotAttaches);
+    // 先切到另一篇（冷加载会正常下载一次 PDF / 读一次会话），冷加载完成后再取基准
+    const otherId = (await tabs()).find((t) => t.docId !== firstId)?.docId;
+    await page.evaluate((docId) => window.__ctx.activateTab(docId), otherId);
+    await settle();
+    // 切回命中句柄 → 热切换：页面内计时 + 期间是否新增 PDF/会话请求（只统计这次切换本身）
+    const hot = await page.evaluate(async (docId) => {
+      window.__hotTrace = true;
+      const pdfCount = () => performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/pdf')).length;
+      const sessionCount = () => performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/session')).length;
+      const pdf0 = pdfCount();
+      const sess0 = sessionCount();
+      const t = performance.now();
+      await window.__ctx.activateTab(docId);
+      const ms = Math.round(performance.now() - t);
+      return { ms, pdfDelta: pdfCount() - pdf0, sessionDelta: sessionCount() - sess0 };
+    }, firstId);
+    await settle();
+    const switchMs = hot.ms;
+    const after = await page.evaluate(() => {
+      const nodes = [...document.querySelectorAll('#aiArea .msg')];
+      return {
+        page: window.__viewer.current,
+        top: document.getElementById('viewer').scrollTop,
+        doc: window.__state.doc.name,
+        attaches: window.__ctx.pdfHotAttaches,
+        handles: window.__ctx.pdfHandleCount,
+        hotTrace: window.__lastHotTrace || null,
+        msgCount: nodes.length,
+        marks: nodes.filter((node) => node.__hotMark === 1).length,
+      };
+    });
+    check('切回旧标签走热切换（attach 命中）', after.attaches > attachBefore, `attaches=${attachBefore}→${after.attaches}`);
+    check('热切换后页码保留', after.page === before.page, `${before.page} → ${after.page}`);
+    check('热切换后滚动位置保留（±3px）', Math.abs(after.top - before.top) <= 3, `${before.top} → ${after.top}`);
+    check('热切换后回到正确文档', after.doc === activeFirst, after.doc);
+    check('热切换不再重复下载 PDF', hot.pdfDelta === 0, `本次切换新增 ${hot.pdfDelta} 次 /api/pdf`);
+    check('热切换复用已渲染的消息 DOM（不重放渲染）', after.msgCount === 2 && after.marks === 2, `msg=${after.msgCount} marks=${after.marks}`);
+    check('热切换不再重新读取会话', hot.sessionDelta === 0, `本次切换新增 ${hot.sessionDelta} 次 /api/session`);
+    check('热切换打点显示走恢复路径（attach + restoreView，没有 session/outline 重放）',
+      !!after.hotTrace && after.hotTrace.hot === true && typeof after.hotTrace.restoreView === 'number'
+      && typeof after.hotTrace.session === 'undefined' && typeof after.hotTrace.outline === 'undefined',
+      JSON.stringify(after.hotTrace));
+    check('单次热切换 < 350ms（页面内计时）', switchMs < 350, `${switchMs}ms；${JSON.stringify(after.hotTrace)}`);
+
+    // p95：来回切 8 次，页面内计时取 95 分位
+    const times = [];
+    for (let i = 0; i < 8; i += 1) {
+      const target = i % 2 === 0 ? otherId : firstId;
+      const ms = await page.evaluate(async (docId) => {
+        const t = performance.now();
+        await window.__ctx.activateTab(docId);
+        return Math.round(performance.now() - t);
+      }, target);
+      times.push(ms);
+    }
+    await settle();
+    times.sort((a, b) => a - b);
+    const p95 = times[Math.max(0, Math.ceil(times.length * 0.95) - 1)];
+    check('热切换 p95 < 350ms', p95 < 350, `p95=${p95}ms（全部：${times.join(',')}）`);
+  }
+
   check('操作期间没有页面错误', pageErrors.length === 0, pageErrors.join(' | '));
   const failed = checks.filter((c) => !c.ok);
   console.log(`\n多标签 P1：${checks.length - failed.length}/${checks.length} 通过`);

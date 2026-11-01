@@ -804,6 +804,84 @@ let serverState = {};
 /* ------------------------------------------------------------ B 线：多标签工作区（P1 冷切换） */
 const tabsStore = { tabs: [], active: '', bar: null, booted: false };
 
+/* B 线 P2：已挂起文档句柄（docId → PdfViewer.detach() 的返回值）。
+   切标签时先 detach 旧的、再 attach 新的，避免每次切换重新下载+解析 PDF；上限 10 个（=标签上限）。 */
+const pdfHandles = new Map();
+let pdfHotAttaches = 0;
+
+
+/* B 线 P2：已打开文档的「视图停放区」。切走时把右栏各块的 DOM 与会话状态整体停放在这里，
+   切回时直接挂回去（不重放 restoreSession、不重建目录/笔记），做到「已经打开的不重复渲染」。 */
+const docViews = new Map();
+
+/** 切走前：停放当前文档的右栏 DOM + 会话状态 + 目录/笔记 HTML + 滚动位置 */
+function parkDocView(docId) {
+  if (!docId || !state.doc || state.doc.docId !== docId) return;
+  const blocks = {};
+  for (const block of AI_BLOCKS) {
+    const meta = state.blockMeta?.[block.id];
+    if (!meta?.body) continue;
+    blocks[block.id] = {
+      nodes: Array.from(meta.body.children),
+      scrollTop: meta.body.scrollTop || 0,
+    };
+  }
+  docViews.set(docId, {
+    blocks,
+    sessionEntries: state.sessionEntries.slice(),
+    history: state.history.slice(),
+    sessionSummary: state.sessionSummary,
+    summaryCovered: state.summaryCovered,
+    teaching: state.teaching ? JSON.parse(JSON.stringify(state.teaching)) : null,
+    outlineHTML: $('#outlineList')?.innerHTML || '',
+    notesHTML: $('#notesList')?.innerHTML || '',
+    // 会话列表（chips 菜单数据）也属于这篇文档：热切回时直接复用，不再 GET /api/sessions
+    sessionList: Array.isArray(sessionStore?.list) ? sessionStore.list.map((s) => ({ ...s })) : [],
+    at: Date.now(),
+  });
+  // 上限：标签上限 10 → 停放区最多留 20 份，超出淘汰最旧（其 PDF 句柄也一并释放）
+  while (docViews.size > TABS_MAX * 2) {
+    const oldest = [...docViews.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (!oldest) break;
+    docViews.delete(oldest[0]);
+  }
+}
+
+/** 切回时：把停放的 DOM/状态挂回去；返回 true 表示走「热恢复」路径（不重放会话） */
+function unparkDocView(docId) {
+  const view = docViews.get(docId);
+  if (!view) return false;
+  for (const block of AI_BLOCKS) {
+    const saved = view.blocks?.[block.id];
+    const meta = state.blockMeta?.[block.id];
+    if (!saved || !meta?.body) continue;
+    meta.body.replaceChildren(...saved.nodes);
+    try { meta.body.scrollTop = saved.scrollTop || 0; } catch { /* ignore */ }
+  }
+  state.sessionEntries = view.sessionEntries.slice();
+  state.history = view.history.slice();
+  state.sessionSummary = view.sessionSummary || '';
+  state.summaryCovered = view.summaryCovered || 0;
+  state.teaching = view.teaching ? JSON.parse(JSON.stringify(view.teaching)) : state.teaching;
+  if (view.outlineHTML && $('#outlineList')) $('#outlineList').innerHTML = view.outlineHTML;
+  if (view.notesHTML && $('#notesList')) $('#notesList').innerHTML = view.notesHTML;
+  if (Array.isArray(view.sessionList)) sessionStore.list = view.sessionList.map((s) => ({ ...s }));
+  refreshCounts?.();
+  return true;
+}
+
+function dropDocView(docId) {
+  docViews.delete(docId);
+}
+
+function dropPdfHandle(docId) {
+  const handle = pdfHandles.get(docId);
+  if (!handle) return;
+  pdfHandles.delete(docId);
+  try { handle.pdf?.destroy?.(); } catch { /* 已经销毁 */ }
+}
+
+
 function tabsPersist() {
   saveWorkspace({ tabs: tabsStore.tabs, active: tabsStore.active });
 }
@@ -1669,6 +1747,10 @@ function initViewer() {
     get tabs() { return tabsStore.tabs.slice(); },
     get activeTab() { return tabsStore.active; },
     get tabsEnabled() { return tabsFeatureEnabled(); },
+    get pdfHotAttaches() { return pdfHotAttaches; },
+    get pdfHandleCount() { return pdfHandles.size; },
+    get docViewCount() { return docViews.size; },
+    get lastHotTrace() { return window.__lastHotTrace || null; },
     openDoc, closeTab, activateTab, moveTab, reopenClosedTab, goWelcome,
     // P2.5 Agent 读取：开关（写 localStorage）、默认值、最近一次运行统计
     get agentRead() { return agentReadEnabled(); },
@@ -3187,6 +3269,9 @@ async function closeTab(docId) {
   if (idx < 0) return;
   const [tab] = tabsStore.tabs.splice(idx, 1);
   pushClosedTab(tab);
+  dropPdfHandle(tab.docId);   // B 线 P2：关掉的标签不再保留 PDF 句柄
+  dropDocView(tab.docId);
+
   const wasActive = state.doc?.docId === id;
   if (!tabsStore.tabs.length) {
     await goWelcome();
@@ -3235,6 +3320,17 @@ async function reopenClosedTab() {
 async function goWelcome() {
   cancelSearch({ clearInput: true, close: true, focus: false });
   abortStream('document-switch');
+  // B 线 P2：回 Welcome 也把当前文档挂起（PDF 句柄 + 右栏 DOM），之后切回来是热切换
+  if (state.doc?.docId) parkDocView(state.doc.docId);
+  if (state.doc?.docId && viewer?.pdf) {
+    try {
+      const handle = viewer.detach();
+      if (handle) {
+        pdfHandles.set(state.doc.docId, handle);
+        while (pdfHandles.size > TABS_MAX) dropPdfHandle(pdfHandles.keys().next().value);
+      }
+    } catch { /* 挂起失败不影响回首页 */ }
+  }
   if (state.doc) {
     try { await saveSessionNow(); } catch { /* 保存失败不挡回首页 */ }
   }
@@ -3370,6 +3466,9 @@ async function openDocColdSwitch({ name, url, docId, path }) {
       return;
     }
   }
+  const prevDocId = state.doc?.docId || null;
+  // B 线 P2：切走前把上一篇的右栏 DOM 与会话状态整体停放，切回来直接挂回（不重放渲染）
+  if (prevDocId) parkDocView(prevDocId);
   const myOpen = (state.openSeq = (state.openSeq || 0) + 1);
   const superseded = () => myOpen !== state.openSeq;
   hideTranslationCard();
@@ -3432,8 +3531,30 @@ async function openDocColdSwitch({ name, url, docId, path }) {
   renderScopeMenu();
   for (const li of $$('#fileList li')) li.classList.toggle('active', li.dataset.id === docId);
 
+  // B 线 P2：热切换状态（在 try 外声明，加载成功后的首屏/会话阶段也要用）
+  let hotSwitch = false;
+  const hotTrace = window.__hotTrace ? {} : null;
+  const hotMark = (key, t0) => { if (hotTrace) hotTrace[key] = Math.round(performance.now() - t0); };
   try {
-    const r = await viewer.load(url, name);
+    // B 线 P2：热切换 —— 先把上一篇挂起成句柄（同一篇下次切回来直接 attach）
+    if (prevDocId && prevDocId !== docId && viewer?.pdf) {
+      try {
+        const handle = viewer.detach();
+        if (handle) {
+          pdfHandles.set(prevDocId, handle);
+          while (pdfHandles.size > TABS_MAX) dropPdfHandle(pdfHandles.keys().next().value);
+        }
+      } catch { /* 挂起失败就退回冷加载 */ }
+    }
+    const cachedHandle = pdfHandles.get(docId) || null;
+    hotSwitch = !!cachedHandle;
+    const tAttach = performance.now();
+    const r = hotSwitch ? await viewer.attach(cachedHandle) : await viewer.load(url, name);
+    hotMark('attach', tAttach);
+    if (cachedHandle) {
+      pdfHandles.delete(docId);
+      pdfHotAttaches += 1;
+    }
     if (superseded()) return;
     if (r?.stale) return;
   } catch (e) {
@@ -3471,19 +3592,37 @@ async function openDocColdSwitch({ name, url, docId, path }) {
   // 等一帧布局完成后重画第一页，避免出现「第一页糊、第二页清楚」的首屏差异。
   // （页面被隐藏时 rAF 不触发 —— 自动化 `--background` 窗口 —— 用定时器兜底。）
   await nextFrame();
-  await viewer.refreshPage?.(1);
+  // B 线 P2：热切换时 attach 已经渲染了可见页，不再拆掉重画首屏（这是切换耗时的大头）
+  if (!hotSwitch) await viewer.refreshPage?.(1);
   if (superseded()) return;
   syncZoom(viewer.scale);
   // 底栏的页码也要在打开时立刻有值：`onPageChange` 不保证在这个时点已经触发过
   //（实测首次打开时底栏还停在占位符「–」，而顶栏已经是 1/16）。直接同步一次。
   syncFootPage(viewer.current, viewer.numPages);
-  await renderOutline();
-  await renderNotes();
-  if (superseded()) return;
-  await restoreSession(docId);
-  if (superseded()) return;
-  // 换论文了：会话条要跟着换成这一篇的当前会话名
-  await loadSessionList();
+  let tStage = performance.now();
+  const hotView = hotSwitch ? unparkDocView(docId) : false;
+  if (hotView) hotMark('restoreSessionList', tStage);
+  if (hotView) {
+    // 已打开过：右栏 DOM/会话/目录/笔记直接从停放区挂回，不再重放（用户口径：已经打开的就不要每次都重新渲染）
+    hotMark('restoreView', tStage);
+    tStage = performance.now();
+  } else {
+    await renderOutline();
+    hotMark('outline', tStage);
+    tStage = performance.now();
+    await renderNotes();
+    hotMark('notes', tStage);
+    if (superseded()) return;
+    tStage = performance.now();
+    await restoreSession(docId);
+    hotMark('session', tStage);
+    if (superseded()) return;
+  }
+  // 换论文了：会话条要跟着换成这一篇的当前会话名（热切回直接用停放区的列表，不再请求）
+  tStage = performance.now();
+  if (!hotView) await loadSessionList();
+  hotMark('sessionList', tStage);
+  if (hotTrace) { hotTrace.hot = hotSwitch; window.__lastHotTrace = hotTrace; }
   renderSessionBar();
   // 新会话（历史为空）时，带上这篇论文之前会话的摘要；切换论文/会话后重新算
   loadPaperMemory();

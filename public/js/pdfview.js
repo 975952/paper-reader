@@ -394,6 +394,94 @@ export class PdfViewer {
     this.pagesEl = null;
   }
 
+  /**
+   * B 线 P2：把当前文档「挂起」成句柄（不销毁 pdf 代理，只释放画布/文本缓存与 DOM）。
+   * 切标签时先 detach 旧标签、再 attach 新标签，避免每次切换都重新下载 + 解析 PDF。
+   * @returns {null|{pdf:object,url:string,name:string,numPages:number,baseSizes:Array,page:number,scale:number,fitMode:boolean,scrollTop:number}}
+   */
+  detach() {
+    if (!this.pdf) return null;
+    const handle = {
+      pdf: this.pdf,
+      url: this.url,
+      name: this.name,
+      numPages: this.numPages,
+      baseSizes: (this.baseSizes || []).slice(),
+      page: this.current || 1,
+      scale: this.scale,
+      fitMode: !!this._fitMode,
+      scrollTop: this.container?.scrollTop || 0,
+    };
+    this._cancelZoomPreview();
+    this._gen++;            // 作废本视图在途任务（pdf 代理本身不销毁）
+    for (const i of Array.from(this.rendered.keys())) this._teardownPage(i);
+    this.rendered.clear();
+    this.renderTasks.clear();
+    this.textCache.clear();
+    this.scanCache.clear();
+    this._pageImageCache.clear();
+    this.pdf = null;
+    this.numPages = 0;
+    this.pageEls = [];
+    this.baseSizes = [];
+    this.offsets = [];
+    this.heights = [];
+    this.current = 1;
+    this._selRects = null;
+    this.referencePages.clear();
+    this.referenceByNum.clear();
+    this.referenceEntries.clear();
+    if (this.pagesEl) this.pagesEl.remove();
+    this.pagesEl = null;
+    return handle;
+  }
+
+  /**
+   * B 线 P2：从 detach() 的句柄原地恢复（不重新下载/解析 PDF）。
+   * 复用 load() 的后半段：建页面容器 → 布局 → 恢复页码/滚动 → 渲染可见页。
+   */
+  async attach(handle) {
+    if (!handle || !handle.pdf) return { numPages: 0, stale: true };
+    this._destroyed = false;
+    const gen = this._gen;
+    this.pdf = handle.pdf;
+    this.url = handle.url || '';
+    this.name = handle.name || '';
+    this.numPages = Number(handle.numPages) || this.pdf.numPages || 0;
+    this.baseSizes = (handle.baseSizes || []).slice();
+    if (!this.baseSizes[1]) {
+      const first = await this.pdf.getPage(1);
+      const vp1 = first.getViewport({ scale: 1 });
+      this.baseSizes = new Array(this.numPages + 1);
+      this.baseSizes[1] = { width: vp1.width, height: vp1.height, rotation: vp1.rotation };
+    }
+    this.pagesEl = document.createElement('div');
+    this.pagesEl.className = 'pages';
+    this.container.querySelectorAll('.pages').forEach((node) => node.remove());
+    this.container.append(this.pagesEl);
+    this._buildPageEls();
+    this._fitMode = handle.fitMode !== false;
+    this.scale = Number(handle.scale) || this._computeFitScale();
+    this.layout();
+    this.opts.onScale?.(this.scale);
+    this.opts.onStatus?.(`共 ${this.numPages} 页`);
+    // 恢复页码与滚动位置（热切换要「看起来没动过」）
+    this.current = Math.min(Math.max(1, Number(handle.page) || 1), this.numPages);
+    const targetTop = Number(handle.scrollTop) > 0
+      ? Number(handle.scrollTop)
+      : (this.offsets?.[this.current] || 0);
+    try { this.container.scrollTop = targetTop; } catch { /* ignore */ }
+    // 尺寸没补齐的（上次加载还没跑完就切走了）继续在后台补
+    if (!this.baseSizes[this.numPages]) {
+      const first = await this.pdf.getPage(1).catch(() => null);
+      if (first && gen === this._gen) this._loadRemainingSizes(first, gen);
+    }
+    await this._renderVisible(true, gen);
+    if (gen !== this._gen) return { numPages: 0, stale: true };
+    this._handleScroll();
+    return { numPages: this.numPages, hot: true };
+  }
+
   /* ------------------------------------------------------------ 加载 */
 
   async load(url, name = '') {
