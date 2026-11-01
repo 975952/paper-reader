@@ -34,6 +34,7 @@ export const Settings = {
     fontSize: 15,
     glossary: '',
     idleMs: 60000,   // 多久收不到数据就判定卡住并中止（没有 UI，可在 data/config.json 里调）
+    longTermMemory: '',  // 用户手写的长期记忆（设置页多行输入，≤4000 字）
   },
 
   async load() {
@@ -140,6 +141,11 @@ export async function streamChat(opts) {
 
   try {
     bump();
+    // 带图请求：告诉服务端「这次要用视觉模型」（模型名仍只来自本机 config，
+    // 前端不传 model，避免把模型选型暴露成可被请求覆盖的字段）。
+    const hasImage = Array.isArray(messages) && messages.some(
+      (m) => Array.isArray(m?.content) && m.content.some((p) => p && p.type === 'image_url'),
+    );
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -148,6 +154,7 @@ export async function streamChat(opts) {
         model,
         temperature,
         stream,
+        useVision: hasImage,
         baseURL: Settings.data.baseURL,
         apiKey: Settings.data.apiKey || undefined,
       }),
@@ -327,7 +334,7 @@ export function matchGlossary(text, glossaryText) {
   return entries.filter(([k]) => hay.includes(k.toLowerCase()));
 }
 
-export function askMessages({ question, selection, context, page, docTitle, fullText, webResults, history = [], reading, references = [], profileBlock = null, teachingBlock = '' }) {
+export function askMessages({ question, selection, context, page, docTitle, fullText, webResults, history = [], reading, references = [], profileBlock = null, teachingBlock = '', pageImages = [] }) {
   const request = reading || resolveReadingRequest({ question, selection, page, history });
   const sys = [
     '你是嵌在论文阅读器里的阅读助手，帮助读者读懂正在看的论文。',
@@ -339,6 +346,9 @@ export function askMessages({ question, selection, context, page, docTitle, full
     '4. 用到联网材料时，只有摘录确实支持的事实才标 [来源1]、[来源2]；不得用标题或书目猜出技术细节。论文自己的 [27]、[32] 是参考文献编号。不要把无关来源写入回答，也不要例行解释两种编号的区别。',
     '5. 用户纠正或设定默认讲解方式时，简短确认后落实到当前阅读对象；「？」若附有新选区就解释新选区，否则围绕上一回答纠正或换个具体说法。不要凭空编造自己检索了什么、拿到了什么或内部运行原因。',
     '6. 用中文和短段落，术语首次出现保留英文；数学公式用 $...$ 或 $$...$$。不要客套、无关扩写或例行邀请用户继续提问。',
+    pageImages.length
+      ? '7. 这篇 PDF 没有可抽取的文本层（扫描件），本次附带了页面图片。只依据图片里实际可见的内容回答；图片里看不清、被裁掉或没有提供的页面，明确说不确定，不要补造原文、页码或图表编号。'
+      : '',
     request.guidance ? `读者持续的讲解偏好：${request.guidance}` : '',
     // 用户口径：「现在的时间在后续过程中要交给模型」——每次回答都带上，
     // 模型才能判断「最近 / 今年 / 几个月前」这类说法。
@@ -383,7 +393,7 @@ export function digestMessages({ text, docTitle }) {
   ];
 }
 
-export function opMessages(op, { docTitle, fullText, digest, extra, history = [], profileBlock = null } = {}) {
+export function opMessages(op, { docTitle, fullText, digest, extra, history = [], profileBlock = null, pageImages = [] } = {}) {
   const parts = [];
   if (docTitle) parts.push(`【论文】${docTitle}`);
   if (fullText) {
@@ -393,15 +403,17 @@ export function opMessages(op, { docTitle, fullText, digest, extra, history = []
   }
   if (extra) parts.push(extra);
   parts.push(`【本次任务】\n${op.ask}`);
+  const sys = [op.sys, nowContext(), pageImages.length ? PAGE_IMAGE_RULE : '',
+    profileBlock ?? buildProfileBlock(undefined, fullText || digest || docTitle, op.ask)].filter(Boolean).join('\n\n');
   return [
-    { role: 'system', content: [op.sys, nowContext(), profileBlock ?? buildProfileBlock(undefined, fullText || digest || docTitle, op.ask)].filter(Boolean).join('\n\n') },
+    { role: 'system', content: sys },
     ...history.slice(-4),
     { role: 'user', content: parts.join('\n\n') },
   ];
 }
 
 export function teachMessages(op, {
-  docTitle, fullText, digest, extraUser = '', profileBlock = '', history = [], ask = '',
+  docTitle, fullText, digest, extraUser = '', profileBlock = '', history = [], ask = '', pageImages = [],
 } = {}) {
   const parts = [];
   if (docTitle) parts.push(`【论文】${docTitle}`);
@@ -410,15 +422,59 @@ export function teachMessages(op, {
   } else if (digest) {
     parts.push(`【阅读索引】\n${digest}`);
   }
+  if (pageImages.length) parts.push(`【页面图片】本次附带了第 ${pageImages.map((p) => p.page).join('、')} 页的原图，见附图。`);
   if (extraUser) parts.push(extraUser);
   parts.push(`【本次任务】\n${ask || op.ask}`);
-  const system = [op.sys, nowContext(), profileBlock].filter(Boolean).join('\n\n');
+  const system = [op.sys, nowContext(), pageImages.length ? PAGE_IMAGE_RULE : '', profileBlock].filter(Boolean).join('\n\n');
   return [
     { role: 'system', content: system },
     ...history.slice(-10).map((m) => ({ role: m.role, content: String(m.content || '') })),
     { role: 'user', content: parts.join('\n\n') },
   ];
 }
+
+/** 扫描件：附带页面图时给所有教学/问答提示词共用的底线 */
+const PAGE_IMAGE_RULE = '【页面图片规则】这篇 PDF 没有可抽取的文本层（扫描件），材料里附带的是页面图片。'
+  + '只依据图片里实际可见的内容作答；看不清、被裁掉或未提供的页面，明确说不确定，不要补造原文、页码或图表编号。';
+
+/** 会话滚动摘要：把早先的对话压成一段可继续用于上下文的摘要（compaction） */
+export function sessionSummaryMessages({ previous = '', turns = '' }) {
+  return [
+    {
+      role: 'system',
+      content: [
+        '你在为一个论文阅读器的问答会话做「滚动摘要」，只输出摘要正文，不回答问题、不客套。',
+        '要求：',
+        '1. 把【已有摘要】和【需要合并的新对话】合成一段新的摘要，用中文，≤400 字；',
+        '2. 保留：读者明确提出的长期要求 / 讲解偏好、已经讨论清楚的论文对象与结论、仍没解决的问题；',
+        '3. 不要编造对话里没有的内容；不要写「用户问了好几次」这类统计；不要加评价或建议；',
+        '4. 只保留对后续回答有用的信息，寒暄、寒暄式追问可以丢掉。',
+      ].join('\n'),
+    },
+    { role: 'user', content: `【已有摘要】\n${previous || '（无）'}\n\n【需要合并的新对话】\n${turns}` },
+  ];
+}
+
+/** 扫描件阅读索引：逐页转写（只输出 Markdown 转写，供后续教学当作「全文」用） */
+export function scanPageMessages({ page, docTitle }) {
+  return [
+    {
+      role: 'system',
+      content: [
+        '你是论文阅读器里的扫描页转写器，只做转写，不回答问题、不总结、不评价。',
+        '把这一页图片里的内容转写成 Markdown：',
+        '1. 正文照原文转写（中文/英文），保留数字、单位、引用编号；',
+        '2. 公式用 $$...$$ 的 LaTeX 写出；',
+        '3. 图表写成「[图 N] 图题 / 坐标轴与图例 / 关键数值」「[表 N] 表题 / 表头 / 关键数据」；',
+        '4. 手写批注单独写成「[手写] …」；',
+        '5. 看不清的地方写「[看不清]」，不要猜、不要补造。',
+        '不要输出任何解释或客套，只输出这一页的转写。',
+      ].join('\n'),
+    },
+    { role: 'user', content: `【论文】${docTitle || '未命名'}\n【第 ${page} 页原图】见附图。` },
+  ];
+}
+
 
 /** 「再压短」：把上一条回答压到 60% 左右，不新增内容 */
 export function condenseMessages({ answer, docTitle }) {

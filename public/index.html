@@ -280,6 +280,10 @@
       <span>模型名</span>
       <input id="cfgModel" type="text" placeholder="deepseek-flash" spellcheck="false" />
     </label>
+    <label class="field">
+      <span>视觉模型（可选）</span>
+      <input id="cfgVisionModel" type="text" placeholder="留空 = 用上面的模型；扫描件与截图需要能读图的模型" spellcheck="false" />
+    </label>
     <label class="field hidden" id="endpointField">
       <span>接口地址</span>
       <input id="cfgBaseURL" type="text" spellcheck="false" />
@@ -307,6 +311,13 @@
       <label class="field field-switch"><input id="cfgUseFullText" type="checkbox" /><span>整篇论文</span></label>
       <label class="field field-switch"><input id="cfgUseWeb" type="checkbox" /><span>联网搜索</span></label>
     </div>
+    <div class="settings-divider"></div>
+    <div class="settings-section-title">长期记忆</div>
+    <label class="field">
+      <span>写给 AI 的长期背景与要求（≤4000 字）</span>
+      <textarea id="cfgLongTermMemory" rows="4" placeholder="例如：我在读多模态方向，解释术语时保留英文原词；先给直觉再给公式……" spellcheck="false"></textarea>
+    </label>
+    <div class="modal-note"><span>只存本机 data/config.json；每次问答和「读懂论文」都会带上，但不当作论文证据。后台学习记忆（你懂到什么程度）是另一套、自动维护。</span></div>
     <!-- 样式部分只保留：主题 / 阅读字号（另有「发送范围」两个开关，见下）。
          结果密度、顶栏行为、「更多样式」里那一堆调试刻度（界面字号 / 控件大小 / 行高 /
          代码大小 / 结果最大宽度 / 结果透明度 / PDF 纸张 / 三个显示开关）全部下架：

@@ -302,6 +302,8 @@ const DEFAULT_CONFIG = {
   stream: true,
   glossary: '',
   idleMs: 60000,
+  // 用户手写的长期记忆（对应 Codex 的全局 AGENTS.md）：只进 prompt，不当论文证据
+  longTermMemory: '',
 };
 
 /* ---------------------------------------------------------------- papers */
@@ -823,7 +825,9 @@ async function handleChat(req, res) {
   const stored = await readDataFile('config.json', {});
   const baseURL = stored.baseURL || DEFAULT_CONFIG.baseURL;
   const apiKey = stored.apiKey || '';
-  const model = stored.model || DEFAULT_CONFIG.model;
+  // 视觉模型：前端只传 useVision 标记，模型名仍只从本机 config 取（请求体里的 model 被忽略）。
+  const wantsVision = payload.useVision === true || payload.useVision === '1';
+  const model = (wantsVision && stored.visionModel) ? stored.visionModel : (stored.model || DEFAULT_CONFIG.model);
 
   let url;
   try {

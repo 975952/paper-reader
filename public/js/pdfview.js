@@ -25,6 +25,16 @@ function deviceRatio() {
   return clamp(d, 1, 2);
 }
 
+/** 等一帧。页面被隐藏（自动化 `--background` 窗口）时 rAF 不触发，用定时器兜底。 */
+function nextFrame(ms = 120) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    requestAnimationFrame(finish);
+    setTimeout(finish, ms);
+  });
+}
+
 const SUPERSAMPLE = 1.25;
 
 /** 实际画多大：屏幕需求 × 超采样，仍然封顶 2（再高就是白烧内存） */
@@ -135,6 +145,8 @@ export class PdfViewer {
     this.rendered = new Map();  // pageNum -> {canvas, textDiv, task, hlLayer}
     this.renderTasks = new Map();
     this.textCache = new Map();  // pageNum -> string
+    this.scanCache = new Map();  // 页面类型扫描结果缓存（同一次加载内）
+    this._pageImageCache = new Map();  // `${page}:${maxDim}` -> {dataUrl,width,height}
     this.offsets = [];        // 每页顶部相对 pages 容器的偏移
     this.heights = [];
     this.current = 1;
@@ -362,6 +374,8 @@ export class PdfViewer {
     this.rendered.clear();
     this.renderTasks.clear();
     this.textCache.clear();
+    this.scanCache.clear();
+    this._pageImageCache.clear();
     if (this.pdf) {
       try { this.pdf.destroy(); } catch { /* ignore */ }
       this.pdf = null;
@@ -947,9 +961,8 @@ export class PdfViewer {
             if (entry?.dirty) await this._renderPage(i, { gen, soft: true });
             else if (!entry && !this.renderTasks.has(i)) await this._renderPage(i, { gen });
           } catch { /* 单页失败不影响后面的页 */ }
-          await new Promise((r) => requestAnimationFrame(() => r()));
-        }
-        this._reclaimFar();
+          await nextFrame();
+        }        this._reclaimFar();
         if (!this._rerenderWanted) return;
       }
     } finally {
@@ -1448,9 +1461,141 @@ export class PdfViewer {
     return parts.join('').trim();
   }
 
+  /* ------------------------------------------------------------ 页型扫描 / 页图 */
+
+  /**
+   * 打开后逐页判断页型：有没有文本层、是不是扫描图、有没有大图。
+   * 只读文本流和算子表，不渲染像素；几十页的字数/图片覆盖率通常在 1s 量级。
+   * 结果只用来决定「问答/教学要不要带页图」，不是精确版面分析。
+   * @returns {Promise<null|{version:number,numPages:number,pages:Array,scanned:boolean,
+   *   scanPages:number[],figurePages:number[],textChars:number,avgChars:number}>}
+   */
+  async scanDocProfile({ onProgress = null, shouldStop = () => false } = {}) {
+    if (!this.pdf) return null;
+    const gen = this._gen;
+    const OPS = pdfjsLib?.OPS || null;
+    // 2D 仿射矩阵乘法（列向量约定，与 PDF.js 的 transform 参数一致）
+    const multiply = (m1, m2) => [
+      m1[0] * m2[0] + m1[2] * m2[1], m1[1] * m2[0] + m1[3] * m2[1],
+      m1[0] * m2[2] + m1[2] * m2[3], m1[1] * m2[2] + m1[3] * m2[3],
+      m1[0] * m2[4] + m1[2] * m2[5] + m1[4], m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
+    ];
+    const pages = [];
+    for (let i = 1; i <= this.numPages; i++) {
+      if (gen !== this._gen || this._destroyed || shouldStop()) return null;
+      const page = await this.pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 1 });
+      const pageArea = Math.max(1, viewport.width * viewport.height);
+      let textChars = 0;
+      let oddChars = 0;
+      try {
+        const tc = await page.getTextContent();
+        for (const item of tc.items) {
+          if (!item || typeof item.str !== 'string') continue;
+          const s = item.str.trim();
+          if (!s) continue;
+          textChars += s.length;
+          // 低质 OCR 留下的假文本层：cid 占位符 / 私用区字符 / 替换符
+          if (/\(cid:\d+\)|[\uE000-\uF8FF\uFFFD]/.test(s)) oddChars += s.length;
+        }
+      } catch { /* 文本层取不到：按无文本处理 */ }
+      let imageCount = 0;
+      let imageCoverage = 0;
+      let vectorOps = 0;
+      try {
+        const ops = await page.getOperatorList();
+        let ctm = [1, 0, 0, 1, 0, 0];
+        const stack = [];
+        for (let k = 0; k < ops.fnArray.length; k++) {
+          const fn = ops.fnArray[k];
+          if (fn === OPS.save) stack.push(ctm);
+          else if (fn === OPS.restore) ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+          else if (fn === OPS.transform) ctm = multiply(ctm, ops.argsArray[k] || [1, 0, 0, 1, 0, 0]);
+          else if (fn === OPS.setTransform) {
+            const a = ops.argsArray[k];
+            ctm = Array.isArray(a) && a.length >= 6 ? a.slice(0, 6) : [1, 0, 0, 1, 0, 0];
+          } else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject) {
+            imageCount++;
+            // 图像画在单位正方形上再由 CTM 放大 → |det(CTM)| 就是它在页面上的面积
+            imageCoverage += Math.abs(ctm[0] * ctm[3] - ctm[1] * ctm[2]) / pageArea;
+          } else if (fn === OPS.paintImageMaskXObject || fn === OPS.paintImageMaskXObjectRepeat
+            || fn === OPS.paintImageMaskXObjectGroup || fn === OPS.paintInlineImageXObjectGroup) {
+            imageCount++;
+            imageCoverage += Math.min(1, Math.abs(ctm[0] * ctm[3] - ctm[1] * ctm[2]) / pageArea);
+          } else if (fn === OPS.constructPath || fn === OPS.fill || fn === OPS.eoFill || fn === OPS.stroke) {
+            vectorOps++;
+          }
+        }
+      } catch { /* 算子表取不到：按纯文本页处理 */ }
+      const coverage = Number(Math.min(1, imageCoverage).toFixed(3));
+      const oddRatio = textChars ? Number((oddChars / textChars).toFixed(2)) : 0;
+      let kind;
+      if (textChars >= 200 && coverage < 0.15) kind = 'text';
+      else if (textChars < 40 && coverage >= 0.5) kind = 'scan';
+      else if (textChars < 40 && imageCount > 0) kind = coverage >= 0.2 ? 'scan' : 'figure';
+      else if (textChars < 300 && coverage > 0.3) kind = 'figure';
+      else if (textChars < 40) kind = 'blank';
+      else kind = 'text';
+      if (oddRatio > 0.3 && coverage > 0.2) kind = 'scan';
+      pages.push({
+        page: i, kind, chars: textChars, imageCount, coverage, vectorOps, oddRatio,
+      });
+      onProgress?.(i, this.numPages);
+    }
+    if (gen !== this._gen || this._destroyed) return null;
+    const textChars = pages.reduce((n, p) => n + p.chars, 0);
+    const scanPages = pages.filter((p) => p.kind === 'scan').map((p) => p.page);
+    const figurePages = pages.filter((p) => p.kind === 'figure').map((p) => p.page);
+    // 过半页面是扫描页，或整篇平均每页不到 20 字 → 按扫描件处理
+    const scanned = scanPages.length >= Math.max(1, Math.ceil(pages.length * 0.5))
+      || textChars < pages.length * 20;
+    const profile = {
+      version: 1,
+      numPages: this.numPages,
+      pages,
+      scanned,
+      scanPages,
+      figurePages,
+      textChars,
+      avgChars: Math.round(textChars / Math.max(1, pages.length)),
+      scannedAt: Date.now(),
+    };
+    this.scanCache.set('doc', profile);
+    return profile;
+  }
+
+  /** 渲染整页为图片（扫描件的问答 / 教学上下文用）；同一页同一尺寸会缓存 */
+  async capturePageImage(pageNum, { maxDim = 1400, quality = 0.85 } = {}) {
+    const key = `${pageNum}:${maxDim}`;
+    const hit = this._pageImageCache.get(key);
+    if (hit) return hit;
+    if (!this.pdf) throw new Error('没有打开的文档');
+    const page = await this.pdf.getPage(pageNum);
+    const base = page.getViewport({ scale: 1 });
+    const scale = Math.min(2.5, Math.max(0.4, maxDim / Math.max(base.width, base.height)));
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    const outWidth = Math.max(1, Math.floor(viewport.width));
+    const outHeight = Math.max(1, Math.floor(viewport.height));
+    canvas.width = outWidth;
+    canvas.height = outHeight;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const paper = paperColor();
+    ctx.fillStyle = paper;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+    await page.render({ canvasContext: ctx, viewport, background: paper }).promise;
+    let dataUrl = canvas.toDataURL('image/jpeg', quality);
+    if (dataUrl.length > 750_000) dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+    canvas.width = 0;
+    canvas.height = 0;
+    const shot = { dataUrl, width: outWidth, height: outHeight, page: pageNum };
+    if (this._pageImageCache.size > 24) this._pageImageCache.delete(this._pageImageCache.keys().next().value);
+    this._pageImageCache.set(key, shot);
+    return shot;
+  }
+
   /** 全文搜索：每个命中一条，包含页码、页内序号和可读的上下文片段 */
-  async search(query, { onProgress } = {}) {
-    const q = String(query || '').trim();
+  async search(query, { onProgress } = {}) {    const q = String(query || '').trim();
     if (!q) return { hits: [], total: 0 };
     const gen = this._gen;
     const hits = [];

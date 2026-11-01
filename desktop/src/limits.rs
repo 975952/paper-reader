@@ -8,8 +8,8 @@ use serde_json::{json, Map, Value};
 
 /// `/api/chat` 允许出现在请求体里的字段（审计 §P0：只允许 messages / stream /
 /// 受限 temperature / max_tokens / 上下文范围）。
-pub const CHAT_FIELDS: [&str; 14] = [
-    "messages", "stream", "temperature", "max_tokens", "idleMs",
+pub const CHAT_FIELDS: [&str; 15] = [
+    "messages", "stream", "temperature", "max_tokens", "idleMs", "useVision",
     "context", "scope", "doc", "docId", "page", "files", "meta", "webResults", "history",
 ];
 
@@ -34,6 +34,8 @@ pub const MAX_BASE_URL_LEN: usize = 2048;
 pub const MAX_MODEL_LEN: usize = 256;
 pub const MAX_TARGET_LANG_LEN: usize = 32;
 pub const MAX_GLOSSARY_LEN: usize = 100_000;
+/// 用户手写的长期记忆（与 security.js 的 LIMITS.str.longTermMemory 一致）
+pub const MAX_LONG_TERM_MEMORY_LEN: usize = 4000;
 
 
 /// 与 security.js 的 BODY_LIMITS 一致。
@@ -67,9 +69,10 @@ pub const SESSION_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 
 /// `/api/config` 只接受这些字段（审计 §P1）
-pub const CONFIG_FIELDS: [&str; 11] = [
+pub const CONFIG_FIELDS: [&str; 12] = [
     "apiKey", "baseURL", "model", "visionModel", "targetLang",
     "temperature", "stream", "idleMs", "theme", "fontSize", "glossary",
+    "longTermMemory",
 ];
 
 fn in_list(list: &[&str], key: &str) -> bool {
@@ -217,6 +220,7 @@ pub fn sanitize_config_patch(raw: &Value) -> ConfigPatch {
             "model" | "visionModel" => take_str!(key, v, MAX_MODEL_LEN),
             "targetLang" => take_str!(key, v, MAX_TARGET_LANG_LEN),
             "glossary" => take_str!(key, v, MAX_GLOSSARY_LEN),
+            "longTermMemory" => take_str!(key, v, MAX_LONG_TERM_MEMORY_LEN),
             "theme" => match v {
                 Value::String(s) if s == "light" || s == "dark" => {
                     patch.insert(key.clone(), v.clone());

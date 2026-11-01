@@ -13,6 +13,7 @@ import {
   Settings, streamChat, testConnection, targetLangFor,
   translateMessages, askMessages, explainMessages, regionMessages,
   digestMessages, webQueryFor, filterWebResults, opMessages, teachMessages, condenseMessages,
+  scanPageMessages, sessionSummaryMessages,
 } from './ai.js';
 import { resolveReadingRequest, snapshotReadingRequest, snapshotHistory, readingTurn,
   restoreReadingHistory, citedSources, stripPageLabels } from './reading-context.js';
@@ -26,6 +27,16 @@ function readFlag(key, dflt = false) {
 }
 function writeFlag(key, on) {
   try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* 忽略 */ }
+}
+
+/** 等一帧。页面被隐藏（自动化 `--background` 窗口）时 rAF 不触发，用定时器兜底。 */
+function nextFrame(ms = 120) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    requestAnimationFrame(finish);
+    setTimeout(finish, ms);
+  });
 }
 
 /** AI 区的分块定义。默认一个都不显示，用到哪块就自动出现，也可以手动增删。 */
@@ -685,6 +696,19 @@ const state = {
   docText: null,
   docTextDoc: null,
   docDigest: null,
+  /* 页型扫描结果（文本页 / 扫描页 / 图表页）：打开论文后后台算一次，按文件指纹缓存 */
+  docProfile: null,
+  docProfileDoc: null,
+  docProfilePromise: null,
+  /* 扫描件的「图片阅读索引」：逐页转写后拼成的文本，教学能力当全文用（按指纹缓存在 localStorage） */
+  scanDigest: null,
+  scanDigestDoc: null,
+  scanDigestPromise: null,
+  scanNoticeShown: {},
+  /* 记忆：会话滚动摘要（compaction）/ 本论文之前的讨论 / 用户手写的长期记忆（在 Settings.data） */
+  sessionSummary: '',
+  summaryCovered: 0,
+  paperMemory: '',
   lastSources: [],
   // 参考文献：本文的参考文献列表（按需解析，见 ensureRelationsBuilt）
   refs: [],
@@ -1537,6 +1561,15 @@ function initViewer() {
     get profileEnabled() { return profileStore.enabled; },
     profileStore, scheduleMemoryExtraction, parseMemorySuggestions,
     memoryIdle: () => learningMemory.idle(),
+    // 扫描件：页型扫描 / 页图 / 图片阅读索引（自动化直接验这条链路）
+    startDocProfileScan, ensureScanDigest, pickScanPages, attachPageImages, sendScopeText,
+    get docProfile() { return state.docProfile; },
+    set docProfile(v) { state.docProfile = v; },
+    // 记忆：长期记忆 / 本篇讨论 / 会话滚动摘要（自动化验注入块与清理）
+    askProfileBlock, sessionSummaryBlock, paperMemoryBlock, longTermMemoryBlock,
+    scheduleSessionSummary, loadPaperMemory, isPaperMemoryOff, setPaperMemoryOff,
+    get sessionSummary() { return state.sessionSummary; },
+    get paperMemory() { return state.paperMemory; },
     get FULL_LIMIT() { return FULL_LIMIT; },
     jumpToPageWithHistory, jumpToDestWithHistory, returnToPreviousPosition,
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
@@ -1551,6 +1584,8 @@ function initViewer() {
     // 回答存笔记：允许自动化直接验证存储结构与写入结果
     answerNoteButton, openAnswerNoteEditor, confirmAnswerNote, syncAllAnswerNoteButtons,
     addEntry, finishEntry,
+    // 右栏划词：自动化直接验证「问答回答 / 译文里的选区有没有气泡、按钮集对不对」
+    rightSelectionHost, onRightSelectionChanged, showBubble, hideBubble,
     // 布局常量：CSS 的 .splitter 宽度与这里的 SPLIT_W 必须一致（有断言盯着）
     SPLIT_W, VIEWER_MIN, RAIL_W,
     get highlights() { return state.highlights; },
@@ -2737,12 +2772,21 @@ async function openDoc({ name, url, docId, path }) {
   viewer.paintSelection(null);
 
   state.history = [];
+  state.sessionSummary = '';
+  state.summaryCovered = 0;
   state.sessionEntries = [];
   state.cache.clear();
   // 换论文了：整篇文本和阅读索引都作废；单次范围也随论文切换复位。
   state.docText = null;
   state.docTextDoc = null;
   state.docDigest = null;
+  // 页型扫描结果 / 扫描件阅读索引：换论文即作废（缓存仍按文件指纹留在 localStorage）
+  state.docProfile = null;
+  state.docProfileDoc = null;
+  state.docProfilePromise = null;
+  state.scanDigest = null;
+  state.scanDigestDoc = null;
+  state.scanDigestPromise = null;
   // 让 state 的两个标记重新对齐当前范围（同一套推导，不重复实现）
   applyRangeForSend(currentRange());
   // 换论文了：参考文献列表作废，等用户再打开这一块时才重新解析（按需，不在这里跑）。
@@ -2807,7 +2851,8 @@ async function openDoc({ name, url, docId, path }) {
   if (superseded()) return;
   // 侧栏状态和正文宽度在打开后才最终稳定；首页先前可能按旧宽度留下低密度位图。
   // 等一帧布局完成后重画第一页，避免出现「第一页糊、第二页清楚」的首屏差异。
-  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  // （页面被隐藏时 rAF 不触发 —— 自动化 `--background` 窗口 —— 用定时器兜底。）
+  await nextFrame();
   await viewer.refreshPage?.(1);
   if (superseded()) return;
   syncZoom(viewer.scale);
@@ -2822,6 +2867,8 @@ async function openDoc({ name, url, docId, path }) {
   // 换论文了：会话条要跟着换成这一篇的当前会话名
   await loadSessionList();
   renderSessionBar();
+  // 新会话（历史为空）时，带上这篇论文之前会话的摘要；切换论文/会话后重新算
+  loadPaperMemory();
   if (saved?.page && saved.page > 1) await viewer.goToPage(saved.page);
   if (superseded()) return;
   state.viewerDocId = docId;
@@ -2830,6 +2877,9 @@ async function openDoc({ name, url, docId, path }) {
   refreshReturnButton();
   saveProgress();
   renderScopeMenu();
+  // 后台判定页型（是否有文本层 / 是否扫描件）：不阻塞首屏，扫描件提示只在结果出来后才弹。
+  // 之后「问答带不带页图」「读懂论文能不能按图理解」都依赖它。
+  startDocProfileScan(docId);
   if (state.useFullText) warmDocText();
 }
 
@@ -3371,6 +3421,13 @@ function initSelection() {
     const onControl = !!e.target?.closest?.('button, input, select, textarea, label, a');
     state._downAt = null;
     state._lastPt = null;
+    /* 右栏回答 / 译文里的选区：走同一个气泡，但只保留「加入问答 / 直接解释 / 复制」。
+       和正文选区互斥（浏览器只允许一个 DOM 选区，切过来时正文选区已经没了）。 */
+    if (rightSelectionHost()) {
+      state._dragSelecting = false;
+      setTimeout(() => onRightSelectionChanged({ deselect: isClick && !onControl }), 10);
+      return;
+    }
     /* 正文 [n] 热点：`.cite-link` 是 pointer-events:none 的（不然 mousedown 落在 div 上，
        浏览器给不出真正的文字锚点，一次小拖选能选出跨页的 2700 多字），
        所以点击改成在这里按坐标判命中。 */
@@ -3423,12 +3480,13 @@ function initSelection() {
     if (t?.closest?.('#viewer')) state._dragSelecting = true;
   });
 
-  // 只有正文区（或整个文档）滚动时才收起气泡。
+  // 只有正文区、整个文档或右栏结果区滚动时才收起气泡。
   // scroll 不冒泡，但 capture 阶段 window 能收到所有元素的滚动事件，
   // 不加判断的话，右侧面板流式输出时自动滚动会把气泡误关掉。
   window.addEventListener('scroll', (e) => {
     const t = e.target;
-    if (t === document || t === document.documentElement || t === document.body || t === $('#viewer')) hideBubble();
+    if (t === document || t === document.documentElement || t === document.body
+      || t === $('#viewer') || (t?.closest && t.closest('#aiArea'))) hideBubble();
   }, true);
 
   // 点气泡按钮时别把选区弄丢
@@ -3495,6 +3553,17 @@ function onSelectionChanged({ deselect = false, down = null, up = null, retry = 
 function showBubble(sel) {
   hideTranslationCard();
   const b = $('#bubble');
+  const right = sel?.source === 'right';
+  b.dataset.source = right ? 'right' : 'body';
+  // 同一套气泡：右栏里翻译 / 写笔记无意义（笔记需要正文锚点），只换文案
+  const add = b.querySelector('button[data-act="add"]');
+  if (add) {
+    const label = add.querySelector('span');
+    if (label) label.textContent = right ? '加入问答' : '对话';
+    add.title = right
+      ? '加入问答区：可以继续加多段文字（不改正文选区）'
+      : '加入对话：可以连续加多段文字，也可以加图片 (Q)';
+  }
   b.classList.remove('hidden');
   const w = b.offsetWidth || 158;
   const h = b.offsetHeight || 32;
@@ -3510,6 +3579,54 @@ function showBubble(sel) {
 }
 
 function hideBubble() { $('#bubble').classList.add('hidden'); }
+
+/**
+ * 当前 DOM 选区是否落在右栏的回答 / 译文正文里。
+ * 返回最近的 `.msg .text` 节点（用户自己发的消息不提供入口），否则 null。
+ */
+function rightSelectionHost() {
+  const area = $('#aiArea');
+  const sel = window.getSelection();
+  if (!area || !sel || !sel.rangeCount || sel.isCollapsed) return null;
+  const node = sel.getRangeAt(0).commonAncestorContainer;
+  const el = node?.nodeType === 1 ? node : node?.parentElement;
+  const textEl = el?.closest?.('.msg .text');
+  if (!textEl || !area.contains(textEl)) return null;
+  if (textEl.closest('.msg.user')) return null;
+  return textEl;
+}
+
+/** 右栏选区：复用同一个气泡，只显示「加入问答 / 直接解释 / 复制」 */
+function onRightSelectionChanged({ deselect = false } = {}) {
+  if (!rightSelectionHost()) {
+    if (deselect) clearSelectionState();
+    else hideBubble();
+    return;
+  }
+  const selection = window.getSelection();
+  const text = cleanText(selection?.toString() || '');
+  if (text.length < 2) {
+    if (deselect) clearSelectionState();
+    else hideBubble();
+    return;
+  }
+  let rect = null;
+  try { rect = selection.getRangeAt(0).getBoundingClientRect(); } catch { /* 选区中途失效 */ }
+  if (!rect || (!rect.width && !rect.height)) { hideBubble(); return; }
+  const sel = {
+    text,
+    cleanText: text,
+    page: viewer?.current || null,
+    source: 'right',
+    // 右栏选区没有正文那种跨页 rect 结构，直接用 DOM 选区矩形定位气泡
+    box: {
+      left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+      width: rect.width, height: rect.height,
+    },
+  };
+  state.selection = sel;
+  showBubble(sel);
+}
 
 function hideTranslationCard() { $('#translationCard')?.classList.add('hidden'); }
 
@@ -4342,7 +4459,13 @@ function sessionPayload() {
   const prefix = `${state.doc.docId}:`;
   const ops = [...state.opsCache.entries()].filter(([key]) => key.startsWith(prefix)).slice(-20)
     .map(([key, value]) => ({ id: key.slice(prefix.length), text: String(value.text || '').slice(0, 12000), at: value.at || Date.now(), page: value.page || null }));
-  const payload = { entries: allEntries, history: snapshotHistory(state.history), ops, teaching: serializeTeachingState(), updatedAt: Date.now() };
+  const payload = {
+    entries: allEntries, history: snapshotHistory(state.history), ops,
+    teaching: serializeTeachingState(), updatedAt: Date.now(),
+    // 滚动摘要（compaction）：早先对话压成一段话，和原文历史一起存
+    summary: String(state.sessionSummary || '').slice(0, 2000),
+    summaryCovered: Math.max(0, Number(state.summaryCovered) || 0),
+  };
   let encoded = JSON.stringify(payload);
   const encodedBytes = () => new TextEncoder().encode(encoded).byteLength;
   while (encodedBytes() > 350000 && payload.entries.length > 1) { payload.entries.shift(); encoded = JSON.stringify(payload); }
@@ -4485,6 +4608,9 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     state._fileEntries = Array.isArray(saved.entries) ? saved.entries : [];
     state.sessionEntries = Array.isArray(saved.entries) ? saved.entries.slice(-90) : [];
     state.history = restoreReadingHistory(saved.history, state.sessionEntries);
+    // 会话滚动摘要：老会话没有这个字段，按「没有摘要」处理
+    state.sessionSummary = typeof saved.summary === 'string' ? saved.summary.slice(0, 2000) : '';
+    state.summaryCovered = Math.max(0, Math.min(Number(saved.summaryCovered) || 0, state.history.length));
     state.opsDone = {};
     state.opsDoc = docId;
     // 「带我一步步读」的进度随会话存盘；老会话没有这个字段就按没有进度处理
@@ -4570,6 +4696,8 @@ async function clearCurrentSession() {
   persistSession.cancel?.();
   state.sessionEntries = [];
   state.history = [];
+  state.sessionSummary = '';
+  state.summaryCovered = 0;
   const prefix = `${state.doc.docId}:`;
   for (const key of state.opsCache.keys()) if (key.startsWith(prefix)) state.opsCache.delete(key);
   state.opsDone = {};
@@ -4579,6 +4707,7 @@ async function clearCurrentSession() {
     const r = await fetch(`/api/session?${sessionQuery(state.doc.docId, activeSidFor(state.doc.docId))}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries: [], history: [], ops: [], updatedAt: Date.now() }) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     toast('当前论文会话已清空', 'ok');
+    loadPaperMemory();
   } catch (e) { toastAction(`清空失败：${e.message}`, '重试', clearCurrentSession, 'err', 10000); }
 }
 
@@ -4640,6 +4769,12 @@ function renderSessionMenu() {
     el('div', { class: 'sess-head', text: `「${(state.doc?.name || '').replace(/\.pdf$/i, '')}」的会话` }),
     ...rows,
     el('button', {
+      type: 'button', class: 'sess-mem',
+      text: isPaperMemoryOff(state.doc?.docId || '') ? '本篇对话记忆：已关闭（点开启）' : '本篇对话记忆：开（点关闭）',
+      title: '新会话是否参考这篇论文之前会话的摘要；不影响各会话自己的历史',
+      onclick: () => togglePaperMemory(),
+    }),
+    el('button', {
       type: 'button', class: 'sess-clear', text: '清空当前会话',
       onclick: () => clearCurrentSession(),
     }),
@@ -4648,6 +4783,21 @@ function renderSessionMenu() {
       onclick: () => newSession(),
     }),
   );
+}
+
+/** 切换「本篇对话记忆」开关（只影响注入，不删任何会话） */
+function togglePaperMemory() {
+  const docId = state.doc?.docId;
+  if (!docId) return;
+  const off = !isPaperMemoryOff(docId);
+  setPaperMemoryOff(docId, off);
+  renderSessionMenu();
+  if (off) {
+    state.paperMemory = '';
+    toast('已关闭：新会话不再参考本篇之前的讨论', 'ok', 2200);
+  } else {
+    loadPaperMemory().then(() => toast('已开启：新会话会参考本篇之前的讨论', 'ok', 2200));
+  }
 }
 
 async function toggleSessionMenu() {
@@ -4673,10 +4823,13 @@ async function switchSession(sid) {
   clearChatBlock();                 // 会话只管问答，译文留着
   state.sessionEntries = [];
   state.history = [];
+  state.sessionSummary = '';
+  state.summaryCovered = 0;
   state.opsDone = {};
   state.opsDoc = null;
   resetTeachingState();
   await restoreSession(docId, { only: 'chat' });
+  loadPaperMemory();
   closeSessionMenu();
   renderSessionBar();
   updateSendScope();
@@ -4694,6 +4847,8 @@ async function newSession() {
   clearChatBlock();                 // 新建会话 = 清空问答区；译文不动（它不属于任何会话）
   state.sessionEntries = [];
   state.history = [];
+  state.sessionSummary = '';
+  state.summaryCovered = 0;
   state.opsDone = {};
   state.opsDoc = null;
   resetTeachingState();
@@ -4701,6 +4856,7 @@ async function newSession() {
   // 用户会以为「新建了但列表里没有」（实测踩过）。空会话也是一次有效的保存。
   try { await saveSessionNow(); } catch { /* 存不下也不阻塞新建 */ }
   await loadSessionList();
+  loadPaperMemory();
   closeSessionMenu();
   renderSessionBar();
   updateSendScope();
@@ -4721,7 +4877,10 @@ async function deleteSession(sid) {
     clearChatBlock();
     state.sessionEntries = [];
     state.history = [];
+    state.sessionSummary = '';
+    state.summaryCovered = 0;
     await restoreSession(docId, { only: 'chat' });
+    await loadPaperMemory();
   }
   await loadSessionList();
   renderSessionMenu();
@@ -5024,10 +5183,121 @@ function profileSelectionText(question = '') {
   return { docText, question };
 }
 
+/* ------------------------------------------------------------ 记忆：长期 / 论文讨论 / 会话摘要 */
+
+/** 用户手写「长期记忆」：只影响回答方式与背景，不冒充论文证据 */
+function longTermMemoryBlock() {
+  const text = String(Settings.data.longTermMemory || '').trim().slice(0, 4000);
+  if (!text) return '';
+  return `【长期记忆（用户手写，长期有效）】\n${text}\n（以上是用户写的背景与要求；与论文事实冲突时以论文原文为准，用户当前指令优先。）`;
+}
+
+/** 这篇论文之前的会话摘要（新会话首轮带上，避免每次从零开始） */
+function paperMemoryBlock() {
+  const text = String(state.paperMemory || '').trim();
+  if (!text) return '';
+  return `【这篇论文之前的讨论摘要（由阅读器自动生成，不等于论文原文，不要当证据引用）】\n${text}`;
+}
+
+/** 本次会话早先内容的滚动摘要（compaction） */
+function sessionSummaryBlock() {
+  const text = String(state.sessionSummary || '').trim();
+  if (!text) return '';
+  return `【本次会话早先内容摘要（由阅读器自动生成，可能不完整；原文仍以最近几轮为准）】\n${text}`;
+}
+
+/** 所有问答 / 教学请求共用的「记忆块」：学习画像 + 长期记忆 + 论文讨论 + 会话摘要 */
+function askProfileBlock(docText = '', question = '', { docId = '' } = {}) {
+  return [
+    buildProfileBlock(profileStore.data, docText, question, { docId }),
+    longTermMemoryBlock(),
+    paperMemoryBlock(),
+    sessionSummaryBlock(),
+  ].filter(Boolean).join('\n\n');
+}
+
 /** 组一份「教学类回答」的档案块（调用前确保 state.docText 已按需加载） */
 function teachingProfileBlock(question = '') {
   const { docText } = profileSelectionText(question);
-  return buildProfileBlock(profileStore.data, docText, question, { docId: state.doc?.docId });
+  return askProfileBlock(docText, question, { docId: state.doc?.docId });
+}
+
+/** 本论文「之前的讨论记忆」开关（默认开；关掉后不再注入，也不影响会话本身） */
+function paperMemoryOffKey(docId) { return `reader.paperMemory.off:${docId}`; }
+function isPaperMemoryOff(docId) {
+  try { return localStorage.getItem(paperMemoryOffKey(docId)) === '1'; } catch { return false; }
+}
+function setPaperMemoryOff(docId, off) {
+  try {
+    if (off) localStorage.setItem(paperMemoryOffKey(docId), '1');
+    else localStorage.removeItem(paperMemoryOffKey(docId));
+  } catch { /* ignore */ }
+}
+
+/** 读取这篇论文最近两个会话的摘要，作为新会话的「之前的讨论」 */
+async function loadPaperMemory() {
+  const docId = state.doc?.docId;
+  state.paperMemory = '';
+  if (!docId || state.history.length) return '';
+  if (isPaperMemoryOff(docId)) return '';
+  try {
+    const list = sessionStore.list.length ? sessionStore.list : await loadSessionList();
+    const current = activeSidFor(docId);
+    const candidates = list
+      .filter((s) => (s.sid || '') !== current && (s.count || 0) > 0)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .slice(0, 2);
+    const parts = [];
+    for (const s of candidates) {
+      const r = await fetch(`/api/session?doc=${encodeURIComponent(docId)}&sid=${encodeURIComponent(s.sid || '')}`);
+      if (!r.ok) continue;
+      const data = await r.json();
+      const summary = String(data?.summary || '').trim();
+      if (summary) parts.push(`· ${s.title || '之前会话'}：${summary.slice(0, 700)}`);
+    }
+    if (state.doc?.docId !== docId) return '';
+    state.paperMemory = parts.join('\n').slice(0, 1800);
+    return state.paperMemory;
+  } catch { return ''; }
+}
+
+let sessionSummaryBusy = false;
+/** 会话滚动摘要：历史超过 8 条、比上次摘要多出 ≥4 条时，后台把早先内容合并成摘要 */
+function scheduleSessionSummary() {
+  if (sessionSummaryBusy) return;
+  if (!Settings.ready) return;
+  const history = Array.isArray(state.history) ? state.history : [];
+  if (history.length <= 8) return;
+  const target = history.length - 6;              // 最近 6 条原样发送，更早的进摘要
+  const covered = Math.max(0, Math.min(Number(state.summaryCovered) || 0, target));
+  if (target - covered < 4) return;
+  const docId = state.doc?.docId || '';
+  const sid = activeSidFor(docId);
+  const previous = state.sessionSummary || '';
+  const turns = history.slice(covered, target).map((m) => {
+    const who = m.role === 'user' ? '读者' : '助手';
+    const content = String(m.content || '').replace(/\s+/g, ' ').slice(0, 900);
+    return `${who}：${content}`;
+  }).join('\n');
+  sessionSummaryBusy = true;
+  (async () => {
+    try {
+      const text = await chat({
+        messages: sessionSummaryMessages({ previous, turns }),
+        stream: false,
+        temperature: 0,
+        signal: state.abort?.signal,
+        idleMs: 30000,
+      });
+      if (state.doc?.docId !== docId || activeSidFor(docId) !== sid) return;
+      const clean = String(text || '').trim().slice(0, 1200);
+      if (!clean) return;
+      state.sessionSummary = clean;
+      state.summaryCovered = target;
+      scheduleSessionSave();
+    } catch { /* 摘要失败静默：下一次轮次还会再试 */ }
+    finally { sessionSummaryBusy = false; }
+  })();
 }
 
 
@@ -5096,7 +5366,7 @@ async function runTeaching(opId, {
   setBusy(true, `0s · ${entryTag}`);
   let received = '';
   try {
-    const ctx = await buildDocContext(op.ask, extraUser || '');
+    const ctx = await buildDocContext(op.ask, extraUser || '', { forTeaching: true, page: viewer.current });
     const messages = teachMessages(op, {
       docTitle: state.doc?.name,
       fullText: ctx?.text,
@@ -5104,8 +5374,11 @@ async function runTeaching(opId, {
       extraUser,
       ask,
       history,
+      pageImages: ctx?.pageImages || [],
       profileBlock: teachingProfileBlock(ask || op.ask),
     });
+    attachPageImages(messages, ctx?.pageImages);
+    warnIfNoVisionModel((ctx?.pageImages || []).length > 0);
     const full = await chat({
       messages,
       signal: ctl.signal,
@@ -5321,7 +5594,7 @@ async function continueWalk(kind, entry) {
   setBusy(true, `0s · ${tag}`);
   let received = '';
   try {
-    const ctx = await buildDocContext('继续下一步', '');
+    const ctx = await buildDocContext('继续下一步', '', { forTeaching: true, page: viewer.current });
     const history = walk.messages.map((m) => ({ role: m.role, content: String(m.content || '').slice(0, 12000) }));
     const messages = teachMessages({ sys, ask: instruction }, {
       docTitle: state.doc?.name,
@@ -5329,8 +5602,11 @@ async function continueWalk(kind, entry) {
       digest: state.docDigest,
       history,
       ask: instruction,
+      pageImages: ctx?.pageImages || [],
       profileBlock: teachingProfileBlock(instruction),
     });
+    attachPageImages(messages, ctx?.pageImages);
+    warnIfNoVisionModel((ctx?.pageImages || []).length > 0);
     const full = await chat({
       messages,
       signal: ctl.signal,
@@ -5553,13 +5829,16 @@ async function runOperation(opId, { force = false, block = 'chat', retryEntry = 
   setBusy(true, `0s · ${op.title}`);
   let received = '';
   try {
-    const ctx = await buildDocContext(op.ask, '');
+    const ctx = await buildDocContext(op.ask, '', { forTeaching: true, page: viewer.current });
     const messages = opMessages(op, {
       docTitle: state.doc?.name,
       fullText: ctx?.text,
       digest: state.docDigest,
+      pageImages: ctx?.pageImages || [],
       profileBlock: teachingProfileBlock(op.ask),
     });
+    attachPageImages(messages, ctx?.pageImages);
+    warnIfNoVisionModel((ctx?.pageImages || []).length > 0);
     const full = await chat({
       messages,
       signal: ctl.signal,
@@ -6292,7 +6571,7 @@ function setBusy(on, hint = '') {
 }
 
 /** 输入框旁边那句范围提示（`#sendScope`）：只讲这次会发什么，不再讲带了几轮历史。 */
-function sendScopeText({ attachments, history, useFullText, useWeb, query, docId, fullMode, contextIncluded } = {}) {
+function sendScopeText({ attachments, history, useFullText, useWeb, query, docId, fullMode, contextIncluded, scanned = false, scanPageCount = 0 } = {}) {
   const rows = attachments || [];
   const quotes = rows.filter((a) => a.kind === 'text');
   const images = rows.filter((a) => a.kind === 'image');
@@ -6301,7 +6580,7 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
   if (images.length) parts.push(`图片 ${images.length} 张`);
   const hasDoc = !!docId && !!viewer?.pdf && state.doc?.docId === docId && state.viewerDocId === docId;
   if (hasDoc && (contextIncluded === undefined ? true : contextIncluded)) {
-    parts.push(quotes.length ? '附近上下文' : '当前页上下文');
+    parts.push(scanPageCount ? `页图 ${scanPageCount} 张` : (quotes.length ? '附近上下文' : '当前页上下文'));
   }
   if (hasDoc && useFullText) {
     let mode = fullMode;
@@ -6310,7 +6589,8 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
     }
     if (mode === 'full') parts.push('整篇论文');
     else if (mode === 'digest') parts.push(`整篇论文索引 + ${PICK_K} 段相关原文`);
-    else if (mode === 'unavailable') parts.push('整篇论文暂不可提取');
+    else if (mode === 'scan') parts.push('整篇论文（按页图理解）');
+    else if (mode === 'unavailable') parts.push(scanned ? '整篇论文（按页图理解）' : '整篇论文暂不可提取');
     else parts.push('整篇论文（将增加读取 / 请求量）');
   }
   if (useWeb && String(query || '').trim()) parts.push('联网搜索');
@@ -6442,7 +6722,7 @@ async function doExplain(sel) {
     if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
     const full = await chat({
       messages: explainMessages({ selection: text, context, page: sel.page, docTitle: state.doc?.name, history, reading, references,
-        profileBlock: buildProfileBlock(profileStore.data, text + "\n" + context, reading.question, { docId }) }),
+        profileBlock: askProfileBlock(text + "\n" + context, reading.question, { docId }) }),
       signal: ctl.signal,
       onDelta: (piece, all) => { received = all; target.push(all); },
       onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
@@ -6450,6 +6730,7 @@ async function doExplain(sel) {
     if (!readingRequestCurrent({ docId, openSeq, sid })) return;
     target.done(full);
     state.history = snapshotHistory([...state.history, ...readingTurn(reading, full)]);
+    scheduleSessionSummary();
     finishEntry(entry, full, { page: sel.page, onAsk: () => addToChat(sel) });
   } catch (e) {
     if (!readingRequestCurrent({ docId, openSeq, sid })) return;
@@ -6474,11 +6755,15 @@ function addToChat(sel) {
   if (!sel || state.busy) return;
   const text = sel.cleanText || cleanText(sel.text || '');
   if (!text) return;
-  state.attachments.push({ id: uid(), kind: 'text', page: sel.page || viewer?.current, text });
+  state.attachments.push({
+    id: uid(), kind: 'text', page: sel.page || viewer?.current, text,
+    // 来源只用于附件行的提示：正文划选 / 右栏回答或译文里划选
+    from: sel.source === 'right' ? 'right' : '',
+  });
   renderAttachments();
   revealPanel('chat');            // 必须把「问答」切到当前标签，否则输入框是 display:none，focus 白调
   $('#chatInput').focus();
-  flashHint(`已加入对话（共 ${state.attachments.length} 项，可以继续加）`);
+  flashHint(`已加入问答区（共 ${state.attachments.length} 项，可以继续加）`);
 }
 
 /** 把一张截图加进附件 */
@@ -6539,6 +6824,7 @@ function renderAttachments() {
       : null,
     el('span', { class: 'at-meta' },
       a.page ? el('b', { text: `第${a.page}页` }) : null,
+      a.from === 'right' ? el('b', { class: 'at-from', text: '右栏' }) : null,
       el('span', { class: 'at-text', text: a.kind === 'image' ? (a.label || '截图') : a.text.replace(/\s+/g, ' ') }),
     ),
     el('button', { type: 'button', class: 'at-x', title: '移除', onclick: () => removeAttach(a.id) }, iconEl('close', { size: 13 })),
@@ -6733,11 +7019,225 @@ function setHint(t) {
   if (h) h.textContent = t || '';
 }
 
+/* ------------------------------------------------------------ 扫描件：页型 / 页图 / 图片阅读索引 */
+
+const DOC_PROFILE_VERSION = 1;
+const SCAN_DIGEST_VERSION = 1;
+/** 扫描件一次问答带几张页图（整篇类问题） */
+const SCAN_PAGES_MAX = 5;
+/** 生成图片阅读索引时最多转写几页 */
+const SCAN_DIGEST_PAGES = 8;
+
+/** 论文文件指纹：换文件（大小/mtime 变了）就让页型缓存和阅读索引失效 */
+function paperFingerprint(docId) {
+  const p = (state.papers || []).find((x) => x && x.docId === docId);
+  if (!p) return '';
+  return `${p.size || 0}:${Math.round(Number(p.mtime) || 0)}`;
+}
+function docProfileCacheKey(docId) {
+  const fp = paperFingerprint(docId);
+  return fp ? `reader.docProfile.v${DOC_PROFILE_VERSION}:${docId}:${fp}` : '';
+}
+function scanDigestCacheKey(docId) {
+  const fp = paperFingerprint(docId);
+  return fp ? `reader.scanDigest.v${SCAN_DIGEST_VERSION}:${docId}:${fp}` : '';
+}
+function loadCachedDocProfile(docId) {
+  try {
+    const key = docProfileCacheKey(docId);
+    if (!key) return null;
+    const parsed = JSON.parse(localStorage.getItem(key) || 'null');
+    return parsed && parsed.version === DOC_PROFILE_VERSION && Array.isArray(parsed.pages) ? parsed : null;
+  } catch { return null; }
+}
+function saveCachedDocProfile(docId, profile) {
+  try {
+    const key = docProfileCacheKey(docId);
+    if (key) localStorage.setItem(key, JSON.stringify(profile));
+  } catch { /* localStorage 满了也不影响阅读 */ }
+}
+function loadCachedScanDigest(docId) {
+  try {
+    const key = scanDigestCacheKey(docId);
+    if (!key) return '';
+    const parsed = JSON.parse(localStorage.getItem(key) || 'null');
+    return parsed && parsed.version === SCAN_DIGEST_VERSION && typeof parsed.text === 'string' ? parsed.text : '';
+  } catch { return ''; }
+}
+function saveCachedScanDigest(docId, text) {
+  try {
+    const key = scanDigestCacheKey(docId);
+    if (key) localStorage.setItem(key, JSON.stringify({ version: SCAN_DIGEST_VERSION, text, at: Date.now() }));
+  } catch { /* 同上 */ }
+}
+
+/** 应用页型扫描结果：扫描件提示一次，并刷新发送范围提示 */
+function applyDocProfile(docId, profile) {
+  if (state.doc?.docId !== docId) return;
+  state.docProfile = profile;
+  state.docProfileDoc = docId;
+  updateSendScope();
+  if (profile?.scanned && !state.scanNoticeShown[docId]) {
+    state.scanNoticeShown[docId] = true;
+    toast('扫描件：没有文本层，问答与「读懂论文」将按页面图片理解', 'ok', 6000);
+  }
+}
+
+/** 打开论文后后台跑一次页型扫描（命中本地缓存就直接用） */
+function startDocProfileScan(docId) {
+  const myDoc = docId || state.doc?.docId;
+  if (!myDoc || !viewer?.pdf) return Promise.resolve(null);
+  if (state.docProfile && state.docProfileDoc === myDoc) return Promise.resolve(state.docProfile);
+  if (state.docProfilePromise) return state.docProfilePromise;
+  const cached = loadCachedDocProfile(myDoc);
+  if (cached) { applyDocProfile(myDoc, cached); return Promise.resolve(cached); }
+  state.docProfilePromise = (async () => {
+    try {
+      const profile = await viewer.scanDocProfile();
+      if (!profile || state.doc?.docId !== myDoc) return null;
+      saveCachedDocProfile(myDoc, profile);
+      applyDocProfile(myDoc, profile);
+      return profile;
+    } catch { return null; }
+    finally { state.docProfilePromise = null; }
+  })();
+  return state.docProfilePromise;
+}
+
+/** 扫描件一次问答带哪些页的图片 */
+function pickScanPages(profile, { question = '', page = null, whole = false } = {}) {
+  const total = Number(profile?.numPages) || viewer?.numPages || 1;
+  const current = clamp(Number(page) || viewer?.current || 1, 1, total);
+  const set = new Set([current]);
+  const wholeQ = whole || /这篇论文|本文|整篇|全文|整体|方法|结论|实验|总结|贡献|摘要|abstract|conclusion/i.test(String(question || ''));
+  if (wholeQ) {
+    for (const p of [1, 2, total - 1, total]) if (p >= 1 && p <= total) set.add(p);
+    const scanned = (profile?.scanPages || []).filter((p) => p !== current);
+    const step = Math.max(1, Math.ceil(scanned.length / Math.max(1, SCAN_PAGES_MAX - set.size)));
+    for (let i = 0; i < scanned.length; i += step) set.add(scanned[i]);
+  } else {
+    if (current > 1) set.add(current - 1);
+    if (current < total) set.add(current + 1);
+  }
+  return [...set].sort((a, b) => a - b).slice(0, SCAN_PAGES_MAX);
+}
+
+/** 逐页渲染成图片（串行，失败跳过该页） */
+async function renderScanPages(pages = []) {
+  const shots = [];
+  for (const p of pages) {
+    try {
+      const shot = await viewer.capturePageImage(p, { maxDim: 1400 });
+      shots.push({ page: p, ...shot });
+    } catch { /* 单页渲染失败不挡整次请求 */ }
+  }
+  return shots;
+}
+
+/** 把页面图片追加到本轮最后一条 user 消息（文本 + image_url 多段内容） */
+function attachPageImages(messages, pageImages = []) {
+  if (!Array.isArray(messages) || !messages.length || !pageImages.length) return messages;
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== 'user') return messages;
+  const parts = Array.isArray(last.content)
+    ? last.content
+    : [{ type: 'text', text: String(last.content || '') }];
+  if (!Array.isArray(last.content)) last.content = parts;
+  const label = pageImages.map((im) => `【第${im.page}页原图】见附图`).join('\n');
+  const first = parts.find((p) => p && p.type === 'text');
+  if (first) first.text = `${first.text || ''}\n\n${label}`;
+  else parts.unshift({ type: 'text', text: label });
+  for (const im of pageImages) {
+    if (im?.dataUrl) parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
+  }
+  return messages;
+}
+
+let visionWarned = false;
+/** 发图前提醒一次：没配视觉模型时图片仍会走主模型，不支持图片的模型会报错 */
+function warnIfNoVisionModel(hasImages) {
+  if (!hasImages || visionWarned) return;
+  if (String(Settings.data.visionModel || '').trim()) return;
+  visionWarned = true;
+  flashHint('未配置「视觉模型」：图片会交给主模型；如果它不支持读图，请到设置里填一个视觉模型');
+}
+
+/** 图片阅读索引要转写的页：首 2 页 + 扫描页采样 + 末 2 页 */
+function sampleScanPages(profile) {
+  const total = Number(profile?.numPages) || viewer?.numPages || 1;
+  const set = new Set();
+  for (const p of [1, 2, total - 1, total]) if (p >= 1 && p <= total) set.add(p);
+  const scanned = (profile?.scanPages || []).filter((p) => p >= 1 && p <= total);
+  const step = Math.max(1, Math.ceil(scanned.length / Math.max(1, SCAN_DIGEST_PAGES - set.size)));
+  for (let i = 0; i < scanned.length && set.size < SCAN_DIGEST_PAGES; i += step) set.add(scanned[i]);
+  return [...set].sort((a, b) => a - b).slice(0, SCAN_DIGEST_PAGES);
+}
+
+/**
+ * 扫描件的「图片阅读索引」：逐页转写 → 拼成可当作全文用的文本。
+ * 首次在扫描件上触发教学能力时跑一次，按文件指纹缓存；失败返回空串（降级为只带页图）。
+ */
+async function ensureScanDigest(docId, profile) {
+  const myDoc = docId || state.doc?.docId;
+  if (!myDoc) return '';
+  if (state.scanDigest && state.scanDigestDoc === myDoc) return state.scanDigest;
+  const cached = loadCachedScanDigest(myDoc);
+  if (cached) { state.scanDigest = cached; state.scanDigestDoc = myDoc; return cached; }
+  if (state.scanDigestPromise) return state.scanDigestPromise;
+  const pages = sampleScanPages(profile);
+  const myTitle = state.doc?.name || '';
+  state.scanDigestPromise = (async () => {
+    const rows = [];
+    try {
+      for (let i = 0; i < pages.length; i++) {
+        if (state.doc?.docId !== myDoc) return '';
+        setHint(`扫描件：正在阅读第 ${pages[i]} 页（${i + 1}/${pages.length}）…`);
+        const shot = await viewer.capturePageImage(pages[i], { maxDim: 1400 });
+        if (state.doc?.docId !== myDoc) return '';
+        let text = '';
+        try {
+          text = await chat({
+            messages: attachPageImages(scanPageMessages({ page: pages[i], docTitle: myTitle }), [shot]),
+            signal: state.abort?.signal,
+            stream: false,
+            temperature: 0,
+          });
+        } catch (e) {
+          if (isAbort(e)) return '';
+          text = '';
+        }
+        const clean = String(text || '').trim();
+        if (clean) rows.push(`===== p.${pages[i]} =====\n${clean}`);
+      }
+      if (!rows.length) return '';
+      const combined = `【扫描件图片阅读索引 · 由页面图片逐页转写，可能有错字】\n${rows.join('\n\n')}`.slice(0, 24000);
+      if (state.doc?.docId !== myDoc) return '';
+      saveCachedScanDigest(myDoc, combined);
+      state.scanDigest = combined;
+      state.scanDigestDoc = myDoc;
+      return combined;
+    } finally {
+      state.scanDigestPromise = null;
+      setHint('');
+    }
+  })();
+  return state.scanDigestPromise;
+}
+
 /** 用户明确选择「整篇」后读取文本，默认打开论文不触发全文提取。 */
 async function warmDocText() {
   if (!viewer?.pdf || !state.doc) return;
   const myDoc = state.doc.docId;
   if (state.docText && state.docTextDoc === myDoc) return;
+  // 扫描件没有文本层：不白跑一遍全文抽取，直接把「按页图理解」告诉用户
+  const profile = state.docProfileDoc === myDoc ? state.docProfile : await startDocProfileScan(myDoc);
+  if (profile?.scanned) {
+    state.docText = '';
+    state.docTextDoc = myDoc;
+    updateSendScope();
+    setHint('扫描件：没有文本层，问答会按页面图片理解（不需要抽取全文）');
+    return;
+  }
   try {
     setHint('正在读取整篇论文…');
     const text = await viewer.getAllText((i, n) => setHint(`正在读取整篇论文 ${i}/${n} 页`));
@@ -6761,7 +7261,7 @@ let FULL_LIMIT = 100000;
 /** 索引模式下一次取几段原文 */
 const PICK_K = 6;
 
-async function buildDocContext(question, selection) {
+async function buildDocContext(question, selection, { page = null, forTeaching = false, whole = false } = {}) {
   if (!state.doc) return null;
   const myDoc = state.doc.docId;
   const myTitle = state.doc.name;
@@ -6773,6 +7273,31 @@ async function buildDocContext(question, selection) {
     e.name = 'AbortError';
     return e;
   };
+  // ① 扫描件：没有文本层 → 带页面图片（教学类先转写一份「图片阅读索引」）
+  const profile = await startDocProfileScan(myDoc).catch(() => null);
+  if (!stillCurrent()) throw stale();
+  if (profile?.scanned) {
+    const targetPage = Number(page) || viewer?.current || 1;
+    if (forTeaching) {
+      setHint('扫描件：正在准备页面图片与阅读索引…');
+      const digest = await ensureScanDigest(myDoc, profile);
+      if (!stillCurrent()) throw stale();
+      const pageImages = await renderScanPages([targetPage]);
+      if (!stillCurrent()) throw stale();
+      setHint('');
+      return {
+        text: digest ? `【图片阅读索引】\n${digest}` : '',
+        mode: 'scan-digest', chars: digest.length, profile, pageImages,
+      };
+    }
+    setHint('扫描件：正在准备页面图片…');
+    const pages = pickScanPages(profile, { question, page: targetPage, whole });
+    const pageImages = await renderScanPages(pages);
+    if (!stillCurrent()) throw stale();
+    setHint('');
+    return { text: '', mode: 'scan', chars: 0, profile, pageImages };
+  }
+  // ② 普通文本 PDF：沿用原有逻辑
   if (!state.docText || state.docTextDoc !== myDoc) {
     setHint('正在读取整篇论文…');
     const text = await viewer.getAllText((i, n) => setHint(`正在读取整篇论文 ${i}/${n} 页`));
@@ -7048,13 +7573,18 @@ async function send(retryPending = null) {
     const reading = pending.reading || resolveReadingRequest({ question: pending.question,
       selection: pending.quoteText, page: pending.firstPage, history: pending.history });
     pending.reading = reading;
-    // 没有选区时也带当前页上下文；整篇论文仍只有在用户点「整篇」后才加入。
+    // 扫描件：先判定页型（命中缓存就不花时间）；扫描件无论范围如何都要带页面图片。
+    const scanProfile = pending.docId ? await startDocProfileScan(pending.docId).catch(() => null) : null;
+    if (!readingRequestCurrent(pending)) return;
+    const scannedDoc = !!scanProfile?.scanned;
+    pending.scanned = scannedDoc;
+    // 没有选区时也带当前页上下文；扫描件没有文本层，改成带页图。
     const quotes = pending.attachments.filter((a) => a.kind === 'text');
-    const contextParts = quotes.length ? await Promise.all(quotes.slice(0, 6).map(async (a) => {
+    const contextParts = scannedDoc ? [] : (quotes.length ? await Promise.all(quotes.slice(0, 6).map(async (a) => {
       const nearby = await viewer.getContextAround(a.page || pending.firstPage, a.text);
       return nearby ? `[第${a.page || pending.firstPage}页]\n${nearby}` : '';
     })) : [pending.firstPage && pending.docId
-      ? await viewer.getContextAround(reading.page || pending.firstPage, stripPageLabels(reading.selection)) : ''];
+      ? await viewer.getContextAround(reading.page || pending.firstPage, stripPageLabels(reading.selection)) : '']);
     const context = [...new Set(contextParts.filter(Boolean))].join('\n\n');
     const references = await readingReferences(reading.selection);
     if (!readingRequestCurrent(pending)) return;
@@ -7062,7 +7592,7 @@ async function send(retryPending = null) {
     pending.scope = sendScopeText({
       attachments: pending.attachments, history: pending.history,
       useFullText: pending.useFullText, useWeb: pending.useWeb,
-      query: pending.inputValue, docId: pending.docId, contextIncluded: !!context,
+      query: pending.inputValue, docId: pending.docId, contextIncluded: !!context, scanned: scannedDoc,
     });
     state.activeSendScope = pending.scope;
     updateSendScope();
@@ -7081,8 +7611,19 @@ async function send(retryPending = null) {
       }
     }
 
-    // ② 整篇论文上下文。长文会降为阅读索引和与问题相关的段落。
-    if (pending.useFullText && pending.docId) {
+    // ② 上下文。扫描件：页面图片（+ 整篇类问题的采样页）；普通论文：整篇全文 / 索引 + 相关段落。
+    if (scannedDoc) {
+      try {
+        docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text, {
+          page: reading.page || pending.firstPage,
+          whole: pending.useFullText,
+        });
+      } catch (e) {
+        if (isAbort(e)) throw e;
+        docCtx = null;
+        setHint('读取扫描页失败，这次只带问题本身');
+      }
+    } else if (pending.useFullText && pending.docId) {
       try {
         docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text);
       } catch (e) {
@@ -7098,7 +7639,10 @@ async function send(retryPending = null) {
       useWeb: pending.useWeb,
       query: pending.inputValue,
       docId: pending.docId,
-      fullMode: pending.useFullText ? (docCtx?.mode || 'unavailable') : null,
+      scanned: scannedDoc,
+      scanPageCount: docCtx?.pageImages?.length || 0,
+      fullMode: scannedDoc ? (pending.useFullText ? 'scan' : null)
+        : (pending.useFullText ? (docCtx?.mode || 'unavailable') : null),
       contextIncluded: !!context,
     });
     state.activeSendScope = pending.scope;
@@ -7106,10 +7650,10 @@ async function send(retryPending = null) {
 
     if (!readingRequestCurrent(pending)) return;
     if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
-    // 学习档案：只把和当前问题/所在页相关的少数条目交给模型；当前时间由 ai.js 固定注入。
+    // 记忆块：学习画像 + 用户手写长期记忆 + 本篇之前的讨论 + 本次会话滚动摘要。
     // 教学进度（「带我一步步读」）也在这里带上，避免自由追问时模型擅自推进下一步。
-    const profileForAsk = buildProfileBlock(profileStore.data,
-      state.docText || context || '', pending.question, { docId: pending.docId });
+    const profileForAsk = askProfileBlock(state.docText || context || '', pending.question,
+      { docId: pending.docId });
     const messages = askMessages({
       question: pending.question,
       selection: reading.selection,
@@ -7120,17 +7664,25 @@ async function send(retryPending = null) {
       webResults: sources,
       history: pending.history,
       reading, references,
+      pageImages: docCtx?.pageImages || [],
       profileBlock: profileForAsk,
       teachingBlock: teachingProgressBlock(),
     });
-    if (images.length) {
+    // 图片有两种：用户自己加的截图 + 扫描件的页面上下文；同一条 user 消息里一起发。
+    const pageImages = docCtx?.pageImages || [];
+    if (images.length || pageImages.length) {
       const last = messages[messages.length - 1];
       const parts = [{ type: 'text', text: last.content }];
       for (const im of images) parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
+      if (pageImages.length) {
+        parts[0].text = `${parts[0].text}\n\n${pageImages.map((im) => `【第${im.page}页原图】见附图`).join('\n')}`;
+        for (const im of pageImages) parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
+      }
       last.content = parts;
     }
     // 右栏只呈现回答正文与来源，不显示全文字数、联网条数等内部统计。
     meta = '';
+    warnIfNoVisionModel(images.length > 0 || pageImages.length > 0);
 
     setHint('');
     const full = await chat({
@@ -7142,6 +7694,7 @@ async function send(retryPending = null) {
     if (!readingRequestCurrent(pending)) return;
     target.done(full);
     state.history = snapshotHistory([...state.history, ...readingTurn(reading, full)]);
+    scheduleSessionSummary();
     finishEntry(pending.entry, full, { page: pending.firstPage, sources: citedSources(full, sources), meta, status: 'complete' });
     scheduleMemoryExtraction({ question: pending.inputValue, answer: full, history: pending.history,
       topic: reading.selection || reading.focus?.text || '',
@@ -7491,6 +8044,8 @@ function fillSettings() {
   }));
   profiles.value = d.activeProfile || '0';
   $('#cfgModel').value = d.model || '';
+  $('#cfgVisionModel').value = d.visionModel || '';
+  $('#cfgLongTermMemory').value = d.longTermMemory || '';
   $('#cfgBaseURL').value = d.baseURL || '';
   $('#cfgApiKey').value = '';
   $('#cfgApiKey').placeholder = d.hasApiKey ? '已保存，留空则不改' : 'sk-…';
@@ -7661,11 +8216,13 @@ function initSettings() {
     const out = $('#testResult');
     const key = $('#cfgApiKey').value.trim();
     const model = $('#cfgModel').value.trim() || Settings.data.model;
+    const visionModel = $('#cfgVisionModel').value.trim();
+    const longTermMemory = $('#cfgLongTermMemory').value.slice(0, 4000);
     const baseURL = $('#cfgBaseURL').value.trim() || Settings.data.baseURL;
     out.className = 'test-result';
     out.textContent = '保存并测试中…';
     try {
-      await Settings.save({ model, baseURL, ...(key ? { apiKey: key } : {}) });
+      await Settings.save({ model, visionModel, longTermMemory, baseURL, ...(key ? { apiKey: key } : {}) });
       fillSettings();
       $('#cfgApiKey').value = '';
       $('#cfgApiKey').placeholder = Settings.data.hasApiKey ? '已保存，留空则不改' : 'sk-…';

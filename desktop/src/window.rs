@@ -16,6 +16,8 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::{ResizeDirection, WindowBuilder},
 };
+#[cfg(windows)]
+use tao::platform::windows::WindowBuilderExtWindows;
 use wry::{NewWindowResponse, WebContext, WebViewBuilder};
 
 use crate::icon_geometry;
@@ -199,7 +201,7 @@ fn app_icon(size: u32) -> Option<tao::window::Icon> {
     tao::window::Icon::from_rgba(icon_geometry::render_icon_rgba(size), size, size).ok()
 }
 
-pub fn run(url: String) -> ! {
+pub fn run(url: String, background: bool) -> ! {
     let event_loop = EventLoopBuilder::<WindowAction>::with_user_event()
         .build();
     // 页面（WebView 里的 JS）不能直接碰窗口：它把动作 post 进事件循环，由这里执行。
@@ -214,16 +216,25 @@ pub fn run(url: String) -> ! {
         .unwrap_or_else(|| url.clone())
         .to_ascii_lowercase();
 
-    let window = match WindowBuilder::new()
+    /* --background：自动化验收专用。窗口创建为隐藏、不抢焦点、不占任务栏，
+       验证脚本通过 HTTP / CDP 操作页面，用户屏幕上不会弹出任何东西。
+       正常双击启动完全不受影响。 */
+    let mut builder = WindowBuilder::new()
         .with_title("论文阅读器")
         .with_window_icon(app_icon(64))
         .with_inner_size(LogicalSize::new(w, h))
         .with_min_inner_size(LogicalSize::new(MIN_W, MIN_H))
         .with_decorations(false)
         .with_resizable(true)
-        .with_maximizable(true)
-        .build(&event_loop)
-    {
+        .with_maximizable(true);
+    if background {
+        builder = builder.with_visible(false).with_focused(false);
+        #[cfg(windows)]
+        {
+            builder = builder.with_skip_taskbar(true);
+        }
+    }
+    let window = match builder.build(&event_loop) {
         Ok(win) => win,
         Err(e) => {
             crate::log_line(&format!("[fatal] 创建窗口失败: {}", e));

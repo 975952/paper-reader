@@ -2,15 +2,20 @@
  * 桌面版（exe）验收：启动 exe → 找到端口 → 验证 HTTP 接口 → 打印端口给 e2e 用
  *   node test/desktop.mjs
  * 之后可以： BASE=http://127.0.0.1:<port> node e2e.mjs
+ *
+ * 隔离原则（2026-11 起）：只启动 test/artifacts 里的**副本**，不启动也不关闭用户正在用的那个 exe；
+ * 副本用 `--background` 启动（窗口不显示、不抢焦点、不占任务栏）。用户实例继续占着它自己的端口。
  */
-import { spawn, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 
+import { deliverableExe, killSandboxInstances, spawnReader, stageExe } from './_exe.mjs';
+
 const ROOT = path.join(import.meta.dirname, '..');
-// 默认验收交付物本身（根目录的 exe）。exe 的 papers/ 与 data/ 是相对自己所在目录解析的，
-// 所以必须启根目录这个，启 target/release 里那个会去找 target/release/papers。
-const EXE = process.env.EXE || path.join(ROOT, '论文阅读器.exe');
+// 交付物：只用来做「前端是否重新内嵌」的 mtime 对比；真正启动的是下面的沙箱副本。
+const DELIVERABLE = deliverableExe();
 const RANGE = Array.from({ length: 20 }, (_, i) => 8787 + i);
 const SANDBOX = path.join(import.meta.dirname, 'artifacts', 'desktop-isolated');
 const DATA = path.join(SANDBOX, 'data');
@@ -20,45 +25,28 @@ const results = [];
 const check = (n, ok, d = '') => { results.push({ n, ok }); console.log(`${ok ? '  ✅' : '  ❌'} ${n}${d ? `  — ${d}` : ''}`); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* ── 先关掉已在跑的实例 ──
-   注意：交付的 exe 文件名是中文，进程名也就是「论文阅读器」，
-   所以 `taskkill /IM paper-reader.exe` 根本打不中 —— 那样会拿着上一轮的旧进程跑测试，
-   而前端是内嵌进 exe 的，改了 public/ 却测了旧二进制 = 白测。
-   这里改成按 exe 路径杀，并且杀完确认真的没了。 */
-function killRunning() {
-  const noop = { stdio: 'ignore' };
-  try {
-    execFileSync('taskkill', ['/IM', 'paper-reader.exe', '/F'], noop);
-  } catch { /* 名字不对 / 没在跑 */ }
-  try {
-    execFileSync('powershell', ['-NoProfile', '-Command',
-      "Get-Process | Where-Object { try { $_.Path -eq $env:PRT_EXE } catch { $false } } | Stop-Process -Force -ErrorAction SilentlyContinue",
-    ], { ...noop, env: { ...process.env, PRT_EXE: EXE } });
-  } catch { /* 尽力而为 */ }
-}
-const aliveCount = () => {
-  try {
-    return execFileSync('powershell', ['-NoProfile', '-Command',
-      "(Get-Process | Where-Object { try { $_.Path -eq $env:PRT_EXE } catch { $false } } | Measure-Object).Count",
-    ], { encoding: 'utf8', env: { ...process.env, PRT_EXE: EXE } }).trim();
-  } catch { return '0'; }
-};
-
-killRunning();
-for (let i = 0; i < 20 && aliveCount() !== '0'; i++) await sleep(300);
-const stillAlive = aliveCount() !== '0';
-if (!stillAlive) {
-  fs.rmSync(SANDBOX, { recursive: true, force: true });
-  fs.mkdirSync(DATA, { recursive: true });
-  fs.mkdirSync(PAPERS, { recursive: true });
-  fs.copyFileSync(path.join(import.meta.dirname, 'fixtures', 'cn-sample.pdf'), path.join(PAPERS, 'fixture-cn-sample.pdf'));
-  fs.copyFileSync(path.join(import.meta.dirname, 'fixtures', 'multipage-sample.pdf'), path.join(PAPERS, 'fixture-multipage.pdf'));
+/* `node desktop.mjs --stop`：只收掉沙箱里遗留的测试副本，不碰任何用户实例 */
+if (process.argv.includes('--stop')) {
+  killSandboxInstances();
+  console.log('已收掉 test/artifacts 下遗留的测试副本（用户正在用的实例未受影响）');
+  process.exit(0);
 }
 
-if (!fs.existsSync(EXE)) {
-  console.error(`找不到 exe：${EXE}\n先跑 desktop/build.bat`);
+/* ── 只清理沙箱里遗留的旧副本（用户正在用的实例不在沙箱前缀下，绝不会被命中） ── */
+killSandboxInstances();
+await sleep(300);
+fs.rmSync(SANDBOX, { recursive: true, force: true });
+fs.mkdirSync(DATA, { recursive: true });
+fs.mkdirSync(PAPERS, { recursive: true });
+fs.copyFileSync(path.join(import.meta.dirname, 'fixtures', 'cn-sample.pdf'), path.join(PAPERS, 'fixture-cn-sample.pdf'));
+fs.copyFileSync(path.join(import.meta.dirname, 'fixtures', 'multipage-sample.pdf'), path.join(PAPERS, 'fixture-multipage.pdf'));
+
+if (!fs.existsSync(DELIVERABLE)) {
+  console.error(`找不到 exe：${DELIVERABLE}\n先跑 desktop/build.bat`);
   process.exit(2);
 }
+
+const STAGED = stageExe('desktop');
 
 /* ── 陈旧的构建产物检查 ──
    前端（public/）是 rust-embed 编译期嵌进 exe 的，改了 public/ 不重新 build，
@@ -75,16 +63,20 @@ if (!fs.existsSync(EXE)) {
     }
   };
   walk(path.join(ROOT, 'public'));
-  const exeM = fs.statSync(EXE).mtimeMs;
+  const exeM = fs.statSync(DELIVERABLE).mtimeMs;
   check('exe 不旧于 public/（前端已重新内嵌）', exeM >= newest - 1000,
     `exe=${new Date(exeM).toLocaleTimeString()} 最新前端=${path.relative(ROOT, newestFile)}@${new Date(newest).toLocaleTimeString()}`);
 }
 
-check('没有残留的旧实例（否则测的是旧二进制）', !stillAlive, stillAlive ? '还有进程没杀掉' : '');
+check('验收启动的是沙箱副本（不碰用户正在用的应用）',
+  !path.relative(path.join(import.meta.dirname, 'artifacts'), STAGED.exe).startsWith('..'),
+  path.relative(ROOT, STAGED.exe));
 
-console.log(`启动：${EXE}`);
-const child = spawn(EXE, [], { detached: true, stdio: 'ignore', env: { ...process.env, PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1' } });
-child.unref();
+console.log(`启动（后台模式，不显示窗口）：${STAGED.exe}`);
+const child = spawnReader(STAGED.exe, {
+  env: { PRT_DATA_DIR: DATA, PRT_PAPERS_DIR: PAPERS, PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1' },
+});
+fs.writeFileSync(path.join(SANDBOX, 'reader.pid'), String(child.pid));
 
 /* ── 找端口 ── */
 let base = null;
@@ -112,19 +104,42 @@ for (let attempt = 0; attempt < 40 && !base; attempt++) {
 check('exe 启动并开了本地服务', !!base, base || '16 秒内没起来');
 if (!base) { process.exit(1); }
 
-/* ── 进程与窗口 ── */
+/* ── 进程与窗口 ──
+   --background 模式下窗口是隐藏的（不抢焦点、不占任务栏），所以不能用
+   MainWindowTitle（它只认可见窗口）；用 EnumWindows 按 PID 找它的顶层窗口和标题，
+   证明「原生窗口确实创建了」而不需要把窗口显示到用户屏幕上。 */
 try {
-  // 按窗口标题找，不依赖进程名（交付的 exe 叫「论文阅读器.exe」）
-  const out = execFileSync('powershell', ['-NoProfile', '-Command',
-    "Get-Process | Where-Object { $_.MainWindowTitle -ne '' } | Select-Object Id,ProcessName,MainWindowTitle | ConvertTo-Json -Compress"],
-  { encoding: 'utf8' }).trim();
-  const all = JSON.parse(out);
-  const list = Array.isArray(all) ? all : [all];
-  // Chrome 可能同时显示「论文阅读器 - Google Chrome」；只认桌面版自己的精确标题。
-  const info = list.find((x) => x.Id === child.pid) || {};
-  check('是原生窗口（有窗口句柄与标题）', info.MainWindowTitle === '论文阅读器', `pid=${info.Id} ${info.ProcessName} title="${info.MainWindowTitle}"`);
+  const script = [
+    'Add-Type @\'',
+    'using System;',
+    'using System.Text;',
+    'using System.Runtime.InteropServices;',
+    'public class PrtWin {',
+    '  public delegate bool EnumProc(IntPtr h, IntPtr l);',
+    '  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);',
+    '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+    '  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);',
+    '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);',
+    '  public static string TitleOf(uint pid) {',
+    '    string found = null;',
+    '    EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p);',
+    '      if (p == pid) { var sb = new StringBuilder(512); GetWindowText(h, sb, 512);',
+    '        if (sb.Length > 0) { found = sb.ToString() + "|" + (IsWindowVisible(h) ? "visible" : "hidden"); return false; } } return true; }, IntPtr.Zero);',
+    '    return found;',
+    '  }',
+    '}',
+    '\'@',
+    '[PrtWin]::TitleOf([uint32]$env:PRT_PID)',
+  ].join('\n');
+  const out = execFileSync('powershell', ['-NoProfile', '-Command', script], {
+    encoding: 'utf8', env: { ...process.env, PRT_PID: String(child.pid) },
+  }).trim();
+  const [title, visibility] = out.split('|');
+  check('原生窗口已创建且标题正确', title === '论文阅读器', `pid=${child.pid} title="${title}"`);
+  check('后台模式窗口不可见（不抢焦点、不占任务栏）', visibility === 'hidden', `window=${visibility}`);
 } catch (e) {
-  check('是原生窗口（有窗口句柄与标题）', false, String(e.message).slice(0, 60));
+  check('原生窗口已创建且标题正确', false, String(e.message).slice(0, 80));
+  check('后台模式窗口不可见（不抢焦点、不占任务栏）', false, String(e.message).slice(0, 80));
 }
 
 /* ── 接口 ── */
@@ -168,6 +183,60 @@ const cfg2 = await fetch(`${base}/api/config`).then((r) => r.json());
 check('/api/config 写入中文正常（UTF-8）', cfg2.targetLang === '中文' && cfg2.glossary === 'attention=注意力',
   `${cfg2.targetLang} / ${cfg2.glossary}`);
 check('/api/config 仅用假密钥且不回传', saved.hasApiKey === true && cfg2.apiKey === '' && cfg2.hasApiKey === true);
+
+/* ── 视觉模型开关 / 长期记忆：Node 与 Rust 必须同契约 ── */
+console.log('\n▶ 视觉模型与长期记忆…');
+{
+  const seen = [];
+  const mock = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      let body = {};
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* ignore */ }
+      seen.push(body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'mock ok' } }] }));
+    });
+  });
+  await new Promise((r) => mock.listen(0, '127.0.0.1', r));
+  const mockBase = `http://127.0.0.1:${mock.address().port}/v1`;
+  try {
+    const cfgSave = await fetch(`${base}/api/config`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        baseURL: mockBase, apiKey: 'fake-vision-key', model: 'text-mock', visionModel: 'vision-mock',
+        longTermMemory: '我在读多模态方向，解释时保留英文术语',
+      }),
+    }).then((r) => r.json());
+    check('/api/config 接受 visionModel / longTermMemory', cfgSave.ok === true, JSON.stringify(cfgSave));
+    const cfgVision = await fetch(`${base}/api/config`).then((r) => r.json());
+    check('config 回读 visionModel', cfgVision.visionModel === 'vision-mock', cfgVision.visionModel);
+    check('config 回读长期记忆（中文 UTF-8）',
+      cfgVision.longTermMemory === '我在读多模态方向，解释时保留英文术语', cfgVision.longTermMemory);
+
+    const chat = (payload) => fetch(`${base}/api/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: '你好' }], stream: false, ...payload }),
+    }).then((r) => r.json());
+    await chat({ useVision: true });
+    check('useVision=true 时上游收到 visionModel', seen.at(-1)?.model === 'vision-mock', seen.at(-1)?.model);
+    await chat({ useVision: false });
+    check('普通请求用主模型', seen.at(-1)?.model === 'text-mock', seen.at(-1)?.model);
+    await chat({ model: 'evil-model', useVision: false });
+    check('请求体里的 model 仍被忽略（模型只能来自本机 config）', seen.at(-1)?.model === 'text-mock', seen.at(-1)?.model);
+    await chat({ useVision: true, messages: [{ role: 'user', content: [{ type: 'text', text: '看图' }] }] });
+    check('视觉请求的消息体原样转发（图片分段不被改写）',
+      Array.isArray(seen.at(-1)?.messages?.[0]?.content), JSON.stringify(seen.at(-1)?.messages?.[0]?.content).slice(0, 60));
+  } finally {
+    await new Promise((r) => { mock.closeAllConnections?.(); mock.close(r); });
+  }
+  // 复原成不会真被调用的地址，后续写盘失败测试不受影响
+  await fetch(`${base}/api/config`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseURL: 'https://api.deepseek.com/v1' }),
+  });
+}
 
 // 故意让目标文件名变成目录，验证原子写入失败会返回 HTTP 错误。
 const failWrite = async (filename, endpoint, body) => {
@@ -399,6 +468,7 @@ try {
 fs.writeFileSync(path.join(import.meta.dirname, '.desktop-port'), base);
 console.log(`\n端口已写入 test/.desktop-port → ${base}`);
 console.log(`可以接着跑： BASE=${base} node e2e.mjs`);
+console.log(`测试副本 pid=${child.pid}（窗口不可见）；收尾： node test/desktop.mjs --stop`);
 
 const passed = results.filter((r) => r.ok).length;
 console.log(`\n结果：${passed}/${results.length} 通过`);

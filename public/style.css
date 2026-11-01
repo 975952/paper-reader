@@ -842,15 +842,16 @@ body.dragging .viewer { pointer-events: none; }
 }
 .sess-row:hover .sess-del, .sess-del:focus-visible { opacity: 1; }
 .sess-del:hover { color: var(--err-text, var(--fg)); background: var(--bg); }
-/* 新建 / 清空：与「更多操作」里的菜单项同构（一行图标 + 文字，无边框） */
-.sess-new, .sess-clear {
+/* 新建 / 清空 / 本篇对话记忆：与「更多操作」里的菜单项同构（一行图标 + 文字，无边框） */
+.sess-new, .sess-clear, .sess-mem {
   width: 100%; margin-top: 2px; padding: 6px 7px;
   border: 0; border-radius: 6px; background: none; cursor: pointer;
   font: inherit; font-size: var(--ui-fs-xs); text-align: left;
 }
 .sess-new { color: var(--fg-dim); }
 .sess-clear { color: var(--fg-dim); }
-.sess-new:hover, .sess-clear:hover { background: var(--bg-sunken); color: var(--accent); }
+.sess-mem { color: var(--fg-faint); }
+.sess-new:hover, .sess-clear:hover, .sess-mem:hover { background: var(--bg-sunken); color: var(--accent); }
 .sess-clear { border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; margin-top: 4px; }
 .sess-empty { padding: 10px 7px; color: var(--fg-faint); font-size: var(--ui-fs-xs); text-align: center; }
 
@@ -1423,6 +1424,13 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
   border-radius: 7px; padding: 8px 10px; font: inherit; font-size: var(--ui-fs-lg); width: 100%;
 }
 .field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+/* 设置里的多行文本（长期记忆）：宽度拉满、可纵向拖动，字号与输入框一致 */
+.field textarea {
+  border: 1px solid var(--border-strong); background: var(--bg); color: var(--fg);
+  border-radius: 7px; padding: 8px 10px; font: inherit; font-size: var(--ui-fs-sm);
+  width: 100%; min-height: 84px; resize: vertical; line-height: 1.55;
+}
+.field textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
 /* 设置里的开关行（发送范围：读整篇论文 / 联网查资料）。勾选框不能吃 .field input 的 100% 宽度 */
 .field.field-switch { flex-direction: row; align-items: center; gap: 8px; cursor: pointer; }
 .field-switch input[type="checkbox"] { width: auto; margin: 0; padding: 0; flex: none; accent-color: var(--accent); }
@@ -1449,6 +1457,9 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
   display: inline-flex; align-items: center; justify-content: center;
 }
 .bubble button:hover { background: var(--accent-soft); color: var(--accent); }
+/* 右栏（问答回答 / 译文）选区：翻译与写笔记无意义，只留加入问答 / 直接解释 / 复制 */
+.bubble[data-source="right"] button[data-act="translate"],
+.bubble[data-source="right"] button[data-act="note"] { display: none; }
 
 .bubble, .notebox { opacity: var(--surface-opacity); }
 /* A closed right sidebar keeps the PDF wide; a short translation can be read beside the selection. */

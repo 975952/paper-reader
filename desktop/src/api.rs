@@ -822,6 +822,7 @@ pub fn default_config() -> Map<String, Value> {
     m.insert("autoTranslate".into(), json!(true));
     m.insert("stream".into(), json!(true));
     m.insert("glossary".into(), json!(""));
+    m.insert("longTermMemory".into(), json!(""));
     m.insert("idleMs".into(), json!(DEFAULT_IDLE_MS));
     m
 }

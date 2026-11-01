@@ -117,6 +117,8 @@ function unauthorized(res, sendJson) {
 
 const CHAT_FIELDS = new Set([
   'messages', 'stream', 'temperature', 'max_tokens', 'idleMs',
+  // 视觉模型开关：只允许「这次请求用视觉模型」这一位，模型名仍只来自本机 config
+  'useVision',
   // 上下文 / 范围类（前端将来的扩展字段，不参与上游请求体构造）
   'context', 'scope', 'doc', 'docId', 'page', 'files', 'meta', 'webResults',
 ]);
@@ -138,6 +140,7 @@ const LIMITS = {
     targetLang: 32,
     theme: 16,
     glossary: 100000,
+    longTermMemory: 4000,
   },
 };
 
@@ -184,6 +187,8 @@ function pickMaxTokens(v) {
 const CONFIG_FIELDS = [
   'apiKey', 'baseURL', 'model', 'visionModel', 'targetLang',
   'temperature', 'stream', 'idleMs', 'theme', 'fontSize', 'glossary',
+  // 长期记忆（用户手写，≤4000 字）：随配置一起落 data/config.json
+  'longTermMemory',
 ];
 
 /** URL 必须是 http/https、无凭证、无控制字符 */
@@ -270,6 +275,14 @@ function sanitizeConfigPatch(patch) {
         if (s.tooLong) { capped.push({ field: key, limit: LIMITS.str.glossary }); break; }
         if (s.notString) { ignored.push(key); break; }
         out.glossary = s.ok;
+        break;
+      }
+      case 'longTermMemory': {
+        // 用户手写的长期记忆：只限长度，不截断（超长 400，与其它字段一致）
+        const s = boundedString(v, LIMITS.str.longTermMemory);
+        if (s.tooLong) { capped.push({ field: key, limit: LIMITS.str.longTermMemory }); break; }
+        if (s.notString) { ignored.push(key); break; }
+        out.longTermMemory = s.ok;
         break;
       }
       case 'temperature': {

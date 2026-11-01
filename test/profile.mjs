@@ -1,4 +1,5 @@
-/** 后台记忆验收。自建隔离数据与假模型；MEMORY_BACKEND=exe 验收根目录交付物。 */
+/** 后台记忆验收。自建隔离数据与假模型；MEMORY_BACKEND=exe 验收**沙箱副本** exe
+ *  （--background 启动：不显示窗口、不抢焦点；用户正在用的实例不受影响）。 */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -6,8 +7,10 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
 import { ROOT, SANDBOX, assertIsolatedDataDir } from './_env.mjs';
+import { spawnReader, stageExe, stopChild } from './_exe.mjs';
 
 const backend = process.env.MEMORY_BACKEND || 'node';
+let stagedExe = null;
 fs.mkdirSync(SANDBOX, { recursive: true });
 const scratch = fs.mkdtempSync(path.join(SANDBOX, `memory-${backend}-`));
 const data = assertIsolatedDataDir(path.join(scratch, 'data')), papers = path.join(scratch, 'papers');
@@ -32,7 +35,13 @@ const mock = http.createServer(async (req, res) => {
   try {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks));
-    if (String(body.messages[0]?.content).includes('后台学习记忆提取器')) {
+    const sys = String(body.messages[0]?.content || '');
+    // 会话滚动摘要：后台请求，不算主回答、不进 mainBodies（否则会打乱 system() 取样）
+    if (sys.includes('滚动摘要')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: '会话摘要（后台）' } }] })); return;
+    }
+    if (sys.includes('后台学习记忆提取器')) {
       memoryBodies.push(body);
       if (failExtraction) { failExtraction = false; res.writeHead(503); res.end('controlled memory failure'); return; }
       if (holdNext) { holdNext = false; await new Promise((r) => { heldExtraction = r; }); }
@@ -59,16 +68,22 @@ const mock = http.createServer(async (req, res) => {
 let reader, browser, page, base, failProfileWrites = false;
 async function stop() {
   if (browser) { if (backend === 'exe') browser.disconnect(); else await browser.close(); browser = null; }
-  if (reader) { const stopped = new Promise((r) => reader.once('exit', r)); reader.kill(); await Promise.race([stopped, wait(5000)]); reader = null; }
+  if (reader) { await stopChild(reader); reader = null; }
 }
 async function start() {
   base = null;
   const port = await freePort(), debugPort = await freePort();
   const env = { ...process.env, PORT: String(port), PRT_DATA_DIR: data, PRT_PAPERS_DIR: papers,
     PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1', NO_OPEN: '1', WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort}` };
-  reader = backend === 'exe' ? spawn(path.join(ROOT, '论文阅读器.exe'), [], { env, stdio: 'ignore', windowsHide: true })
-    : spawn(process.execPath, [path.join(ROOT, 'server.js')], { env, stdio: 'ignore', windowsHide: true });
-  const ports = backend === 'exe' ? Array.from({ length: 64 }, (_, i) => i + 8787) : [port];
+  let ports;
+  if (backend === 'exe') {
+    stagedExe = stagedExe || stageExe('memory').exe;
+    reader = spawnReader(stagedExe, { env });
+    ports = Array.from({ length: 100 }, (_, i) => i + 8760);
+  } else {
+    reader = spawn(process.execPath, [path.join(ROOT, 'server.js')], { env, stdio: 'ignore', windowsHide: true });
+    ports = [port];
+  }
   await until(async () => {
     for (const p of ports) {
       try { const origin = `http://127.0.0.1:${p}`; const r = await fetch(origin + '/api/papers', { signal: AbortSignal.timeout(120) });
@@ -77,10 +92,18 @@ async function start() {
     } return false;
   }, 30000);
   if (backend === 'exe') {
+    check('验收启动的是沙箱副本（不碰用户正在用的应用）', stagedExe.includes(SANDBOX));
     let ws;
     await until(async () => { try { ws = (await (await fetch(`http://127.0.0.1:${debugPort}/json/version`)).json()).webSocketDebuggerUrl; return !!ws; } catch { return false; } });
-    browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null });
-    page = (await browser.pages()).find((p) => p.url().startsWith(base)) || (await browser.pages())[0];
+    browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: { width: 1400, height: 900 } });
+    // 后台（隐藏）窗口的首屏导航可能比 CDP 端口就绪晚，等页面 URL 指向本实例
+    page = null;
+    for (let i = 0; i < 150 && !page; i++) {
+      const pages = await browser.pages();
+      page = pages.find((p) => p.url().startsWith(base)) || null;
+      if (!page) await wait(100);
+    }
+    if (!page) throw new Error('exe 页面没有加载出来');
   } else {
     browser = await puppeteer.launch({ executablePath: process.env.CHROME || 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe', headless: true,
       args: ['--no-sandbox'], defaultViewport: { width: 1400, height: 900 } }); page = await browser.newPage();

@@ -1,6 +1,6 @@
 /** Real embedded exe: closed sidebar translation card, open sidebar result, and PDF horizontal reach. */
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,15 +16,17 @@ fs.mkdirSync(papers);
 fs.copyFileSync(path.join(import.meta.dirname, 'fixtures', 'multipage-sample.pdf'), path.join(papers, sampleName));
 const exe = path.join(temp, 'reader.exe');
 fs.copyFileSync(path.join(root, '论文阅读器.exe'), exe);
-const child = spawn(exe, [], { windowsHide: true, stdio: 'ignore', env: {
+const child = spawn(exe, ['--background'], { windowsHide: true, stdio: 'ignore', env: {
   ...process.env, PRT_DATA_DIR: data, PRT_PAPERS_DIR: papers, PRT_REQUIRE_TOKEN: '0',
 } });
 let browser;
 try {
   let base;
-  for (let i = 0; i < 50 && !base; i++) {
+  // 只认「自己的」服务：papers 里必须有本测试的临时 fixture（Rust 版 /api/papers 不返回 dir 字段，
+  // 所以不能拿目录路径比对）；端口从 8760 起扫，避免用户正在用的实例（8787）被误当成测试服务。
+  for (let i = 0; i < 80 && !base; i++) {
     await new Promise((r) => setTimeout(r, 250));
-    for (let port = 8787; port < 8807; port++) {
+    for (let port = 8760; port < 8860; port++) {
       try {
         const url = `http://127.0.0.1:${port}`;
         const listing = await fetch(`${url}/api/papers`, { signal: AbortSignal.timeout(150) }).then((r) => r.json());
@@ -205,7 +207,8 @@ try {
   assert.deepEqual(errors, [], `browser errors: ${errors.join('; ')}`);
 } finally {
   await browser?.close();
-  child.kill();
+  try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+  try { child.kill(); } catch {}
   if (path.resolve(temp).startsWith(path.resolve(os.tmpdir()) + path.sep)
       && path.basename(temp).startsWith('prt-translation-layout-')) {
     for (let i = 0; i < 10; i++) {

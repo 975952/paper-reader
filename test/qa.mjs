@@ -1,5 +1,6 @@
 /** 连续阅读问答：实际请求、原文定位、检索、恢复和重试。全部使用隔离文件和假模型。
- * node test/qa.mjs；QA_BACKEND=exe 时直接操作根目录 exe 的 WebView2 页面。
+ * node test/qa.mjs；QA_BACKEND=exe 时操作**沙箱副本** exe 的 WebView2 页面
+ * （副本用 --background 启动：不显示窗口、不抢焦点；用户正在用的实例不受影响）。
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -9,6 +10,7 @@ import vm from 'node:vm';
 import { spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
 import { ROOT, SANDBOX, assertIsolatedDataDir } from './_env.mjs';
+import { spawnReader, stageExe, stopChild } from './_exe.mjs';
 import { resolveReadingRequest, readingTurn, snapshotHistory, restoreReadingHistory, citedSources } from '../public/js/reading-context.js';
 import { webQueryFor, filterWebResults } from '../public/js/ai.js';
 
@@ -17,6 +19,7 @@ const scratch = fs.mkdtempSync(path.join(SANDBOX, `qa-${backend}-`));
 const data = assertIsolatedDataDir(path.join(scratch, 'data'));
 const papers = path.join(scratch, 'papers');
 fs.mkdirSync(data); fs.mkdirSync(papers);
+let stagedExe = null;
 const name = 'qa-fixture.pdf';
 const AUTHOR = 'Andrew G. Howard';
 const SELECTED = 'structured transform networks [28] and deep fried convnets [37].';
@@ -85,9 +88,15 @@ let failNext = false;
 const mock = http.createServer(async (req, res) => {
   const chunks = []; for await (const c of req) chunks.push(c);
   const body = JSON.parse(Buffer.concat(chunks));
-  if (String(body.messages[0]?.content).includes('后台学习记忆提取器')) {
+  const sys = String(body.messages[0]?.content || '');
+  // 后台请求不算「主回答」：学习记忆提取 + 会话滚动摘要都不记录、不参与断言
+  if (sys.includes('后台学习记忆提取器')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ choices: [{ message: { content: '[]' } }] })); return;
+  }
+  if (sys.includes('滚动摘要')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: '会话摘要（后台）' } }] })); return;
   }
   bodies.push(body);
   if (failNext) { failNext = false; res.writeHead(503, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"controlled failure"}}'); return; }
@@ -107,9 +116,15 @@ try {
   const env = { ...process.env, PORT: String(port), PRT_DATA_DIR: data, PRT_PAPERS_DIR: papers,
     PRT_REQUIRE_TOKEN: '0', PRT_DIAGNOSTICS: '1', NO_OPEN: '1',
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort}` };
-  reader = backend === 'exe' ? spawn(path.join(ROOT, '论文阅读器.exe'), [], { env, stdio: 'ignore' })
-    : spawn(process.execPath, [path.join(ROOT, 'server.js')], { env, stdio: 'ignore' });
-  const ports = backend === 'exe' ? Array.from({ length: 20 }, (_, i) => i + 8787) : [port];
+  let ports;
+  if (backend === 'exe') {
+    stagedExe = stageExe('qa').exe;
+    reader = spawnReader(stagedExe, { env });
+    ports = Array.from({ length: 100 }, (_, i) => i + 8760);
+  } else {
+    reader = spawn(process.execPath, [path.join(ROOT, 'server.js')], { env, stdio: 'ignore' });
+    ports = [port];
+  }
   for (let i = 0; i < 100 && !base; i++) {
     for (const p of ports) {
       try {
@@ -121,6 +136,7 @@ try {
     if (!base) await wait(100);
   }
   check('新进程使用独立数据目录', !!base && !!reader.pid);
+  if (backend === 'exe') check('验收启动的是沙箱副本（不碰用户正在用的应用）', stagedExe.includes(SANDBOX), stagedExe);
   const config = await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ baseURL: `http://127.0.0.1:${mock.address().port}/v1`, model: 'qa-mock', apiKey: 'qa-fake-key' }) });
   check('隔离模型配置保存成功', config.ok);
@@ -129,10 +145,16 @@ try {
     for (let i = 0; i < 100 && !ws; i++) {
       try { ws = (await (await fetch(`http://127.0.0.1:${debugPort}/json/version`)).json()).webSocketDebuggerUrl; } catch { await wait(100); }
     }
-    check('连接根目录 exe 的原生 WebView2', !!ws);
-    browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null });
-    page = (await browser.pages()).find((p) => p.url().startsWith(base)) || (await browser.pages())[0];
-    check('实际程序页面由本次 exe 提供', !!page && page.url().startsWith(base));
+    check('连接沙箱副本 exe 的原生 WebView2', !!ws);
+    browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: { width: 1400, height: 900 } });
+    // 窗口是后台（隐藏）启动的：WebView2 首屏可能还没导航完，等页面 URL 真的指向本实例
+    page = null;
+    for (let i = 0; i < 150 && !page; i++) {
+      const pages = await browser.pages();
+      page = pages.find((p) => p.url().startsWith(base)) || null;
+      if (!page) await wait(100);
+    }
+    check('实际程序页面由本次 exe 提供', !!page && page.url().startsWith(base), page?.url() || '(无匹配页面)');
   } else {
     browser = await puppeteer.launch({ executablePath: process.env.CHROME || 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
       headless: true, args: ['--no-sandbox'], defaultViewport: { width: 1400, height: 900 } });
@@ -264,6 +286,6 @@ try {
   console.log(`QA ${backend}: ${count}/${count} passed; evidence: ${scratch}`);
 } finally {
   if (browser) { if (backend === 'exe') browser.disconnect(); else await browser.close(); }
-  if (reader) reader.kill();
+  if (reader) await stopChild(reader);
   mock.closeAllConnections(); await new Promise((r) => mock.close(r));
 }

@@ -10,32 +10,30 @@ rem  output filename is therefore built from its Unicode code
 rem  points at run time:
 rem      U+8BBA U+6587 U+9605 U+8BFB U+5668  =  "LunWenYueDuQi"
 rem
-rem  Why the steps are shaped like this (all learned the hard way):
+rem  Why the steps are shaped like this:
 rem  1) touch src\assets.rs before cargo build. The frontend is
 rem     embedded by rust-embed at compile time, and cargo only
 rem     tracks files it saw during the PREVIOUS compile, so a NEW
 rem     file under public/ does not trigger a rebuild and silently
 rem     never reaches the exe.
-rem  2) kill the running instance by PROCESS NAME before copying.
-rem     The shipped process name is Chinese "LunWenYueDuQi", not
-rem     "paper-reader.exe", so an /IM paper-reader.exe taskkill
-rem     misses it. Also: never use try/catch inside a Where-Object
-rem     block - "try" is a statement, not an expression, and
-rem     PowerShell will treat it as a command name and fail.
-rem  3) copy, then verify the SHA256 of BOTH destinations. A copy
-rem     onto a running exe fails silently otherwise, and tests then
-rem     "pass" against a stale binary. Two hardening details learned
-rem     the hard way: the copy RETRIES for up to 10s (killing the app
-rem     releases the file handle a moment later than the process
-rem     disappears - a one-shot copy right after the kill failed),
-rem     and the cosmetic LastWriteTime touch is wrapped in try/catch
-rem     (a locked target used to abort the whole statement, so
-rem     powershell -Command exited 1 although both copies verified).
+rem  2) never kill a running reader. This script used to close every
+rem     process named "LunWenYueDuQi" so the copy could overwrite a
+rem     running exe - which also closed the copy the user was
+rem     reading. Now it kills nothing: the project-root copy is
+rem     required (retry for 10s, then report how to free it), and
+rem     the Desktop copy is best-effort (if it is in use, print a
+rem     note and leave the old one alone; close the app and rerun
+rem     build.bat when it is convenient).
+rem  3) verify the SHA256 of every destination - a copy onto a
+rem     running exe fails silently otherwise, and tests then "pass"
+rem     against a stale binary. The copy retries for up to 10s
+rem     because Windows releases the file handle a moment after
+rem     the last handle closes.
 rem ============================================================
 setlocal
 cd /d "%~dp0"
 
-echo [1/4] cargo build --release
+echo [1/3] cargo build --release
 powershell -NoProfile -Command "(Get-Item 'src\assets.rs').LastWriteTime = Get-Date"
 cargo build --release
 if errorlevel 1 (
@@ -45,29 +43,27 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/4] stop any running instance - otherwise the copy is locked
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$t = -join ([char]0x8BBA,[char]0x6587,[char]0x9605,[char]0x8BFB,[char]0x5668);" ^
-  "Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq $t -or $_.ProcessName -eq 'paper-reader' -or $_.MainWindowTitle -eq $t } | Stop-Process -Force -ErrorAction SilentlyContinue;" ^
-  "Start-Sleep -Milliseconds 1500"
-
-echo.
-echo [3/4] copy exe to project root and the Desktop
+echo [2/3] copy exe to project root and the Desktop ^(running instances are left alone^)
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$n = -join ([char]0x8BBA,[char]0x6587,[char]0x9605,[char]0x8BFB,[char]0x5668);" ^
   "$src = (Resolve-Path 'target\release\paper-reader.exe').Path;" ^
   "$root = (Resolve-Path '..').Path;" ^
-  "$dst = @((Join-Path $root ($n + '.exe')), (Join-Path ([Environment]::GetFolderPath('Desktop')) ($n + '.exe')));" ^
+  "$desktop = [Environment]::GetFolderPath('Desktop');" ^
+  "$dst = @((Join-Path $root ($n + '.exe')), (Join-Path $desktop ($n + '.exe')));" ^
   "$latest = (Get-ChildItem '..\public' -Recurse -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime;" ^
   "$sha = [Security.Cryptography.SHA256]::Create();" ^
   "$want = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($src))).Replace('-', '');" ^
   "$bad = 0;" ^
   "foreach ($d in $dst) {" ^
+  "  $isDesktop = $d.StartsWith($desktop, [StringComparison]::OrdinalIgnoreCase);" ^
   "  $ok = 0;" ^
   "  for ($i = 0; $i -lt 20 -and -not $ok; $i++) {" ^
   "    try { Copy-Item -Force $src $d -ErrorAction Stop; $ok = 1 } catch { Start-Sleep -Milliseconds 500 }" ^
   "  }" ^
-  "  if (-not $ok) { Write-Host ('      [x] ' + $d + ' : still locked (app open?)'); $bad = 1; continue }" ^
+  "  if (-not $ok) {" ^
+  "    if ($isDesktop) { Write-Host ('      [!] ' + $d + ' : in use, skipped - close the app and rerun build.bat to update the Desktop copy'); continue }" ^
+  "    Write-Host ('      [x] ' + $d + ' : locked - a reader is running from this folder; close it and rerun build.bat'); $bad = 1; continue" ^
+  "  }" ^
   "  $got = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($d))).Replace('-', '');" ^
   "  if ($got -ne $want) { Write-Host ('      [x] MISMATCH ' + $d); $bad = 1; continue }" ^
   "  try { (Get-Item $d).LastWriteTime = $latest } catch { }" ^
@@ -75,10 +71,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "}" ^
   "exit $bad"
 if errorlevel 1 (
-  echo [x] copy failed - close the app and run this again
+  echo [x] project-root copy failed - close the reader that is running from this folder and run build.bat again
   exit /b 1
 )
 
 echo.
-echo [4/4] done - double click that exe to start
+echo [3/3] done - double click the exe to start
 exit /b 0

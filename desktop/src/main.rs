@@ -77,6 +77,15 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let want_help = args.iter().any(|a| a == "--help" || a == "-h");
     let console = want_help || args.iter().any(|a| a == "--console" || a == "-c");
+    // 验收 / 自动化专用：窗口不显示、不抢焦点、不占任务栏。
+    // 只影响「怎么开窗口」，不影响任何功能；用户双击启动的默认行为不变。
+    let background = args.iter().any(|a| a == "--background")
+        || std::env::var("PRT_BACKGROUND")
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                v == "1" || v == "true" || v == "yes"
+            })
+            .unwrap_or(false);
 
     if console {
         // 必须在任何输出之前：Rust 的 stdout/stderr 句柄是首次使用时取的
@@ -114,11 +123,16 @@ fn main() {
 
     if want_help {
         log_line("");
-        log_line("  用法: 论文阅读器.exe [--console] [--port N]");
-        log_line("      --console   挂上控制台并打印日志（不弹黑框是默认行为）");
-        log_line("      --port N    从这个端口开始试（默认 8787，被占用就往后找）");
+        log_line("  用法: 论文阅读器.exe [--console] [--background] [--port N]");
+        log_line("      --console     挂上控制台并打印日志（不弹黑框是默认行为）");
+        log_line("      --background  后台启动：不显示窗口、不抢焦点、不占任务栏（自动化验收用）");
+        log_line("      --port N      从这个端口开始试（默认 8787，被占用就往后找）");
         log_line("");
         return;
+    }
+
+    if background {
+        log_line("[boot] 后台模式：窗口不显示、不抢焦点（自动化验收）");
     }
 
     if !assets::contains("index.html") {
@@ -158,5 +172,5 @@ fn main() {
     }
 
     // 主线程交给窗口；HTTP 在后台线程里，窗口关掉即整个进程结束
-    window::run(url);
+    window::run(url, background);
 }

@@ -1,5 +1,5 @@
 import puppeteer from 'puppeteer-core';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,17 +9,23 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prt-reopen-'));
 for (const dir of ['data', 'papers']) fs.mkdirSync(path.join(tmp, dir));
 const exe = path.join(tmp, 'reader.exe');
 fs.copyFileSync(path.join(root, '论文阅读器.exe'), exe);
-const child = spawn(exe, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env, PRT_DATA_DIR: path.join(tmp, 'data'), PRT_PAPERS_DIR: path.join(tmp, 'papers'), PRT_REQUIRE_TOKEN: '0' } });
+const dataDir = path.join(tmp, 'data');
+const papersDir = path.join(tmp, 'papers');
+// 自己的服务靠「papers 里这篇独有命名的论文」识别（Rust 版 /api/papers 不返回 dir 字段）；
+// 同时也让后续「点文件列表打开论文」有东西可点。
+const marker = `sidebar-marker-${path.basename(tmp)}.pdf`;
+fs.copyFileSync(path.join(import.meta.dirname, 'fixtures', 'multipage-sample.pdf'), path.join(papersDir, marker));
+const child = spawn(exe, ['--background'], { windowsHide: true, stdio: 'ignore', env: { ...process.env, PRT_DATA_DIR: dataDir, PRT_PAPERS_DIR: papersDir, PRT_REQUIRE_TOKEN: '0' } });
 let browser;
 try {
   let base;
-  for (let attempt = 0; attempt < 40 && !base; attempt++) {
+  for (let attempt = 0; attempt < 60 && !base; attempt++) {
     await new Promise(r => setTimeout(r, 300));
-    for (let port = 8787; port < 8807; port++) {
+    for (let port = 8760; port < 8860; port++) {
       try {
         const candidate = `http://127.0.0.1:${port}`;
-        const res = await fetch(candidate + '/api/health', { signal: AbortSignal.timeout(150) });
-        if (res.ok) { base = candidate; break; }
+        const listing = await fetch(candidate + '/api/papers', { signal: AbortSignal.timeout(150) }).then((r) => r.json());
+        if ((listing.papers || []).some((p) => p.name === marker)) { base = candidate; break; }
       } catch {}
     }
   }
@@ -50,5 +56,6 @@ try {
   console.log('PASS embedded source and zero page errors');
 } finally {
   await browser?.close();
-  child.kill();
+  try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+  try { child.kill(); } catch {}
 }

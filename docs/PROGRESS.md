@@ -2574,3 +2574,82 @@ zoom-touch **52/52**、zoom **39/39**、selection 31/31、cjk 11/11。
   SHA256 `F4F31B2206E3E228154BFEFB837914AE09A5DB99743DA448ADFF6C76D7E694AB`（比上一版小约 199KB，
   主要是内嵌前端的注释变少）。
 - GitHub Release v1.0.0 的 `paper-reader.exe` 资产将在本轮推送后替换为新 exe，tag 同步指到最终提交。
+
+## 46. 问答与翻译整体改造：扫描件 / 右栏划词 / 记忆 / 不打扰用户的测试（2026-11-01）
+
+用户口径（`problems.txt`，五条改进 + 一条测试要求）：
+
+> 1. 第一次打开 PDF 时判断类型；若无文本，问答时上下文默认通过图片形式提交上下文或全文，读懂论文结果进右侧问答栏、每一项都能接着追问；
+> 2. 问答部分和翻译部分要能像正文文本一样有「加入问答区」「直接解释」；
+> 3. 同一会话有没有前文记忆、是否一起发给模型；要做全局记忆系统，参考 Codex 桌面应用；
+> 4. 打开 PDF 时扫描构成（哪里是文字、哪里是图），手写/图内文字也要能识别，先去调研评估；
+> 5. 整体设计，决定问答与翻译以哪种方式修改；
+> 6. 测试时不要反复关掉用户正在用的应用，不要弹出窗口抢到最前面。
+
+### 46.1 先调研（两个子智能体，报告已落盘）
+
+- [`扫描件与OCR-调研.md`](扫描件与OCR-调研.md)：扫描件/图内文字/手写公式的识别方案对比（VLM 按需 OCR、Windows OCR、RapidOCR、云 OCR），
+  PDF 构成扫描用 `getTextContent()` + `getOperatorList()`（10–30ms/页）即可做页级分类；结论：首选复用已配置的视觉模型，Windows OCR 作无视觉模型时的降级，不把 MinerU/marker/PaddleOCR 打进 exe。
+- [`记忆系统调研-Codex.md`](记忆系统调研-Codex.md)：Codex 的 AGENTS.md / Memories / Chronicle / compaction 分层，ChatGPT 记忆的「可见可改可删」，
+  Claude Code / Cursor 对照；结论：用户手写规则 → 论文/会话沉淀摘要 → 会话内原文，且全程可关闭、可清除。
+- 整体设计：[`问答与翻译-整体设计.md`](问答与翻译-整体设计.md)（§3 现状核对、§4–§7 分项设计、§8 测试隔离、§9 分阶段）。
+
+### 46.2 交付行为
+
+- **扫描版 PDF**：
+  - `PdfViewer.scanDocProfile()` 打开后后台逐页统计「文本字符数 / 图片覆盖面积 / 矢量操作数」，
+    页级分类 text / scan / figure / blank；整篇过半点是扫描页或平均每页 <20 字 → 扫描件；
+    结果按 docId+size+mtime 缓存在 localStorage（`reader.docProfile.v1:*`），不阻塞首屏。
+  - 扫描件的问答自动带**页面图片**（当前页；整篇类问题带首页/尾页/代表页，最多 5 张；`capturePageImage()` 按需渲染，
+    JPEG ≤1400px 并缓存），提示词里明确「只依据图片可见内容，看不清不要补造」。
+  - 扫描件的「读懂论文」首次触发时逐页转写采样页（最多 8 页）生成**图片阅读索引**，按文件指纹缓存
+    （`reader.scanDigest.v1:*`）；四项能力用「索引 + 当前页图」，进度可停止。
+  - 打开扫描件时提示一次「按页面图片理解」；输入框范围提示显示「整篇论文（按页图理解）」「页图 N 张」。
+- **视觉模型真正生效**：设置页新增「视觉模型（可选）」；前端带图请求加 `useVision: true`，
+  Node 与 Rust（`security.js` / `limits.rs` / `chat.rs`）都只从本机 config 取 `visionModel || model`，
+  请求体里的 `model` 仍被忽略（模型选型不可被请求覆盖）。未配置视觉模型时提示一次。
+- **右栏划词**：问答回答 / 解释 / 教学结果 / 译文里的选中文字复用同一个 `#bubble`，
+  只显示「加入问答 / 直接解释 / 复制」（翻译、笔记隐藏；快捷键 T/E/Q 仍可用）；
+  选区对象带 `source:'right'` 与当前页，来源在附件行标「右栏」；正文选区行为不变。
+- **记忆**：
+  - 会话滚动摘要（compaction）：history >8 条且比上次摘要多 ≥4 条时后台合成摘要，
+    存在会话 JSON 的 `summary` / `summaryCovered`，之后每次请求带「本次会话早先内容摘要」；
+  - 本篇跨会话：新建会话时读取最近 2 个会话的 `summary`，注入「这篇论文之前的讨论摘要」；
+    会话菜单新增「本篇对话记忆：开/关」（只影响注入，不删会话）；
+  - 长期记忆：设置页多行输入（≤4000 字），存 `data/config.json` → `longTermMemory`（Node/Rust 同契约），
+    每次问答 / 教学 system 带「长期记忆（用户手写）」，与后台学习画像分块。
+  - 注入顺序：学习画像 → 长期记忆 → 本篇讨论 → 会话摘要；各自有长度上限；摘要生成失败静默降级。
+- **PDF 构成扫描**：第一版只做页级分类（不引入 bbox/版面分析）；OCR 按调研结论排在下一阶段
+  （视觉模型转录缓存 + Windows OCR 降级），本轮先打通「页图 + 图片阅读索引」。
+- **不打扰用户（P0，先做）**：
+  - `desktop/build.bat` 不再按进程名杀进程；根目录副本被占用时重试 10 秒后报错，
+    桌面副本被占用（用户正在用）时只打印「in use, skipped」并跳过；
+  - exe 新增 `--background` / `PRT_BACKGROUND=1`：窗口创建为隐藏、`focused(false)`、不占任务栏；
+  - `test/_exe.mjs` 公共 helper：`stageExe()` 只启动 `test/artifacts` 里的副本，
+    `stopChild()` 只杀自己启动的子进程，`killSandboxInstances()` 只清沙箱前缀进程；
+  - `desktop.mjs` 删除「先杀所有实例」，改用 EnumWindows 验证「原生窗口存在且不可见」；
+    `qa.mjs` / `profile.mjs` 的 exe 后端、`sidebar-reopen.mjs`、`translation-layout.mjs` 全部改沙箱副本 + `--background`；
+  - `e2e.mjs` 必须显式给 BASE（不再默认摸 8787）；新增 `test/e2e-isolated.mjs` 一键起隔离服务跑 e2e。
+  - 实测：用户桌面实例（PID 64448，占 8787）全程未被关闭；后台模式窗口 `IsWindowVisible=false`。
+
+### 46.3 验证
+
+- 新增套件：`right-select.mjs` **17/17**、`scan-pdf.mjs` **18/18**、`memory-session.mjs` **13/13**；
+  新增 `e2e-isolated.mjs`（起隔离服务跑 e2e 的入口，e2e 必须显式 BASE）。
+- 回归：`desktop.mjs` **75/75**（沙箱副本 exe；含「窗口不可见」「visionModel / longTermMemory 契约」
+  「useVision 选视觉模型」「请求体 model 被忽略」）、`qa.mjs` Node **36/36** 与 exe **39/39**、
+  `teaching-isolated.mjs`（teaching **34/34** + ops **13/13**）、`ai-send-regression.mjs` **13/13**、
+  `attachments.mjs` **22/22**、`profile.mjs` Node **30/30**、
+  `sidebar-reopen.mjs` / `translation-layout.mjs`（沙箱副本 exe）通过、`memory-unit.mjs` **16/16**。
+- Rust：`cargo build --release` 通过；`cargo test` **29/29**。
+- 根目录 exe 重编：10,561,536 B，SHA256 `A8053628536BBA320BABE77A5940744A0BD0869A5C01E0BD89C16B5E0F585C87`。
+  **桌面副本没有覆盖**：用户正在使用（旧版 10,508,288 B，SHA256 `EF39AA83A3468C1676AA8A91FD478B52BCA506068E80898AE8F803352433E1C6`），
+  `build.bat` 按新规则跳过并提示；用户关掉应用后重跑 `desktop\build.bat` 即可更新。
+- 已知漂移：`e2e.mjs` 本身有历史断言漂移（「译」一节仍按旧右栏行为断言；该文件近几轮不在维护清单里，
+  §45.4 的回归清单也没有它），本轮只加了后台请求过滤与「必须显式 BASE」保护。
+  `context.mjs` 的 9 条历史失败见 §42.2，本轮未处理。
+
+### 46.4 备份 / 回退
+
+- 本轮没有新建 git 备份；改动前的 HEAD 是 `0bd421d`，`git diff` 可完整回退。
+- 旧的训练/测试产物仍在 `test/artifacts/`（gitignore），不参与交付。

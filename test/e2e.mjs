@@ -3,7 +3,12 @@ import { assertIsolatedDataDir, resolveDataDir } from './_env.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const BASE = process.env.BASE || 'http://127.0.0.1:8787';
+const BASE = process.env.BASE;
+if (!BASE) {
+  // 不允许默认去摸 8787：用户可能正开着阅读器（也占 8787），测试不能误读/误写真实数据。
+  console.error('必须显式给隔离实例的 BASE，例如：\n  node test/desktop.mjs\n  BASE=http://127.0.0.1:8788 node e2e.mjs');
+  process.exit(2);
+}
 const CHROME = process.env.CHROME || 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe';
 const OUT = path.join(import.meta.dirname, 'artifacts');
 fs.mkdirSync(OUT, { recursive: true });
@@ -70,6 +75,14 @@ page.on('request', (req) => {
 
   if (url.endsWith('/api/chat')) {
     const body = JSON.parse(req.postData() || '{}');
+    const sysFull = String(body.messages?.[0]?.content || '');
+    // 后台请求不算「主回答」：学习记忆提取 + 会话滚动摘要都不记录、不参与断言
+    if (sysFull.includes('后台学习记忆提取器')) {
+      return req.respond({ status: 200, contentType: 'application/json', body: '{"choices":[{"message":{"content":"[]"}}]}' });
+    }
+    if (sysFull.includes('滚动摘要')) {
+      return req.respond({ status: 200, contentType: 'application/json', body: '{"choices":[{"message":{"content":"会话摘要（后台）"}}]}' });
+    }
     const last = body.messages?.[body.messages.length - 1];
     const parts = Array.isArray(last?.content) ? last.content : null;
     const hasImage = !!parts && parts.some((c) => c.type === 'image_url');

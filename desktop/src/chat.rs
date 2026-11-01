@@ -87,10 +87,22 @@ pub fn handle(rq: Request, body: &[u8], _ctx: &Ctx) {
         Some(v) if truthy(v) => v.clone(),
         _ => json!(""),
     };
-    let model = js_string(&from_stored(
-        "model",
-        defaults.get("model").unwrap_or(&json!(DEFAULT_MODEL)),
-    ));
+    // 视觉模型：前端只传 useVision 标记，模型名仍只从本机 config 取（请求体里的 model 被忽略）。
+    let wants_vision = matches!(payload.get("useVision"), Some(v) if truthy(v));
+    let model = if wants_vision {
+        match stored.get("visionModel").filter(|v| truthy(v)) {
+            Some(v) => js_string(v),
+            None => js_string(&from_stored(
+                "model",
+                defaults.get("model").unwrap_or(&json!(DEFAULT_MODEL)),
+            )),
+        }
+    } else {
+        js_string(&from_stored(
+            "model",
+            defaults.get("model").unwrap_or(&json!(DEFAULT_MODEL)),
+        ))
+    };
 
     let url = match normalize_chat_url(&base_url) {
         Ok(u) => u,

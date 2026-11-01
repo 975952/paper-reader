@@ -66,6 +66,14 @@ page.on('request', (req) => {
 
   if (url.endsWith('/api/chat')) {
     const body = JSON.parse(req.postData() || '{}');
+    const sysFull = String(body.messages?.[0]?.content || '');
+    // 后台请求不算「主回答」：学习记忆提取 + 会话滚动摘要都不记录、不参与断言
+    if (sysFull.includes('后台学习记忆提取器')) {
+      return req.respond({ status: 200, contentType: 'application/json', body: '{"choices":[{"message":{"content":"[]"}}]}' });
+    }
+    if (sysFull.includes('滚动摘要')) {
+      return req.respond({ status: 200, contentType: 'application/json', body: '{"choices":[{"message":{"content":"会话摘要（后台）"}}]}' });
+    }
     const last = body.messages?.[body.messages.length - 1];
     const userText = Array.isArray(last?.content)
       ? (last.content.find((c) => c.type === 'text')?.text || '')
