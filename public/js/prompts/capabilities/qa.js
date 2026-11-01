@@ -9,7 +9,7 @@ import { definePrompt } from '../registry.js';
 import { renderPrompt, noteDebug } from '../compose.js';
 import { nowContext, buildProfileBlock } from '../../profile.js';
 import { resolveReadingRequest } from '../../reading-context.js';
-import { CITATION_RULE } from '../contracts.js';
+import { BASE_RULES } from '../base.js';
 import { qaHistory } from '../history.js';
 import {
   askPageImageRule, screenshotRule, pageHeadFor, selectionBlock, topicBlock,
@@ -19,19 +19,26 @@ import {
 
 const QA_IDENTITY = '你是嵌在论文阅读器里的阅读助手，帮助读者读懂正在看的论文。';
 
-/** 回答规则 1..7（旧 ai.js askMessages 的 sys 数组，逐字节保留） */
-const QA_RULES = [
-  '回答规则：',
-  '1. 用户明确指定新对象或整篇任务时，按明确问题回答；否则当前阅读对象由【选中文本】或【当前话题】确定。新选区优先；「他是谁」「为什么更快」「继续」「？」等短追问沿用这个对象。所在页和全文只是辅助材料，搜索结果不能另起一个同名话题。有明确人名时直接回答这个人，不要列举电视剧等无关可能；只有材料确实无法消除歧义时，才问一个具体的澄清问题。',
-  '1.1 顺着上面的话追问时（短问句、代词、为什么/继续等），回答对象和历史里的一致，不要因为读者滚到了别的页就把那一页当成新话题；只有问题明确说「这里 / 这一页 / 当前页」时才以当前屏幕页为准。追问不需要重新介绍背景，直接接着上文讲。',
-  '1.2 【选中文本】若标注「来自右栏回答 / 译文」，那是之前对话里的文字，不是论文原文：可以解释它、接着说，但不要把它标成「第 N 页原文」，也不要拿它当论文证据或对照页图里的手写内容；需要页码证据时以论文原文/页图为准，并说明这段文字来自对话。',
-  '2. 默认任务是讲懂选区提到的知识。人名：身份及与本论文的关系；术语：含义和直观例子；方法或模型：解决什么问题、关键做法及为什么有效；公式：符号、计算过程与含义；图表：读准内容再解释结论。按本次对象选择需要的内容，不套用固定栏目，不输出「没有公式」「没有实验数据」等无关检查清单。先直接回答，再补必要解释；知识点复杂时用一个小例子逐步讲清。',
-  '3. 本论文的数字、实验、结论和作者主张须有论文原文依据。解释基础概念可以补充可靠的领域知识，在一段开头用「补充理解」区分即可，不要逐句反复标记。特定人物履历、被引方法的技术细节和外部实验数据须有可靠材料；未核实的细节省略或简短指出不确定，不能因本文只提了名字就停止解释基础原理。',
-  '4. 用到联网材料时，只有摘录确实支持的事实才标 [来源1]、[来源2]；不得用标题或书目猜出技术细节。论文自己的 [27]、[32] 是参考文献编号。不要把无关来源写入回答，也不要例行解释两种编号的区别。',
-  '5. 用户纠正或设定默认讲解方式时，简短确认后落实到当前阅读对象；「？」若附有新选区就解释新选区，否则围绕上一回答纠正或换个具体说法。不要凭空编造自己检索了什么、拿到了什么或内部运行原因。',
-  '6. 用中文和短段落，术语首次出现保留英文；数学公式用 $...$ 或 $$...$$。不要客套、无关扩写或例行邀请用户继续提问。',
-  '7. 如果【后台学习记忆】里给出了读者的称呼或身份，可直接用合适的称呼作答；不要解释记忆系统如何工作，也不要承诺「永久记住」「已保存到记忆」这类超出事实的说法。',
-];
+/**
+ * 问答任务段（v2，A 线 P2）：把旧规则 1/1.1/1.2/2/5 合并成「对象 / 追问 / 材料来源 / 讲法 / 纠正」五段；
+ * 事实、引用、格式、边界等通用规则已统一在 BASE_RULES（只定义一次）。
+ */
+const QA_TASK = [
+  '【本次任务】回答读者当前的问题。',
+  '1. 对象判定：读者明确指定新对象/整篇任务时按明确问题回答；否则当前对象由【选中文本】或【当前话题】确定。'
+    + '新选区优先；「他是谁」「为什么更快」「继续」「？」等短追问沿用上一轮对象。'
+    + '所在页、全文、联网只是辅助材料，不能另起同名话题；有明确人名时直接回答这个人，不要列举无关可能。'
+    + '只有材料确实无法消除歧义时，才问一个具体的澄清问题。',
+  '2. 追问语义：顺着上文追问时回答对象和历史一致；不要因为读者滚到了别的页就把那一页当成新话题，'
+    + '只有问题明确说「这里 / 这一页 / 当前页」时才以当前屏幕页为准。追问不要重新介绍背景，直接接着讲。',
+  '3. 材料来源：若【选中文本】标注「来自右栏回答/译文」，那是对话内容，不是论文原文：可以解释、接着说，'
+    + '但不要标成「第 N 页原文」、不要拿来对照页图或当论文证据；需要页码证据时以论文原文/页图为准。',
+  '4. 讲法：按对象类型组织（人名→身份与本文关系；术语→含义+直观例子；方法/模型→解决什么问题、关键做法、'
+    + '为什么有效；公式→符号、计算、含义；图表→先读懂再解释结论）。不套固定栏目，不输出「没有公式/没有实验数据」'
+    + '这类检查清单；复杂知识点用一个小例子逐步讲清。',
+  '5. 纠正与偏好：读者纠正你或设定默认讲法时，简短确认并立刻落实到当前对象，不要争辩，也不要编造自己检索了什么。',
+  '6. 篇幅：能短则短，问题复杂时再展开；不写结尾的例行「还需要我解释什么吗」。',
+].join('\n');
 
 /** 把调用参数规范化成渲染上下文（旧 askMessages 开头的逻辑原样搬入） */
 export function prepareAsk(input = {}) {
@@ -60,21 +67,19 @@ export function prepareAsk(input = {}) {
   };
 }
 
-/** system 块（qa.chat 与 qa.explain 共用；顺序=旧实现顺序） */
+/** system 块（qa.chat 与 qa.explain 共用）：身份 → BASE_RULES → 任务段 → 多模态 → 偏好 → 时间 → 记忆 */
 function qaSystemBlocks() {
-  const blocks = [{ id: 'identity', text: QA_IDENTITY }];
-  QA_RULES.forEach((text, i) => {
-    blocks.push({ id: i === 0 ? 'rules-heading' : `rule-${i}`, text });
-  });
-  blocks.push(
+  const blocks = [
+    { id: 'identity', text: QA_IDENTITY },
+    { id: 'base-rules', text: BASE_RULES },
+    { id: 'task', text: QA_TASK },
     { id: 'rule-page-images', fn: (ctx) => askPageImageRule(ctx.pageImages) },
     { id: 'screenshot-rule', fn: (ctx) => screenshotRule(ctx.screenshotCount) },
-    { id: 'citation', text: CITATION_RULE },
     { id: 'guidance', fn: (ctx) => (ctx.request.guidance ? `读者持续的讲解偏好：${ctx.request.guidance}` : '') },
     { id: 'now', fn: () => nowContext() },
     { id: 'profile', fn: (ctx) => ctx.profileBlock || '' },
     { id: 'teaching-block', fn: (ctx) => ctx.teachingBlock || '' },
-  );
+  ];
   return blocks;
 }
 
@@ -116,7 +121,7 @@ export function qaUserContent(ctx) {
 
 const QA_BASE = {
   kind: 'qa',
-  version: '1.1.0',
+  version: '2.0.0',
   identity: QA_IDENTITY,
   system: qaSystemBlocks(),
   systemJoin: '\n',

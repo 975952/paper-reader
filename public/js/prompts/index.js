@@ -14,21 +14,20 @@ import './capabilities/translate.js';
 import './capabilities/teach.js';
 import './capabilities/ops.js';
 import './capabilities/background.js';
-import './capabilities/legacy.js';
 
 export {
   definePrompt, getPromptDef, hasPromptDef, listPrompts, getManifest,
   PROMPT_MANIFEST, PROMPT_SYSTEM_VERSION, promptHash, fnv1a,
 } from './registry.js';
 export {
-  composePrompt, renderPrompt, renderDef, renderBlocks, lastPromptDebug, noteDebug,
+  composePrompt, renderPrompt, renderDef, renderBlocks, lastPromptDebug, noteDebug, fitMessages,
 } from './compose.js';
 export {
   estimateTokens, estimateMessagesTokens, HARD_TOKENS, IMAGE_TOKENS,
   MAX_PAGE_IMAGES, MAX_SCREENSHOTS, TRIM_ORDER, NEVER_TRIM,
 } from './budget.js';
 export { BASE_TEACH, BASE_OPS, OUTPUT_ONLY, withProtocol } from './base.js';
-export { CITATION_RULE, PAGE_IMAGE_RULE, PRT_SPEC, SYSTEM_MARKERS } from './contracts.js';
+export { PAGE_IMAGE_RULE, PRT_SPEC, SYSTEM_MARKERS } from './contracts.js';
 export {
   docBlock, fullTextBlock, digestBlock, pageImagesBlock, askPageImageRule, screenshotRule,
   pageHeadFor, selectionBlock, topicBlock, contextBlockFor, referencesBlock, webBlock,
@@ -39,7 +38,7 @@ export { qaHistory, opHistory, teachHistory } from './history.js';
 
 /* 能力兼容壳 */
 export { askMessages, explainMessages, prepareAsk } from './capabilities/qa.js';
-export { translateMessages, matchGlossary } from './capabilities/translate.js';
+export { translateMessages } from './capabilities/translate.js';
 export {
   teachMessages, condenseMessages, TEACH_PLAN_TASK, PREREQ_TASK, WALK_TASK, VISUAL_TASK,
   WALK_CONTINUE_SYS, walkReteachSys, PREREQ_ONE_SYS, CONDENSE_SYS, TEACH_TASKS,
@@ -49,5 +48,4 @@ export {
   digestMessages, sessionSummaryMessages, scanPageMessages,
   memoryExtractMessages, MEMORY_EXTRACT_SYS,
 } from './capabilities/background.js';
-export { regionMessages } from './capabilities/legacy.js';
 export { SCREENSHOT_TASK } from './capabilities/qa.js';

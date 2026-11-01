@@ -200,8 +200,13 @@ try {
   check('教学请求拿到图片阅读索引', /图片阅读索引/.test(teaching.text || ''), (teaching.text || '').slice(0, 60));
   check('教学请求仍带当前页图', (teaching.imageCount || 0) >= 1, `images=${teaching.imageCount}`);
   const cached = await page.evaluate(() => {
-    const keys = Object.keys(localStorage).filter((k) => k.startsWith('reader.scanDigest.v1:'));
-    return { keys: keys.length, sample: keys[0] ? String(localStorage.getItem(keys[0])).slice(0, 40) : '' };
+    // A 线 P3：缓存键从 v1 改为带提示词系统版本（reader.scanDigest.<版本>:<docId>:<指纹>）
+    const keys = Object.keys(localStorage).filter((k) => k.startsWith('reader.scanDigest.'));
+    const raw = keys[0] ? String(localStorage.getItem(keys[0])) : '';
+    // P3 起缓存值带 {version, text} 包装：断言看 text 里是否真的有图片阅读索引正文
+    let text = raw;
+    try { text = JSON.parse(raw)?.text || raw; } catch { /* 旧格式就是纯文本 */ }
+    return { keys: keys.length, sample: text.slice(0, 40) };
   });
   check('图片阅读索引按文件指纹缓存', cached.keys === 1 && cached.sample.includes('扫描件图片阅读索引'), JSON.stringify(cached));
 

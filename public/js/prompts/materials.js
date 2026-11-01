@@ -5,7 +5,6 @@
  * P3 才给每个块加预算与裁剪优先级。改这里的标签会直接影响
  * `context-page` / `qa` / `teaching` 等断言，动之前先 grep 测试。
  */
-import { CITATION_RULE } from './contracts.js';
 import { formatPageList } from '../citation-validator.js';
 
 /** 【论文】标题 + 页码角色 */
@@ -135,4 +134,3 @@ export function taskBlock(ask) {
   return `【本次任务】\n${ask}`;
 }
 
-export { CITATION_RULE };

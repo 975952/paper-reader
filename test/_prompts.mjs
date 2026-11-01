@@ -155,13 +155,12 @@ export const SCENARIOS = {
     docTitle: 'Attention Is All You Need',
     page: 1,
   }),
-  'translate/context-glossary': () => ai.translateMessages({
+  'translate/context': () => ai.translateMessages({
     text: 'The encoder maps an input sequence to a sequence of continuous representations.',
     targetLang: '中文',
     context: '3 Model Architecture',
     page: 2,
     docTitle: 'Attention Is All You Need',
-    glossary: 'encoder=编码器\nattention=注意力',
   }),
   'teach/intro': (p15 = {}) => ai.teachMessages(teachOp('intro'), {
     ...p15,
@@ -231,9 +230,6 @@ export const SCENARIOS = {
     topic: '注意力机制',
     source: { docId: 'fixture-multipage.pdf', paper: 'Attention Is All You Need', capability: 'intro' },
     profile: FIXTURE_PROFILE,
-  }),
-  'legacy/region': () => ai.regionMessages({
-    question: '这块区域是什么？', targetLang: '中文', page: 2, docTitle: 'Attention Is All You Need',
   }),
 };
 

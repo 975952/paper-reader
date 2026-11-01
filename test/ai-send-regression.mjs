@@ -58,6 +58,9 @@ try {
   // PDF 存在时会话仍可能在恢复；等论文的完整打开流程结束再开始发送。
   await page.waitForFunction(() => window.__viewer?.pdf && window.__ctx
     && window.__state.viewerDocId === window.__state.doc?.docId);
+  // A 线 P2.5：本套件验收 P1.5 的「一次请求 → 一次上游」契约；Agent 会额外发工具决策请求，
+  // 所以这里显式关掉（Agent 自己的契约由 test/agent-read.mjs 覆盖）。
+  await page.evaluate(() => window.__ctx.setAgentRead(false));
   for (const kind of ['translate', 'explain', 'chat']) {
     const before = hits;
     const entriesBefore = await page.evaluate(() => window.__state.sessionEntries.length);

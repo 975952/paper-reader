@@ -8,11 +8,12 @@
 import {
   BASE_TEACH, PRT_SPEC, withProtocol, TEACH_TASKS,
   WALK_CONTINUE_SYS, walkReteachSys, PREREQ_ONE_SYS, CONDENSE_SYS,
+  PROMPT_SYSTEM_VERSION,
 } from './prompts/index.js';
 
-export { TEACH_TASKS, WALK_CONTINUE_SYS, walkReteachSys, PREREQ_ONE_SYS, CONDENSE_SYS };
+export { TEACH_TASKS, WALK_CONTINUE_SYS, walkReteachSys, PREREQ_ONE_SYS, CONDENSE_SYS, PROMPT_SYSTEM_VERSION };
 
-/** 提示词版本号：改了提示词就 +1，让教学类回答的缓存自动失效 */
+/** 旧版教学缓存版本号（保接口兼容；P3 起缓存键统一带 PROMPT_SYSTEM_VERSION） */
 export const TEACHING_PROMPT_VERSION = 't4';
 
 /** 所有教学能力共用的底线（旧名保留，实现已迁 prompts/base.js） */
@@ -93,30 +94,12 @@ export function sanitiseChips(raw) {
   const out = [];
   for (const c of Array.isArray(raw) ? raw : []) {
     if (!c || typeof c !== 'object') continue;
-    const label = clip(c.label, 12);
-    const prompt = clip(c.prompt, 200);
+    const label = clip(c.label, 10);
+    const prompt = clip(c.prompt, 120);
     const op = ['evidence', 'limits'].includes(c.op) ? c.op : '';
     if (!label || (!prompt && !op)) continue;
     out.push({ label, prompt, op });
     if (out.length >= 4) break;
-  }
-  return out;
-}
-
-/** 把 profile 建议规范化（只留待确认所需字段） */
-export function sanitiseProfileSuggestions(raw) {
-  const out = [];
-  for (const p of Array.isArray(raw) ? raw : []) {
-    if (!p || typeof p !== 'object') continue;
-    const topic = clip(p.topic, 120);
-    if (!topic) continue;
-    out.push({
-      topic,
-      level: clip(p.level, 300),
-      boundary: clip(p.boundary, 2000),
-      basis: 'inferred',
-    });
-    if (out.length >= 3) break;
   }
   return out;
 }
@@ -138,24 +121,20 @@ export function splitPrtBlock(raw) {
     if (!m[0]) break;                       // 空匹配防御：不允许死循环
     fence.lastIndex = m.index + m[0].length;
   }
-  if (!last) return { text: s, chips: [], profile: [], ok: false };
+  if (!last) return { text: s, chips: [], ok: false };
   const headEnd = last.index === 0 ? 0 : last.index;
   const bodyStart = last.index + last[0].length;
   // 找收尾围栏：必须是最后一行（后面只剩空白）
   const closeRe = /\n[ \t]*`{3,}[ \t]*(?=\s*$)/g;
   closeRe.lastIndex = bodyStart;
   const close = closeRe.exec(s);
-  if (!close) return { text: s, chips: [], profile: [], ok: false };
+  if (!close) return { text: s, chips: [], ok: false };
   const jsonText = s.slice(bodyStart, close.index).trim();
   const text = s.slice(0, headEnd).trimEnd();
   let parsed;
-  try { parsed = JSON.parse(jsonText); } catch { return { text, chips: [], profile: [], ok: false }; }
-  return {
-    text,
-    chips: sanitiseChips(parsed?.chips),
-    profile: sanitiseProfileSuggestions(parsed?.profile),
-    ok: true,
-  };
+  try { parsed = JSON.parse(jsonText); } catch { return { text, chips: [], ok: false }; }
+  // P2 收紧 prt schema：只允许 chips 一个字段（未知字段忽略，旧的 profile 建议字段不再解析）
+  return { text, chips: sanitiseChips(parsed?.chips), ok: true };
 }
 
 /* ---------------------------------------------------------------- 清单条目 / 页面对象 */

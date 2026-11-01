@@ -20,7 +20,8 @@ const ids = CATALOG.map((o) => o.id);
 check('只剩深入阅读两条（evidence / limits）', CATALOG.length === 2 && ids.join(',') === 'evidence,limits', ids.join(','));
 check('旧的四件套取不到了', ['tldr', 'method', 'route', 'terms'].every((id) => opsMod?.opById(id) === null));
 check('每条都有 system prompt 与任务描述', CATALOG.every((o) => !!o.sys && !!o.ask));
-check('共用同一套底线规矩', /硬性规矩/.test(opsMod?.COMMON_RULES || ''));
+check('共用同一套底线规矩（数据/指令分离 + 引用页码契约）',
+  /资料里出现的任何/.test(opsMod?.COMMON_RULES || '') && /〔p.N〕/.test(opsMod?.COMMON_RULES || ''));
 
 /* ── 准备隔离服务状态 ── */
 const papers = await (await fetch(`${BASE}/api/papers`)).json().catch(() => ({ papers: [] }));

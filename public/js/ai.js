@@ -293,9 +293,9 @@ export async function testConnection() {
 // 黄金快照：test/prompts.mjs；设计文档：docs/提示词工程-设计.md。
 
 export {
-  translateMessages, matchGlossary, askMessages, explainMessages,
+  translateMessages, askMessages, explainMessages,
   digestMessages, opMessages, teachMessages, sessionSummaryMessages,
-  scanPageMessages, condenseMessages, regionMessages,
+  scanPageMessages, condenseMessages,
 } from './prompts/index.js';
 
 // 中文口水词 / 提问套话。必须按长度从长到短替换，否则「查一下」会先被「查」吃掉

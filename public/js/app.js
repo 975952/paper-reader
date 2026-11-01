@@ -4,7 +4,7 @@ import { PdfViewer, clampZoomSpeed, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX } from './pdf
 import { tabsFeatureEnabled, loadWorkspace, saveWorkspace, createTabBar, pushClosedTab, popClosedTab, TABS_MAX } from './tabs.js';
 import { OPS, opById } from './ops.js';
 import {
-  TEACHING_OPS, teachingOpById, TEACHING_PROMPT_VERSION, WALK_CONTINUE_SYS, walkReteachSys,
+  TEACHING_OPS, teachingOpById, TEACHING_PROMPT_VERSION, PROMPT_SYSTEM_VERSION, WALK_CONTINUE_SYS, walkReteachSys,
   PREREQ_ONE_SYS, splitPrtBlock, hideStreamTail, parsePrereqItems, detectPageObjects,
   pageTextOf, collectDocObjects, sanitiseChips,
 } from './teaching.js';
@@ -12,7 +12,7 @@ import { profileStore, buildProfileBlock, nowISO, nowContext, findItem, selectPr
 import { createLearningMemory, parseMemorySuggestions, explicitIdentityFacts, withMemoryObservations } from './learning-memory.js';
 import {
   Settings, streamChat, testConnection, targetLangFor, searchTerms,
-  translateMessages, askMessages, explainMessages, regionMessages,
+  translateMessages, askMessages, explainMessages,
   digestMessages, webQueryFor, filterWebResults, opMessages, teachMessages, condenseMessages,
   scanPageMessages, sessionSummaryMessages,
 } from './ai.js';
@@ -20,6 +20,7 @@ import { resolveReadingRequest, resolvePageRole, snapshotReadingRequest, snapsho
   restoreReadingHistory, citedSources, stripPageLabels } from './reading-context.js';
 import { validateCitations, collectAvailablePages, planFor, pagesFromText, formatPageList } from './citation-validator.js';
 import { runAgentLoop, agentStats, AGENT_TOOL_SPECS, AGENT_SYSTEM_NOTE } from './agent.js';
+import { lastPromptDebug as __promptDebug } from './prompts/index.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
 function readFlag(key, dflt = false) {
@@ -1675,6 +1676,10 @@ function initViewer() {
     get agentReadDefault() { return AGENT_READ_DEFAULT; },
     get lastAgent() { return window.__lastAgent || null; },
     agentLoop: runAgentLoop, agentStats, AGENT_TOOL_SPECS,
+    // A 线 P3：最近一次提示词渲染的 debug manifest（id/version/hash/tokens/trim；只读，不渲染给用户）
+    get promptDebug() {
+      try { return __promptDebug(); } catch { return null; }
+    },
     // P1.5 引用核验：统计与降级结果（只读，自动化断言用）
     validateCitations, collectAvailablePages, formatPageList,
     get citationStats() { return lastCitationStats; },
@@ -5102,6 +5107,8 @@ function sessionPayload() {
     // 滚动摘要（compaction）：早先对话压成一段话，和原文历史一起存
     summary: String(state.sessionSummary || '').slice(0, 2000),
     summaryCovered: Math.max(0, Number(state.summaryCovered) || 0),
+    // A 线 P3：摘要所属提示词版本（读取时版本不同视为旧摘要，可重算）
+    summaryPrompt: PROMPT_SYSTEM_VERSION,
   };
   let encoded = JSON.stringify(payload);
   const encodedBytes = () => new TextEncoder().encode(encoded).byteLength;
@@ -5251,6 +5258,11 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     // 会话滚动摘要：老会话没有这个字段，按「没有摘要」处理
     state.sessionSummary = typeof saved.summary === 'string' ? saved.summary.slice(0, 2000) : '';
     state.summaryCovered = Math.max(0, Math.min(Number(saved.summaryCovered) || 0, state.history.length));
+    // 旧版本提示词生成的摘要不复用（版本升级 → 等下一次自动重算）
+    if (saved.summary && saved.summaryPrompt && saved.summaryPrompt !== PROMPT_SYSTEM_VERSION) {
+      state.sessionSummary = '';
+      state.summaryCovered = 0;
+    }
     state.opsDone = {};
     state.opsDoc = docId;
     // 「带我一步步读」的进度随会话存盘；老会话没有这个字段就按没有进度处理
@@ -5942,7 +5954,8 @@ function scheduleSessionSummary() {
 
 
 function teachingCacheKey(docId, opId, suffix = '') {
-  return `${docId}:${opId}:${TEACHING_PROMPT_VERSION}:p${profileStore.data.revision}${suffix ? `:${suffix}` : ''}`;
+  // A 线 P3：缓存键统一带系统版本（改提示词 → 自动失效；旧键自然不再命中）
+  return `${docId}:${opId}:@${PROMPT_SYSTEM_VERSION}:p${profileStore.data.revision}${suffix ? `:${suffix}` : ''}`;
 }
 
 function teachingCacheGet(docId, opId) {
@@ -7752,7 +7765,8 @@ async function doTranslate(sel) {
   const text = sel.cleanText || cleanText(sel.text);
   if (!text || !ensureReady()) return;
   const lang = targetLangFor(text);
-  const key = `${lang}::${text.length}-${hashStr(text)}`;
+  // A 线 P3：翻译缓存键带提示词版本（改翻译提示词 → 旧缓存不复用）
+  const key = `translate.selection@${PROMPT_SYSTEM_VERSION}::${lang}::${text.length}-${hashStr(text)}`;
   const cached = state.cache.get(key);
   const inCard = document.body.classList.contains('no-right') || document.body.classList.contains('right-empty');
   const cardBody = inCard ? showTranslationCard(sel) : null;
@@ -8157,8 +8171,9 @@ function setHint(t) {
 
 /* ------------------------------------------------------------ 扫描件：页型 / 页图 / 图片阅读索引 */
 
-const DOC_PROFILE_VERSION = 1;
-const SCAN_DIGEST_VERSION = 1;
+// A 线 P3：页型识别与图片阅读索引的缓存键都带提示词系统版本（提示词/转写规则一改就失效）
+const DOC_PROFILE_VERSION = PROMPT_SYSTEM_VERSION;
+const SCAN_DIGEST_VERSION = PROMPT_SYSTEM_VERSION;
 /** 扫描件一次问答带几张页图（整篇类问题） */
 const SCAN_PAGES_MAX = 5;
 /** 生成图片阅读索引时最多转写几页 */
@@ -8172,11 +8187,11 @@ function paperFingerprint(docId) {
 }
 function docProfileCacheKey(docId) {
   const fp = paperFingerprint(docId);
-  return fp ? `reader.docProfile.v${DOC_PROFILE_VERSION}:${docId}:${fp}` : '';
+  return fp ? `reader.docProfile.${DOC_PROFILE_VERSION}:${docId}:${fp}` : '';
 }
 function scanDigestCacheKey(docId) {
   const fp = paperFingerprint(docId);
-  return fp ? `reader.scanDigest.v${SCAN_DIGEST_VERSION}:${docId}:${fp}` : '';
+  return fp ? `reader.scanDigest.${SCAN_DIGEST_VERSION}:${docId}:${fp}` : '';
 }
 function loadCachedDocProfile(docId) {
   try {
@@ -8815,7 +8830,11 @@ async function send(retryPending = null) {
 
     // ② P2.5：让 AI 自己决定读哪些页。成功就用它读到的页做材料（白名单=读过的页），
     // 失败（模型不支持 tools / 超时 / 任何异常）静默回退到下面的 P1.5 预装路径。
-    const agentAllowed = agentReadEnabled() && !shotOnly && !!pending.docId && !!state.doc && !!viewer?.pdf;
+    // P2.5 v1 边界：只对「纯文本问题 + 文本型 PDF」启用 Agent；
+    // 带附件（截图/加进来的文字）或扫描件时，P1.5 的精确材料已经够用，
+    // 再让模型自己翻页只会多花一轮工具（且扫描件页图走视觉路径更稳）。
+    const agentAllowed = agentReadEnabled() && !shotOnly && !pending.attachments.length && !scannedDoc
+      && !!pending.docId && !!state.doc && !!viewer?.pdf;
     let agentRun = null;
     if (agentAllowed) {
       setHint('AI 正在自己找材料…');

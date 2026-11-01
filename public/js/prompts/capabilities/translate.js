@@ -9,35 +9,9 @@ import { definePrompt } from '../registry.js';
 import { renderPrompt, noteDebug } from '../compose.js';
 import { OUTPUT_ONLY } from '../base.js';
 
-/** 从「英文=译名」文本里找出这次片段真正命中的术语 */
-export function matchGlossary(text, glossaryText) {
-  if (!glossaryText || !text) return [];
-  const entries = String(glossaryText)
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith('#') && l.includes('='))
-    .map((l) => {
-      const i = l.indexOf('=');
-      return [l.slice(0, i).trim(), l.slice(i + 1).trim()];
-    })
-    .filter(([k, v]) => k && v);
-  if (!entries.length) return [];
-  const hay = text.toLowerCase();
-  return entries.filter(([k]) => hay.includes(k.toLowerCase()));
-}
-
-/** 把命中术语渲染成提示词里的固定行（旧实现里是 sys.push 的多行，整体以换行开头） */
-function glossaryLines(text, glossaryText) {
-  const hits = matchGlossary(text, glossaryText);
-  if (!hits.length) return '';
-  const lines = ['', '以下术语必须严格按给定译名翻译（用户指定，优先级最高）：'];
-  for (const [k, v] of hits) lines.push(`· ${k} → ${v}`);
-  return lines.join('\n');
-}
-
 export const translateSelection = definePrompt({
   id: 'translate.selection',
-  version: '1.0.0',
+  version: '2.0.0',
   kind: 'qa',
   identity: '你是一位严谨的学术论文翻译专家',
   system: [
@@ -49,7 +23,6 @@ export const translateSelection = definePrompt({
     { id: 'rule-3', text: '3. 保持原文段落结构（空行分段）。不要添加解释、不要总结、不要补标题。' },
     { id: 'rule-4', text: '4. 若片段明显被截断，按语义补全成通顺的句子，但不得编造原文没有的内容。' },
     { id: 'rule-5', fn: () => `5. ${OUTPUT_ONLY}` },
-    { id: 'glossary', fn: (ctx) => glossaryLines(ctx.text, ctx.glossary) },
   ],
   systemJoin: '\n',
   user: (ctx) => {
@@ -63,13 +36,13 @@ export const translateSelection = definePrompt({
   memory: [],
   historyMax: 0,
   multimodal: 'none',
-  notes: '只输出译文；无历史、无记忆。glossary 在 P2 删除（无设置入口的死参数）。',
+  notes: '只输出译文；无历史、无记忆。P2 已删除无设置入口的 glossary 死参数。',
 });
 
 /** 旧导出：translateMessages —— translate.selection 的兼容壳 */
 export function translateMessages(input = {}) {
   return compose('translate.selection', {
-    text: '', targetLang: '中文', context: '', page: null, docTitle: '', glossary: '',
+    text: '', targetLang: '中文', context: '', page: null, docTitle: '',
     ...input,
   });
 }

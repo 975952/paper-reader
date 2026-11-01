@@ -8,7 +8,7 @@ import { definePrompt, hasPromptDef } from '../registry.js';
 import { renderPrompt, renderDef, noteDebug } from '../compose.js';
 import { nowContext, buildProfileBlock } from '../../profile.js';
 import { BASE_OPS } from '../base.js';
-import { PAGE_IMAGE_RULE, CITATION_RULE } from '../contracts.js';
+import { PAGE_IMAGE_RULE } from '../contracts.js';
 import { opHistory } from '../history.js';
 import { fullTextBlock, digestBlock, taskBlock, availablePagesBlock } from '../materials.js';
 
@@ -54,7 +54,6 @@ function opsSystemBlocks(task) {
     { id: 'task', text: task },
     { id: 'now', fn: () => nowContext() },
     { id: 'page-image-rule', fn: (ctx) => (ctx.pageImages?.length ? PAGE_IMAGE_RULE : '') },
-    { id: 'citation', text: CITATION_RULE },
     {
       id: 'profile',
       fn: (ctx) => ctx.profileBlock ?? buildProfileBlock(undefined, ctx.fullText || ctx.digest || ctx.docTitle, ctx.op?.ask || ''),
@@ -64,7 +63,7 @@ function opsSystemBlocks(task) {
 
 const OP_DEF_BASE = {
   kind: 'op',
-  version: '1.1.0',
+  version: '2.0.0',
   identity: BASE_OPS,
   systemJoin: '\n\n',
   history: (ctx) => opHistory(ctx.history || []),
@@ -121,7 +120,6 @@ export function opMessages(op, input = {}) {
       { id: 'op-sys', text: op?.sys || '' },
       { id: 'now', fn: () => nowContext() },
       { id: 'page-image-rule', fn: (c) => (c.pageImages?.length ? PAGE_IMAGE_RULE : '') },
-      { id: 'citation', text: CITATION_RULE },
       { id: 'profile', fn: (c) => c.profileBlock ?? buildProfileBlock(undefined, c.fullText || c.digest || c.docTitle, c.op?.ask || '') },
     ],
     history: (c) => opHistory(c.history || []),

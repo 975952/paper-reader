@@ -10,7 +10,7 @@ import { definePrompt, hasPromptDef } from '../registry.js';
 import { renderPrompt, renderDef, noteDebug } from '../compose.js';
 import { nowContext, buildProfileBlock } from '../../profile.js';
 import { BASE_TEACH, withProtocol } from '../base.js';
-import { PAGE_IMAGE_RULE, CITATION_RULE, PRT_SPEC } from '../contracts.js';
+import { PAGE_IMAGE_RULE, PRT_SPEC } from '../contracts.js';
 import { teachHistory } from '../history.js';
 import { fullTextBlock, digestBlock, pageImagesBlock, taskBlock, availablePagesBlock } from '../materials.js';
 
@@ -136,14 +136,13 @@ export const PREREQ_ONE_SYS = `${BASE_TEACH}\n\n${PREREQ_ONE_TASK}`;
  * 教学类 system 块（顺序 = 旧 teachMessages：op.sys → 当前时间 → 页图规则 → 引用契约 → 画像）。
  * op.sys 在旧实现里已经是 BASE_TEACH + 任务段 + PRT_SPEC，所以这里拆成三个块，join('\n\n') 后字节一致。
  */
-function teachSystemBlocks(task, { citation = true } = {}) {
+function teachSystemBlocks(task) {
   return [
     { id: 'base-teach', text: BASE_TEACH },
     { id: 'task', text: typeof task === 'function' ? '' : task },
     { id: 'prt', text: PRT_SPEC },
     { id: 'now', fn: () => nowContext() },
     { id: 'page-image-rule', fn: (ctx) => (ctx.pageImages?.length ? PAGE_IMAGE_RULE : '') },
-    ...(citation ? [{ id: 'citation', text: CITATION_RULE }] : []),
     { id: 'profile', fn: (ctx) => ctx.profileBlock || '' },
   ];
 }
@@ -164,7 +163,7 @@ export function teachUserContent(ctx) {
 
 const TEACH_DEF_BASE = {
   kind: 'teach',
-  version: '1.1.0',
+  version: '2.0.0',
   identity: BASE_TEACH,
   systemJoin: '\n\n',
   history: (ctx) => teachHistory(ctx.history || []),
@@ -257,7 +256,6 @@ export function teachMessages(op, input = {}) {
       { id: 'op-sys', text: op?.sys || '' },
       { id: 'now', fn: () => nowContext() },
       { id: 'page-image-rule', fn: (c) => (c.pageImages?.length ? PAGE_IMAGE_RULE : '') },
-      { id: 'citation', text: CITATION_RULE },
       { id: 'profile', fn: (c) => c.profileBlock || '' },
     ],
     history: (c) => teachHistory(c.history || []),
@@ -274,4 +272,4 @@ export function condenseMessages({ answer, docTitle } = {}) {
   return messages;
 }
 
-export { PRT_SPEC, CITATION_RULE }; 
+export { PRT_SPEC };
