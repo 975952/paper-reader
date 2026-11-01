@@ -7228,13 +7228,20 @@ function applyDocProfile(docId, profile) {
   updateSendScope();
   if (profile?.scanned && !state.scanNoticeShown[docId]) {
     state.scanNoticeShown[docId] = true;
-    const hasOcr = ocrPages(docId).length > 0;
-    toastAction(
-      hasOcr ? '扫描件：已有文字版缓存，问答会直接用 OCR 文字' : '扫描件：没有文本层，问答与「读懂论文」将按页面图片理解。可生成文字版（OCR，需视觉模型）',
-      hasOcr ? '重新识别' : '生成文字版',
-      () => runOcrDoc({ force: hasOcr }),
-      'ok', 15000,
-    );
+    const cachedPages = ocrPages(docId);
+    const hasVision = String(Settings.data.visionModel || '').trim();
+    if (cachedPages.length) {
+      toastAction('扫描件：已有文字版（OCR）缓存，问答与读懂论文会直接用文字；需要时可重新识别',
+        '重新识别', () => runOcrDoc({ force: true }), 'ok', 12000);
+    } else if (!hasVision) {
+      // 没有视觉模型时页面图会交给主模型，文本模型可能「假装看到了」——先把风险说清楚
+      toastAction('扫描件：没有文本层，且未配置「视觉模型」。模型可能无法真正读图（回答可能靠猜）；请先到设置里填一个支持图片的模型',
+        '去设置', () => openSettings('扫描件问答 / OCR 需要「视觉模型」：填一个能读图的模型名（如 gpt-4o、gemini-flash、Qwen-VL）'),
+        'err', 16000);
+    } else {
+      toastAction('扫描件：没有文本层，问答与「读懂论文」将按页面图片理解。可生成文字版（OCR，逐页转写）',
+        '生成文字版', () => runOcrDoc(), 'ok', 15000);
+    }
   }
 }
 
