@@ -3114,3 +3114,100 @@ exe 重编：**10,635,776 字节**，SHA256 `F6E8131D807D97464E685C282436EB0D673
 exe 重编：**10,642,432 字节**，SHA256 `F036E2CDE68FF06F7880B4AF691006BF74388E43795DA09AD022C90E9E6E4D28`
 （最终交付，包含 §48–§55 全部改动）。仓库根 `论文阅读器.exe` 已更新；
 桌面副本仍在运行时按 §46 规则跳过——关闭应用后重跑 `desktop\build.bat`，或直接双击仓库根新版。
+﻿
+## 56. A 线 P0：冻结提示词基线（2026-11-01 晚，交接文档 §4.2 第 2 步）
+
+### 56.1 做了什么
+
+- **黄金基线**：新写 `test/_prompts.mjs`（固定 Date + 固定学习档案 + 24 个真实场景）与
+  `test/prompts-capture.mjs`（连跑两次校验确定性），在**改造前**抓出
+  `test/fixtures/prompts-baseline.json`：24 个场景覆盖问答/追问/整篇+联网+文献/扫描页图/只发截图/
+  右栏选文/解释/翻译两种/教学 8 项/操作 2 项/后台 4 项/历史死代码 1 项。
+  时间与「当前时间」串归一化成 `<NOW>`，其余逐字节冻结。
+- **注册表骨架**：`public/js/prompts/`（零依赖 ES module，Node 可直接 import）：
+  `registry.js`（PromptDef 校验 + semver + manifest + FNV-1a hash）、`compose.js`（固定顺序渲染 + debug）、
+  `budget.js`（CJK 友好 token 估算 / 硬上限 120k / 裁剪顺序常量）、`base.js`、`contracts.js`、
+  `materials.js`、`memory.js`、`history.js`、`capabilities/{qa,translate,teach,ops,background,legacy}.js`、
+  `index.js`（公共 API）。P0 阶段只新增文件、**未接线**，所以源码行为零变化。
+- **测试基线**：`test/regress.mjs`（外部工具，未入库）按「隔离服务 + 假 Key + 每套件前清 data/复位书架」
+  跑 42 个套件：**30/42 通过**。既有失败 12 个（全部是改造前就存在的，见 56.2），作为 P1「不得新增失败」的对照。
+
+### 56.2 冻结基线数字（2026-11-01 晚 · Node v24.18.0 · 隔离 harness）
+
+| 结果 | 套件 |
+|---|---|
+| 通过（30） | `prompts`/`prompt-request`/`citation-validator`（新增）、memory-unit 20/20、qa 43/43、citation-quote 30/30（此时）、context-page 21/21、teaching-isolated 13/13（teaching 39/39 + ops 13/13）、profile 33/33、memory-session 13/13、scan-pdf 18/18（此时）、ai-send-regression 22/22、answer-note（39 条中 2 条既有红）、attachments、files-batch 24/24、folders、fullscreen 13/13、home 40/40、lab-leak、links 24/24、math 33/33、outline 8/8、right-select 18/18、save-reliability、send-range、session-bar、theme 13/13、translate-order、cjk 11/11、smoke、zoom 39/39、zoom-touch 52/52、dnd、r6 10/11、e2e-isolated 19/49 |
+| 既有失败（12） | `answer-note` 2 条（大型弹窗断言，旧行为）、`r6` 10/11、`e2e-isolated` 19/49（旧断言漂移）、`mobile` 隔离服务端口冲突、`node-search` 联网、`context` 70/79、`library` 22/24（外部隔离服务）、`relations` 43/44（联网 arXiv）、`selection-stable`（超时被杀）、`stream` 10/15（外部 BASE 旧套件）、`ux` 旧断言、`translate-pure` 3 条旧译文块断言 |
+
+> 结论：基线里没有一条红是提示词系统引入的（P0 未接线）；P1 的验收口径 = **不新增红** + 黄金快照逐字节一致。
+
+## 57. A 线 P1：提示词搬家 + composePrompt + 兼容壳（字节级一致）
+
+### 57.1 做了什么
+
+- `ai.js / teaching.js / ops.js / profile.js / learning-memory.js` 内部改为调用 `prompts/`：
+  - `ai.js` 只保留 Settings/streamChat/搜索词等逻辑，10 个消息构造函数改为 `./prompts/index.js` 的 re-export
+    （导出名/返回结构不变）；
+  - `teaching.js` 保留**能力标题/ask 文案**（「先给我讲明白」等字面量必须留在本文件，假上游与 desktop.mjs 靠它识别）
+    和全部解析器（prt/chips/清单/页对象/分页），提示词常量与任务段改从 `prompts/` 取；
+  - `ops.js` 变纯 re-export；`profile.js` 的 `PROFILE_RULES` 迁入 `prompts/memory.js`（选条/预算算法留在原处）；
+    `learning-memory.js` 的 `MEMORY_EXTRACT_SYS` + `memoryExtractMessages` 原样搬进 `prompts/capabilities/background.js`
+    （注意 ESM `export … from` 不产生本地绑定，`createLearningMemory` 内部仍要 import 一次——已修，memory-unit 20/20）。
+  - 各能力历史条数收口到 `prompts/history.js`（问答 6 / 操作 4 / 教学 10），装配顺序与旧实现逐块一致。
+- **兼容期零文案改动**：system 的固定块顺序（身份 → 规则 → 可选的页图/截图规则 → 引用契约 → 偏好 →
+  当前时间 → 画像 → 教学块）原样保留；`qa.chat` 的 systemJoin 用 `\n`、教学/操作用 `\n\n`、
+  翻译的「空行块」用 raw 块复刻，全部由黄金快照兜底。
+- **新增测试**：`test/prompts.mjs`（黄金快照 24 场景逐字节 + 注册表/manifest/semver + 保留标记 + 预算常量 +
+  兼容壳导出签名，148 条）、`test/prompt-request.mjs`（消息 schema/关键标签/历史条数/密钥与路径检查 +
+  真发一次 `/api/chat` 让假上游比对 messages 不被后端改写，170 条）。
+- 交付链路：`desktop/src/assets.rs` 增加 `prompts_are_embedded` 单测（15 个关键文件逐一点名，
+  rust-embed 新增文件不自动重编，靠 build.bat touch 兜底）；`test/pack.mjs` 增加前端白名单抽查，
+  `desktop\build.bat` 重编通过。
+
+### 57.2 验收（P1 完成时）
+
+- **黄金快照 24/24 逐字节一致**（P0 基线 vs 改造后，含 system/user/历史全部内容）；
+- `test/prompts.mjs` **148/148**、`test/prompt-request.mjs` **162/162**（P1.5 增加到 170/170）；
+- 关键回归复跑与 P0 基线一致（**无新增红**）：qa 43/43、citation-quote 30/30（当时）、context-page 21/21、
+  teaching-isolated 13/13、profile 33/33、memory-session 13/13、memory-unit 20/20、scan-pdf 18/18、
+  right-select 18/18、session-bar、home 40/40、translate-order、ai-send-regression 22/22；
+- exe 重编：**10,681,856 字节**（含 prompts/ 全部内嵌文件，`cargo test` 的 prompts_are_embedded 通过）。
+
+## 58. A 线 P1.5：页码/引用硬约束（治「页码对不上、讲错东西」）
+
+### 58.1 做了什么（对应设计文档 §19.2 四道硬约束 + §19.4 验收）
+
+- **A. 可用页码白名单**：新增 `public/js/citation-validator.js` 的 `collectAvailablePages()`，
+  从「本次真实提供的材料」算页码集合（整篇全文分页标记 / 页图页码 / 所在页上下文 / 选区页 / 参考文献页 /
+  扫描件阅读索引页），由 `materials.availablePagesBlock()` 渲染成
+  `【本次可用页码】p.1、p.3–p.5（只能引用这些页…）` 放进问答/教学/操作材料。
+- **B. `CitationValidator`**：流式结束后、最终渲染前，逐条校验 `〔p.N〕` / `〔p.N‖片段〕`：
+  越界或不在白名单 → **不渲染按钮**（保持原文文字）；页码对但片段核对不上 → **降级为纯页码按钮**
+  （`.page-ref-unverified`，只跳页、不画假高亮）；片段命中 → 正常渲染。
+  文本型 PDF 用「去空白整串匹配 + ±1 页容错 + 跨页拼接」；扫描件用「图片阅读索引」按页转写核对，
+  没有可核对文本时明确降级。统计写入 `window.__ctx.citationStats`，流式结束前不套用上一条结果。
+- **C. 近因指令 + 只读依据回执**：问答 user 消息在【问题】前加
+  `【本轮要求】对象=…；所在页=…；范围=…；当前页只是背景信息…；只回答这一件事`；
+  每条回答上方渲染 `.entry-basis` 只读小字「本次依据：p.N 选区 / 当前页 p.N / 整篇原文 …」，
+  随会话存档（`basis` 字段）并在恢复时重放；**不提供任何一键纠正按钮**。
+- **D. 材料降噪**：整篇范围不再叠当前页整页上下文；所在页上下文标签统一追加
+  「背景信息，必要时可忽略」（追问仍按话题页取上下文，旧 `context-page` 断言不变）；
+  只发截图时仍不吃整篇（原有逻辑保持）。
+- **E. 当前页判定改面积口径**：`pdfview.currentVisiblePage()` 从「scrollTop + 30% 视口探针」改为
+  **页面矩形 ∩ 阅读区视口 交集面积最大页**（同面积取更靠近视口中心），文本型/扫描件统一；
+  不改渲染、不新增开销，滚动节流仍由调用方负责。
+- **F. 扫描件专条**：页图材料带「第 N 页原图」标签（原有）；核验走图片阅读索引；核对不上明确降级。
+
+### 58.2 验收
+
+- `test/citation-validator.mjs`（新增，纯 Node）**36/36**：编页码/越界/白名单外/片段找不到/±1 页/跨页/
+  扫描件无文本/扫描件走索引/范围引用/「无效引用 100% 降级或拦截」/plan 查表；
+- `test/citation-quote.mjs` 扩到 **38/38**：既有 30 条全部保留并按新行为调整（整篇范围下 p.5/p.3 才能引用），
+  新增「本次依据只读小字存在」「编页码不渲染按钮」「白名单外不渲染按钮」「citationStats 记录拦截」
+  「片段核不上 → 降级纯页码且不画假高亮」「正文公式仍渲染、引用片段不露 HTML」；
+- `test/scan-pdf.mjs` **20/20**：新增「当前页 = 可见面积最大页（与独立几何计算一致）」+
+  「面积口径修正了旧 30% 探针的偏差」两条；
+- 回归（P1.5 完成时）：context-page 21/21、qa 43/43、teaching-isolated 13/13、memory-session 13/13、
+  profile 33/33、home 40/40、memory-unit 20/20、prompts 148/148、prompt-request 170/170、citation-validator 36/36；
+- exe 重编（`desktop\build.bat`，含全部 P1.5 前端改动）。
+

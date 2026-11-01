@@ -31,4 +31,30 @@ mod tests {
         assert!(contains("vendor/pdf.min.mjs"));
         assert!(count() > 100);
     }
+
+    /// A 线 P1：新增的 public/js/prompts/ 是目录整体内嵌的，但 rust-embed 对**新增文件**
+    /// 不会自动触发重编译（build.bat 会 touch 本文件）。这里逐类抽查，防止
+    /// 「public/ 里有、exe 里没有」这种只会在真机上才暴露的漏嵌。
+    #[test]
+    fn prompts_are_embedded() {
+        for path in [
+            "js/prompts/index.js",
+            "js/prompts/registry.js",
+            "js/prompts/compose.js",
+            "js/prompts/base.js",
+            "js/prompts/contracts.js",
+            "js/prompts/materials.js",
+            "js/prompts/memory.js",
+            "js/prompts/history.js",
+            "js/prompts/budget.js",
+            "js/prompts/capabilities/qa.js",
+            "js/prompts/capabilities/translate.js",
+            "js/prompts/capabilities/teach.js",
+            "js/prompts/capabilities/ops.js",
+            "js/prompts/capabilities/background.js",
+            "js/prompts/capabilities/legacy.js",
+        ] {
+            assert!(contains(path), "exe 缺少前端文件：{path}（重新跑 desktop\\build.bat）");
+        }
+    }
 }

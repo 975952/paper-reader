@@ -1065,20 +1065,39 @@ export class PdfViewer {
   }
 
   /**
-   * 当前屏幕显示区域对应的页码（与状态栏页码同一口径：视口上部 30% 处）。
-   * 与 `current` 的区别：这里每次按 scrollTop 现算，不受滚动事件节流影响；
-   * 用户刚滚完就点发送时也能拿到正确页。分页尺寸没补齐时退回 current。
+   * 当前页（P1.5）：按「页面矩形 ∩ 阅读区视口」的交集面积最大判定，同面积取更靠近视口中心的一页。
+   * 旧实现用「scrollTop + 30% 视口」探针，扫描件/页高不一致时会偏；面积判定与状态栏同一口径。
+   * 只读已渲染页面的布局（offsetTop/offsetHeight），不触发渲染；滚动节流由调用方负责。
+   * 与 `current` 的区别：这里每次按 scrollTop 现算，不受滚动事件节流影响。
    */
   currentVisiblePage() {
     if (!this.pdf || !this.pageEls.length || !this.offsets.length) return this.current || 1;
-    const probe = (this.container.scrollTop || 0) + (this.container.clientHeight || 0) * 0.3;
-    let cur = this.current || 1;
-    let changed = false;
+    const viewTop = this.container.scrollTop || 0;
+    const viewH = this.container.clientHeight || 0;
+    if (!viewH) return this.current || 1;
+    const viewBottom = viewTop + viewH;
+    const viewCenter = viewTop + viewH / 2;
+    let best = this.current || 1;
+    let bestArea = -1;
+    let bestDist = Infinity;
     for (let i = 1; i <= this.numPages; i++) {
-      if (this.offsets[i] === undefined) break;
-      if (probe >= this.offsets[i]) { cur = i; changed = true; } else break;
+      const el = this.pageEls[i];
+      if (!el || this.offsets[i] === undefined) continue;
+      const top = this.offsets[i];
+      const height = el.offsetHeight || this.heights?.[i] || 0;
+      if (!height) continue;
+      const overlap = Math.min(top + height, viewBottom) - Math.max(top, viewTop);
+      if (overlap <= 0) continue;
+      const width = el.offsetWidth || 1;
+      const area = overlap * width;
+      const dist = Math.abs(top + height / 2 - viewCenter);
+      if (area > bestArea + 0.5 || (Math.abs(area - bestArea) <= 0.5 && dist < bestDist)) {
+        best = i;
+        bestArea = area;
+        bestDist = dist;
+      }
     }
-    return changed || cur ? cur : 1;
+    return bestArea > 0 ? best : (this.current || 1);
   }
 
   async _renderVisible(force = false, gen = this._gen) {

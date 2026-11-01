@@ -17,6 +17,7 @@ import {
 } from './ai.js';
 import { resolveReadingRequest, resolvePageRole, snapshotReadingRequest, snapshotHistory, readingTurn,
   restoreReadingHistory, citedSources, stripPageLabels } from './reading-context.js';
+import { validateCitations, collectAvailablePages, planFor, pagesFromText, formatPageList } from './citation-validator.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
 function readFlag(key, dflt = false) {
@@ -1633,6 +1634,10 @@ function initViewer() {
     // 引用定位：〔p.N‖原文片段〕 → 跳页 + 橙色高亮 + 取消
     jumpToQuote, clearQuoteHighlight, decoratePageRefs,
     get quoteState() { return { ...quoteState }; },
+    // P1.5 引用核验：统计与降级结果（只读，自动化断言用）
+    validateCitations, collectAvailablePages, formatPageList,
+    get citationStats() { return lastCitationStats; },
+    get citationPlan() { return activeCitationPlan ? [...activeCitationPlan.values()] : []; },
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
     renderAttachments, refreshReturnButton,
     // 发送范围四选项：让自动化直接验「范围 → 本次发送带什么」
@@ -4566,13 +4571,14 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   return { root, body: textEl, acts, role };
 }
 
-function finishEntry(entry, fullText, { page, onAsk, onRetry, retryLabel = '', sources, meta, status = 'complete' } = {}) {
+function finishEntry(entry, fullText, { page, onAsk, onRetry, retryLabel = '', sources, meta, status = 'complete', basis = '' } = {}) {
   const rec = entry.root.__sessionRecord;
   if (rec) {
     rec.text = String(fullText || '').slice(0, 12000);
     rec.page = page || rec.page;
     rec.sources = (sources || []).slice(0, 8);
     rec.meta = meta || '';
+    rec.basis = String(basis || rec.basis || '').slice(0, 240);
     rec.status = status;
   }
   // R7：内容长出来之后刷新底部渐隐（下一帧量，等布局落定）
@@ -4580,6 +4586,14 @@ function finishEntry(entry, fullText, { page, onAsk, onRetry, retryLabel = '', s
   // 同一个条目可能被收尾多次（典型：操作「重试」复用同一条），
   // 先把上一次的元信息行与来源列表摘掉，否则会叠出两行、旧的那行还写着「N 页失败」。
   entry.root.querySelectorAll('.entry-meta, .source-details, .src-list').forEach((node) => node.remove());
+  // P1.5：回答上方的「本次依据」只读小字（不可点、不参与交互）。
+  entry.root.querySelectorAll('.entry-basis').forEach((node) => node.remove());
+  const basisText = String(basis || rec?.basis || '').trim();
+  if (basisText) {
+    const textNode = entry.root.querySelector('.text');
+    const basisEl = el('div', { class: 'entry-basis', text: basisText.slice(0, 240) });
+    if (textNode) entry.root.insertBefore(basisEl, textNode); else entry.root.append(basisEl);
+  }
   entry.acts.replaceChildren();
   entry.acts.classList.remove('hidden');
   const bare = entry.root.dataset.operation === 'translation';  appendAll(entry.acts,
@@ -4812,6 +4826,7 @@ function sessionPayload() {
     status: ['pending', 'complete', 'stopped', 'failed', 'user'].includes(x.status) ? x.status : (x.kind === 'user' ? 'user' : 'complete'),
     sources: (Array.isArray(x.sources) ? x.sources : []).slice(0, 8).map((s) => ({ title: String(s.title || '').slice(0, 500), url: String(s.url || '').slice(0, 2000), number: s.number || null })),
     meta: String(x.meta || '').slice(0, 500),
+    basis: String(x.basis || '').slice(0, 240),
     retry: serialiseRetryPayload(x.retry),
     // 「读懂论文」的教学按钮 / 教学对象：恢复会话后「继续下一步 / 这个我懂了」仍然可用
     chips: (Array.isArray(x.chips) ? x.chips : []).slice(0, 4).map((c) => ({ label: String(c.label || '').slice(0, 12), prompt: String(c.prompt || '').slice(0, 200), op: ['evidence', 'limits'].includes(c.op) ? c.op : '' })),
@@ -5042,7 +5057,7 @@ async function restoreSession(docId, { only = 'all' } = {}) {
       if (row.kind !== 'user' && priorUser) entry.root.__question = String(priorUser.text || '').slice(0, 600);
       const retry = restoreRetryCallback(row, entry, priorUser);
       if (row.kind !== 'user' && (row.text || row.status === 'stopped' || row.status === 'complete')) finishEntry(entry, row.text || '', {
-        page: row.page, sources: row.sources, meta: row.meta,
+        page: row.page, sources: row.sources, meta: row.meta, basis: row.basis,
         status: row.status === 'stopped' ? 'stopped' : 'complete',
         onRetry: row.status === 'stopped' ? retry : null,
       });
@@ -5787,6 +5802,12 @@ async function runTeaching(opId, {
     // 讲法判断需要「整篇论文的主线」；拿单个问题的相关段落会把讲解带偏
     const ctxQuery = autoDirected ? '研究问题 核心方法 关键公式 图表 实验 结论 论文整体' : op.ask;
     const ctx = await buildDocContext(ctxQuery, mergedExtra, { forTeaching: true, page: teachPage });
+    const scanned = !!ctx?.profile?.scanned || ctx?.mode === 'scan-digest' || ctx?.mode === 'scan';
+    const citationMat = citationMaterialsFor({
+      docCtx: ctx, scanned,
+      pending: { firstPage: teachPage, reading: null }, pageRole: 'screen',
+    });
+    activeCitationPlan = null;
     const messages = teachMessages(op, {
       docTitle: state.doc?.name,
       fullText: ctx?.text,
@@ -5796,6 +5817,7 @@ async function runTeaching(opId, {
       history: convHistory,
       pageImages: ctx?.pageImages || [],
       profileBlock: teachingProfileBlock(ask || op.ask),
+      availablePages: citationMat.availablePages,
     });
     attachPageImages(messages, ctx?.pageImages);
     warnIfNoVisionModel((ctx?.pageImages || []).length > 0);
@@ -5808,9 +5830,11 @@ async function runTeaching(opId, {
     if (state.doc?.docId !== docId) return null;
     const split = splitPrtBlock(full);
     const clean = split.text || full;
+    await auditAnswerCitations(clean, { availablePages: citationMat.availablePages, scanned });
+    if (state.doc?.docId !== docId) return null;
     target.done(clean);
     finishEntry(entry, clean, {
-      page: teachPage, retryLabel: '重新生成',
+      page: teachPage, retryLabel: '重新生成', basis: citationMat.basis,
       onRetry: () => runTeaching(opId, { force: true, retryEntry: entry, extraUser, ask, tag, teaching }),
     });
     renderTeachingExtras(entry, { opId, chips: split.chips, teaching });
@@ -6267,12 +6291,18 @@ async function runOperation(opId, { force = false, block = 'chat', retryEntry = 
   let received = '';
   try {
     const ctx = await buildDocContext(op.ask, '', { forTeaching: true, page: viewer.current });
+    const scanned = !!ctx?.profile?.scanned || ctx?.mode === 'scan-digest' || ctx?.mode === 'scan';
+    const citationMat = citationMaterialsFor({
+      docCtx: ctx, scanned, pending: { firstPage: viewer.current, reading: null }, pageRole: 'screen',
+    });
+    activeCitationPlan = null;
     const messages = opMessages(op, {
       docTitle: state.doc?.name,
       fullText: ctx?.text,
       digest: state.docDigest,
       pageImages: ctx?.pageImages || [],
       profileBlock: teachingProfileBlock(op.ask),
+      availablePages: citationMat.availablePages,
     });
     attachPageImages(messages, ctx?.pageImages);
     warnIfNoVisionModel((ctx?.pageImages || []).length > 0);
@@ -6283,12 +6313,15 @@ async function runOperation(opId, { force = false, block = 'chat', retryEntry = 
       onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s · ${op.title}`),
     });
     if (state.doc?.docId !== docId) return null;
+    await auditAnswerCitations(full, { availablePages: citationMat.availablePages, scanned });
+    if (state.doc?.docId !== docId) return null;
     target.done(full);
     state.opsCache.set(cacheKey, { text: full, at: Date.now(), page: viewer.current });
     state.opsDone[opId] = true;
     if (state.opsDoc !== docId) { state.opsDoc = docId; }
     finishEntry(entry, full, {
       page: viewer.current,
+      basis: citationMat.basis,
       onAsk: () => { state.quote = { page: viewer.current, text: full.slice(0, 2000) }; toast('已设为引用，直接提问即可', 'ok', 2500); },
     });
     entry.acts.append(el('button', { text: '重新生成', onclick: () => runOperation(opId, { force: true, block, retryEntry: entry }) }));
@@ -6841,18 +6874,132 @@ function quoteFragmentParts(html) {
   return { text, html: raw.trim() };
 }
 
+/* ------------------------------------------------------------ P1.5 引用核验 / 依据回执 */
+
+/** 当前这条回答的引用校验结果（收尾时算一次；渲染器按 raw 查表）。null = 还没算，按旧行为渲染 */
+let activeCitationPlan = null;
+let lastCitationStats = null;
+
+/** 扫描件的「图片阅读索引」按页取转写文本（格式：===== p.N =====\n…） */
+function pageTextFromScanDigest(digest, page) {
+  const text = String(digest || '');
+  if (!text || !page) return '';
+  const re = /=====\s*p\.(\d+)\s*=====/g;
+  const marks = [];
+  let m;
+  while ((m = re.exec(text))) marks.push({ page: Number(m[1]), at: m.index, bodyAt: m.index + m[0].length });
+  const i = marks.findIndex((mk) => mk.page === Number(page));
+  if (i < 0) return '';
+  return text.slice(marks[i].bodyAt, i + 1 < marks.length ? marks[i + 1].at : text.length);
+}
+
+/** 本次材料的「对象 / 范围」一句话（给近因指令用） */
+function objectLabelFor(pending, reading) {
+  const text = String(reading?.selection || reading?.focus?.text || pending?.question || '')
+    .replace(/\s+/g, ' ').trim();
+  if (!text) return '读者当前的问题';
+  if (reading?.inherited) return `上一轮话题：${text.slice(0, 24)}`;
+  if (reading?.selection) return `选中文本：${text.slice(0, 24)}`;
+  return text.slice(0, 40);
+}
+
+/** 本次发送范围（整篇 / 当前页 / 联网 / 截图） */
+function scopeLabelFor(pending, { scanned = false, images = [] } = {}) {
+  const bits = [];
+  bits.push(pending?.useFullText ? (scanned ? '整篇页图' : '整篇') : (scanned ? '当前页页图' : '当前页'));
+  if (pending?.useWeb) bits.push('联网');
+  if (images?.length) bits.push(`${images.length} 张截图`);
+  return bits.join(' + ');
+}
+
+/**
+ * 程序事实：本次材料真实提供了哪些页（白名单），以及「本次依据」只读回执。
+ * 白名单来源：整篇全文的分页标记 / 页图页码 / 所在页上下文里的页标记 / 选区页 / 参考文献页。
+ */
+function citationMaterialsFor({ docCtx = null, context = '', references = [], scanned = false, pending = null,
+  sources = [], images = [], pageRole = '' } = {}) {
+  const fullText = docCtx?.mode === 'digest' ? '' : (docCtx?.text || '');
+  const pageImages = docCtx?.pageImages || [];
+  const scanPages = scanned ? [...pagesFromText(state.scanDigest)] : [];
+  const availablePages = collectAvailablePages({
+    fullText, pageImages, contexts: context ? [context] : [],
+    selectionPage: pending?.reading?.selection ? (pending?.reading?.focus?.page || null) : null,
+    focusPage: pending?.reading?.focus?.page || null,
+    currentPage: pending?.firstPage || null,
+    references, scanPages,
+  });
+  // 兜底：一个页码都算不出来时（例如索引模式没有分页标记），至少把当前页当白名单，
+  // 避免把全部引用都判成非法；真正编出来的页仍然会被拦。
+  if (!availablePages.length && pending?.firstPage) availablePages.push(Number(pending.firstPage));
+  const basis = [];
+  const focusPage = pending?.reading?.focus?.page || null;
+  if (pending?.reading?.selection) basis.push(focusPage ? `p.${focusPage} 选区` : '选区');
+  if (context) {
+    const p = pending?.firstPage || viewer?.current || viewer?.currentVisiblePage?.() || null;
+    const who = pageRole === 'topic' ? '话题页' : pageRole === 'explicit' ? '指定页' : '当前页';
+    basis.push(p ? `${who} p.${p}` : who);
+  }
+  if (docCtx?.mode === 'full') basis.push('整篇原文');
+  else if (docCtx?.mode === 'digest') basis.push('整篇索引');
+  if (pageImages.length) basis.push(`p.${pageImages.map((im) => im.page).join('、')} 页图`);
+  if (sources?.length) basis.push(`联网 ${sources.length} 条`);
+  if (images?.length) basis.push(`${images.length} 张截图`);
+  return { availablePages, basis: `本次依据：${basis.length ? basis.join(' / ') : '仅问题本身'}` };
+}
+
+/** 引用核验：流式结束后算一次，渲染器按 raw 查表降级/拦截 */
+async function auditAnswerCitations(answer, { availablePages = null, scanned = false } = {}) {
+  try {
+    const totalPages = Number(viewer?.numPages) || 0;
+    const pageTextFor = scanned
+      ? (p) => pageTextFromScanDigest(state.scanDigest, p)
+      : (p) => (viewer?.getPageText ? viewer.getPageText(p) : '');
+    const result = await validateCitations(answer, {
+      totalPages,
+      availablePages: availablePages?.length ? availablePages : null,
+      pageTextFor,
+      scanned,
+    });
+    activeCitationPlan = result.plan;
+    lastCitationStats = result.stats;
+    return result;
+  } catch {
+    activeCitationPlan = null;
+    lastCitationStats = null;
+    return null;
+  }
+}
+
+/** 教学/操作/解释路径共用：把校验结果写进当前渲染状态，返回统计 */
+async function auditForRenderedAnswer(answer, { docCtx = null, context = '', references = [], scanned = false, page = null } = {}) {
+  const mat = citationMaterialsFor({
+    docCtx, context, references, scanned, pageRole: 'screen',
+    pending: { firstPage: page || viewer?.current || null, reading: null },
+  });
+  await auditAnswerCitations(answer, { availablePages: mat.availablePages, scanned });
+  return mat;
+}
+
 function decoratePageRefs(html) {
   const pages = Number(viewer?.numPages) || 0;
+  const plan = activeCitationPlan;
   // 兼容模型的各种写法：p. 前后带空格、半角/全角竖线、长破折号；片段长度按「可见文字」算，
   // HTML 上限放宽（行内公式的 KaTeX 标记可能上千字符），避免「带公式的引用不渲染」
   return String(html || '').replace(
     /〔\s*p\.\s*(\d{1,4})\s*(?:[–\-—]\s*(\d{1,4}))?\s*(?:\|\||‖|｜)\s*([^〕]{1,8000})〕|〔\s*p\.\s*(\d{1,4})\s*(?:[–\-—]\s*(\d{1,4}))?\s*〕/g,
     (raw, aPipe, bPipe, frag, aPlain, bPlain) => {
+      // P1.5：程序核验过的不合法引用不渲染按钮（drop），片段核不上的降级成纯页码（page-only）。
+      const decision = plan ? planFor(plan, raw) : null;
+      if (decision && decision.level === 'drop') return raw;
       const a = aPipe || aPlain;
       const b = aPipe ? bPipe : bPlain;
       const p = Number(a);
       if (!Number.isInteger(p) || p < 1 || (pages && p > pages)) return raw;
       const label = b ? `p.${a}–${b}` : `p.${a}`;
+      if (decision && decision.level === 'page-only') {
+        const title = `跳到第 ${p} 页（原文片段未核对，不画高亮）`;
+        return `<button type="button" class="page-ref page-ref-unverified" data-page="${p}" data-unverified="1" title="${escapeHtml(title)}">${label}</button>`;
+      }
       const parts = aPipe ? quoteFragmentParts(frag) : null;
       const fragment = parts?.text || '';
       if (!fragment) {
@@ -7246,19 +7393,28 @@ async function doExplain(sel) {
     const references = await readingReferences(text);
     if (!readingRequestCurrent({ docId, openSeq, sid })) return;
     if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
+    const citationMat = citationMaterialsFor({
+      context, references, scanned: false, pageRole: 'selection',
+      pending: { firstPage: sel.page || null, reading },
+    });
+    activeCitationPlan = null;
     const full = await chat({
       messages: explainMessages({ selection: text, context, page: sel.page, docTitle: state.doc?.name, history, reading, references,
         selectionSource: fromRight ? 'right' : '',
-        profileBlock: askProfileBlock(text + "\n" + context, reading.question, { docId }) }),
+        profileBlock: askProfileBlock(text + "\n" + context, reading.question, { docId }),
+        availablePages: citationMat.availablePages,
+        scopeLabel: '选区', objectLabel: objectLabelFor({ question: reading.question }, reading) }),
       signal: ctl.signal,
       onDelta: (piece, all) => { received = all; target.push(all); },
       onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
     });
     if (!readingRequestCurrent({ docId, openSeq, sid })) return;
+    await auditAnswerCitations(full, { availablePages: citationMat.availablePages, scanned: false });
+    if (!readingRequestCurrent({ docId, openSeq, sid })) return;
     target.done(full);
     state.history = snapshotHistory([...state.history, ...readingTurn(reading, full)]);
     scheduleSessionSummary();
-    finishEntry(entry, full, { page: sel.page, onAsk: () => addToChat(sel) });
+    finishEntry(entry, full, { page: sel.page, basis: citationMat.basis, onAsk: () => addToChat(sel) });
   } catch (e) {
     if (!readingRequestCurrent({ docId, openSeq, sid })) return;
     if (isAbort(e)) {
@@ -8174,13 +8330,13 @@ async function send(retryPending = null) {
     // · 明说「第 N 页」→ 那一页；· 其它/「这一页/这里」→ 当前屏幕页。扫描件没有文本层，改成带页图。
     const quotes = pending.attachments.filter((a) => a.kind === 'text');
     const anchor = contextAnchorFor(pending.pageRole, reading);
-    const contextParts = scannedDoc ? [] : (quotes.length ? await Promise.all(quotes.slice(0, 6).map(async (a) => {
+    const contextParts = scannedDoc ? [] : (pending.useFullText && !shotOnly ? [] : (quotes.length ? await Promise.all(quotes.slice(0, 6).map(async (a) => {
       // 右栏划来的文字不是 PDF 原文，定位不到「原文附近」；给所在页整页当语境
       const nearby = await viewer.getContextAround(a.page || pending.firstPage,
         a.from === 'right' ? '' : a.text);
       return nearby ? `[第${a.page || pending.firstPage}页]\n${nearby}` : '';
     })) : [pending.firstPage && pending.docId
-      ? await viewer.getContextAround(pending.firstPage, anchor) : '']);
+      ? await viewer.getContextAround(pending.firstPage, anchor) : '']));
     const context = [...new Set(contextParts.filter(Boolean))].join('\n\n');
     const references = await readingReferences(reading.selection);
     if (!readingRequestCurrent(pending)) return;
@@ -8254,6 +8410,11 @@ async function send(retryPending = null) {
     // 教学进度（「带我一步步读」）也在这里带上，避免自由追问时模型擅自推进下一步。
     const profileForAsk = askProfileBlock(state.docText || context || '', pending.question,
       { docId: pending.docId });
+    // P1.5：可用页码白名单 + 本轮要求（近因指令）+ 本次依据回执，全部由程序算好，不靠模型猜。
+    const citationMat = citationMaterialsFor({
+      docCtx, context, references, scanned: scannedDoc, pending, sources, images, pageRole: pending.pageRole,
+    });
+    activeCitationPlan = null;   // 新回答开始：先不套上一条的校验结果
     const messages = askMessages({
       question: pending.question,
       selection: reading.selection,
@@ -8271,6 +8432,9 @@ async function send(retryPending = null) {
       screenshotCount: images.length,
       profileBlock: profileForAsk,
       teachingBlock: teachingProgressBlock(),
+      availablePages: citationMat.availablePages,
+      scopeLabel: scopeLabelFor(pending, { scanned: scannedDoc, images }),
+      objectLabel: objectLabelFor(pending, reading),
     });
     // 图片有两种：用户自己加的截图 + 扫描件的页面上下文；同一条 user 消息里一起发。
     const pageImages = docCtx?.pageImages || [];
@@ -8299,10 +8463,13 @@ async function send(retryPending = null) {
       onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
     });
     if (!readingRequestCurrent(pending)) return;
+    // 引用核验必须在最终渲染之前完成：不合格的片段降级成纯页码，编造的页码直接不渲染。
+    await auditAnswerCitations(full, { availablePages: citationMat.availablePages, scanned: scannedDoc });
+    if (!readingRequestCurrent(pending)) return;
     target.done(full);
     state.history = snapshotHistory([...state.history, ...readingTurn(reading, full)]);
     scheduleSessionSummary();
-    finishEntry(pending.entry, full, { page: pending.firstPage, sources: citedSources(full, sources), meta, status: 'complete' });
+    finishEntry(pending.entry, full, { page: pending.firstPage, sources: citedSources(full, sources), meta, status: 'complete', basis: citationMat.basis });
     scheduleMemoryExtraction({ question: pending.inputValue, answer: full, history: pending.history,
       topic: reading.selection || reading.focus?.text || '',
       source: { docId: pending.docId || '', paper: pending.docTitle || '', capability: 'chat' } });
@@ -8314,7 +8481,7 @@ async function send(retryPending = null) {
       // 保留已经收到的回答；状态放在回答下方，绝不覆盖回答正文。
       target.done(received);
       finishEntry(pending.entry, received, {
-        page: pending.firstPage, sources: citedSources(received, sources), meta, status: 'stopped', onRetry: () => send(pending),
+        page: pending.firstPage, sources: citedSources(received, sources), meta, status: 'stopped', basis: citationMat?.basis, onRetry: () => send(pending),
       });
     } else {
       target.fail(errText(e));

@@ -228,6 +228,54 @@ try {
   check('文本 PDF 问答不带页图', (textAsk.imageCount || 0) === 0, `images=${textAsk.imageCount}`);
   check('文本 PDF 问答用主模型', textAsk.model === 'text-mock', textAsk.model);
 
+  /* ══════════ 五、P1.5：当前页按「可见面积最大」判定（扫描件页高不一致时 30% 探针会偏） ══════════ */
+  await page.goto(`${BASE}/?open=scanned-paper.pdf&topbar=static`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.__state?.doc && window.__viewer?.numPages > 0 && window.__ctx.docProfile?.scanned === true, { timeout: 40000 });
+  await page.waitForFunction(() => {
+    const v = window.__viewer;
+    return v && v.offsets && v.offsets[1] !== undefined && v.offsets[v.numPages] !== undefined;
+  }, { timeout: 30000 });
+  const areaCheck = await page.evaluate(async () => {
+    const v = window.__viewer;
+    const c = v.container;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const out = [];
+    for (let n = 1; n < v.numPages; n++) {
+      if (v.offsets[n + 1] === undefined) continue;
+      // 让第 n+1 页从视口 40% 处开始 → 上半 40% 是第 n 页底部、下半 60% 是第 n+1 页；
+      // 面积判定应选第 n+1 页，而旧的「视口 30% 探针」会落在第 n 页（两者不同）。
+      c.scrollTop = Math.max(0, v.offsets[n + 1] - c.clientHeight * 0.4);
+      await wait(150);
+      const cRect = c.getBoundingClientRect();
+      let exp = 0, expArea = -1, expDist = Infinity;
+      for (let i = 1; i <= v.numPages; i++) {
+        const el = v.pageEls[i];
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        const top = r.top - cRect.top;
+        const bottom = r.bottom - cRect.top;
+        const overlap = Math.min(bottom, c.clientHeight) - Math.max(top, 0);
+        if (overlap <= 0) continue;
+        const area = overlap * r.width;
+        const dist = Math.abs((top + bottom) / 2 - c.clientHeight / 2);
+        if (area > expArea + 0.5 || (Math.abs(area - expArea) <= 0.5 && dist < expDist)) { exp = i; expArea = area; expDist = dist; }
+      }
+      const probe = c.scrollTop + c.clientHeight * 0.3;
+      let old = v.current || 1;
+      for (let i = 1; i <= v.numPages; i++) {
+        if (v.offsets[i] === undefined) break;
+        if (probe >= v.offsets[i]) old = i; else break;
+      }
+      out.push({ n, got: v.currentVisiblePage(), exp, old });
+    }
+    c.scrollTop = 0;
+    return out;
+  });
+  check('当前页 = 可见面积最大的那一页（与独立几何计算一致）',
+    areaCheck.length > 0 && areaCheck.every((r) => r.got === r.exp), JSON.stringify(areaCheck));
+  check('面积判定修正了旧「30% 探针」的偏差（存在两种口径结果不同的位置）',
+    areaCheck.some((r) => r.got !== r.old), JSON.stringify(areaCheck));
+
   check('操作期间没有页面错误', pageErrors.length === 0, pageErrors.join(' | '));
   const failed = checks.filter((c) => !c.ok);
   console.log(`\n扫描件：${checks.length - failed.length}/${checks.length} 通过`);

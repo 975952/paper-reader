@@ -95,6 +95,26 @@ if (leaked.length) {
   process.exit(1);
 }
 
+/* ── 2.5 前端新增目录会被 walk 带进来，但白名单要显式抽查一次 ──
+   （历史上源码 zip 漏过 security.js；提示词目录是 A 线 P1 新增的，必须确认进包） */
+const REQUIRED_PUBLIC = [
+  'public/js/prompts/index.js',
+  'public/js/prompts/registry.js',
+  'public/js/prompts/compose.js',
+  'public/js/prompts/capabilities/qa.js',
+  'public/js/prompts/capabilities/teach.js',
+  'public/js/app.js',
+  'public/js/ai.js',
+  'public/js/teaching.js',
+];
+const missingPublic = REQUIRED_PUBLIC.filter((rel) => !files.some((f) => f.rel.replace(/\\/g, '/') === rel));
+if (missingPublic.length) {
+  console.error('拒绝打包：源码包里缺少必需的前端文件（白名单/目录遍历有问题）');
+  for (const f of missingPublic) console.error('  ' + f);
+  process.exit(1);
+}
+console.log(`前端白名单抽查：通过（${REQUIRED_PUBLIC.length} 个关键文件都在包里）`);
+
 /* ── 3. 落到临时目录 ── */
 fs.rmSync(STAGE, { recursive: true, force: true });
 fs.mkdirSync(STAGE, { recursive: true });

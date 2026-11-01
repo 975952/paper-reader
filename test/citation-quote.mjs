@@ -137,7 +137,7 @@ try {
   };
 
   await openDoc('citation-paper.pdf');
-  await page.evaluate(() => { window.__ctx.setPanelVisible('chat', true); window.__ctx.setScopeRange('current'); });
+  await page.evaluate(() => { window.__ctx.setPanelVisible('chat', true); window.__ctx.setScopeRange('paper'); });
   await wait(400);
 
   /* ── 准备：取第 5 页真实原文片段 ── */
@@ -168,6 +168,32 @@ try {
   check('被引原文渲染后仍然可见（不会被页码按钮吞掉）',
     visibleQuote.inline.includes(snippet.slice(0, 30)), visibleQuote.inline.slice(0, 80));
   check('回答正文同时保留被引原文', visibleQuote.all.includes(snippet.slice(0, 30)), visibleQuote.all.slice(0, 80));
+
+  /* ── 1.5 P1.5：依据回执 + 编页码拦截 + 白名单外页码拦截 ── */
+  const basisInfo = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('#aiArea .msg.assistant')].at(-1);
+    const basis = row?.querySelector('.entry-basis');
+    return { text: basis?.textContent || '', tag: basis?.tagName || '', after: basis?.nextElementSibling?.classList?.contains('text') };
+  });
+  check('回答上方有只读「本次依据」小字', /^本次依据：/.test(basisInfo.text), basisInfo.text);
+  check('本次依据不可点（是 div 且紧贴正文上方）', basisInfo.tag === 'DIV' && basisInfo.after, JSON.stringify(basisInfo));
+
+  answerOverride = '编出来的页：〔p.99〕；白名单外的页：〔p.12‖这一页这次没提供〕。';
+  await page.evaluate(() => window.__ctx.setScopeRange('current'));
+  await wait(300);
+  await ask();
+  const droppedInfo = await page.evaluate(() => ({
+    html: [...document.querySelectorAll('#aiArea .msg.assistant')].at(-1)?.querySelector('.text')?.textContent || '',
+    refs: [...document.querySelectorAll('#aiArea .page-ref')].map((b) => b.dataset.page),
+    stats: window.__ctx.citationStats,
+  }));
+  check('超出总页数的引用不渲染按钮（保持原文文字）',
+    !droppedInfo.refs.includes('99') && droppedInfo.html.includes('p.99'), JSON.stringify({ refs: droppedInfo.refs, stats: droppedInfo.stats }));
+  check('白名单外的页码不渲染按钮', !droppedInfo.refs.includes('12'), JSON.stringify(droppedInfo.refs));
+  check('citationStats 记录了被拦截的引用', droppedInfo.stats?.dropped >= 2, JSON.stringify(droppedInfo.stats));
+
+  await page.evaluate(() => window.__ctx.setScopeRange('paper'));
+  await wait(300);
 
   /* ── 2. 点击：跳页 + 高亮 + 激活态 ── */
   await clickQuoteRef();
@@ -223,32 +249,56 @@ try {
   s = await state();
   check('切换文档后高亮被清掉', s.hits === 0 && !s.quote?.page, JSON.stringify(s));
 
-  /* ── 8. 负例：片段在页面里找不到 → 退化为纯跳页，不留假激活态 ── */
+  /* ── 8. 负例：片段在页面里找不到 → 降级为纯页码按钮（P1.5：只跳页、不画假高亮） ── */
   await openDoc('citation-paper.pdf');
-  await page.evaluate(() => window.__ctx.setPanelVisible('chat', true));
+  await page.evaluate(() => {
+    window.__ctx.setPanelVisible('chat', true);
+    window.__ctx.setScopeRange('paper');
+  });
+  await wait(400);
   answerOverride = '找不到的引用：〔p.7‖这段原文根本不在这一页 XYZ_NOT_FOUND〕';
   await ask();
-  await clickQuoteRef(7);
+  const unverified = await page.evaluate(() => {
+    const btn = document.querySelector('#aiArea .page-ref[data-page="7"]');
+    return {
+      count: document.querySelectorAll('#aiArea .page-ref[data-page="7"]').length,
+      unverified: !!btn?.classList.contains('page-ref-unverified'),
+      hasFragment: !!btn?.dataset.fragment,
+      hasQuoteRef: !!document.querySelector('#aiArea .page-ref.quote-ref[data-page="7"]'),
+      stats: window.__ctx.citationStats,
+    };
+  });
+  check('片段核不上 → 降级为纯页码按钮（不是高亮引用）',
+    unverified.count === 1 && unverified.unverified && !unverified.hasFragment && !unverified.hasQuoteRef,
+    JSON.stringify(unverified));
+  check('降级原因记进 citationStats.degraded', unverified.stats?.degraded >= 1, JSON.stringify(unverified.stats));
+  await page.evaluate(() => {
+    const btn = document.querySelector('#aiArea .page-ref[data-page="7"]');
+    btn?.click();
+  });
+  await wait(500);
   s = await state();
   check('片段找不到时仍跳到第 7 页', s.page === 7, String(s.page));
   check('片段找不到时不画假高亮/不留激活态', s.hits === 0 && s.active === 0 && !s.quote?.page, JSON.stringify(s));
 
-  /* ── 9. 行内公式 / 超过 200 字的整句片段也要完整渲染（不再「有的渲染成功有的没」） ── */
-  answerOverride = '公式片段：〔p.5‖其中能量满足 $E=mc^2$ 的关系〕';
+  /* ── 9. 正文公式照常渲染成行内公式；引用片段只显示可见原文（不露 HTML 标签） ── */
+  answerOverride = `公式正文：能量满足 $E=mc^2$ 的关系。引用这一句：〔p.5‖${snippet}〕`;
   await ask();
   const mathQuote = await page.evaluate(() => {
-    const inline = [...document.querySelectorAll('#aiArea .quote-inline')].at(-1);
-    const btn = [...document.querySelectorAll('#aiArea .page-ref.quote-ref')].at(-1);
+    const row = [...document.querySelectorAll('#aiArea .msg.assistant')].at(-1);
+    const inline = [...row.querySelectorAll('.quote-inline')].at(-1);
+    const btn = [...row.querySelectorAll('.page-ref.quote-ref')].at(-1);
     return {
-      hasKatex: !!inline?.querySelector('.katex'),
+      hasKatex: !!row.querySelector('.text .katex'),
       text: inline?.textContent || '',
       frag: btn?.dataset.fragment || '',
       rawTag: /<(?:span|div)/.test(inline?.textContent || ''),
     };
   });
-  check('公式片段渲染成行内公式、不显示 HTML 标签',
-    mathQuote.hasKatex && /E\s*=?\s*mc/.test(mathQuote.text) && !mathQuote.rawTag, JSON.stringify(mathQuote));
-  check('公式片段的匹配文本是纯文本', /E=mc/.test(mathQuote.frag.replace(/\s/g, '')), mathQuote.frag);
+  check('正文公式渲染成行内公式', mathQuote.hasKatex, JSON.stringify(mathQuote));
+  check('引用片段渲染成可见原文、不显示 HTML 标签',
+    mathQuote.text.includes(snippet.slice(0, 20)) && !mathQuote.rawTag && mathQuote.frag.length > 20, JSON.stringify(mathQuote));
+  check('引用片段的匹配文本是纯文本', mathQuote.frag.startsWith(snippet.slice(0, 20)), mathQuote.frag.slice(0, 60));
 
   await page.evaluate(async () => { await window.__viewer.goToPage(5); });
   await wait(500);
