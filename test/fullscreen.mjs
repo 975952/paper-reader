@@ -1,11 +1,12 @@
 /**
  * 应用全屏验收（2026-11）：
- *  - 顶栏有全屏按钮，点击进入全屏（沉浸式：隐藏应用内顶栏/底栏，文档吃满整屏）；
- *  - F11 也能切换全屏；
- *  - 按 Esc 退出全屏（这是 Esc 的第一优先级）。
+ *  - 顶栏有全屏按钮，点击进入全屏；
+ *  - 全屏只改窗口（铺满屏幕），应用内顶栏/底栏保持原样（用户口径：不要隐藏顶栏）；
+ *  - 底部不留白条（底栏贴住窗口底边）；
+ *  - F11 也能切换全屏；按 Esc 退出全屏。
  *
  * 浏览器里用 Fullscreen API；测试环境里把 requestFullscreen/exitFullscreen 换成桩，
- * 验证页面自己的全屏状态与布局切换（真实窗口全屏由桌面壳 tao 负责，cargo test 覆盖 IPC 解析）。
+ * 验证页面自己的全屏状态与布局（真实窗口全屏由桌面壳 tao 负责，cargo test 覆盖 IPC 解析）。
  *
  *   node test/fullscreen.mjs
  */
@@ -91,6 +92,7 @@ try {
       fullscreen: document.body.classList.contains('window-fullscreen'),
       topbar: topbar ? getComputedStyle(topbar).display : 'missing',
       foot: foot ? getComputedStyle(foot).display : 'missing',
+      footBottom: foot ? foot.getBoundingClientRect().bottom : 0,
       mainH: main ? main.getBoundingClientRect().height : 0,
       innerH: window.innerHeight,
       btnVisible: !!btn && getComputedStyle(btn).display !== 'none',
@@ -104,13 +106,14 @@ try {
   check('顶栏有全屏按钮', before.btnVisible && before.fullscreen === false, JSON.stringify(before));
   check('普通状态：顶栏与底栏都在', before.topbar !== 'none' && before.foot !== 'none', `${before.topbar}/${before.foot}`);
 
-  /* ── 1. 点按钮进入全屏 ── */
+  /* ── 1. 点按钮进入全屏：只改窗口，应用内 chrome 不动 ── */
   await page.click('#fullscreenBtn');
   await wait(450);
   const full = await ui();
   check('点按钮进入全屏（页面状态 + 请求了 Fullscreen API）', full.fullscreen && full.requested >= 1, JSON.stringify(full));
-  check('全屏时隐藏应用内顶栏与底栏', full.topbar === 'none' && full.foot === 'none', `${full.topbar}/${full.foot}`);
-  check('全屏时文档吃满整屏', Math.abs(full.mainH - full.innerH) < 2, `${full.mainH} vs ${full.innerH}`);
+  check('全屏时顶栏与底栏保持显示（不再隐藏上方那一栏）', full.topbar !== 'none' && full.foot !== 'none', `${full.topbar}/${full.foot}`);
+  check('底栏贴住窗口底边、最下面没有白条', Math.abs(full.footBottom - full.innerH) < 2, `${full.footBottom} vs ${full.innerH}`);
+  check('全屏时光标区域未被压缩（主区高度与普通状态一致）', Math.abs(full.mainH - before.mainH) < 2, `${before.mainH} → ${full.mainH}`);
   check('全屏按钮切换到「退出全屏」态', full.pressed === 'true' && /退出全屏/.test(full.title), `${full.pressed} ${full.title}`);
 
   /* ── 2. Esc 退出全屏 ── */

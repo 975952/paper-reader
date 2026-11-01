@@ -1,7 +1,7 @@
 /**
  * 引用定位验收（docs/右栏交互增强-设计.md §2/§3）：
  *  - 回答里的 〔p.N‖原文片段〕 渲染成可点页码 + 可见原句（含行内公式）；
- *  - 点击 → 跳到第 N 页 + 高亮该片段（覆盖整句，不止开头几个字）；
+ *  - 点击 → 跳到第 N 页 + 高亮该片段（覆盖整句；跨页时后续页也接着高亮）；
  *  - 取消：再点同一个引用 toggle / 点正文任意处 / 翻页 / 切文档；Esc 不再取消（留给全屏）；
  *  - 点答案的页码标签 / 原文引用块也会跳到文中并高亮；
  *  - 找不到片段时退化为纯跳页，不留假激活态；旧格式 〔p.N〕 行为不变。
@@ -323,6 +323,29 @@ try {
   check('连点同一个引用不来回滚动', Math.abs(afterRepeat.top - beforeRepeat.top) <= 2,
     `${beforeRepeat.top} → ${afterRepeat.top}`);
   check('连点同一个引用最终仍在第 5 页', afterRepeat.page === 5, JSON.stringify(afterRepeat));
+
+  /* ── 12. 跨页引用：换页处被切开的片段，两页都要高亮（不能只画第一页） ── */
+  await page.evaluate(async () => { await window.__viewer.goToPage(5); });
+  await wait(500);
+  const crossFrag = await page.evaluate(async () => {
+    const p5 = String(await window.__viewer.getPageText(5)).replace(/\s+/g, ' ').trim();
+    const p6 = String(await window.__viewer.getPageText(6)).replace(/\s+/g, ' ').trim();
+    return `${p5.slice(-70).trim()} ${p6.slice(0, 70).trim()}`;
+  });
+  answerOverride = `跨页：〔p.5‖${crossFrag}〕`;
+  await ask();
+  // 点最新那条跨页引用（同一页可能有多条旧引用，按 DOM 顺序取最后一条）
+  await page.evaluate(() => {
+    [...document.querySelectorAll('.page-ref.quote-ref')].filter((b) => b.dataset.page === '5').at(-1)?.click();
+  });
+  await wait(900);
+  const cross = await page.evaluate(() => ({
+    p5: document.querySelectorAll('.page[data-page="5"] .quote-hit').length,
+    p6: document.querySelectorAll('.page[data-page="6"] .quote-hit').length,
+    extra: Object.keys(window.__viewer._quote?.extra || {}),
+  }));
+  check('跨页引用：第一页部分有高亮', cross.p5 > 0, JSON.stringify(cross));
+  check('跨页引用：下一页接着高亮（不再只画第一页）', cross.p6 > 0 && cross.extra.includes('6'), JSON.stringify(cross));
 
   check('操作期间没有页面错误', pageErrors.length === 0, pageErrors.join(' | '));
   const failed = checks.filter((c) => !c.ok);

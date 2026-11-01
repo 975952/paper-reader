@@ -1719,6 +1719,7 @@ export class PdfViewer {
    * 刻意做成「一次到位」：即时跳页（不做平滑滚动动画）、只有目标页还没渲染时才等它渲染，
    * 已渲染的页面绝不重建（之前每次 refreshPage 都会把画布拆掉重画，看起来就是闪一下）。
    * 高亮位置已经在视口里时不再滚动，避免同一引用连点时来回动。
+   * 片段跨页时（换页处被切开）会把剩余部分接着画到后面几页（用户实测：之前只画第一页的）。
    * @returns {Promise<boolean>} 是否画出了高亮
    */
   async highlightQuote(pageNum, fragment) {
@@ -1735,7 +1736,20 @@ export class PdfViewer {
       // 兜底：仍没有文本层（极少见）才重建这一页
       await this.refreshPage(target);
     }
-    const ok = this._paintQuote(target);
+    const start = this._matchQuote(this._quoteSpans(target), text);
+    let ok = false;
+    if (start.hits.length) {
+      this._paintQuote(target);
+      ok = true;
+      // 跨页片段：这一页没放完的部分，从下一页开头接着找
+      const extra = await this._quoteExtraPages(target, start.consumed);
+      if (Object.keys(extra).length) {
+        this._quote.extra = extra;
+        for (const p of Object.keys(extra)) {
+          if (this.rendered.get(Number(p))?.textDiv) this._paintQuote(Number(p));
+        }
+      }
+    }
     if (!ok) return false;
     const entry = this.rendered.get(target);
     const first = entry?.quoteLayer?.firstElementChild;
@@ -1754,18 +1768,67 @@ export class PdfViewer {
     return true;
   }
 
+  /** 某页文本层的 spans（没渲染/没有文本层时返回空数组） */
+  _quoteSpans(i) {
+    const entry = this.rendered.get(i);
+    if (!entry?.textDiv) return [];
+    return Array.from(entry.textDiv.querySelectorAll('span:not(.markedContent)'));
+  }
+
+  /** 把一页文本压成「去空白小写串」，并记住每个字在原文里的下标 */
+  _normPageText(text) {
+    const map = [];
+    let norm = '';
+    for (let i = 0; i < text.length; i++) {
+      if (/\s/.test(text[i])) continue;
+      map.push(i);
+      norm += text[i];
+    }
+    return { lower: norm.toLowerCase(), map };
+  }
+
+  /**
+   * 跨页片段：从 target+1 页开始，把片段「还没画完」的剩余部分接着找出来。
+   * 返回 { 页码: 该页要画的那段原文 }，供 _paintQuote 在后面几页照常画。
+   */
+  async _quoteExtraPages(target, consumed) {
+    const extra = {};
+    const fNorm = String(this._quote?.fragment || '').replace(/\s+/g, '').toLowerCase();
+    let remain = fNorm.slice(Math.max(0, consumed));
+    if (remain.length < 6) return extra;
+    for (let page = target + 1; page <= this.numPages && page <= target + 3 && remain.length >= 6; page += 1) {
+      let pageText = '';
+      try { pageText = await this.getPageText(page); } catch { break; }
+      if (!pageText) break;
+      const { lower, map } = this._normPageText(String(pageText));
+      let matched = 0;
+      let idx = -1;
+      for (const len of [...new Set([Math.min(remain.length, 80), 60, 40, 24, 14, 8])]) {
+        if (len > remain.length || len < 6) continue;
+        const at = lower.indexOf(remain.slice(0, len));
+        if (at >= 0) { matched = len; idx = at; break; }
+      }
+      if (idx < 0 || matched < 6) break;
+      extra[page] = String(pageText).slice(map[idx], map[idx + matched - 1] + 1);
+      remain = remain.slice(matched);
+    }
+    return extra;
+  }
+
   /** 只重画某一页的引用高亮（页面重渲染后由 _renderPage 调用） */
   _paintQuote(i) {
     const entry = this.rendered.get(i);
     if (!entry) return false;
     if (entry.quoteLayer) entry.quoteLayer.innerHTML = '';
     const quote = this._quote;
-    if (!quote?.page || quote.page !== i || !entry.textDiv) return false;
+    if (!quote?.page || !entry.textDiv) return false;
+    const fragment = quote.page === i ? quote.fragment : (quote.extra?.[i] || '');
+    if (!fragment) return false;
     const pageEl = this.pageEls[i];
     if (!pageEl) return false;
     const pr = pageEl.getBoundingClientRect();
-    const spans = Array.from(entry.textDiv.querySelectorAll('span:not(.markedContent)'));
-    const hits = this._matchQuote(spans, quote.fragment);
+    const spans = this._quoteSpans(i);
+    const { hits } = this._matchQuote(spans, fragment);
     if (!hits.length) return false;
     let painted = 0;
     for (const seg of hits) {
@@ -1794,14 +1857,15 @@ export class PdfViewer {
 
   /**
    * 片段匹配：把页面 span 文本压成「去掉空白的小写串」再定位起点，
-   * 然后尽量延伸到整句结束（用句尾回找 + 贪心延伸容忍连字符/换行/个别字差），
-   * 返回覆盖完整片段的 span 区间，而不是只画开头命中的那几个字。
+   * 然后尽量延伸到整句结束（用句尾回找 + 贪心延伸容忍连字符/换行/个别字差）。
+   * @returns {{hits: Array, consumed: number}} hits 覆盖完整片段的 span 区间；
+   *          consumed 是这一页「吃掉」了多少个去掉空白的片段字符（跨页时接着找下一页）。
    */
   _matchQuote(spans, fragment) {
     const raw = String(fragment || '').trim();
-    if (!raw) return [];
+    if (!raw || !spans.length) return { hits: [], consumed: 0 };
     const fNorm = raw.replace(/\s+/g, '').toLowerCase();
-    if (fNorm.length < 2) return [];
+    if (fNorm.length < 2) return { hits: [], consumed: 0 };
     // norm = 页面文本去掉空白；pos[i] 记住第 i 个字对应哪个 span 的哪个字符
     const pos = [];
     let norm = '';
@@ -1824,7 +1888,7 @@ export class PdfViewer {
         at = lower.indexOf(fNorm.slice(0, len));
         if (at >= 0) { startLen = len; break; }
       }
-      if (at < 0) return [];
+      if (at < 0) return { hits: [], consumed: 0 };
       end = at + startLen;
       const tailLen = Math.min(24, fNorm.length);
       if (tailLen >= 6) {
@@ -1840,7 +1904,8 @@ export class PdfViewer {
       if (k > end - at) end = at + k;
       end = Math.min(end, lower.length);
     }
-    if (end <= at) return [];
+    if (end <= at) return { hits: [], consumed: 0 };
+    const consumed = Math.min(end - at, fNorm.length);
     // norm 区间 → span 区间（同一 span 里取首尾，跨 span 逐段拆）
     const out = [];
     let cur = null;
@@ -1852,7 +1917,10 @@ export class PdfViewer {
       cur = { spanIndex: p.spanIndex, start: p.charIndex, end: p.charIndex + 1 };
     }
     if (cur) out.push(cur);
-    return out.map((seg) => ({ hitIndex: 0, spanIndex: seg.spanIndex, start: seg.start, end: seg.end }));
+    return {
+      hits: out.map((seg) => ({ hitIndex: 0, spanIndex: seg.spanIndex, start: seg.start, end: seg.end })),
+      consumed,
+    };
   }
 
   setActiveQuery(q) {

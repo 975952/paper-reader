@@ -2293,12 +2293,10 @@ body.dragging .side { transition: width .07s linear; }
 .page-ref:hover { border-color: var(--accent); background: var(--accent-soft); }
 .page-ref:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* ── 全屏（沉浸式）：去掉应用内顶栏与底部工具条，文档吃满整屏；Esc 退出 ──
-   窗口本身的全屏由桌面壳（tao）或浏览器 Fullscreen API 负责，这里只管应用内 chrome。 */
-body.window-fullscreen { --topbar-h: 0px; --statusbar-h: 0px; }
-body.window-fullscreen .topbar,
-body.window-fullscreen .viewer-foot { display: none; }
-body.window-fullscreen #main { height: 100vh; }
+/* ── 全屏：只由桌面壳/浏览器把窗口铺满屏幕，应用内顶栏与底栏保持原样 ──
+   用户口径：「全屏模式下上方的一栏被隐藏了」——不要沉浸式，顶栏底栏都留着；
+   之前那版隐藏顶栏/底栏还改 #main 高度，会在最下面留一条白条。 */
+body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
 
 /* ── 带片段的引用：页码按钮后面把被引原句显示出来（不能只放 title 里，否则正文只剩 p.N） ── */
 .quote-inline {
