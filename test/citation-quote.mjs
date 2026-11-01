@@ -1,8 +1,9 @@
 /**
  * 引用定位验收（docs/右栏交互增强-设计.md §2/§3）：
- *  - 回答里的 〔p.N‖原文片段〕 渲染成可点页码；
- *  - 点击 → 跳到第 N 页 + 橙色高亮该片段；
- *  - 取消：再点同一个引用 toggle / Esc / 点正文任意处 / 翻页 / 切文档；
+ *  - 回答里的 〔p.N‖原文片段〕 渲染成可点页码 + 可见原句（含行内公式）；
+ *  - 点击 → 跳到第 N 页 + 高亮该片段（覆盖整句，不止开头几个字）；
+ *  - 取消：再点同一个引用 toggle / 点正文任意处 / 翻页 / 切文档；Esc 不再取消（留给全屏）；
+ *  - 点答案的页码标签 / 原文引用块也会跳到文中并高亮；
  *  - 找不到片段时退化为纯跳页，不留假激活态；旧格式 〔p.N〕 行为不变。
  *
  *   node test/citation-quote.mjs
@@ -168,29 +169,34 @@ try {
     visibleQuote.inline.includes(snippet.slice(0, 30)), visibleQuote.inline.slice(0, 80));
   check('回答正文同时保留被引原文', visibleQuote.all.includes(snippet.slice(0, 30)), visibleQuote.all.slice(0, 80));
 
-  /* ── 2. 点击：跳页 + 橙色高亮 + 激活态 ── */
+  /* ── 2. 点击：跳页 + 高亮 + 激活态 ── */
   await clickQuoteRef();
   let s = await state();
   check('点击后跳到第 5 页', s.page === 5, String(s.page));
-  check('页面上画出橙色高亮块', s.hits > 0, `${s.hits} 块`);
+  check('页面上画出高亮块', s.hits > 0, `${s.hits} 块`);
   check('引用按钮进入激活态', s.active === 1 && s.quote?.page === 5, JSON.stringify(s.quote));
   const color = await page.evaluate(() => {
     const el = document.querySelector('.quote-hit');
-    return el ? getComputedStyle(el).backgroundColor : '';
+    return el ? { bg: getComputedStyle(el).backgroundColor, shadow: getComputedStyle(el).boxShadow } : null;
   });
-  check('高亮是橙色半透明', /rgba?\(\s*255\s*,\s*1[0-9]{2}\s*,\s*[0-9]{1,2}/.test(color), color);
+  check('高亮是柔和苔绿（不再是橙色描边框）',
+    !!color && /rgba?\(\s*125\s*,\s*158\s*,\s*80/.test(color.bg) && !/255\s*,\s*1[0-9]{2}\s*,\s*[0-9]{1,2}/.test(color.bg),
+    JSON.stringify(color));
 
   /* ── 3. 再点同一个 = toggle 取消 ── */
   await clickQuoteRef();
   s = await state();
   check('再点同一个引用取消高亮', s.hits === 0 && s.active === 0 && !s.quote?.page, JSON.stringify(s));
 
-  /* ── 4. Esc 取消 ── */
+  /* ── 4. Esc 不再取消高亮（Esc 留给全屏）；再点同一个引用才取消 ── */
   await clickQuoteRef();
   await page.keyboard.press('Escape');
   await wait(200);
   s = await state();
-  check('Esc 取消高亮', s.hits === 0 && s.active === 0, JSON.stringify(s));
+  check('Esc 不再取消引用高亮', s.hits > 0 && s.active === 1, JSON.stringify(s));
+  await clickQuoteRef();
+  s = await state();
+  check('再点同一个引用取消高亮', s.hits === 0 && s.active === 0 && !s.quote?.page, JSON.stringify(s));
 
   /* ── 5. 点正文任意处取消 ── */
   await clickQuoteRef();
@@ -226,6 +232,97 @@ try {
   s = await state();
   check('片段找不到时仍跳到第 7 页', s.page === 7, String(s.page));
   check('片段找不到时不画假高亮/不留激活态', s.hits === 0 && s.active === 0 && !s.quote?.page, JSON.stringify(s));
+
+  /* ── 9. 行内公式 / 超过 200 字的整句片段也要完整渲染（不再「有的渲染成功有的没」） ── */
+  answerOverride = '公式片段：〔p.5‖其中能量满足 $E=mc^2$ 的关系〕';
+  await ask();
+  const mathQuote = await page.evaluate(() => {
+    const inline = [...document.querySelectorAll('#aiArea .quote-inline')].at(-1);
+    const btn = [...document.querySelectorAll('#aiArea .page-ref.quote-ref')].at(-1);
+    return {
+      hasKatex: !!inline?.querySelector('.katex'),
+      text: inline?.textContent || '',
+      frag: btn?.dataset.fragment || '',
+      rawTag: /<(?:span|div)/.test(inline?.textContent || ''),
+    };
+  });
+  check('公式片段渲染成行内公式、不显示 HTML 标签',
+    mathQuote.hasKatex && /E\s*=?\s*mc/.test(mathQuote.text) && !mathQuote.rawTag, JSON.stringify(mathQuote));
+  check('公式片段的匹配文本是纯文本', /E=mc/.test(mathQuote.frag.replace(/\s/g, '')), mathQuote.frag);
+
+  await page.evaluate(async () => { await window.__viewer.goToPage(5); });
+  await wait(500);
+  const page5Text = await page.evaluate(async () => (await window.__viewer.getPageText(5)).replace(/\s+/g, ' ').trim());
+  const longSnippet = page5Text.slice(0, 220);
+  answerOverride = `长片段：〔p.5‖${longSnippet}〕`;
+  await ask();
+  const longInfo = await page.evaluate(() => {
+    const btn = [...document.querySelectorAll('#aiArea .page-ref.quote-ref')].at(-1);
+    const inline = [...document.querySelectorAll('#aiArea .quote-inline')].at(-1);
+    return { frag: btn?.dataset.fragment || '', text: inline?.textContent || '' };
+  });
+  check('超过 200 字的整句片段也能渲染', longInfo.frag.length > 200 && longInfo.text.length > 200,
+    `frag=${longInfo.frag.length} text=${longInfo.text.length}`);
+  await clickQuoteRef(5);
+  s = await state();
+  const cover = await page.evaluate(() => {
+    const widths = [...document.querySelectorAll('.quote-hit')].map((el) => parseFloat(el.style.width || '0'));
+    return { hits: widths.length, widest: Math.max(0, ...widths), total: widths.reduce((a, b) => a + b, 0) };
+  });
+  check('高亮覆盖整句（多块、总宽明显大于单块）', s.hits >= 2 && cover.hits >= 2 && cover.total > cover.widest * 1.6,
+    JSON.stringify(cover));
+
+  /* ── 10. 点答案的页码标签 / 原文引用块 → 跳到文中并高亮 ── */
+  const pgClicked = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('#aiArea .msg.assistant')].at(-1);
+    const pg = row?.querySelector('.role .pg');
+    pg?.click();
+    return !!pg;
+  });
+  await wait(700);
+  s = await state();
+  check('点问答的页码标签也跳到文中并高亮', pgClicked && s.hits > 0, JSON.stringify(s));
+
+  const refSnippet = page5Text.slice(60, 150);
+  await page.evaluate(async (t) => { window.__ctx.doExplain({ text: t, cleanText: t, page: 5 }); }, refSnippet);
+  await page.waitForFunction(() => !window.__state.busy, { timeout: 30000 });
+  await wait(300);
+  const refClicked = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('#aiArea .msg.assistant')]
+      .find((n) => n.querySelector('.tag')?.textContent === 'explanation');
+    const ref = row?.querySelector('.ref.ref-jump');
+    ref?.click();
+    return !!ref;
+  });
+  await wait(700);
+  s = await state();
+  check('点答案里的原文引用块也高亮文中原文', refClicked && s.hits > 0, JSON.stringify(s));
+
+  /* ── 11. 连续点同一个引用：不重建页面、不来回滚动（不闪） ── */
+  // 先点一次建立当前引用状态，再连点同一个：位置不应再动
+  await page.evaluate(() => { [...document.querySelectorAll('.page-ref.quote-ref')].at(-1)?.click(); });
+  await wait(600);
+  const beforeRepeat = await page.evaluate(() => {
+    const canvas = document.querySelector('.page[data-page="5"] canvas');
+    if (canvas) canvas.dataset.testMark = 'keep';
+    return { marked: !!canvas, top: document.querySelector('#viewer').scrollTop };
+  });
+  for (let i = 0; i < 2; i += 1) {
+    await page.evaluate(() => { [...document.querySelectorAll('.page-ref.quote-ref')].at(-1)?.click(); });
+    await wait(450);
+  }
+  await page.evaluate(() => { [...document.querySelectorAll('.page-ref.quote-ref')].at(-1)?.click(); });
+  await wait(450);
+  const afterRepeat = await page.evaluate(() => ({
+    marked: document.querySelector('.page[data-page="5"] canvas')?.dataset.testMark === 'keep',
+    top: document.querySelector('#viewer').scrollTop,
+    hits: document.querySelectorAll('.quote-hit').length,
+    page: window.__viewer.current,
+  }));
+  check('连点同一个引用不重建页面画布（不闪）', beforeRepeat.marked && afterRepeat.marked, JSON.stringify(afterRepeat));
+  check('连点同一个引用不来回滚动', Math.abs(afterRepeat.top - beforeRepeat.top) <= 2,
+    `${beforeRepeat.top} → ${afterRepeat.top}`);
+  check('连点同一个引用最终仍在第 5 页', afterRepeat.page === 5, JSON.stringify(afterRepeat));
 
   check('操作期间没有页面错误', pageErrors.length === 0, pageErrors.join(' | '));
   const failed = checks.filter((c) => !c.ok);

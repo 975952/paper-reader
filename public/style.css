@@ -814,13 +814,13 @@ body.dragging .viewer { pointer-events: none; }
 .search-hit { position: absolute; background: var(--hit); border-radius: 2px; mix-blend-mode: multiply; }
 .search-hit.current { outline: 2px solid var(--accent); outline-offset: 1px; z-index: 2; }
 @media (prefers-color-scheme: dark) { .search-hit { mix-blend-mode: screen; } }
-/* 引用定位：橙色半透明块 + 细描边；与搜索（黄）、选区（暖沙）区分开。
-   不参与搜索命中列表，也不自动淡出（用户可能要对着高亮读原文）。 */
+/* 引用定位：柔和的苔绿半透明块（跟应用的橄榄绿主色一致），不要橙色描边框。
+   与搜索（黄）、选区（暖沙）区分开；不参与搜索命中列表，也不自动淡出。 */
 .quote-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 .quote-hit {
-  position: absolute; border-radius: 2px;
-  background: rgba(255, 150, 50, .26);
-  border: 1px solid rgba(226, 120, 26, .55);
+  position: absolute; border-radius: 3px;
+  background: rgba(125, 158, 80, .20);
+  box-shadow: inset 0 -1px 0 rgba(96, 126, 56, .40);
   box-sizing: border-box;
   mix-blend-mode: multiply;
 }
@@ -829,7 +829,7 @@ body.dragging .viewer { pointer-events: none; }
 :root[data-theme="graphite"] .quote-hit { mix-blend-mode: screen; }
 @media (prefers-color-scheme: dark) { .quote-hit { mix-blend-mode: screen; } }
 /* 点中引用按钮的激活态（再点同一下即取消高亮） */
-.page-ref.active { background: rgba(226, 120, 26, .22); border-color: rgba(226, 120, 26, .6); }
+.page-ref.active { background: rgba(125, 158, 80, .20); border-color: rgba(96, 126, 56, .55); }
 .hl-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 .hl-mark { position: absolute; background: var(--hl); border-radius: 2px; }
 
@@ -1203,7 +1203,15 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
 }
 .msg.user .ava { background: var(--accent); color: var(--accent-fg); }
 .msg .tag { display: none; }
-.msg .pg { color: var(--fg-faint); font-variant-numeric: tabular-nums; }
+.msg .pg {
+  color: var(--fg-faint); font-variant-numeric: tabular-nums;
+  border: 0; background: none; border-radius: 4px;
+  padding: 0 3px; margin: -1px 0;
+  font-family: inherit; font-size: var(--ui-fs-2xs); line-height: 1.4;
+  cursor: pointer;
+}
+.msg .pg:hover, .msg .pg:focus-visible { color: var(--accent); background: var(--accent-soft); }
+.msg .pg:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .msg .role .tbtn { height: calc(18px * var(--ctl-scale)); min-width: calc(18px * var(--ctl-scale)); font-size: calc(11px * var(--ctl-scale)); padding: 0 calc(3px * var(--ctl-scale)); margin-left: auto; }
 
 /* 引用的原文：一条细竖线 + 小字，不做成盒子。
@@ -2284,6 +2292,13 @@ body.dragging .side { transition: width .07s linear; }
 }
 .page-ref:hover { border-color: var(--accent); background: var(--accent-soft); }
 .page-ref:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ── 全屏（沉浸式）：去掉应用内顶栏与底部工具条，文档吃满整屏；Esc 退出 ──
+   窗口本身的全屏由桌面壳（tao）或浏览器 Fullscreen API 负责，这里只管应用内 chrome。 */
+body.window-fullscreen { --topbar-h: 0px; --statusbar-h: 0px; }
+body.window-fullscreen .topbar,
+body.window-fullscreen .viewer-foot { display: none; }
+body.window-fullscreen #main { height: 100vh; }
 
 /* ── 带片段的引用：页码按钮后面把被引原句显示出来（不能只放 title 里，否则正文只剩 p.N） ── */
 .quote-inline {

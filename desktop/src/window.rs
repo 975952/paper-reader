@@ -14,7 +14,7 @@ use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
-    window::{ResizeDirection, WindowBuilder},
+    window::{Fullscreen, ResizeDirection, WindowBuilder},
 };
 #[cfg(windows)]
 use tao::platform::windows::WindowBuilderExtWindows;
@@ -32,13 +32,15 @@ const MIN_H: f64 = 400.0;
 /* ------------------------------------------------------------ 窗口动作（页面 → 壳） */
 
 /// 应用内标题栏发来的动作。页面侧构造：`{type:"minimize"|"maximize"|"close"|"drag"}`、
-/// `{type:"resize", dir:"n"|"s"|"w"|"e"|"nw"|"ne"|"sw"|"se"}`。
+/// `{type:"resize", dir:"n"|"s"|"w"|"e"|"nw"|"ne"|"sw"|"se"}`、
+/// `{type:"fullscreen", on?:boolean}`（不传 on 就切换；Esc 由页面发 on=false）。
 #[derive(Debug, Clone, Copy)]
 enum WindowAction {
     Drag,
     Resize(ResizeDirection),
     Minimize,
     Maximize,
+    Fullscreen(Option<bool>),
     Close,
 }
 
@@ -48,6 +50,7 @@ fn parse_action(msg: &str) -> Option<WindowAction> {
         "drag" => Some(WindowAction::Drag),
         "minimize" => Some(WindowAction::Minimize),
         "maximize" => Some(WindowAction::Maximize),
+        "fullscreen" => Some(WindowAction::Fullscreen(v.get("on").and_then(|x| x.as_bool()))),
         "close" => Some(WindowAction::Close),
         "resize" => {
             let dir = v.get("dir").and_then(|x| x.as_str())?;
@@ -74,16 +77,25 @@ fn ipc_sender_allowed(origin: &str, sender: &str) -> bool {
     is_local_target(origin, sender)
 }
 
-/// 把「最大化 / 还原」状态推回页面：前端用它切图标（`body.window-maximized` + 两个 SVG）。
+/// 把「最大化 / 全屏」状态推回页面：前端用它切图标与沉浸式布局（`body.window-maximized` / `body.window-fullscreen`）。
 /// 只回推布尔值，不传任何用户数据。
-fn push_window_state(webview: &wry::WebView, maximized: bool) {
+fn push_window_state(webview: &wry::WebView, maximized: bool, fullscreen: bool) {
     let js = format!(
-        "window.__prtWindowState && window.__prtWindowState({{ maximized: {} }});",
-        maximized
+        "window.__prtWindowState && window.__prtWindowState({{ maximized: {}, fullscreen: {} }});",
+        maximized, fullscreen
     );
     if let Err(e) = webview.evaluate_script(&js) {
         crate::log_line(&format!("[window] 回推窗口状态失败: {}", e));
     }
+}
+
+/// 无边框全屏：盖住任务栏，退出后恢复原来的尺寸/位置（tao 负责还原）。
+fn is_fullscreen(window: &tao::window::Window) -> bool {
+    window.fullscreen().is_some()
+}
+
+fn set_fullscreen(window: &tao::window::Window, on: bool) {
+    window.set_fullscreen(if on { Some(Fullscreen::Borderless(None)) } else { None });
 }
 
 fn sane(v: Option<f64>, def: f64) -> f64 {
@@ -273,6 +285,7 @@ pub fn run(url: String, background: bool) -> ! {
         .checked_sub(Duration::from_secs(60))
         .unwrap_or_else(Instant::now);
     let mut last_max = window.is_maximized();
+    let mut last_full = is_fullscreen(&window);
 
     event_loop.run(move |event, _event_loop, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -295,18 +308,28 @@ pub fn run(url: String, background: bool) -> ! {
                     }
                     WindowAction::Minimize => window.set_minimized(true),
                     WindowAction::Maximize => window.set_maximized(!window.is_maximized()),
+                    // 全屏：页面传 on 就按它执行（Esc 退出走这条），不传就切换。
+                    WindowAction::Fullscreen(on) => {
+                        let want = on.unwrap_or_else(|| !is_fullscreen(&window));
+                        set_fullscreen(&window, want);
+                    }
                     WindowAction::Close => {
                         let logical = window.inner_size().to_logical::<f64>(window.scale_factor());
-                        save_size(logical.width, logical.height);
+                        // 全屏时的尺寸是屏幕尺寸，不能覆盖用户平时的窗口大小
+                        if !is_fullscreen(&window) {
+                            save_size(logical.width, logical.height);
+                        }
                         *control_flow = ControlFlow::Exit;
                         return;
                     }
                 }
-                // 动作可能改了最大化状态 → 回推给页面切图标
-                let now = window.is_maximized();
-                if now != last_max {
-                    last_max = now;
-                    push_window_state(&main_webview, now);
+                // 动作可能改了最大化 / 全屏状态 → 回推给页面切图标与沉浸式布局
+                let now_max = window.is_maximized();
+                let now_full = is_fullscreen(&window);
+                if now_max != last_max || now_full != last_full {
+                    last_max = now_max;
+                    last_full = now_full;
+                    push_window_state(&main_webview, now_max, now_full);
                 }
             }
             Event::WindowEvent {
@@ -314,18 +337,20 @@ pub fn run(url: String, background: bool) -> ! {
                 window_id,
                 ..
             } => {
-                // 拖动过程中会疯狂触发，节流一下
-                if window_id == main_id && last_save.elapsed() >= Duration::from_millis(700) {
+                // 拖动过程中会疯狂触发，节流一下；全屏时别把屏幕尺寸写进 window.json
+                if window_id == main_id && !is_fullscreen(&window) && last_save.elapsed() >= Duration::from_millis(700) {
                     last_save = Instant::now();
                     let logical = size.to_logical::<f64>(window.scale_factor());
                     save_size(logical.width, logical.height);
                 }
-                // 最大化 / 还原（含双击标题栏、Win+↑、系统菜单）也会走到这里
+                // 最大化 / 还原 / 全屏（含双击标题栏、Win+↑、系统菜单）也会走到这里
                 if window_id == main_id {
-                    let now = window.is_maximized();
-                    if now != last_max {
-                        last_max = now;
-                        push_window_state(&main_webview, now);
+                    let now_max = window.is_maximized();
+                    let now_full = is_fullscreen(&window);
+                    if now_max != last_max || now_full != last_full {
+                        last_max = now_max;
+                        last_full = now_full;
+                        push_window_state(&main_webview, now_max, now_full);
                     }
                 }
             }
@@ -335,8 +360,10 @@ pub fn run(url: String, background: bool) -> ! {
                 ..
             } => {
                 if window_id == main_id {
-                    let logical = window.inner_size().to_logical::<f64>(window.scale_factor());
-                    save_size(logical.width, logical.height);
+                    if !is_fullscreen(&window) {
+                        let logical = window.inner_size().to_logical::<f64>(window.scale_factor());
+                        save_size(logical.width, logical.height);
+                    }
                     *control_flow = ControlFlow::Exit;
                 }
             }
@@ -397,6 +424,18 @@ mod tests {
         assert!(matches!(parse_action(r#"{"type":"maximize"}"#), Some(WindowAction::Maximize)));
         assert!(matches!(parse_action(r#"{"type":"close"}"#), Some(WindowAction::Close)));
         assert!(matches!(parse_action(r#"{"type":"drag"}"#), Some(WindowAction::Drag)));
+        assert!(matches!(
+            parse_action(r#"{"type":"fullscreen"}"#),
+            Some(WindowAction::Fullscreen(None))
+        ));
+        assert!(matches!(
+            parse_action(r#"{"type":"fullscreen","on":false}"#),
+            Some(WindowAction::Fullscreen(Some(false)))
+        ));
+        assert!(matches!(
+            parse_action(r#"{"type":"fullscreen","on":true}"#),
+            Some(WindowAction::Fullscreen(Some(true)))
+        ));
         assert!(matches!(
             parse_action(r#"{"type":"resize","dir":"se"}"#),
             Some(WindowAction::Resize(ResizeDirection::SouthEast))

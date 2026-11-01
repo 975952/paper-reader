@@ -1145,12 +1145,62 @@ function windowAction(type, extra) {
   try { window.ipc.postMessage(JSON.stringify({ type, ...(extra || {}) })); } catch { /* 壳没接住就算了 */ }
 }
 
-/** Rust 侧窗口状态变化时用 evaluate_script 调它（当前用于「最大化 ↔ 还原」切图标） */
+/* ------------------------------------------------------------ 全屏
+   桌面壳里走窗口 IPC（tao 真正无边框全屏，盖住任务栏；退出恢复原窗口大小）；
+   浏览器里降级用 Fullscreen API。进入后隐藏应用内顶栏与底栏（沉浸式），Esc 退出。 */
+function fullscreenActive() {
+  return !!(document.fullscreenElement || document.body.classList.contains('window-fullscreen'));
+}
+
+function applyFullscreenUi(on) {
+  const active = !!on;
+  document.body.classList.toggle('window-fullscreen', active);
+  const btn = $('#fullscreenBtn');
+  if (!btn) return;
+  btn.classList.toggle('on', active);
+  btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  btn.setAttribute('aria-label', active ? '退出全屏' : '进入全屏');
+  btn.title = active ? '退出全屏（Esc）' : '全屏　F11';
+}
+
+async function toggleFullscreen(force) {
+  const want = force === undefined ? !fullscreenActive() : !!force;
+  if (WINDOW_IPC) { windowAction('fullscreen', { on: want }); return; }
+  try {
+    if (want) {
+      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+        await document.documentElement.requestFullscreen();
+      }
+      applyFullscreenUi(true);
+      flashHint('已进入全屏 · 按 Esc 退出');
+    } else {
+      if (document.fullscreenElement && document.exitFullscreen) await document.exitFullscreen();
+      applyFullscreenUi(false);
+    }
+  } catch {
+    // 浏览器拒绝（比如没有用户手势）不假装成功
+    flashHint('当前窗口不允许全屏');
+  }
+}
+
+document.addEventListener('fullscreenchange', () => {
+  if (!WINDOW_IPC) applyFullscreenUi(!!document.fullscreenElement);
+});
+
+/** Rust 侧窗口状态变化时用 evaluate_script 调它（最大化图标 / 全屏沉浸式布局） */
 window.__prtWindowState = (state) => {
   document.body.classList.toggle('window-maximized', !!(state && state.maximized));
+  applyFullscreenUi(!!(state && state.fullscreen));
 };
 
 function initWindowChrome() {
+  // 全屏按钮两种环境都要能点（浏览器里没有窗口控件，但有 Fullscreen API）
+  $('#fullscreenBtn')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleFullscreen();
+  });
+
   // 没有壳：不显示窗口控件，也不装拖动热区（浏览器里这些动作没有意义）
   if (!WINDOW_IPC) { document.body.classList.add('no-window-chrome'); return; }
 
@@ -4157,9 +4207,21 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   /** 译文条目：本条的界面要「纯净」（无动作按钮，role 行也不留回原文图标） */
   const isTranslateEntry = block === 'translate';
 
+  const refText = quote && uiStyle.showQuote ? quote : '';
+  /** 点页码标签时优先高亮这条消息里同一页的带片段引用；没有就用这条消息自己的原文引用 */
+  const quoteForPage = (btn) => {
+    const msg = btn?.closest?.('.msg');
+    const qref = msg?.querySelector?.(`.page-ref.quote-ref[data-page="${page}"]`);
+    return qref?.dataset.fragment || refText;
+  };
   const role = el('div', { class: `role${!isUser && !page ? ' hidden' : ''}` },
     tag ? el('span', { class: 'tag', text: tag, 'aria-hidden': 'true' }) : null,
-    page && uiStyle.showPage ? el('span', { class: 'pg', text: `第${page}页` }) : null,
+    page && uiStyle.showPage ? el('button', {
+      class: 'pg', type: 'button', text: `第${page}页`,
+      title: `回到第${page}页原文并高亮对应内容`,
+      'aria-label': `回到第${page}页原文并高亮对应内容`,
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); jumpAndHighlight(page, quoteForPage(e.currentTarget)); },
+    }) : null,
     // 译文块不要动作按钮（「最纯净的界面」）：连 role 行里这个「回原文」图标也去掉，
     // 跳回原文统一由下面那块可点击的原文引用承担。
     !isUser && page && uiStyle.showPage && !isTranslateEntry ? el('button', {
@@ -4169,15 +4231,14 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
       onclick: () => jumpToPageWithHistory(page, { smooth: true }),
     }, iconEl('jump-back')) : null,
   );
-  const refText = quote && uiStyle.showQuote ? quote : '';
   const refClickable = !!refText && !!page && !isUser;
   const ref = refText
     ? el(refClickable ? 'button' : 'div', {
       class: `ref${refClickable ? ' ref-jump' : ''}`,
       type: refClickable ? 'button' : null,
-      title: refClickable ? `跳回第 ${page} 页原文：${refText}` : refText,
-      'aria-label': refClickable ? `跳回第 ${page} 页原文` : null,
-      onclick: refClickable ? () => jumpToPageWithHistory(page, { smooth: true }) : null,
+      title: refClickable ? `回到第 ${page} 页并高亮原文：${refText}` : refText,
+      'aria-label': refClickable ? `回到第 ${page} 页并高亮原文` : null,
+      onclick: refClickable ? (e) => { e.preventDefault(); jumpAndHighlight(page, refText); } : null,
     }, refText)
     : null;
   const shots = (imageSrc ? [imageSrc] : (thumbs || [])).filter(Boolean);
@@ -6461,26 +6522,51 @@ function markReversedBodies() {
  * 带 ‖ 片段的引用点击后会跳到该页并高亮片段（橙色），再点同一个引用可取消。
  * 渲染失败/页码越界时保持普通文字，不影响回答本身。
  */
+/**
+ * 引用片段的两种形态：
+ *  - text：纯文本（用于 data-fragment / title / 纸面高亮匹配）；
+ *  - html：原来的行内 HTML（markdown 粗体、KaTeX 公式在片段里也能正常显示）。
+ * 只对行内内容保留 HTML；片段被 markdown 段落/列表切断时退回纯文本，避免嵌套块级元素。
+ */
+function quoteFragmentParts(html) {
+  const raw = String(html || '');
+  const holder = document.createElement('div');
+  holder.innerHTML = raw;
+  // 公式片段里 KaTeX 会同时输出 MathML（给读屏）和可见 HTML；纯文本口径只取可见那份，
+  // 否则 textContent 会把同一公式拼成「E=mc2E=mc^2E=mc2」。
+  const visible = holder.cloneNode(true);
+  visible.querySelectorAll('.katex-mathml').forEach((node) => node.remove());
+  const text = (visible.textContent || '').replace(/\s+/g, ' ').trim();
+  const blocky = /<(?:p|div|ul|ol|li|pre|blockquote|h[1-6]|table|thead|tbody|tr|td|th|section)\b/i.test(raw);
+  // 行内片段正常保留 HTML（公式/粗体仍能显示）；块级结构或有异常长文本时退回纯文本
+  if (blocky || text.length > 600) return { text: text.slice(0, 600), html: escapeHtml(text.slice(0, 600)) };
+  return { text, html: raw.trim() };
+}
+
 function decoratePageRefs(html) {
   const pages = Number(viewer?.numPages) || 0;
-  return String(html || '').replace(/〔p\.(\d{1,4})(?:[–\-](\d{1,4}))?(?:\|\||‖)([^〕]{1,200})〕|〔p\.(\d{1,4})(?:[–\-](\d{1,4}))?〕/g,
+  // 兼容模型的各种写法：p. 前后带空格、半角/全角竖线、长破折号；片段长度按「可见文字」算，
+  // HTML 上限放宽（行内公式的 KaTeX 标记可能上千字符），避免「带公式的引用不渲染」
+  return String(html || '').replace(
+    /〔\s*p\.\s*(\d{1,4})\s*(?:[–\-—]\s*(\d{1,4}))?\s*(?:\|\||‖|｜)\s*([^〕]{1,8000})〕|〔\s*p\.\s*(\d{1,4})\s*(?:[–\-—]\s*(\d{1,4}))?\s*〕/g,
     (raw, aPipe, bPipe, frag, aPlain, bPlain) => {
       const a = aPipe || aPlain;
       const b = aPipe ? bPipe : bPlain;
       const p = Number(a);
       if (!Number.isInteger(p) || p < 1 || (pages && p > pages)) return raw;
       const label = b ? `p.${a}–${b}` : `p.${a}`;
-      const fragment = aPipe ? String(frag || '').replace(/\s+/g, ' ').trim().slice(0, 200) : '';
+      const parts = aPipe ? quoteFragmentParts(frag) : null;
+      const fragment = parts?.text || '';
       if (!fragment) {
         const title = b ? `跳到第 ${a}–${b} 页` : `跳到第 ${a} 页`;
         return `<button type="button" class="page-ref" data-page="${p}" title="${escapeHtml(title)}">${label}</button>`;
       }
-      const title = `跳到第 ${p} 页并定位原文：${fragment.slice(0, 60)}`;
+      const title = `跳到第 ${p} 页并定位原文：${fragment.slice(0, 80)}`;
       // 片段必须跟着显示出来：之前只塞进 title，渲染后正文只剩 p.5，引用的原句被「吞掉」了
-      //（用户实测：老师手写答案变成连续四个 p.5）。文字保持普通文本，可选中复制；
+      //（用户实测：老师手写答案变成连续四个 p.5）。文字保持可选中复制；
       // 只有前面的页码按钮负责跳页 + 高亮。
-      return `<button type="button" class="page-ref quote-ref" data-page="${p}" data-fragment="${escapeHtml(fragment)}" title="${escapeHtml(title)}">${label}</button>`
-        + ` <span class="quote-inline">${escapeHtml(fragment)}</span>`;
+      return `<button type="button" class="page-ref quote-ref" data-page="${p}" data-fragment="${escapeHtml(fragment.slice(0, 600))}" title="${escapeHtml(title)}">${label}</button>`
+        + ` <span class="quote-inline">${parts.html}</span>`;
     });
 }
 
@@ -6501,12 +6587,14 @@ function clearQuoteHighlight() {
   return had;
 }
 
-/** 点击带原文片段的引用：跳页 + 橙色高亮；再点同一个 = 取消 */
+/** 点击带原文片段的引用：跳页 + 高亮；再点同一个 = 取消。
+ *  只记返回历史，真正的定位（一次即时跳转 + 必要时才滚动）全交给 viewer.highlightQuote，
+ *  避免「先平滑滚到页顶、再刷新重绘、再滚到句子」的闪动。 */
 async function jumpToQuote(page, fragment, btn) {
   const same = quoteState.page === page && quoteState.fragment === fragment && quoteState.btn === btn;
   if (same) { clearQuoteHighlight(); return; }
   clearQuoteHighlight();
-  jumpToPageWithHistory(page, { smooth: true });
+  if (pageJumpWouldMove(page)) recordReaderJump();
   quoteState = { page, fragment, btn: btn || null };
   btn?.classList.add('active');
   let ok = false;
@@ -6514,6 +6602,16 @@ async function jumpToQuote(page, fragment, btn) {
   // 期间被取消（用户又点了别处）或界面里根本找不到这段原文：别留一个假的激活态
   if (quoteState.page !== page || quoteState.fragment !== fragment) { btn?.classList.remove('active'); return; }
   if (!ok) clearQuoteHighlight();
+}
+
+/** 点击问答里的页码标签 / 原文引用块：跳到对应页，有原文就画橙色高亮（没有就只跳页）。
+ *  高亮取消方式与引用一致：点正文 / 再点一次 / 翻页 / 换文档。 */
+function jumpAndHighlight(page, text) {
+  const p = Number(page);
+  if (!p) return;
+  const fragment = stripPageLabels(String(text || '')).replace(/\s+/g, ' ').trim().slice(0, 200);
+  if (fragment) jumpToQuote(p, fragment, null);
+  else jumpToPageWithHistory(p, { smooth: true });
 }
 
 /** 页码按钮：按住委托，流式重绘也不用重绑 */
@@ -8466,18 +8564,21 @@ function initShortcuts() {
     const typing = tag === 'input' || tag === 'textarea' || e.target.isContentEditable;
 
     if (e.key === 'Escape') {
+      // Esc 的第一优先级：退出全屏（全屏时用户只有这个明确预期；引用高亮不再用 Esc 取消）
+      if (fullscreenActive()) { e.preventDefault(); toggleFullscreen(false); return; }
       if (!$('#regionOverlay').classList.contains('hidden')) { state.stopRegion?.(); return; }
       if (!$('#settingsModal').classList.contains('hidden')) { closeSettings(); return; }
       if (!$('#searchBar').classList.contains('hidden')) { $('#searchClose').click(); return; }
       if (!$('#noteBox').classList.contains('hidden')) { saveNoteBox(); return; }
       if (state.abort) { abortStream('user'); $('#composerHint').textContent = '正在停止…'; return; }
-      // 引用高亮：Esc 先取消高亮（优先级低于正在生成的停止）
-      if (quoteState.page) { clearQuoteHighlight(); return; }
+      // 引用高亮不随 Esc 取消：点正文任意处 / 再点同一个引用 / 翻页 / 换文档时清
       // Esc 是明确的「不要这个选区了」：连方块和记住的选区一起清掉
       if (state.selection) { clearSelectionState(); viewer?.clearSelection(); return; }
       hideBubble();
       return;
     }
+    // 全屏切换：F11（浏览器里也照常用；桌面壳走窗口 IPC）
+    if (e.key === 'F11') { e.preventDefault(); toggleFullscreen(); return; }
     if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); setReadingFontSize(uiStyle.fontSize + 1); return; }
     if ((e.ctrlKey || e.metaKey) && (e.key === '-' || e.key === '_')) { e.preventDefault(); setReadingFontSize(uiStyle.fontSize - 1); return; }
     if ((e.ctrlKey || e.metaKey) && e.key === '0') { e.preventDefault(); setReadingFontSize(DEFAULT_UI_STYLE.fontSize); return; }

@@ -1716,27 +1716,42 @@ export class PdfViewer {
 
   /**
    * 跳到某页并高亮「原文片段」（模型引用里的 〔p.N‖片段〕 用）。
-   * 片段先精确匹配；匹配不到时退化为最长前缀，保证「至少跳到那一页」。
+   * 刻意做成「一次到位」：即时跳页（不做平滑滚动动画）、只有目标页还没渲染时才等它渲染，
+   * 已渲染的页面绝不重建（之前每次 refreshPage 都会把画布拆掉重画，看起来就是闪一下）。
+   * 高亮位置已经在视口里时不再滚动，避免同一引用连点时来回动。
    * @returns {Promise<boolean>} 是否画出了高亮
    */
   async highlightQuote(pageNum, fragment) {
     const target = clamp(Math.round(Number(pageNum) || 1), 1, this.numPages || 1);
-    const text = String(fragment || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    // 片段可能是一整句（比按钮 title 里显示的更长），高亮时尽量覆盖整句，不能只画开头几个字
+    const text = String(fragment || '').replace(/\s+/g, ' ').trim().slice(0, 600);
     this._quote = { page: target, fragment: text };
+    // 即时跳页（behavior:auto），目标页没渲染好就等它的渲染任务；已渲染就直接用
     await this.goToPage(target);
-    await this.refreshPage(target);
-    const ok = this._paintQuote(target);
-    if (ok) {
-      const entry = this.rendered.get(target);
-      const first = entry?.quoteLayer?.firstElementChild;
-      if (first) {
-        const y = parseFloat(first.style.top || '0');
-        const pageTop = this.offsets[target] ?? 0;
-        const want = Math.max(0, pageTop + y - this.container.clientHeight * 0.35);
-        this.container.scrollTo({ top: want, behavior: 'smooth' });
-      }
+    if (!this.rendered.get(target)?.textDiv) {
+      await this.renderTasks.get(target)?.catch?.(() => {});
     }
-    return ok;
+    if (!this.rendered.get(target)?.textDiv) {
+      // 兜底：仍没有文本层（极少见）才重建这一页
+      await this.refreshPage(target);
+    }
+    const ok = this._paintQuote(target);
+    if (!ok) return false;
+    const entry = this.rendered.get(target);
+    const first = entry?.quoteLayer?.firstElementChild;
+    if (!first) return true;
+    // 已经在视口里就不动滚动条：连点同一个引用不会来回晃
+    const view = this.container.getBoundingClientRect();
+    const rect = first.getBoundingClientRect();
+    const margin = Math.min(80, this.container.clientHeight * 0.15);
+    const visible = rect.top >= view.top + margin && rect.bottom <= view.bottom - margin;
+    if (!visible) {
+      const y = parseFloat(first.style.top || '0');
+      const pageTop = this.offsets[target] ?? 0;
+      const want = Math.max(0, pageTop + y - this.container.clientHeight * 0.35);
+      this.container.scrollTo({ top: want, behavior: 'auto' });
+    }
+    return true;
   }
 
   /** 只重画某一页的引用高亮（页面重渲染后由 _renderPage 调用） */
@@ -1777,19 +1792,67 @@ export class PdfViewer {
     return painted > 0;
   }
 
-  /** 片段匹配：整段优先，其次按最长前缀退让（容忍空白/换行差异） */
+  /**
+   * 片段匹配：把页面 span 文本压成「去掉空白的小写串」再定位起点，
+   * 然后尽量延伸到整句结束（用句尾回找 + 贪心延伸容忍连字符/换行/个别字差），
+   * 返回覆盖完整片段的 span 区间，而不是只画开头命中的那几个字。
+   */
   _matchQuote(spans, fragment) {
-    const f = String(fragment || '').trim();
-    if (!f) return [];
-    const candidates = [f];
-    for (const len of [80, 60, 40, 24, 16, 10, 6]) {
-      if (f.length > len) candidates.push(f.slice(0, len));
+    const raw = String(fragment || '').trim();
+    if (!raw) return [];
+    const fNorm = raw.replace(/\s+/g, '').toLowerCase();
+    if (fNorm.length < 2) return [];
+    // norm = 页面文本去掉空白；pos[i] 记住第 i 个字对应哪个 span 的哪个字符
+    const pos = [];
+    let norm = '';
+    spans.forEach((span, spanIndex) => {
+      const text = span.textContent || '';
+      for (let i = 0; i < text.length; i++) {
+        if (/\s/.test(text[i])) continue;
+        pos.push({ spanIndex, charIndex: i });
+        norm += text[i];
+      }
+    });
+    const lower = norm.toLowerCase();
+    let at = lower.indexOf(fNorm);
+    let end = at < 0 ? -1 : at + fNorm.length;
+    if (at < 0) {
+      // 整句对不上（换行、连字符、个别字差）：先用最长前缀找起点，再靠句尾把终点补回来
+      let startLen = 0;
+      for (const len of [160, 120, 90, 60, 40, 24, 16, 10, 6]) {
+        if (fNorm.length <= len) continue;
+        at = lower.indexOf(fNorm.slice(0, len));
+        if (at >= 0) { startLen = len; break; }
+      }
+      if (at < 0) return [];
+      end = at + startLen;
+      const tailLen = Math.min(24, fNorm.length);
+      if (tailLen >= 6) {
+        const te = lower.indexOf(fNorm.slice(-tailLen), at + 1);
+        if (te > at) end = Math.max(end, te + tailLen);
+      }
+      // 中段最多容忍 2 个字符不一致，逐字向后延伸；一旦连续对不上就停（不跨到下一句）
+      let k = startLen;
+      let miss = 0;
+      while (at + k < lower.length && k < fNorm.length && miss <= 2) {
+        if (lower[at + k] === fNorm[k]) { k += 1; miss = 0; } else { miss += 1; }
+      }
+      if (k > end - at) end = at + k;
+      end = Math.min(end, lower.length);
     }
-    for (const cand of candidates) {
-      const hits = findInSpans(spans, cand);
-      if (hits.length) return hits;
+    if (end <= at) return [];
+    // norm 区间 → span 区间（同一 span 里取首尾，跨 span 逐段拆）
+    const out = [];
+    let cur = null;
+    for (let i = at; i < end; i++) {
+      const p = pos[i];
+      if (!p) continue;
+      if (cur && cur.spanIndex === p.spanIndex) { cur.end = p.charIndex + 1; continue; }
+      if (cur) out.push(cur);
+      cur = { spanIndex: p.spanIndex, start: p.charIndex, end: p.charIndex + 1 };
     }
-    return [];
+    if (cur) out.push(cur);
+    return out.map((seg) => ({ hitIndex: 0, spanIndex: seg.spanIndex, start: seg.start, end: seg.end }));
   }
 
   setActiveQuery(q) {
