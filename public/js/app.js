@@ -734,6 +734,10 @@ const state = {
   // B 线 P3：会话文件里读到的条目缓存（按文档；热切换时随视图停放/恢复），以及它属于哪篇文档
   _fileEntries: [],
   _fileDocId: '',
+  /** 当前文件夹（一次只处理一个文件夹；文件可跨文件夹转移） */
+  currentFolder: '',
+  /** 这个文件夹是否已被「完全关闭」（回到首页/所有标签关闭）→ 再进来默认新会话 */
+  folderClosed: false,
   teaching: { walk: null, current: null },
   teachingCache: new Map(),
   /** 左栏文件多选（批量删除 / 批量移动）；存相对路径，仅 PDF，不含文件夹 */
@@ -770,6 +774,7 @@ let serverState = {};
   initPanelSync();
   initViewer();
   initFiles();
+  initFolderSwitch();
   initSelection();
   initNoteBox();
   initCiteBox();
@@ -797,6 +802,7 @@ let serverState = {};
   const migrated = applyPanelMigration();
   if (migrated) { applyPanels(); applyResponsiveLayout(); }
   await refreshPaperList();
+  await initFolderContext();
   initTabs();
   if (tabsFeatureEnabled()) await bootTabWorkspace();
   else await maybeReopenLast();
@@ -1787,11 +1793,13 @@ function initViewer() {
     get pdfHotAttaches() { return pdfHotAttaches; },
     get pdfHandleCount() { return pdfHandles.size; },
     get docViewCount() { return docViews.size; },
-    get globalSessionDoc() { return GLOBAL_SESSION_DOC; },
+    get currentFolderKey() { return currentFolderKey(); },
+    get currentFolder() { return currentFolderPath(); },
     get chatVersion() { return chatVersion; },
     get translateSid() { return TRANSLATE_SID; },
     get lastHotTrace() { return window.__lastHotTrace || null; },
     openDoc, closeTab, activateTab, moveTab, reopenClosedTab, goWelcome,
+    newSession, switchSession, deleteSession, clearCurrentSession, loadSessionList, switchFolder,
     // P2.5 Agent 读取：开关（写 localStorage）、默认值、最近一次运行统计
     get agentRead() { return agentReadEnabled(); },
     setAgentRead(on) { writeFlag('reader.agentRead', !!on); return agentReadEnabled(); },
@@ -2167,6 +2175,7 @@ async function refreshPaperList() {
     } else { state.papers = []; state.folders = []; }
   } catch { state.papers = []; state.folders = []; }
   renderPaperList();
+  renderFolderSwitch();
 }
 
 const PAPER_GRIP_SVG = '<svg viewBox="0 0 24 24" width="10" height="16" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>';
@@ -3382,7 +3391,7 @@ async function reopenClosedTab() {
 }
 
 /** 关掉全部标签 → Welcome（现有 #home 书架页；文档对象保留，只是不在工作区里） */
-async function goWelcome() {
+async function goWelcome({ skipSave = false } = {}) {
   cancelSearch({ clearInput: true, close: true, focus: false });
   abortStream('document-switch');
   hideDocLoading();
@@ -3397,13 +3406,14 @@ async function goWelcome() {
       }
     } catch { /* 挂起失败不影响回首页 */ }
   }
-  if (state.doc) {
+  if (state.doc && !skipSave) {
     try { await saveSessionNow(); } catch { /* 保存失败不挡回首页 */ }
   }
   tabsStore.active = '';
   tabsStore.tabs = [];
   tabsSyncBar();
   tabsPersist();
+  state.folderClosed = true;   // 这个文件夹已完全关闭：下次打开默认新会话
   cleanStaleLastDoc();
   setView('home');
   $('#docName').textContent = '未打开文档';
@@ -3485,7 +3495,7 @@ async function bootTabWorkspace() {
   if (openName && !named) toast('papers/ 里没有找到 ' + openName, 'err', 4000);
 
   // ① 先恢复上次的工作区（文件还在的标签才恢复；打开顺序不变）
-  const restorable = ws.tabs.filter((t) => byId.has(t.docId));
+  const restorable = ws.tabs.filter((t) => byId.has(t.docId) && folderOfDoc(t.docId) === currentFolderPath());
   if (restorable.length) {
     tabsStore.tabs = restorable.map((t) => {
       const paper = byId.get(t.docId);
@@ -3535,6 +3545,8 @@ async function openDocColdSwitch({ name, url, docId, path }) {
   const prevDocId = state.doc?.docId || null;
   // B 线 P2：切走前把上一篇的右栏 DOM 与会话状态整体停放，切回来直接挂回（不重放渲染）
   if (prevDocId) parkDocView(prevDocId);
+  // 用户口径：每次只处理一个文件夹；换到别的文件夹 = 关掉旧标签 + 开新会话
+  ensureFolderForDoc(docId);
   const myOpen = (state.openSeq = (state.openSeq || 0) + 1);
   const superseded = () => myOpen !== state.openSeq;
   hideTranslationCard();
@@ -5189,29 +5201,57 @@ const persistSession = debounce(() => {
 function scheduleSessionSave() { if (state.doc) persistSession(); }
 
 const SESSION_KEY = 'reader.activeSession';
+const CURRENT_FOLDER_KEY = 'reader.currentFolder.v1';
 
-/* B 线 P3（2026-11-01 用户追加拍板：问答会话改成**全局**）
-   - 问答会话 = 所有已导入论文共用一份：/api/session?doc=__global__（复用现有接口与 doc 参数，不新增后端接口）；
-   - 译文 = 文档级伪会话：/api/session?doc=<docId>&sid=__translate；
-   - 旧「按文档」的会话文件保持不动，首次打开某篇文档时懒迁移（复制 chat 条目进全局、translate 条目进文档译文文件）。 */
-const GLOBAL_SESSION_DOC = '__global__';
+/* 会话归属（2026-11-02 用户拍板）：
+   - **问答会话属于文件夹**：每次只处理一个文件夹；换文件夹 = 换一套标签/会话，只显示这个文件夹里开过的会话；
+   - 重新进入一个文件夹（切回来 / 完全关掉后再打开 / 重启）默认**新开一个会话**（旧会话文件保留在列表里可选）；
+   - 译文仍按文档（doc=<docId>&sid=__translate）；
+   - 老的「按文档」会话文件懒迁移进所属文件夹；旧的全局会话启动时按 docId→文件夹 拆分导入（复制，不删旧文件）。 */
+const LEGACY_GLOBAL_SESSION_DOC = '__global__';
 const TRANSLATE_SID = '__translate';
-/* 懒迁移标记。v1 有个 bug：热切换会拿停放的旧会话覆盖全局文件，把已迁移进来的旧聊天冲掉，
-   但 v1 标记已经写下了（重开也不会再迁）。所以升到 v2：老用户升级后每个文档**再迁一次**（按内容去重，
-   不会重复），把被冲掉的旧聊天补回全局会话。 */
-const MIGRATE_FLAG_PREFIX = 'reader.migrated.global.v2.';
+const FOLDER_MIGRATE_FLAG_PREFIX = 'reader.migrated.folder.v3.';
+const GLOBAL_SPLIT_FLAG = 'reader.migrated.globalToFolder.v1';
+
+function fnv1a8(str) {
+  let h = 0x811c9dc5;
+  const s = String(str);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+/** 文件夹稳定键（可直接当 /api/session 的 doc 参数；不含用户路径原文） */
+function folderKeyOf(path) { return `folder-${fnv1a8(`/${String(path || '')}`)}`; }
+function currentFolderPath() { return state.currentFolder || ''; }
+function currentFolderKey() { return folderKeyOf(currentFolderPath()); }
+/** 论文所属文件夹（'' = papers 根目录） */
+function folderOfDoc(docId) {
+  const p = (state.papers || []).find((x) => x && x.docId === docId);
+  return p ? String(p.folder || '') : '';
+}
+function folderDisplayName(path) {
+  if (!path) return 'papers/';
+  return path.replace(/\//g, ' / ');
+}
+function persistCurrentFolder() {
+  try { localStorage.setItem(CURRENT_FOLDER_KEY, currentFolderPath()); } catch { /* 忽略 */ }
+}
 
 function readActiveSessions() {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY) || '{}') || {}; } catch { return {}; }
 }
-/** 活动会话 sid：全局只记一份（问答会话不属于某一篇文档） */
+/** 活动会话 sid：**按文件夹**记一份（问答会话属于文件夹，不属于某一篇文档） */
 function activeSidFor(_docId) {
   const map = readActiveSessions();
-  return typeof map[GLOBAL_SESSION_DOC] === 'string' ? map[GLOBAL_SESSION_DOC] : '';
+  const key = currentFolderKey();
+  return typeof map[key] === 'string' ? map[key] : '';
 }
 function setActiveSidFor(_docId, sid) {
   const map = readActiveSessions();
-  if (sid) map[GLOBAL_SESSION_DOC] = sid; else delete map[GLOBAL_SESSION_DOC];
+  const key = currentFolderKey();
+  if (sid) map[key] = sid; else delete map[key];
   try { localStorage.setItem(SESSION_KEY, JSON.stringify(map)); } catch { /* 忽略 */ }
 }
 /** 新会话的 sid：时间戳 + 随机后缀，够用且不会撞 */
@@ -5317,7 +5357,7 @@ function serializeTeachingState() {
   };
 }
 
-/** 构建会话 payload 并按归属拆分：全局问答（所有论文共用）+ 文档译文（__translate 伪会话）。 */
+/** 构建会话 payload 并按归属拆分：文件夹问答（当前文件夹共用）+ 文档译文（__translate 伪会话）。 */
 function buildSessionPayload() {
   if (!state.doc) return null;
   const docId = state.doc.docId;
@@ -5352,14 +5392,15 @@ function buildSessionPayload() {
     .slice(-40)
     .map((e) => ({ ...e, block: String(e.block || 'translate') }));
   const allEntries = [...kept, ...entries];
-  const prefix = `${docId}:`;
-  const ops = [...state.opsCache.entries()].filter(([key]) => key.startsWith(prefix)).slice(-20)
-    .map(([key, value]) => ({ id: key.slice(prefix.length), text: String(value.text || '').slice(0, 12000), at: value.at || Date.now(), page: value.page || null }));
-  // ① 全局问答会话：chat 条目 + 历史 + 摘要 + 教学进度（教学状态自带 docId，按当前文档过滤）
+  /* AI 功能记录（深入阅读等）属于**本次文件夹会话**：换会话/重新进文件夹时清空，
+     这样新会话里 AI 功能菜单不会显示「已生成」，点它会重新算。 */
+  const ops = [...state.opsCache.entries()].slice(-40)
+    .map(([key, value]) => ({ id: key, text: String(value.text || '').slice(0, 12000), at: value.at || Date.now(), page: value.page || null }));
+  // ① 文件夹问答会话：chat 条目 + 历史 + 摘要 + 教学进度 + AI 功能记录
   const chat = {
     entries: allEntries.filter((e) => e.block !== 'translate'),
     history: snapshotHistory(state.history),
-    ops: [],
+    ops,
     teaching: serializeTeachingState(),
     updatedAt: Date.now(),
     summary: String(state.sessionSummary || '').slice(0, 2000),
@@ -5367,11 +5408,11 @@ function buildSessionPayload() {
     // A 线 P3：摘要所属提示词版本（读取时版本不同视为旧摘要，可重算）
     summaryPrompt: PROMPT_SYSTEM_VERSION,
   };
-  // ② 文档级译文伪会话：只放 translate 条目 + 本文档的「深入阅读」缓存
+  // ② 文档级译文伪会话：只放 translate 条目（AI 功能记录已归会话）
   const translate = {
     entries: allEntries.filter((e) => e.block === 'translate'),
     history: [],
-    ops,
+    ops: [],
     teaching: null,
     updatedAt: Date.now(),
     summary: '',
@@ -5389,7 +5430,7 @@ function buildSessionPayload() {
   return { chat: clampPayload(chat), translate: clampPayload(translate) };
 }
 
-/** 保存：全局问答 → doc=__global__；本文档译文 → doc=<docId>&sid=__translate（复用现有接口） */
+/** 保存：文件夹问答 → doc=<folderKey>；本文档译文 → doc=<docId>&sid=__translate（复用现有接口） */
 async function saveSessionNow() {
   if (!state.doc) return;
   const both = buildSessionPayload();
@@ -5398,22 +5439,22 @@ async function saveSessionNow() {
   const sid = activeSidFor(docId);
   const headers = { 'Content-Type': 'application/json' };
   const [chatRes, translateRes] = await Promise.all([
-    fetch(`/api/session?${sessionQuery(GLOBAL_SESSION_DOC, sid)}`, { method: 'POST', headers, body: both.chat }),
+    fetch(`/api/session?${sessionQuery(currentFolderKey(), sid)}`, { method: 'POST', headers, body: both.chat }),
     fetch(`/api/session?${sessionQuery(docId, TRANSLATE_SID)}`, { method: 'POST', headers, body: both.translate }),
   ]);
   if (!chatRes.ok) throw new Error(`HTTP ${chatRes.status}`);
   if (!translateRes.ok) throw new Error(`译文保存失败 HTTP ${translateRes.status}`);
-  // 记住「刚存进去的全局会话指纹」：下次冷恢复读到同样的内容时就不用作废停放视图（热切换仍可复用 DOM）
+  // 记住「刚存进去的文件夹会话指纹」：下次冷恢复读到同样的内容时就不用作废停放视图（热切换仍可复用 DOM）
   try { globalChatSig = chatSigOf(sid, JSON.parse(both.chat).entries); } catch { globalChatSig = ''; }
 }
 
 /**
- * B 线 P3 懒迁移：旧「按文档」会话 → 全局问答 + 文档译文（**复制，不删旧文件**；失败下次打开再试）。
+ * 懒迁移：旧「按文档」会话 → **所属文件夹**的默认会话 + 文档译文（复制，不删旧文件；失败下次打开再试）。
  * 幂等：localStorage 标记成功迁移的文档；旧 chat 按 kind|text|page 去重，旧 translate 同理。
  */
 async function migrateLegacySession(docId) {
   if (!docId) return;
-  const flag = `${MIGRATE_FLAG_PREFIX}${docId}`;
+  const flag = `${FOLDER_MIGRATE_FLAG_PREFIX}${docId}`;
   try { if (localStorage.getItem(flag)) return; } catch { /* ignore */ }
   const dedupeKey = (e) => `${e?.kind || ''}|${e?.text || ''}|${e?.page || ''}`;
   const headers = { 'Content-Type': 'application/json' };
@@ -5448,28 +5489,33 @@ async function migrateLegacySession(docId) {
       });
       if (!saveRes.ok) return;   // 失败不标记，下次重试
     }
-    // ② chat 条目 → 全局会话（按当前活动会话追加）
+    // ② chat 条目 → 所属文件夹的默认会话（复制，不删旧文件）
     const oldChat = oldEntries.filter((e) => e && e.block !== 'translate');
     if (oldChat.length) {
-      const sid = activeSidFor(docId);
-      if (sid) return;           // 已经在某个新会话里：不动它，等默认会话再迁移（避免把旧内容塞进新会话）
-      const gRes = await fetch(`/api/session?${sessionQuery(GLOBAL_SESSION_DOC, '')}`);
+      const folderKey = folderKeyOf(folderOfDoc(docId));
+      const gRes = await fetch(`/api/session?${sessionQuery(folderKey, '')}`);
       const gSaved = gRes.ok ? await gRes.json() : {};
       const existing = new Set((gSaved.entries || []).map(dedupeKey));
       const merged = [...(gSaved.entries || [])];
       for (const e of oldChat) {
         const key = dedupeKey(e);
         if (existing.has(key)) continue;
-        // 旧条目补来源文档标注（迁移时代它进入全局会话的那篇论文）
         const docTitle = state.doc?.docId === docId ? String(state.doc?.name || '') : '';
         merged.push({ ...e, docId, docTitle: docTitle.slice(0, 300) });
         existing.add(key);
       }
-      const saveRes = await fetch(`/api/session?${sessionQuery(GLOBAL_SESSION_DOC, '')}`, {
+      // 旧文件里的 ops（深入阅读缓存）按 docId:opId 搬进会话，旧会话才会显示「已生成」
+      const oldOps = (Array.isArray(old.ops) ? old.ops : [])
+        .filter((op) => op && op.id && typeof op.text === 'string')
+        .map((op) => ({ id: `${docId}:${op.id}`, text: op.text.slice(0, 12000), at: op.at || Date.now(), page: op.page || null }));
+      const mergedOps = [...(Array.isArray(gSaved.ops) ? gSaved.ops : [])];
+      for (const op of oldOps) if (!mergedOps.some((x) => x.id === op.id)) mergedOps.push(op);
+      const saveRes = await fetch(`/api/session?${sessionQuery(folderKey, '')}`, {
         method: 'POST', headers,
         body: JSON.stringify({
           ...gSaved,
           entries: merged.slice(-180),
+          ops: mergedOps.slice(-40),
           teaching: gSaved.teaching || null,
           updatedAt: Date.now(),
         }),
@@ -5478,6 +5524,228 @@ async function migrateLegacySession(docId) {
     }
     try { localStorage.setItem(flag, '1'); } catch { /* ignore */ }
   } catch { /* 迁移失败：保留旧文件，下次打开这篇再试 */ }
+}
+
+/* ── 文件夹上下文：一次只处理一个文件夹；换文件夹 = 新会话；只列这个文件夹的会话 ── */
+
+/** 关闭不属于某个文件夹的标签（换文件夹时用），并释放它们的 PDF 句柄/停放视图 */
+function closeTabsNotInFolder(path) {
+  const keep = new Set((state.papers || []).filter((p) => String(p.folder || '') === path).map((p) => p.docId));
+  for (const tab of [...tabsStore.tabs]) {
+    if (keep.has(tab.docId)) continue;
+    dropPdfHandle(tab.docId);
+    dropDocView(tab.docId);
+  }
+  tabsStore.tabs = tabsStore.tabs.filter((t) => keep.has(t.docId));
+  if (tabsStore.tabs.length) {
+    if (!tabsStore.tabs.some((t) => t.docId === tabsStore.active)) tabsStore.active = tabsStore.tabs[0].docId;
+  } else {
+    tabsStore.active = '';
+  }
+  tabsSyncBar();
+  tabsPersist();
+}
+
+/** 清掉 AI 功能记录（换会话/新会话/重新进文件夹时） */
+function resetFolderAiRecords() {
+  state.opsCache.clear();
+  state.opsDone = {};
+  state.opsDoc = null;
+  state.teachingCache.clear();
+  state.teaching = { walk: null, current: null };
+}
+
+/** 为当前文件夹开启一个**新会话**（旧会话文件保留，可在会话菜单里选回） */
+function startFolderSession() {
+  setActiveSidFor(null, newSid());
+  globalChatSig = '';
+  chatDomSig = '';
+  chatVersion += 1;
+  clearChatBlock();
+  resetFolderAiRecords();
+  state.sessionEntries = [];
+  state.history = [];
+  state.sessionSummary = '';
+  state.summaryCovered = 0;
+  state._fileEntries = [];
+  state._fileDocId = '';
+}
+
+/**
+ * 确保「当前文件夹」与 docId 所属文件夹一致。
+ * - 换到另一个文件夹：关掉旧文件夹标签、开新会话；
+ * - 同一个文件夹但之前被「完全关闭」过（回首页/所有标签关了/重启）：开新会话；
+ * 返回 true 表示发生了文件夹切换。
+ */
+function ensureFolderForDoc(docId) {
+  const path = docId ? folderOfDoc(docId) : '';
+  const changed = path !== currentFolderPath();
+  if (!changed) {
+    if (state.folderClosed) {
+      state.folderClosed = false;
+      startFolderSession();
+    }
+    return false;
+  }
+  state.currentFolder = path;
+  state.folderClosed = false;
+  persistCurrentFolder();
+  closeTabsNotInFolder(path);
+  startFolderSession();
+  renderFolderSwitch();
+  flashHint(`已切换文件夹：${folderDisplayName(path)}（新会话）`);
+  return true;
+}
+
+/** 显式切换文件夹（左栏文件夹按钮 / 菜单） */
+async function switchFolder(path) {
+  const target = String(path || '');
+  if (target === currentFolderPath()) return;
+  if (state.busy) { toast('正在生成中，先等它跑完或点停止再换文件夹', 'err', 3200); return; }
+  // 先把旧文件夹会话存盘，再关旧标签、开新会话
+  try { if (state.doc && state.sessionEntries.length) await saveSessionNow(); } catch { /* 存不下也允许切 */ }
+  state.currentFolder = target;
+  state.folderClosed = false;
+  persistCurrentFolder();
+  closeTabsNotInFolder(target);
+  startFolderSession();
+  renderFolderSwitch();
+  if (!tabsStore.tabs.length) {
+    // 旧标签已关；这里不要再把旧文档的会话/译文写回新文件夹（skipSave）
+    await goWelcome({ skipSave: true });
+    state.folderClosed = false;   // 刚进入这个文件夹，会话已建好；首个文件直接沿用
+  } else if (state.doc && folderOfDoc(state.doc.docId) === target) {
+    await openDoc({ docId: tabsStore.tabs[0].docId, name: tabsStore.tabs[0].name, url: tabsStore.tabs[0].url, path: tabsStore.tabs[0].path });
+  }
+  flashHint(`已切换文件夹：${folderDisplayName(target)}（新会话）`);
+}
+
+/** 左栏「当前文件夹」按钮的文案 */
+function renderFolderSwitch() {
+  const btn = $('#folderSwitch');
+  if (!btn) return;
+  btn.textContent = `📁 ${folderDisplayName(currentFolderPath())}`;
+  btn.title = `当前文件夹：papers/${currentFolderPath() ? `${currentFolderPath()}/` : ''}（点击切换文件夹）`;
+}
+
+/** 左栏文件夹切换菜单 */
+function initFolderSwitch() {
+  const btn = $('#folderSwitch');
+  const menu = $('#folderSwitchMenu');
+  if (!btn || !menu) return;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); return; }
+    const rows = [{ path: '', name: 'papers/' }];
+    for (const f of (state.folders || [])) rows.push({ path: f.path, name: `${f.path.replace(/\//g, ' / ')}/` });
+    menu.replaceChildren(...rows.map((row) => {
+      const count = (state.papers || []).filter((p) => String(p.folder || '') === row.path).length;
+      const on = row.path === currentFolderPath();
+      return el('button', {
+        type: 'button',
+        class: `folder-switch-item${on ? ' on' : ''}`,
+        title: `papers/${row.path ? `${row.path}/` : ''}`,
+        onclick: () => { menu.classList.add('hidden'); switchFolder(row.path); },
+      },
+      el('span', { class: 'fsi-name', text: row.name }),
+      el('span', { class: 'fsi-count', text: `${count} 篇` }),
+      on ? el('span', { class: 'fsi-on', text: '当前' }) : null);
+    }));
+    menu.classList.remove('hidden');
+  });
+  document.addEventListener('click', (e) => {
+    if (menu.classList.contains('hidden')) return;
+    if (e.target.closest('#folderSwitchMenu') || e.target.closest('#folderSwitch')) return;
+    menu.classList.add('hidden');
+  });
+}
+
+/** 启动时初始化当前文件夹；并把旧的「全局会话」按 docId→文件夹 拆分导入（复制，不删旧文件） */
+async function initFolderContext() {
+  let folder = '';
+  try { folder = String(localStorage.getItem(CURRENT_FOLDER_KEY) || ''); } catch { /* ignore */ }
+  if (!folder && serverState.lastDoc) folder = folderOfDoc(serverState.lastDoc);
+  // 存储的文件夹可能已经被删掉了：落回根目录
+  const exists = !folder || (state.folders || []).some((f) => f.path === folder);
+  state.currentFolder = exists ? folder : '';
+  state.folderClosed = true;   // 重启后重新进入 → 默认新会话
+  persistCurrentFolder();
+  renderFolderSwitch();
+  await migrateGlobalSessionsToFolders();
+}
+
+/** 旧「全局会话」→ 各文件夹会话：按条目里的 docId 找所属文件夹，复制导入（只做一次） */
+async function migrateGlobalSessionsToFolders() {
+  try { if (localStorage.getItem(GLOBAL_SPLIT_FLAG)) return; } catch { return; }
+  const headers = { 'Content-Type': 'application/json' };
+  const dedupe = (e) => `${e?.kind || ''}|${e?.text || ''}|${e?.page || ''}`;
+  try {
+    const listRes = await fetch(`/api/sessions?doc=${encodeURIComponent(LEGACY_GLOBAL_SESSION_DOC)}`);
+    if (!listRes.ok) return;
+    const list = (await listRes.json()).sessions || [];
+    for (const s of list) {
+      const sid = String(s.sid || '');
+      const r = await fetch(`/api/session?${sessionQuery(LEGACY_GLOBAL_SESSION_DOC, sid)}`);
+      if (!r.ok) continue;
+      const data = await r.json();
+      const entries = (Array.isArray(data.entries) ? data.entries : []).filter((e) => e && e.block !== 'translate');
+      if (!entries.length) continue;
+      const byFolder = new Map();
+      for (const e of entries) {
+        const folder = folderOfDoc(e.docId);
+        if (!byFolder.has(folder)) byFolder.set(folder, []);
+        byFolder.get(folder).push(e);
+      }
+      for (const [folder, rows] of byFolder) {
+        const folderKey = folderKeyOf(folder);
+        const targetSid = sid || newSid();
+        const cur = await fetch(`/api/session?${sessionQuery(folderKey, targetSid)}`);
+        const saved = cur.ok ? await cur.json() : {};
+        const existing = new Set((saved.entries || []).map(dedupe));
+        const merged = [...(saved.entries || [])];
+        for (const e of rows) {
+          const key = dedupe(e);
+          if (existing.has(key)) continue;
+          merged.push(e);
+          existing.add(key);
+        }
+        await fetch(`/api/session?${sessionQuery(folderKey, targetSid)}`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ ...saved, entries: merged.slice(-180), ops: [], teaching: null, updatedAt: Date.now() }),
+        });
+      }
+    }
+    try { localStorage.setItem(GLOBAL_SPLIT_FLAG, '1'); } catch { /* ignore */ }
+  } catch { /* 下次启动再试 */ }
+}
+
+/** 已有结果直接定位：打开对应结果块 → 滚到那条消息 → 闪一下 */
+function focusExistingResult(entry, label = '') {
+  if (!entry) return false;
+  // 传进来的可能是「会话记录」而不是 addEntry 返回的 entry（记录上没有 .root）：按 __sessionRecord 找回 DOM
+  let root = entry.root || null;
+  if (!root) {
+    const blockId = entry.block === 'translate' ? 'translate' : 'chat';
+    const body = state.blockMeta?.[blockId]?.body;
+    root = [...(body?.querySelectorAll?.('.msg') || [])].find((node) => node.__sessionRecord === entry) || null;
+  }
+  if (!root) return false;
+  const block = root.closest('.ai-block')?.dataset?.block || 'chat';
+  showAiBlock(block);
+  // 立即执行一次、再用定时器补一次：无头/后台窗口里 rAF 可能不触发，面板刚切过去布局也要落定
+  const apply = () => {
+    if (!root.isConnected) return;
+    try { root.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { root.scrollIntoView?.({ block: 'nearest' }); }
+    root.classList.remove('result-flash');
+    void root.offsetWidth;
+    root.classList.add('result-flash');
+    clearTimeout(root.__flashTimer);
+    root.__flashTimer = setTimeout(() => root.classList.remove('result-flash'), 1600);
+  };
+  apply();
+  setTimeout(apply, 80);
+  if (label) toast(`「${label}」已在结果区（已定位过去），点「重新生成」才会重跑`, 'ok', 3000);
+  return true;
 }
 
 function restoreComposerFallback(question, payload = null) {
@@ -5602,9 +5870,9 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     await migrateLegacySession(docId);
     const sid = activeSidFor(docId);
     const openSeq = state.openSeq;
-    // 全局问答会话（所有论文共用）+ 本文档译文伪会话（文档级）
+    // 当前文件夹的问答会话 + 本文档译文伪会话（文档级）
     const [chatRes, translateRes] = await Promise.all([
-      fetch(`/api/session?${sessionQuery(GLOBAL_SESSION_DOC, sid)}`),
+      fetch(`/api/session?${sessionQuery(currentFolderKey(), sid)}`),
       fetch(`/api/session?${sessionQuery(docId, TRANSLATE_SID)}`),
     ]);
     if (!chatRes.ok) throw new Error(`HTTP ${chatRes.status}`);
@@ -5613,8 +5881,7 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     if (!readingRequestCurrent({ docId, openSeq, sid })) return;
     const chatEntries = Array.isArray(savedChat.entries) ? savedChat.entries : [];
     const translateEntries = Array.isArray(savedTranslate.entries) ? savedTranslate.entries : [];
-    /* 全局会话内容变过（别的论文懒迁移把旧聊天并进来 / 换过会话）→ 让所有停放视图失效，
-       否则热切回时会挂回旧 DOM、还会把旧内容存回全局会话文件（覆盖掉刚迁移进来的条目）。 */
+    /* 会话内容变过（换过会话 / 迁移）→ 让所有停放视图失效，否则热切回会挂回旧 DOM。 */
     const sig = chatSigOf(sid, chatEntries);
     if (only === 'chat' || (globalChatSig && sig !== globalChatSig)) chatVersion += 1;
     globalChatSig = sig;
@@ -5630,7 +5897,7 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     const saved = {
       ...savedChat,
       entries: combined,
-      ops: Array.isArray(savedTranslate.ops) ? savedTranslate.ops : [],
+      ops: Array.isArray(savedChat.ops) ? savedChat.ops : [],
     };
     state._fileEntries = combined;
     state._fileDocId = docId;
@@ -5657,10 +5924,14 @@ async function restoreSession(docId, { only = 'all' } = {}) {
           .map((m) => ({ role: m?.role === 'assistant' ? 'assistant' : 'user', content: String(m?.content || '').slice(0, 12000) })),
       };
     }
-    for (const op of Array.isArray(saved.ops) ? saved.ops : []) {
+    /* AI 功能记录跟着文件夹会话走：先清空内存缓存，再装回这个会话里的记录（兼容旧 id 格式） */
+    state.opsCache.clear();
+    state.opsDone = {};
+    for (const op of Array.isArray(savedChat.ops) ? savedChat.ops : []) {
       if (!op?.id || typeof op.text !== 'string') continue;
-      state.opsCache.set(`${docId}:${op.id}`, { text: op.text.slice(0, 12000), at: op.at || Date.now(), page: op.page || null });
-      state.opsDone[op.id] = true;
+      const key = String(op.id).includes(':') ? String(op.id) : `${docId}:${op.id}`;
+      state.opsCache.set(key, { text: op.text.slice(0, 12000), at: op.at || Date.now(), page: op.page || null });
+      if (key.startsWith(`${docId}:`)) state.opsDone[key.slice(docId.length + 1)] = true;
     }
     for (let rowIndex = 0; rowIndex < state.sessionEntries.length; rowIndex += 1) {
       let row = state.sessionEntries[rowIndex];
@@ -5735,9 +6006,8 @@ async function clearCurrentSession() {
   state.history = [];
   state.sessionSummary = '';
   state.summaryCovered = 0;
-  const prefix = `${state.doc.docId}:`;
-  for (const key of state.opsCache.keys()) if (key.startsWith(prefix)) state.opsCache.delete(key);
-  state.opsDone = {};
+  // 清空会话 = 清掉问答 + 这个会话里的 AI 功能记录（译文不动）
+  resetFolderAiRecords();
   resetTeachingState();
   // 只清问答；译文属于文档级（__translate），DOM 和文件都不动
   clearChatBlock();
@@ -5745,7 +6015,7 @@ async function clearCurrentSession() {
   globalChatSig = '';
   try {
     // 只清全局问答会话；本文档译文（__translate）不动
-    const r = await fetch(`/api/session?${sessionQuery(GLOBAL_SESSION_DOC, activeSidFor(state.doc.docId))}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries: [], history: [], ops: [], teaching: null, summary: '', summaryCovered: 0, updatedAt: Date.now() }) });
+    const r = await fetch(`/api/session?${sessionQuery(currentFolderKey(), activeSidFor(state.doc.docId))}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries: [], history: [], ops: [], teaching: null, summary: '', summaryCovered: 0, updatedAt: Date.now() }) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     toast('当前论文会话已清空', 'ok');
     loadPaperMemory();
@@ -5767,8 +6037,8 @@ function closeSessionMenu() {
 async function loadSessionList() {
   if (!state.doc) return [];
   try {
-    // B 线 P3：会话列表是全局的（所有论文共用问答会话）
-    const r = await fetch(`/api/sessions?doc=${encodeURIComponent(GLOBAL_SESSION_DOC)}`);
+    // 会话属于文件夹：只列当前文件夹里开过的会话
+    const r = await fetch(`/api/sessions?doc=${encodeURIComponent(currentFolderKey())}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     sessionStore.list = (await r.json()).sessions || [];
   } catch { sessionStore.list = []; }
@@ -5808,7 +6078,7 @@ function renderSessionMenu() {
   });
   if (!rows.length) rows.push(el('div', { class: 'sess-empty', text: '还没有会话' }));
   menu.replaceChildren(
-    el('div', { class: 'sess-head', text: '全部论文共用的会话' }),
+    el('div', { class: 'sess-head', text: `「${folderDisplayName(currentFolderPath())}」的会话` }),
     ...rows,
     el('button', {
       type: 'button', class: 'sess-mem',
@@ -5869,9 +6139,7 @@ async function switchSession(sid) {
   state.history = [];
   state.sessionSummary = '';
   state.summaryCovered = 0;
-  state.opsDone = {};
-  state.opsDoc = null;
-  resetTeachingState();
+  resetFolderAiRecords();
   await restoreSession(docId, { only: 'chat' });
   loadPaperMemory();
   closeSessionMenu();
@@ -5894,9 +6162,8 @@ async function newSession() {
   state.history = [];
   state.sessionSummary = '';
   state.summaryCovered = 0;
-  state.opsDone = {};
-  state.opsDoc = null;
-  resetTeachingState();
+  // 新会话 = 清掉 AI 功能记录（深入阅读/教学缓存），菜单里不再显示「已生成」
+  resetFolderAiRecords();
   // 立刻落盘一次：不存的话新会话在服务端没有文件，会话列表里就看不到它，
   // 用户会以为「新建了但列表里没有」（实测踩过）。空会话也是一次有效的保存。
   try { await saveSessionNow(); } catch { /* 存不下也不阻塞新建 */ }
@@ -5914,7 +6181,7 @@ async function deleteSession(sid) {
   const docId = state.doc.docId;
   if (!confirm('删除这个会话？论文和笔记不受影响。')) return;
   try {
-    const r = await fetch(`/api/session?${sessionQuery(GLOBAL_SESSION_DOC, sid)}`, { method: 'DELETE' });
+    const r = await fetch(`/api/session?${sessionQuery(currentFolderKey(), sid)}`, { method: 'DELETE' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
   } catch (e) { toast(`删除失败：${e.message}`, 'err', 4000); return; }
   if (activeSidFor(docId) === (sid || '')) {
@@ -6296,7 +6563,7 @@ async function loadPaperMemory() {
       .slice(0, 2);
     const parts = [];
     for (const s of candidates) {
-      const r = await fetch(`/api/session?doc=${encodeURIComponent(GLOBAL_SESSION_DOC)}&sid=${encodeURIComponent(s.sid || '')}`);
+      const r = await fetch(`/api/session?doc=${encodeURIComponent(currentFolderKey())}&sid=${encodeURIComponent(s.sid || '')}`);
       if (!r.ok) continue;
       const data = await r.json();
       const summary = String(data?.summary || '').trim();
@@ -6409,9 +6676,7 @@ async function runTeaching(opId, {
       // 本次会话里已经有一条讲解：直接定位过去，不重复花钱（点「重新生成」才会按最新位置与记忆重讲）
       const existing = teachingEntryFor(opId);
       if (existing) {
-        showAiBlock('chat');
-        existing.root?.scrollIntoView?.({ block: 'nearest' });
-        toast('「先给我讲明白」已在结果区；点「重新生成」会结合最新阅读位置和记忆重讲', 'ok', 3200);
+        focusExistingResult(existing, '先给我讲明白');
         return { text: String(existing.text || '') };
       }
     } else if (opId !== 'visual') {
@@ -6419,9 +6684,7 @@ async function runTeaching(opId, {
       // 恢复出来的会话里已经有这条结果（跨重启的「已生成」）：直接定位过去，不重新花钱
       const existing = teachingEntryFor(opId);
       if (existing) {
-        showAiBlock('chat');
-        existing.root?.scrollIntoView?.({ block: 'nearest' });
-        toast(`「${op.title}」已在结果区，点「重新生成」可以重跑`, 'ok', 3000);
+        focusExistingResult(existing, op.title);
         return hit || { text: String(existing.text || '') };
       }
       if (hit) {
@@ -6919,10 +7182,8 @@ async function runOperation(opId, { force = false, block = 'chat', retryEntry = 
     const existing = [...state.sessionEntries].reverse().find((x) => x?.block === block && x?.tag === op.title
       && x?.status === 'complete' && (x.retry?.opId === opId || String(x.text || '') === String(hit.text || '').slice(0, 12000)));
     if (existing) {
-      showAiBlock(block);
-      existing.root?.scrollIntoView?.({ block: 'nearest' });
-      toast(`「${op.title}」已在结果区，点「重新生成」可以重跑`, 'ok', 3000);
       state.opsDone[opId] = true;
+      focusExistingResult(existing, op.title);
       return hit;
     }
     // 旧会话可能只保留了缓存而没有 DOM 记录：复用缓存，不凭空追加第二条结果。
@@ -7831,7 +8092,9 @@ async function runAgentReadPath({ pending, reading, context, references, sources
   try {
     const base = askMessages({ ...baseMaterials, availablePages: baseMaterials.availablePages || [], scopeLabel: 'AI 自行读取', objectLabel: objectLabelFor(pending, reading) });
     const system = String(base[0]?.content || '');
-    base[0] = { role: 'system', content: `${system}\n\n${AGENT_SYSTEM_NOTE}` };
+    const folderLine = `【当前文件夹】${currentFolderPath() || 'papers/'}。默认只读**当前论文 / 当前文件夹**的材料；` +
+      '只有用户明确点名了其它论文（文件名 / 「第 N 篇」/ 别的文件夹 / 「其它论文」）时才用 list_papers / read_other_paper 跨文件夹读取，否则不要主动跨文件夹。';
+    base[0] = { role: 'system', content: `${system}\n\n${AGENT_SYSTEM_NOTE}\n${folderLine}` };
     const runtime = createAgentRuntime(pending, { scannedDoc });
     const run = await runAgentLoop({
       messages: base,
@@ -10340,7 +10603,7 @@ window.addEventListener('beforeunload', () => {
       // B 线 P3：unload 时分别保存全局问答与本文档译文（都走 keepalive）
       const both = buildSessionPayload();
       if (both) {
-        saveOnUnload(`/api/session?${sessionQuery(GLOBAL_SESSION_DOC, activeSidFor(state.doc.docId))}`, both.chat);
+        saveOnUnload(`/api/session?${sessionQuery(currentFolderKey(), activeSidFor(state.doc.docId))}`, both.chat);
         saveOnUnload(`/api/session?${sessionQuery(state.doc.docId, TRANSLATE_SID)}`, both.translate);
       }
     } catch { /* unload fallback */ }

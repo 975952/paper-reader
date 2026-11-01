@@ -78,6 +78,11 @@
       拖入 PDF（可多选）　<label class="link" for="fileInput">选文件</label>
       <input type="file" id="fileInput" accept="application/pdf,.pdf" multiple hidden />
     </div>
+    <!-- 每次只处理一个文件夹：这里显示当前文件夹，点开可切换（换文件夹 = 关掉旧标签 + 新会话） -->
+    <div class="folder-switch-row">
+      <button type="button" class="folder-switch" id="folderSwitch" title="当前文件夹（点击切换）">📁 papers/</button>
+      <div class="folder-switch-menu hidden" id="folderSwitchMenu" role="menu" aria-label="切换文件夹"></div>
+    </div>
     <ul class="filelist" id="fileList"></ul>
     <!-- 文件面板右键菜单：fixed 定位，由 app.js 的 initFileContextMenu 驱动 -->
     <div class="ctx-menu" id="fileCtx" hidden></div>

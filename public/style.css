@@ -1096,6 +1096,40 @@ body.reading .home { display: none; }
 .home-empty { padding: 20px 8px; color: var(--fg-faint); font-size: var(--ui-fs); text-align: center; }
 .home-empty-sub { margin-top: 6px; font-size: var(--ui-fs-sm); color: var(--fg-faint); }
 
+/* 左栏：当前文件夹切换（一次只处理一个文件夹；换文件夹 = 关旧标签 + 新会话） */
+.folder-switch-row { position: relative; display: flex; flex-direction: column; padding: 4px var(--list-pad-x) 6px; }
+.folder-switch {
+  width: 100%; display: flex; align-items: center; gap: 6px; text-align: left;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elev);
+  color: var(--fg-dim); font: inherit; font-size: var(--ui-fs-xs); cursor: pointer;
+  padding: calc(3px * var(--ctl-scale)) calc(8px * var(--ctl-scale));
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.folder-switch:hover { border-color: var(--accent); color: var(--fg); }
+.folder-switch-menu {
+  position: absolute; top: calc(100% + 2px); left: var(--list-pad-x); right: var(--list-pad-x); z-index: 40;
+  max-height: 320px; overflow: auto; padding: 4px;
+  border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-elev); box-shadow: var(--shadow-md);
+}
+.folder-switch-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none;
+  color: var(--fg-dim); font: inherit; font-size: var(--ui-fs-sm); text-align: left;
+  padding: 6px 8px; border-radius: 6px; cursor: pointer;
+}
+.folder-switch-item:hover { background: var(--bg); color: var(--fg); }
+.folder-switch-item.on { color: var(--accent); }
+.fsi-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fsi-count { flex: 0 0 auto; color: var(--fg-faint); font-size: var(--ui-fs-2xs); }
+.fsi-on { flex: 0 0 auto; font-size: var(--ui-fs-2xs); color: var(--accent); }
+
+/* 「点已经生成的 AI 功能 → 直接定位到那条结果」的高亮 */
+.msg.result-flash { border-radius: 8px; animation: result-flash 1.5s ease-out; }
+@keyframes result-flash {
+  0% { background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent); }
+  70% { background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent); }
+  100% { background: transparent; box-shadow: none; }
+}
+
 /* ── 窄窗口：600–900px 内容吃满、继续阅读卡片改纵向 ── */
 @media (max-width: 900px) {
   .home { padding: 4vh 16px 26px; }
