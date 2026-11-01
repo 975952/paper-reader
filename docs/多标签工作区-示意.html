@@ -1,0 +1,1174 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>多标签工作区 · 界面示意（设计稿 v2）</title>
+<style>
+/* ============================================================
+   设计示意页 v2：与正式应用（public/）互相独立，删掉不影响应用。
+   演示用户最终拍板的结构：
+   · 标签条只显示"已打开的文档"；全部关闭 = Welcome（书架页，无标签）
+   · 翻译属于文档；问答属于文件夹（同一文件夹内切文档不换会话）
+   · 同时看到已打开文档 / 文件夹内文档，可点击按需打开
+   · 翻译生成中切标签、问答生成中切会话，后台继续
+   ============================================================ */
+:root {
+  --bg: #F8F5EB; --bg-elev: #FDFBF5; --bg-sunken: #F1EDE0;
+  --fg: #3F4038; --fg-dim: #63645A; --fg-faint: #77786C;
+  --border: #E4DEC9; --border-strong: #D5CEB4;
+  --accent: #556B2F; --accent-soft: #D5E1C7; --accent-fg: #FBFDF4;
+  --ok: #7F9D78; --ok-text: #57734F; --err-text: #9E5A4C;
+  --paper: #FCFAF2; --shadow: 0 1px 2px rgba(74,64,38,.06), 0 8px 24px rgba(74,64,38,.08);
+  --shadow-sm: 0 1px 3px rgba(74,64,38,.10);
+  --sel: rgba(190,172,104,.42);
+  --topbar-h: 35px; --tabbar-h: 32px; --statusbar-h: 30px;
+  --ui-fs: 13.5px; --ui-fs-lg: 12.5px; --ui-fs-md: 12px; --ui-fs-sm: 11.5px; --ui-fs-xs: 11px; --ui-fs-2xs: 10.5px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --mono: "Cascadia Mono", Consolas, monospace;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #2E2B24; --bg-elev: #38342B; --bg-sunken: #24211C;
+  --fg: #FFFFFF; --fg-dim: #CDC7B8; --fg-faint: #A9A294;
+  --border: #4A453A; --border-strong: #5C5648;
+  --accent: #A8BFA7; --accent-soft: #3C4030; --accent-fg: #1E2418;
+  --ok: #7FA98C; --ok-text: #9CC08C; --err-text: #D89A8A;
+  --paper: #F7F4EA; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.45);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,.5);
+  --sel: rgba(168,191,167,.35);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font); font-size: var(--ui-fs);
+  display: flex; flex-direction: column; -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; color: inherit; cursor: pointer; border: 0; background: transparent; }
+.hidden { display: none !important; }
+.spacer { flex: 1 1 auto; }
+
+/* ── 顶栏（注意：没有「首页」按钮——用户拍板有标签时不放入口） ── */
+.topbar {
+  height: var(--topbar-h); display: flex; align-items: center; gap: 10px; padding: 0 10px;
+  background: var(--bg-elev); border-bottom: 1px solid var(--border); position: relative; z-index: 40;
+}
+.brand {
+  width: 18px; height: 18px; border-radius: 4px; background: var(--accent); color: var(--accent-fg);
+  display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700;
+}
+.doc-name { font-size: 12.5px; color: var(--fg-dim); max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tbtn {
+  min-width: 26px; height: 26px; padding: 0 6px; border-radius: 6px; display: inline-flex;
+  align-items: center; justify-content: center; color: var(--fg-dim); font-size: 11.5px;
+  transition: background .12s, color .12s;
+}
+.tbtn:hover { background: var(--bg-sunken); color: var(--fg); }
+.tbtn.on { background: var(--accent-soft); color: var(--accent); }
+.mock-flag {
+  font-size: var(--ui-fs-2xs); color: var(--fg-faint); border: 1px dashed var(--border-strong);
+  border-radius: 99px; padding: 2px 8px; margin-left: 4px; white-space: nowrap;
+}
+
+/* ── 主区 ── */
+.main { flex: 1 1 auto; min-height: 0; display: flex; align-items: stretch; padding: 6px; background: var(--bg-sunken); }
+.rail {
+  flex: 0 0 40px; display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 6px 0; background: var(--bg-elev); border-right: 1px solid var(--border);
+}
+.rail-btn {
+  width: 28px; height: 28px; border-radius: 6px; display: inline-flex; align-items: center;
+  justify-content: center; color: var(--fg-dim); font-size: 14px;
+}
+.rail-btn.active { background: var(--accent-soft); color: var(--accent); }
+.rail-btn:hover { background: var(--bg-sunken); color: var(--fg); }
+
+/* 左栏 */
+.side { background: var(--bg-elev); display: flex; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid var(--border); }
+.side.left { flex: 0 0 224px; }
+.side.right { flex: 0 0 366px; }
+.left-head { padding: 8px 8px 6px; display: flex; align-items: center; gap: 6px; }
+.filter {
+  flex: 1 1 auto; border: 1px solid var(--border); background: var(--bg); border-radius: 7px;
+  padding: 4px 8px; color: var(--fg); font-size: 12px; outline: none;
+}
+.filter:focus { border-color: var(--accent); }
+.side-scroll { flex: 1 1 auto; overflow: auto; padding: 0 6px 10px; }
+
+/* 已打开区（Open Editors 式） */
+.open-editors { margin: 0 0 6px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.oe-head { display: flex; align-items: center; gap: 4px; font-size: var(--ui-fs-2xs); color: var(--fg-faint); padding: 2px 4px 5px; }
+.oe-list { list-style: none; margin: 0; padding: 0; }
+.oe-item { display: flex; align-items: center; gap: 5px; padding: 4px 6px; border-radius: 6px; font-size: var(--ui-fs-md); color: var(--fg-dim); cursor: default; }
+.oe-item:hover { background: var(--bg-sunken); color: var(--fg); }
+.oe-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.oe-item .sub { margin-left: auto; font-size: var(--ui-fs-2xs); color: var(--fg-faint); flex: 0 0 auto; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oe-item .x { flex: 0 0 auto; color: var(--fg-faint); font-size: 12px; padding: 0 2px; }
+.oe-item .x:hover { color: var(--fg); }
+
+/* 文件夹树 */
+.tree { list-style: none; margin: 0; padding: 0; }
+.folder-row { display: flex; align-items: center; gap: 5px; padding: 5px 6px; border-radius: 6px; font-size: var(--ui-fs-md); color: var(--fg-dim); cursor: default; }
+.folder-row:hover { background: var(--bg-sunken); color: var(--fg); }
+.folder-row .arrow { width: 11px; color: var(--fg-faint); font-size: 10px; transition: transform .12s; }
+.folder-row .count { margin-left: auto; font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+.folder-row .jobdot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.6s infinite; }
+.file-item { display: flex; align-items: center; gap: 6px; padding: 5px 7px 5px 12px; border-radius: 6px; font-size: var(--ui-fs-md); color: var(--fg-dim); cursor: default; position: relative; }
+.file-item:hover { background: var(--bg-sunken); color: var(--fg); }
+.file-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.file-item.open::before {
+  content: ""; position: absolute; left: 2px; top: 50%; transform: translateY(-50%);
+  width: 3px; height: 12px; border-radius: 2px; background: var(--accent); opacity: .85;
+}
+.file-item .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-item .jobdot { margin-left: auto; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.6s infinite; flex: 0 0 auto; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+.splitter { flex: 0 0 5px; }
+/* Welcome：标签全关 → 收起左右侧栏，中间铺满（与正式应用 setView('home') 的观感一致） */
+body:not(.tabs-mode) .side.left,
+body:not(.tabs-mode) .side.right,
+body:not(.tabs-mode) .splitter,
+body:not(.tabs-mode) .tabbar { display: none !important; }
+
+/* 中间列 */
+.center { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg-elev); border: 1px solid var(--border); overflow: hidden; }
+.tabbar {
+  flex: 0 0 var(--tabbar-h); display: flex; align-items: stretch;
+  background: var(--bg-sunken); border-bottom: 1px solid var(--border); user-select: none;
+}
+.tab-strip-wrap { flex: 1 1 auto; min-width: 0; position: relative; overflow: hidden; }
+.tab-strip { height: 100%; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; touch-action: pan-x; }
+.tab-strip::-webkit-scrollbar { display: none; }
+.tab {
+  width: 180px; min-width: 120px; max-width: 230px; flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+  padding: 0 5px 0 9px; border-right: 1px solid var(--border); border-top: 2px solid transparent;
+  color: var(--fg-dim); font-size: var(--ui-fs-md); position: relative; cursor: default; transition: background .12s;
+}
+.tab:hover { background: color-mix(in srgb, var(--bg-elev) 60%, transparent); }
+.tab[aria-selected="true"] { background: var(--bg-elev); border-top-color: var(--accent); color: var(--fg); font-weight: 500; }
+.tab-ico { flex: 0 0 auto; display: inline-flex; opacity: .85; }
+.tab-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-close { flex: 0 0 auto; width: 18px; height: 18px; border-radius: 4px; color: var(--fg-faint); display: inline-flex; align-items: center; justify-content: center; opacity: 0; font-size: 13px; }
+.tab:hover .tab-close, .tab[aria-selected="true"] .tab-close { opacity: 1; }
+.tab-close:hover { background: var(--bg-sunken); color: var(--fg); }
+.tab-badge { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; }
+.tab-badge[data-state="streaming"] { background: var(--accent); animation: pulse 1.6s infinite; }
+.tab-badge[data-state="done"] { background: var(--ok); }
+.tab.dragging { opacity: .55; }
+.tab-drop-line { position: absolute; top: 4px; bottom: 4px; width: 2px; background: var(--accent); border-radius: 1px; pointer-events: none; z-index: 3; }
+.tab-ghost {
+  position: fixed; z-index: 200; pointer-events: none; opacity: .92; display: flex; align-items: center;
+  gap: 6px; padding: 0 9px; height: 30px; background: var(--bg-elev); border: 1px solid var(--border-strong);
+  border-radius: 5px; box-shadow: var(--shadow); font-size: var(--ui-fs-md); color: var(--fg);
+}
+.tab-overflow { flex: 0 0 auto; width: 32px; color: var(--fg-dim); font-size: 15px; border-left: 1px solid var(--border); }
+.tab-overflow:hover { background: var(--bg-elev); color: var(--accent); }
+.tab-new { flex: 0 0 32px; color: var(--fg-dim); font-size: 16px; border-left: 1px solid var(--border); }
+.tab-new:hover { background: var(--bg-elev); color: var(--accent); }
+.tabbar[hidden] { display: none; }
+
+/* 正文 */
+.viewer { flex: 1 1 0; min-height: 0; overflow: auto; position: relative; background: var(--bg-sunken); padding: 16px 20px 40px; }
+.page {
+  width: min(660px, 92%); margin: 0 auto; background: var(--paper); color: #2B2B26;
+  border-radius: 3px; box-shadow: var(--shadow); padding: 46px 54px 60px; position: relative;
+  font-family: Georgia, "Times New Roman", "Songti SC", serif; font-size: 13px; line-height: 1.85;
+}
+.page-num { position: absolute; bottom: 14px; left: 0; right: 0; text-align: center; font: 10.5px var(--font); color: #8A8578; }
+.page h1 { font: 600 19px/1.35 var(--font); margin: 0 0 4px; }
+.page .authors { font-size: 11.5px; color: #6B675C; margin-bottom: 18px; }
+.page h2 { font: 600 12.5px var(--font); margin: 18px 0 6px; }
+.page p { margin: 0 0 9px; color: #3A3A33; }
+.page .formula { font-family: var(--mono); font-size: 12px; text-align: center; background: #F4F0E4; padding: 8px 10px; border-radius: 5px; margin: 10px 0; }
+.page .hl { background: var(--sel); border-radius: 2px; padding: 0 1px; }
+
+/* Welcome（无标签） */
+.home { flex: 1 1 0; overflow: auto; padding: 40px 22px; }
+.home-head { max-width: 620px; margin: 0 auto 24px; text-align: center; }
+.home-logo { width: 48px; height: 48px; border-radius: 12px; background: var(--accent); color: var(--accent-fg); font-weight: 700; font-size: 23px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 8px; }
+.home h1 { font-size: 23px; margin: 0 0 3px; }
+.home .tagline { color: var(--fg-dim); margin: 0; font-size: var(--ui-fs-lg); }
+.home-actions { max-width: 620px; margin: 0 auto 24px; display: flex; gap: 10px; }
+.home-open { flex: 1 1 auto; background: var(--accent); color: var(--accent-fg); border-radius: 8px; padding: 10px 12px; font-weight: 600; }
+.home-drop { flex: 1 1 auto; border: 1px dashed var(--border-strong); border-radius: 8px; padding: 10px 12px; color: var(--fg-faint); }
+.home-recent { max-width: 620px; margin: 0 auto; }
+.home-sec-title { font-size: var(--ui-fs-sm); color: var(--fg-faint); margin-bottom: 8px; }
+.home-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; border-radius: 8px; background: var(--bg-elev); border: 1px solid var(--border); margin-bottom: 6px; cursor: pointer; }
+.home-item:hover { border-color: var(--accent); }
+.home-item .hi-name { font-size: var(--ui-fs-md); }
+.home-item .hi-meta { font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+
+/* 右栏 */
+.ai-folderbar {
+  flex: 0 0 auto; height: 26px; display: flex; align-items: center; gap: 6px; padding: 0 8px;
+  background: var(--bg-sunken); border-bottom: 1px solid var(--border);
+  font-size: var(--ui-fs-2xs); color: var(--fg-faint); position: relative;
+}
+.ai-folderbar .folder { color: var(--fg-dim); max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-folderbar .doc { color: var(--fg-faint); max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-folderbar .status { margin-left: auto; color: var(--accent); white-space: nowrap; }
+.fb-docs { flex: 0 0 auto; font-size: var(--ui-fs-2xs); color: var(--fg-dim); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; }
+.fb-docs:hover { color: var(--accent); border-color: var(--accent); }
+.aibar { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; padding: 6px 8px 5px; border-bottom: 1px solid var(--border); }
+.aibar-btn { padding: 4px 12px; border-radius: 6px; font-size: var(--ui-fs-sm); color: var(--fg-dim); }
+.aibar-btn:hover { background: var(--bg-sunken); color: var(--accent); }
+.aibar-btn.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* 译文块（文档级） */
+.translate-line { flex: 0 0 auto; padding: 6px 10px; font-size: var(--ui-fs-2xs); color: var(--fg-faint); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 5px; }
+.translate-line .name { color: var(--fg-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-body { flex: 1 1 0; min-height: 0; overflow: auto; padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.tr-entry { border-left: 2px solid var(--border-strong); padding-left: 8px; }
+.tr-entry .q { font-size: var(--ui-fs-sm); color: var(--fg-faint); margin-bottom: 3px; }
+.tr-entry .a { font-size: var(--ui-fs-md); line-height: 1.7; }
+.ai-empty { color: var(--fg-faint); font-size: var(--ui-fs-sm); text-align: center; padding: 28px 12px; line-height: 1.9; }
+
+/* 问答块（文件夹级） */
+.chat-sessions { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; padding: 5px 8px; border-bottom: 1px solid var(--border); position: relative; }
+.sess-chips { flex: 1 1 auto; min-width: 0; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+.sess-chips::-webkit-scrollbar { display: none; }
+.sess-chip {
+  flex: 0 0 auto; max-width: 140px; display: inline-flex; align-items: center; gap: 5px;
+  height: 24px; padding: 0 9px; border-radius: 6px; background: var(--bg-sunken);
+  color: var(--fg-dim); font-size: var(--ui-fs-xs); white-space: nowrap;
+}
+.sess-chip:hover { color: var(--accent); background: var(--accent-soft); }
+.sess-chip[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.sess-chip-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sess-chip-badge { width: 5px; height: 5px; border-radius: 50%; flex: 0 0 auto; }
+.sess-chip-badge[data-state="streaming"] { background: var(--accent); animation: pulse 1.6s infinite; }
+.sess-chip-badge[data-state="done"] { background: var(--ok); }
+.sess-new, .sess-more { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 6px; color: var(--fg-faint); font-size: 14px; }
+.sess-new:hover, .sess-more:hover { background: var(--bg-sunken); color: var(--accent); }
+.chat-body-mount { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.chat-body-mount .ai-body { flex: 1 1 0; }
+
+.msg { font-size: var(--ui-fs-md); line-height: 1.75; }
+.msg .role { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
+.msg .tag { font-size: var(--ui-fs-2xs); color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 0 5px; }
+.msg .pg { font-size: var(--ui-fs-2xs); color: var(--fg-faint); background: var(--bg-sunken); border-radius: 4px; padding: 0 5px; }
+.msg .doc-tag { font-size: var(--ui-fs-2xs); color: var(--fg-dim); background: var(--bg-sunken); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; }
+.msg .ref { border-left: 2px solid var(--border-strong); padding: 1px 0 1px 8px; color: var(--fg-faint); font-size: var(--ui-fs-sm); margin: 2px 0 5px; }
+.msg .text { color: var(--fg); }
+.msg.user .text { color: var(--fg-dim); }
+.msg.assistant .text strong { color: var(--accent); }
+.msg .cursor { color: var(--accent); }
+
+.composer { flex: 0 0 auto; border-top: 1px solid var(--border); padding: 8px 10px 7px; background: var(--bg-elev); }
+.composer-row { display: flex; align-items: flex-end; gap: 6px; }
+.composer textarea {
+  flex: 1 1 auto; resize: none; min-height: 34px; max-height: 110px; padding: 7px 9px;
+  border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg); color: var(--fg);
+  font: 13px/1.6 var(--font); outline: none;
+}
+.composer textarea:focus { border-color: var(--accent); }
+.composer .send { width: 34px; height: 34px; border-radius: 8px; background: var(--accent); color: var(--accent-fg); }
+.composer-hint { margin-top: 5px; font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+
+/* 底部 */
+.foot { flex: 0 0 var(--statusbar-h); display: flex; align-items: center; gap: 8px; padding: 0 10px; background: var(--bg-elev); border-top: 1px solid var(--border); font-size: var(--ui-fs-sm); color: var(--fg-dim); }
+.foot .grp { display: flex; align-items: center; gap: 3px; }
+.foot .page-input { width: 46px; text-align: center; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 2px 4px; font: 12px var(--font); color: var(--fg); }
+.foot .zoom-pct { min-width: 44px; text-align: right; color: var(--fg-dim); }
+.foot .tbtn[disabled], .foot .page-input[disabled] { opacity: .4; cursor: default; }
+
+/* 菜单 */
+.menu {
+  position: absolute; top: calc(var(--tabbar-h) - 4px); right: 6px; z-index: 60;
+  width: 320px; max-height: 400px; overflow: auto; background: var(--bg-elev);
+  border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: var(--shadow); padding: 6px;
+}
+.menu.docs-menu { top: 24px; right: 6px; width: 300px; }
+.menu input.filter2 { width: 100%; margin-bottom: 5px; }
+.menu .m-head { font-size: var(--ui-fs-2xs); color: var(--fg-faint); padding: 4px 6px 4px; display: flex; align-items: center; gap: 5px; }
+.menu .m-head::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--border); }
+.menu .m-row { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 6px; font-size: var(--ui-fs-md); color: var(--fg-dim); cursor: default; }
+.menu .m-row:hover { background: var(--bg-sunken); color: var(--fg); }
+.menu .m-row.current { background: var(--accent-soft); color: var(--accent); }
+.menu .m-row .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu .m-row .x { color: var(--fg-faint); padding: 0 3px; }
+.menu .m-row .x:hover { color: var(--fg); }
+.menu .m-row .opened { font-size: var(--ui-fs-2xs); color: var(--fg-faint); flex: 0 0 auto; }
+.menu .m-row .open-here { font-size: var(--ui-fs-2xs); color: var(--accent); flex: 0 0 auto; }
+.menu .m-foot { border-top: 1px solid var(--border); margin-top: 5px; padding-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
+.menu .m-foot button { font-size: var(--ui-fs-xs); color: var(--fg-dim); border-radius: 5px; padding: 4px 7px; }
+.menu .m-foot button:hover { background: var(--bg-sunken); color: var(--accent); }
+.sess-menu { top: 30px; right: 8px; width: 260px; }
+
+/* 批注 */
+.anno-dot {
+  position: absolute; z-index: 90; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent); color: var(--accent-fg); font: 600 10.5px/18px var(--font);
+  text-align: center; box-shadow: var(--shadow-sm); pointer-events: none;
+}
+body.annot-on .tabbar, body.annot-on .ai-folderbar, body.annot-on .chat-sessions, body.annot-on .open-editors {
+  outline: 1px dashed var(--accent); outline-offset: -1px;
+}
+.anno-card {
+  position: fixed; right: 12px; bottom: 42px; z-index: 100; width: 350px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 10px 12px; font-size: var(--ui-fs-sm); color: var(--fg-dim); line-height: 1.75;
+}
+.anno-card b { color: var(--fg); }
+.anno-card .row { display: flex; gap: 7px; margin-top: 5px; }
+.anno-card .row .n { flex: 0 0 18px; height: 18px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font: 600 10.5px/18px var(--font); text-align: center; }
+.anno-card .close-anno { position: absolute; top: 6px; right: 8px; color: var(--fg-faint); font-size: 14px; }
+</style>
+</head>
+<body class="tabs-mode">
+
+<header class="topbar">
+  <span class="brand">P</span>
+  <span class="doc-name" id="topDocName">论文阅读器</span>
+  <span class="spacer"></span>
+  <span class="mock-flag">设计示意 v2 · 非真实功能</span>
+  <button class="tbtn" id="themeBtn" title="切换深色/浅色">◐</button>
+  <button class="tbtn" id="annoBtn" title="显示/隐藏批注">批注</button>
+  <button class="tbtn" title="设置">⚙</button>
+</header>
+
+<main class="main">
+  <nav class="rail">
+    <button class="rail-btn active" title="文件">▤</button>
+    <button class="rail-btn" title="目录">☰</button>
+    <button class="rail-btn" title="笔记">✎</button>
+    <button class="rail-btn" title="参考文献">⌘</button>
+  </nav>
+
+  <aside class="side left" id="leftSide">
+    <div class="left-head"><input class="filter" placeholder="筛选文件…" /></div>
+    <div class="side-scroll">
+      <section class="open-editors" id="openEditors">
+        <div class="oe-head">已打开 <span id="openEditorsCount"></span></div>
+        <ul class="oe-list" id="openEditorsList"></ul>
+      </section>
+      <ul class="tree" id="fileTree"></ul>
+    </div>
+  </aside>
+
+  <div class="splitter"></div>
+
+  <section class="center">
+    <div class="tabbar" id="tabBar" hidden>
+      <div class="tab-strip-wrap" id="tabStripWrap">
+        <div class="tab-strip" id="tabStrip" role="tablist" aria-label="打开的文件"></div>
+      </div>
+      <button class="tab-overflow hidden" id="tabOverflow" title="全部标签 / 文件夹文档">…</button>
+      <button class="tab-new" id="tabNew" title="打开 PDF">＋</button>
+    </div>
+    <div class="viewer" id="viewer"></div>
+    <div class="home hidden" id="home"></div>
+  </section>
+
+  <div class="splitter"></div>
+
+  <aside class="side right" id="rightSide">
+    <div class="ai-folderbar" id="aiFolderbar">
+      <span class="folder" id="fbFolder"></span>
+      <span class="doc" id="fbDoc"></span>
+      <span class="status" id="fbStatus"></span>
+      <button class="fb-docs" id="fbDocs" title="文档：已打开 / 文件夹内其他">文档 ▾</button>
+      <div class="menu docs-menu hidden" id="docsMenu" role="menu"></div>
+    </div>
+    <div class="aibar">
+      <button class="aibar-btn" id="aibarTranslate">译文</button>
+      <button class="aibar-btn on" id="aibarChat">问答</button>
+    </div>
+    <div id="translatePanel" class="hidden" style="display:flex;flex-direction:column;flex:1 1 auto;min-height:0">
+      <div class="translate-line" id="translateLine"></div>
+      <div class="ai-body" id="translateBody"></div>
+    </div>
+    <div id="chatPanel" style="display:flex;flex-direction:column;flex:1 1 auto;min-height:0">
+      <div class="chat-sessions" id="chatSessions">
+        <div class="sess-chips" id="sessChips"></div>
+        <button class="sess-new" id="sessNew" title="新建会话">＋</button>
+        <button class="sess-more" id="sessMore" title="全部会话">☰</button>
+        <div class="menu sess-menu hidden" id="sessMenu"></div>
+      </div>
+      <div class="chat-body-mount" id="chatBodyMount"></div>
+    </div>
+    <div class="composer" id="composer">
+      <div class="composer-row">
+        <textarea id="chatInput" rows="1" placeholder="问点什么…（Enter 发送）"></textarea>
+        <button class="send" title="发送">➤</button>
+      </div>
+      <div class="composer-hint" id="composerHint">当前页上下文 · 示意：草稿按标签保存；问答属于当前文件夹</div>
+    </div>
+  </aside>
+</main>
+
+<footer class="foot" id="viewerFoot">
+  <div class="grp">
+    <button class="tbtn" id="prevPage">‹</button>
+    <input class="page-input" id="pageInput" value="–" />
+    <span id="pageCount">/ –</span>
+    <button class="tbtn" id="nextPage">›</button>
+  </div>
+  <span class="spacer"></span>
+  <div class="grp">
+    <span>大小</span>
+    <button class="tbtn" id="zoomOut">−</button>
+    <span class="zoom-pct" id="zoomPct">—</span>
+    <button class="tbtn" id="zoomIn">＋</button>
+  </div>
+</footer>
+
+<script>
+/* ============================================================
+   示意页脚本：只模拟交互，不加载 PDF、不连后端。
+   真实实现见 docs/多标签工作区-设计.md（v2）。
+   ============================================================ */
+const SVG = {
+  file: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3.4H6.6a1.6 1.6 0 0 0-1.6 1.6v14a1.6 1.6 0 0 0 1.6 1.6h10.8a1.6 1.6 0 0 0 1.6-1.6V8.4z"/><path d="M14 3.4v5h5"/></svg>',
+  close: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6.4 6.4 17.6 17.6"/><path d="M17.6 6.4 6.4 17.6"/></svg>',
+};
+
+/* ── 数据：文件夹 → 文档；文档 → 译文；文件夹 → 问答会话 ── */
+const FOLDERS = ['Transformer', '生成模型', '多模态', '长序列'];
+const DOCS = [
+  { id: 'attn', name: 'Attention Is All You Need', folder: 'Transformer', page: 5, zoom: 120,
+    translate: [
+      { q: 'We call our particular attention "Scaled Dot-Product Attention".',
+        a: '我们把这种注意力称为**缩放点积注意力**：Q/K 点积后除以 √d_k，再 softmax 加权 V。', page: 5 },
+      { q: 'The input consists of queries and keys of dimension dk.',
+        a: '输入由 d_k 维的 query 和 key、d_v 维的 value 组成；除以 √d_k 是为了让点积的方差回到 1。', page: 5 },
+    ],
+    trJob: null },
+  { id: 'bert', name: 'BERT: Pre-training of Deep Bidirectional Transformers', folder: 'Transformer', page: 12, zoom: 100,
+    translate: [
+      { q: 'We introduce a new language representation model called BERT.',
+        a: '我们提出**BERT**：用双向 Transformer 做预训练，再微调下游任务。', page: 12 },
+    ],
+    trJob: null },
+  { id: 'ddpm', name: 'Denoising Diffusion Probabilistic Models', folder: '生成模型', page: 3, zoom: 150,
+    translate: [], trJob: null },
+  { id: 'sbm', name: 'Score-Based Generative Modeling through SDEs', folder: '生成模型', page: 1, zoom: 100,
+    translate: [], trJob: null },
+  { id: 'vit', name: 'An Image is Worth 16x16 Words', folder: '多模态', page: 1, zoom: 100,
+    translate: [], trJob: null },
+  { id: 's4', name: 'Efficiently Modeling Long Sequences with S4', folder: '长序列', page: 7, zoom: 100,
+    translate: [], trJob: null },
+];
+
+/* 问答会话按文件夹归属；msgs 上带 docId，演示"同一会话跨文档" */
+const FOLDER_SESSIONS = {
+  Transformer: {
+    activeSid: 't1',
+    sessions: [
+      { sid: 't1', title: '注意力对比', updated: '10 分钟前', job: null, msgs: [
+        { role: 'user', docId: 'attn', text: '这一页的缩放点积注意力，和 RNN 比优势在哪？', page: 5 },
+        { role: 'assistant', docId: 'attn', tag: '答', page: 5,
+          quote: 'We call our particular attention "Scaled Dot-Product Attention".',
+          text: '**示意回答**：它把序列内任意两位置的依赖变成一次矩阵乘，可并行；RNN 要按时间步递推，长距离依赖会衰减。' },
+        { role: 'user', docId: 'bert', text: 'BERT 是双向的，它和这里的注意力有什么不同？' },
+        { role: 'assistant', docId: 'bert', tag: '答', text: '**示意回答**：结构相近，但 BERT 用双向上下文 + 掩码语言建模目标，属于"预训练 + 微调"路线；本页是翻译模型里的自注意力层。' },
+      ] },
+      { sid: 't2', title: '前向推导', updated: '昨天', job: null, msgs: [
+        { role: 'user', docId: 'attn', text: '把这一页的公式按步骤展开。' },
+        { role: 'assistant', docId: 'attn', tag: '答', text: '**示意回答**：① QKᵀ ② 除以 √d_k ③ 行 softmax ④ 乘 V。' },
+      ] },
+    ],
+  },
+  '生成模型': {
+    activeSid: 'g1',
+    sessions: [
+      { sid: 'g1', title: '扩散推导', updated: '刚才', job: null, msgs: [
+        { role: 'user', docId: 'ddpm', text: '前向加噪为什么能写成闭式？', page: 3 },
+        { role: 'assistant', docId: 'ddpm', tag: '答', page: 3,
+          text: '**示意回答**：单步加噪是高斯的，多个高斯叠加仍是高斯，均值和方差可以递推合并，所以能直接写成关于 t 的闭式。' },
+      ] },
+      { sid: 'g2', title: '新会话', updated: '', job: null, msgs: [] },
+    ],
+  },
+  '多模态': { activeSid: 'm1', sessions: [
+    { sid: 'm1', title: 'Patch 划分', updated: '昨天', job: null, msgs: [
+      { role: 'user', docId: 'vit', text: '图片怎么变成 token 序列？' },
+      { role: 'assistant', docId: 'vit', tag: '答', text: '**示意回答**：切成 16×16 patch，线性投影 + 位置编码后送入 Transformer。' },
+    ] },
+  ] },
+  '长序列': { activeSid: 's1', sessions: [
+    { sid: 's1', title: 'S4 直觉', updated: '3 天前', job: null, msgs: [
+      { role: 'user', docId: 's4', text: 'S4 和 RNN/卷积的关系？' },
+      { role: 'assistant', docId: 's4', tag: '答', text: '**示意回答**：连续状态空间模型离散化后，可并行卷积训练、递推推理。' },
+    ] },
+  ] },
+};
+
+const state = {
+  active: 'attn',                       // 'attn' | ... | null（null = Welcome）
+  openIds: ['attn', 'bert', 'ddpm'],
+  order: ['attn', 'bert', 'ddpm'],
+  rightTab: 'chat',                     // 'chat' | 'translate'
+  annot: false,
+  theme: 'light',
+  expanded: new Set(FOLDERS),
+};
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
+const docById = (id) => DOCS.find((d) => d.id === id);
+const activeDoc = () => (state.active ? docById(state.active) : null);
+const activeFolder = () => (activeDoc() ? activeDoc().folder : '');
+const folderSessions = (folder) => FOLDER_SESSIONS[folder] || { activeSid: '', sessions: [] };
+const activeSession = () => {
+  const f = folderSessions(activeFolder());
+  return f.sessions.find((s) => s.sid === f.activeSid) || f.sessions[0] || null;
+};
+const welcome = () => !state.active;
+
+/* ── 后台任务模拟：开始一个"生成中"任务，切走也不会停 ── */
+let jobSeq = 0;
+function startFakeTranslate(docId) {
+  const d = docById(docId);
+  if (!d || d.trJob) return;
+  d.trJob = { done: false, entry: { q: '（示意）正在翻译选中的段落…', a: '', page: d.page } };
+  renderTabs(); renderLeft();
+  const chunks = ['示意翻译：这段说明了缩放点积注意力的计算方式，', '先做 QKᵀ 再除以 √d_k，', 'softmax 后与 V 加权求和。'];
+  let i = 0;
+  d.trJob.timer = setInterval(() => {
+    if (i < chunks.length) {
+      d.trJob.entry.a += chunks[i++];
+      renderTabBarBadges(); renderLeft();
+      if (state.active === docId && state.rightTab === 'translate') renderRight();
+    } else {
+      clearInterval(d.trJob.timer);
+      d.trJob = null;
+      d.translate.unshift({ q: '（示意）翻译任务完成', a: chunks.join(''), page: d.page });
+      renderTabs(); renderLeft(); renderRight();
+    }
+  }, 700);
+}
+function startFakeChatJob(folderArg, sidArg, docArg) {
+  const folder = folderArg || activeFolder();
+  const fs = folderSessions(folder);
+  const s = fs.sessions.find((x) => x.sid === (sidArg || fs.activeSid));
+  if (!s || s.job) return;
+  s.job = { text: '', done: false, docId: docArg || state.active, folder };
+  const chunks = ['示意：这条回答在后台继续生成，', '即使你切走标签或切到别的会话，', '它也会写完并保存在当前文件夹的会话里。'];
+  let i = 0;
+  s.job.timer = setInterval(() => {
+    if (i < chunks.length) {
+      s.job.text += chunks[i++];
+      if (state.active && activeFolder() === folder && activeSession() === s) renderRight();
+      renderTabBarBadges(); renderLeft();
+    } else {
+      clearInterval(s.job.timer);
+      s.msgs.push({ role: 'assistant', docId: s.job.docId, tag: '答', text: s.job.text });
+      s.job = null;
+      if (state.active) { renderLeft(); renderSessions(fs, folder); }
+      renderTabs(); renderRight();
+    }
+  }, 900);
+}
+
+/* ── 标签条 ── */
+function renderTabBar() {
+  const bar = $('#tabBar');
+  bar.hidden = state.openIds.length === 0;
+  document.body.classList.toggle('tabs-mode', state.openIds.length > 0);
+  renderTabs();
+}
+function renderTabs() {
+  const strip = $('#tabStrip');
+  strip.replaceChildren();
+  for (const id of state.order) {
+    if (!state.openIds.includes(id)) continue;
+    const d = docById(id);
+    const tab = document.createElement('div');
+    tab.className = 'tab';
+    tab.dataset.id = id;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(state.active === id));
+    tab.tabIndex = state.active === id ? 0 : -1;
+    const badge = d.trJob ? 'streaming' : '';
+    tab.innerHTML = `<span class="tab-ico">${SVG.file}</span>
+      <span class="tab-title" title="${d.name}.pdf">${d.name}</span>
+      ${badge ? `<span class="tab-badge" data-state="${badge}" title="译文生成中"></span>` : ''}
+      <button class="tab-close" title="关闭标签" aria-label="关闭 ${d.name}">${SVG.close}</button>`;
+    tab.addEventListener('click', (e) => { if (!e.target.closest('.tab-close')) activate(id); });
+    tab.addEventListener('auxclick', (e) => { if (e.button === 1) { e.preventDefault(); closeTab(id); } });
+    tab.querySelector('.tab-close').addEventListener('click', (e) => { e.stopPropagation(); closeTab(id); });
+    tab.addEventListener('pointerdown', (e) => startDrag(e, id));
+    tab.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      openTabContextMenu(id, e);
+    });
+    strip.append(tab);
+  }
+  requestAnimationFrame(updateOverflow);
+}
+function renderTabBarBadges() {
+  // 只更新 badge，避免拖拽中重建
+  for (const tab of $$('#tabStrip .tab')) {
+    const d = docById(tab.dataset.id);
+    const has = !!tab.querySelector('.tab-badge');
+    if (d && d.trJob && !has) {
+      const b = document.createElement('span');
+      b.className = 'tab-badge'; b.dataset.state = 'streaming'; b.title = '译文生成中';
+      tab.insertBefore(b, tab.querySelector('.tab-close'));
+    } else if ((!d || !d.trJob) && has) {
+      tab.querySelector('.tab-badge').remove();
+    }
+  }
+}
+function updateOverflow() {
+  const strip = $('#tabStrip');
+  const wrap = strip.parentElement;
+  if (!strip) return;
+  const over = strip.scrollWidth > wrap.clientWidth + 1;
+  $('#tabOverflow').classList.toggle('hidden', !over);
+}
+function activate(id) {
+  if (!id || !state.openIds.includes(id) || state.active === id) return;
+  state.active = id;
+  renderAll();
+}
+function openDoc(id) {
+  if (!state.openIds.includes(id)) {
+    if (state.openIds.length >= 10) return;
+    state.openIds.push(id);
+    state.order.push(id);
+  }
+  state.active = id;
+  renderAll();
+}
+function closeTab(id) {
+  const at = state.order.indexOf(id);
+  state.openIds = state.openIds.filter((x) => x !== id);
+  state.order = state.order.filter((x) => x !== id);
+  if (state.active === id) state.active = state.order[Math.min(at, state.order.length - 1)] || null;
+  renderAll();
+}
+function closeAllTabs() {
+  state.openIds = []; state.order = []; state.active = null;
+  renderAll();
+}
+
+/* 拖拽排序（Pointer Events） */
+function startDrag(e, id) {
+  if (e.button !== 0 || e.target.closest('.tab-close')) return;
+  const strip = $('#tabStrip');
+  const tabEl = e.currentTarget;
+  const startX = e.clientX;
+  let ghost = null, line = null, started = false, insert = null;
+  const move = (ev) => {
+    if (!started) {
+      if (Math.abs(ev.clientX - startX) < 5) return;
+      started = true;
+      tabEl.classList.add('dragging');
+      ghost = document.createElement('div');
+      ghost.className = 'tab-ghost';
+      ghost.textContent = docById(id).name;
+      document.body.append(ghost);
+      line = document.createElement('span');
+      line.className = 'tab-drop-line';
+      strip.append(line);
+    }
+    ghost.style.left = `${ev.clientX - 60}px`;
+    ghost.style.top = `${ev.clientY - 16}px`;
+    const stripRect = strip.getBoundingClientRect();
+    const others = [...strip.querySelectorAll('.tab')].filter((t) => t.dataset.id !== id);
+    insert = others.length;
+    for (let i = 0; i < others.length; i++) {
+      const r = others[i].getBoundingClientRect();
+      if (ev.clientX < r.left + r.width / 2) { insert = i; break; }
+    }
+    const ref = others[insert];
+    line.style.left = `${(ref ? ref.getBoundingClientRect().left : stripRect.right) - stripRect.left}px`;
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    if (!started) return;
+    tabEl.classList.remove('dragging');
+    ghost?.remove(); line?.remove();
+    if (insert != null) {
+      const ids = state.order.filter((x) => x !== id);
+      ids.splice(Math.max(0, Math.min(ids.length, insert)), 0, id);
+      state.order = ids;
+    }
+    renderTabs();
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+
+/* ── 左栏：已打开区 + 文件夹树 ── */
+function renderLeft() {
+  const host = $('#openEditorsList');
+  host.replaceChildren();
+  $('#openEditors').classList.toggle('hidden', state.openIds.length === 0);
+  $('#openEditorsCount').textContent = state.openIds.length ? `(${state.openIds.length})` : '';
+  for (const id of state.order) {
+    if (!state.openIds.includes(id)) continue;
+    const d = docById(id);
+    const li = document.createElement('li');
+    li.className = 'oe-item' + (state.active === id ? ' active' : '');
+    li.innerHTML = `<span style="opacity:.75">${SVG.file}</span>
+      <span class="name" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.name}</span>
+      <span class="sub">${d.folder}</span><span class="x">×</span>`;
+    li.addEventListener('click', (e) => {
+      if (e.target.closest('.x')) { closeTab(id); return; }
+      activate(id);
+    });
+    host.append(li);
+  }
+
+  const tree = $('#fileTree');
+  tree.replaceChildren();
+  for (const folder of FOLDERS) {
+    const docs = DOCS.filter((d) => d.folder === folder);
+    const openCount = docs.filter((d) => state.openIds.includes(d.id)).length;
+    const folderHasJob = folderSessions(folder).sessions.some((s) => s.job);
+    const frow = document.createElement('li');
+    frow.className = 'folder-row';
+    frow.innerHTML = `<span class="arrow" style="transform:rotate(${state.expanded.has(folder) ? 90 : 0}deg)">▸</span>
+      <span>📁</span><span class="fname">${folder}</span>
+      ${folderHasJob ? '<span class="jobdot" title="该文件夹有会话在后台生成"></span>' : ''}
+      <span class="count">已打开 ${openCount} / 共 ${docs.length}</span>`;
+    frow.addEventListener('click', () => {
+      if (state.expanded.has(folder)) state.expanded.delete(folder); else state.expanded.add(folder);
+      renderLeft();
+    });
+    tree.append(frow);
+    if (!state.expanded.has(folder)) continue;
+    for (const d of docs) {
+      const li = document.createElement('li');
+      const open = state.openIds.includes(d.id);
+      li.className = 'file-item' + (open ? ' open' : '') + (state.active === d.id ? ' active' : '');
+      li.innerHTML = `<span style="opacity:.65">${SVG.file}</span><span class="name">${d.name}</span>
+        ${d.trJob ? '<span class="jobdot" title="译文生成中"></span>' : ''}`;
+      li.addEventListener('click', () => openDoc(d.id));
+      tree.append(li);
+    }
+  }
+}
+
+/* ── 中间：正文 / Welcome ── */
+function renderCenter() {
+  const home = $('#home');
+  const viewer = $('#viewer');
+  const d = activeDoc();
+  if (!d) {
+    home.classList.remove('hidden');
+    viewer.classList.add('hidden');
+    $('#topDocName').textContent = '论文阅读器';
+    renderWelcome();
+    return;
+  }
+  home.classList.add('hidden');
+  viewer.classList.remove('hidden');
+  const p = d.page;
+  viewer.innerHTML = `<div class="page">
+    <h1>${d.name}</h1>
+    <div class="authors">示意页 · 第 ${p} 页 · 缩放 ${d.zoom}% · 真实界面由 pdf.js 渲染；标签切换保留每篇的页码/缩放/滚动位置</div>
+    <h2>3.2 Scal</h2>
+    <p>We call our particular attention <span class="hl">“Scaled Dot-Product Attention”</span>. The input consists of
+    queries and keys of dimension d<sub>k</sub>, and values of dimension d<sub>v</sub>. We compute the dot products of the
+    query with all keys, divide each by √d<sub>k</sub>, and apply a softmax function to obtain the weights on the values.</p>
+    <div class="formula">Attention(Q, K, V) = softmax( QKᵀ / √d<sub>k</sub> ) · V</div>
+    <p>（示意：这篇属于「${d.folder}」文件夹；同一文件夹里的问答会话共享，译文属于本文档。）</p>
+    <div class="page-num">— ${p} —</div>
+  </div>`;
+}
+function renderWelcome() {
+  const recent = DOCS.slice(0, 3);
+  $('#home').innerHTML = `<div class="home-head">
+      <div class="home-logo">P</div><h1>论文阅读器</h1>
+      <p class="tagline">本地 PDF · 划词即译 · 选中即问 · 全部标签关闭时就是这里</p>
+    </div>
+    <div class="home-actions"><button class="home-open">打开 PDF</button><div class="home-drop">把 PDF 拖到这里（支持多选）</div></div>
+    <div class="home-recent"><div class="home-sec-title">最近打开（点一下会重新打开成标签）</div>
+    ${recent.map((d) => `<div class="home-item" data-id="${d.id}"><span class="hi-name">${d.name}</span><span class="hi-meta">第 ${d.page} 页 · 今天</span></div>`).join('')}
+    </div>`;
+  $$('#home .home-item').forEach((el) => el.addEventListener('click', () => openDoc(el.dataset.id)));
+}
+
+/* ── 右栏：文件夹 / 文档上下文 + 译文（doc）/ 问答（folder） ── */
+function renderRight() {
+  const d = activeDoc();
+  const right = $('#rightSide');
+  right.classList.toggle('hidden', !d);
+  if (!d) return;
+  const folder = d.folder;
+  const fs = folderSessions(folder);
+  const jobRunning = fs.sessions.some((s) => s.job) || !!d.trJob;
+  $('#fbFolder').textContent = `📁 ${folder}`;
+  $('#fbDoc').textContent = `📄 ${d.name}`;
+  $('#fbStatus').textContent = d.trJob ? '译文生成中…'
+    : (fs.sessions.some((s) => s.job) ? '回答生成中…' : '');
+  $('#topDocName').textContent = `${d.name} · 论文阅读器`;
+  $('#aibarTranslate').classList.toggle('on', state.rightTab === 'translate');
+  $('#aibarChat').classList.toggle('on', state.rightTab === 'chat');
+  $('#translatePanel').classList.toggle('hidden', state.rightTab !== 'translate');
+  $('#chatPanel').classList.toggle('hidden', state.rightTab !== 'chat');
+  $('#composer').classList.toggle('hidden', state.rightTab !== 'chat');
+  renderTranslate(d);
+  renderSessions(fs, folder);
+  renderChatBody(fs, folder);
+  renderComposer();
+}
+function renderTranslate(d) {
+  $('#translateLine').innerHTML = `📄 <span class="name">${d.name}</span> · ${d.translate.length} 条译文 · 译文属于文档`;
+  const body = $('#translateBody');
+  body.replaceChildren();
+  const entries = [];
+  if (d.trJob) entries.push(d.trJob.entry || { q: '（示意）正在翻译…', a: '' });
+  entries.push(...d.translate);
+  if (!entries.length) {
+    body.innerHTML = '<div class="ai-empty">这篇还没有译文<br>划词翻译后会出现在这里（切标签各自保留，重启也还在）</div>';
+    return;
+  }
+  for (const e of entries) {
+    const div = document.createElement('div');
+    div.className = 'tr-entry';
+    div.innerHTML = `<div class="q">${e.q}</div><div class="a">${e.a}${e === d.trJob?.entry ? '<span class="cursor">▌</span>' : ''}</div>`;
+    body.append(div);
+  }
+}
+function renderSessions(fs, folder) {
+  const host = $('#sessChips');
+  host.replaceChildren();
+  const rows = [...fs.sessions].sort((a, b) => (b.sid === fs.activeSid ? 1 : 0) - (a.sid === fs.activeSid ? 1 : 0));
+  for (const s of rows) {
+    const b = document.createElement('button');
+    b.className = 'sess-chip';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(s.sid === fs.activeSid));
+    b.title = `${s.title}${s.updated ? ` · ${s.updated}` : ''}（文件夹「${folder}」的会话）`;
+    b.innerHTML = `<span class="sess-chip-title">${s.title}</span>
+      ${s.job ? '<span class="sess-chip-badge" data-state="streaming"></span>' : ''}`;
+    b.addEventListener('click', () => { fs.activeSid = s.sid; renderRight(); });
+    host.append(b);
+  }
+}
+function renderChatBody(fs, folder) {
+  const mount = $('#chatBodyMount');
+  const s = fs.sessions.find((x) => x.sid === fs.activeSid) || fs.sessions[0];
+  mount.replaceChildren();
+  if (!s) {
+    mount.innerHTML = '<div class="ai-empty" style="padding:28px 12px">还没有会话，点 ＋ 新建</div>';
+    return;
+  }
+  const body = document.createElement('div');
+  body.className = 'ai-body';
+  const multiDoc = new Set(s.msgs.map((m) => m.docId)).size > 1;
+  for (const m of [...s.msgs]) {
+    const d = docById(m.docId);
+    const msg = document.createElement('div');
+    msg.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
+    const docTag = multiDoc && d ? `<span class="doc-tag" title="这条消息问的是《${d.name}》">${shortName(d.name)}</span>` : '';
+    msg.innerHTML = `<div class="role">${m.tag ? `<span class="tag">${m.tag}</span>` : ''}${docTag}${m.page ? `<span class="pg">第${m.page}页</span>` : ''}</div>
+      ${m.quote ? `<div class="ref">${m.quote}</div>` : ''}
+      <div class="text">${m.text}</div>`;
+    body.append(msg);
+  }
+  if (s.job) {
+    const msg = document.createElement('div');
+    msg.className = 'msg assistant';
+    msg.innerHTML = `<div class="role"><span class="tag">答</span><span class="doc-tag">${shortName(docById(state.active)?.name || '')}</span></div>
+      <div class="text">${s.job.text || '示意：正在后台生成回答……'}<span class="cursor">▌</span></div>`;
+    body.append(msg);
+  }
+  if (!s.msgs.length && !s.job) {
+    body.innerHTML = '<div class="ai-empty" style="padding:26px 12px">新会话是空的；这个会话属于文件夹「' + folder + '」，同文件夹内切文档不会换会话。</div>';
+  }
+  mount.append(body);
+}
+function renderComposer() {
+  $('#composerHint').textContent = state.rightTab === 'chat'
+    ? '当前页上下文 · 草稿按标签保存 · 问答属于当前文件夹，生成中切会话会后台继续'
+    : '译本块没有输入框（与现有行为一致）';
+}
+function shortName(name) { return String(name || '').split(/[:：]/)[0].slice(0, 12); }
+
+/* ── 菜单 ── */
+function closeMenus() {
+  $('#allTabsMenu')?.remove();
+  $('#tabCtxMenu')?.remove();
+  $('#docsMenu')?.classList.add('hidden');
+  $('#sessMenu')?.classList.add('hidden');
+  document.removeEventListener('pointerdown', onDocDown, true);
+}
+function onDocDown(e) {
+  if (e.target.closest('.menu') || e.target.closest('#tabOverflow') || e.target.closest('#fbDocs') || e.target.closest('#sessMore')) return;
+  closeMenus();
+}
+function openDocsMenu() {
+  closeMenus();
+  const menu = $('#docsMenu');
+  const d = activeDoc();
+  menu.classList.remove('hidden');
+  const folderDocs = DOCS.filter((x) => x.folder === d.folder);
+  const opened = folderDocs.filter((x) => state.openIds.includes(x.id));
+  const rest = folderDocs.filter((x) => !state.openIds.includes(x.id));
+  menu.replaceChildren();
+  menu.append(sectionHead('已打开（本文件夹）'));
+  if (!opened.length) menu.append(emptyRow('本文件夹还没有已打开文档'));
+  for (const x of opened) {
+    const row = document.createElement('div');
+    row.className = 'm-row' + (state.active === x.id ? ' current' : '');
+    row.innerHTML = `<span class="name">${x.name}</span><span class="opened">${state.active === x.id ? '当前' : '已打开'}</span>`;
+    row.addEventListener('click', () => { activate(x.id); closeMenus(); });
+    menu.append(row);
+  }
+  menu.append(sectionHead('文件夹内其他文档（点击按需打开）'));
+  if (!rest.length) menu.append(emptyRow('本文件夹的文档都已打开'));
+  for (const x of rest) {
+    const row = document.createElement('div');
+    row.className = 'm-row';
+    row.innerHTML = `<span class="name">${x.name}</span><span class="open-here">打开</span>`;
+    row.addEventListener('click', () => { openDoc(x.id); closeMenus(); });
+    menu.append(row);
+  }
+  document.addEventListener('pointerdown', onDocDown, true);
+}
+function openTabMenu() {
+  closeMenus();
+  const menu = document.createElement('div');
+  menu.className = 'menu'; menu.id = 'allTabsMenu';
+  menu.innerHTML = `<input class="filter filter2" placeholder="过滤标签 / 文档…" />
+    <div class="m-rows"></div>
+    <div class="m-foot">
+      <button data-act="others">关闭其他</button><button data-act="all">关闭全部（回 Welcome）</button>
+    </div>`;
+  const d = activeDoc();
+  const currentFolder = d ? d.folder : '';
+  const folderDocs = currentFolder ? DOCS.filter((x) => x.folder === currentFolder) : [];
+  const draw = (q = '') => {
+    const rows = menu.querySelector('.m-rows');
+    rows.replaceChildren();
+    rows.append(sectionHead(`全部标签（${state.openIds.length}）`));
+    const tabs = state.order.filter((id) => state.openIds.includes(id));
+    for (const id of tabs) {
+      if (q && !docById(id).name.toLowerCase().includes(q)) continue;
+      const row = document.createElement('div');
+      row.className = 'm-row' + (state.active === id ? ' current' : '');
+      row.innerHTML = `<span class="name">${docById(id).name}</span><span class="x">×</span>`;
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('.x')) { closeTab(id); closeMenus(); return; }
+        activate(id); closeMenus();
+      });
+      rows.append(row);
+    }
+    if (currentFolder) {
+      rows.append(sectionHead(`当前文件夹（${currentFolder}）`));
+      for (const x of folderDocs) {
+        if (q && !x.name.toLowerCase().includes(q)) continue;
+        const open = state.openIds.includes(x.id);
+        const row = document.createElement('div');
+        row.className = 'm-row';
+        row.innerHTML = `<span class="name">${x.name}</span><span class="opened">${open ? '已打开' : '按需打开'}</span>`;
+        row.addEventListener('click', () => { openDoc(x.id); closeMenus(); });
+        rows.append(row);
+      }
+    }
+  };
+  draw();
+  menu.querySelector('.filter2').addEventListener('input', (e) => draw(e.target.value.trim().toLowerCase()));
+  menu.querySelector('[data-act="others"]').addEventListener('click', () => {
+    for (const id of [...state.order]) if (id !== state.active) closeTab(id);
+    closeMenus();
+  });
+  menu.querySelector('[data-act="all"]').addEventListener('click', () => { closeAllTabs(); closeMenus(); });
+  $('.center').style.position = 'relative';
+  $('.center').append(menu);
+  document.addEventListener('pointerdown', onDocDown, true);
+}
+function openSessMenu() {
+  closeMenus();
+  const fs = folderSessions(activeFolder());
+  const menu = $('#sessMenu');
+  menu.classList.remove('hidden');
+  menu.replaceChildren();
+  menu.append(sectionHead(`「${activeFolder()}」的会话（文件夹级）`));
+  for (const s of fs.sessions) {
+    const row = document.createElement('div');
+    row.className = 'm-row' + (s.sid === fs.activeSid ? ' current' : '');
+    row.innerHTML = `<span class="name">${s.title}</span><span class="opened">${s.msgs.length ? s.msgs.length + ' 条' : '空'}</span>`;
+    row.addEventListener('click', () => { fs.activeSid = s.sid; closeMenus(); renderRight(); });
+    menu.append(row);
+  }
+  const foot = document.createElement('div');
+  foot.className = 'm-foot';
+  foot.innerHTML = '<button data-act="clear">清空当前会话</button><button data-act="new">新建会话</button>';
+  foot.querySelector('[data-act="clear"]').addEventListener('click', () => {
+    const s = fs.sessions.find((x) => x.sid === fs.activeSid);
+    if (s) { s.msgs = []; s.job = null; }
+    closeMenus(); renderRight();
+  });
+  foot.querySelector('[data-act="new"]').addEventListener('click', () => { newSession(); closeMenus(); });
+  menu.append(foot);
+  document.addEventListener('pointerdown', onDocDown, true);
+}
+
+/* 标签右键菜单：关闭 / 关闭其他 / 关闭全部（回 Welcome） */
+function openTabContextMenu(id, ev) {
+  closeMenus();
+  const center = $('.center');
+  const cr = center.getBoundingClientRect();
+  const menu = document.createElement('div');
+  menu.className = 'menu';
+  menu.id = 'tabCtxMenu';
+  menu.style.cssText = `top:${ev.clientY - cr.top}px;left:${ev.clientX - cr.left}px;right:auto;width:200px`;
+  const rows = [
+    ['关闭', () => { closeTab(id); closeMenus(); }],
+    ['关闭其他', () => { for (const x of [...state.order]) if (x !== id) closeTab(x); closeMenus(); }],
+    ['关闭全部（回 Welcome）', () => { closeAllTabs(); closeMenus(); }],
+    ['在左栏中定位', () => { state.expanded.add(docById(id).folder); closeMenus(); renderLeft(); }],
+  ];
+  for (const [label, fn] of rows) {
+    const row = document.createElement('div');
+    row.className = 'm-row';
+    row.innerHTML = `<span class="name">${label}</span>`;
+    row.addEventListener('click', fn);
+    menu.append(row);
+  }
+  center.style.position = 'relative';
+  center.append(menu);
+  document.addEventListener('pointerdown', onDocDown, true);
+}
+function sectionHead(text) { const d = document.createElement('div'); d.className = 'm-head'; d.textContent = text; return d; }
+function emptyRow(text) { const d = document.createElement('div'); d.className = 'm-row'; d.innerHTML = `<span class="name" style="color:var(--fg-faint)">${text}</span>`; return d; }
+function newSession() {
+  const folder = activeFolder();
+  if (!folder) return;
+  const fs = folderSessions(folder);
+  const sid = 'n' + Date.now().toString(36);
+  fs.sessions.unshift({ sid, title: '新会话', updated: '刚刚', job: null, msgs: [] });
+  fs.activeSid = sid;
+  renderRight();
+}
+
+/* ── 交互绑定 ── */
+function bindChrome() {
+  $('#themeBtn').addEventListener('click', () => {
+    state.theme = state.theme === 'light' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = state.theme;
+  });
+  $('#annoBtn').addEventListener('click', toggleAnno);
+  $('#tabOverflow').addEventListener('click', (e) => { e.stopPropagation(); openTabMenu(); });
+  $('#tabNew').addEventListener('click', () => {
+    const closed = DOCS.find((d) => !state.openIds.includes(d.id));
+    if (closed) openDoc(closed.id);
+  });
+  $('#fbDocs').addEventListener('click', (e) => { e.stopPropagation(); openDocsMenu(); });
+  $('#sessNew').addEventListener('click', newSession);
+  $('#sessMore').addEventListener('click', (e) => { e.stopPropagation(); openSessMenu(); });
+  $('#aibarTranslate').addEventListener('click', () => { state.rightTab = 'translate'; renderRight(); });
+  $('#aibarChat').addEventListener('click', () => { state.rightTab = 'chat'; renderRight(); });
+  $('#chatInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const text = e.target.value.trim();
+      const fs = folderSessions(activeFolder());
+      const s = fs.sessions.find((x) => x.sid === fs.activeSid);
+      if (!text || !s || !state.active) return;
+      s.msgs.push({ role: 'user', docId: state.active, text, page: activeDoc().page });
+      e.target.value = '';
+      renderRight();
+      // 演示：发送后自动开始后台生成（切走也继续）
+      startFakeChatJob();
+      renderRight();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeMenus(); return; }
+    if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      if (!state.openIds.length) return;
+      const i = state.order.indexOf(state.active);
+      const next = state.order[(i + (e.shiftKey ? state.order.length - 1 : 1)) % state.order.length];
+      activate(next);
+      return;
+    }
+    if (e.key.toLowerCase() === 'w') {
+      e.preventDefault();
+      if (state.active) closeTab(state.active);
+      return;
+    }
+    if (e.key.toLowerCase() === 't' && e.shiftKey) {
+      e.preventDefault();
+      const closed = DOCS.find((d) => !state.openIds.includes(d.id));
+      if (closed) openDoc(closed.id);
+    }
+  });
+  window.addEventListener('resize', () => { updateOverflow(); });
+}
+
+/* ── 底部 ── */
+function renderFoot() {
+  const d = activeDoc();
+  const on = !!d;
+  for (const id of ['prevPage', 'nextPage', 'pageInput', 'zoomOut', 'zoomIn']) $('#' + id).disabled = !on;
+  $('#pageInput').value = on ? String(d.page) : '–';
+  $('#pageCount').textContent = on ? '/ 16' : '/ –';
+  $('#zoomPct').textContent = on ? `${d.zoom}%` : '—';
+}
+function bindFoot() {
+  $('#prevPage').addEventListener('click', () => { const d = activeDoc(); if (!d) return; d.page = Math.max(1, d.page - 1); renderCenter(); renderFoot(); });
+  $('#nextPage').addEventListener('click', () => { const d = activeDoc(); if (!d) return; d.page = Math.min(16, d.page + 1); renderCenter(); renderFoot(); });
+  $('#zoomIn').addEventListener('click', () => { const d = activeDoc(); if (!d) return; d.zoom = Math.min(300, d.zoom + 10); renderCenter(); renderFoot(); });
+  $('#zoomOut').addEventListener('click', () => { const d = activeDoc(); if (!d) return; d.zoom = Math.max(50, d.zoom - 10); renderCenter(); renderFoot(); });
+}
+
+/* ── 批注 ── */
+const NOTES = [
+  [1, '标签条（只列已打开文档）', '有标签才出现；关掉全部 = 回 Welcome，没有「书架标签」。'],
+  [2, '「全部标签 / 文件夹文档」菜单', '分组：全部标签 + 当前文件夹（未打开的显示「按需打开」，点一下开成新标签）。'],
+  [3, '文件夹 / 文档上下文条', '📁 问答属于哪个文件夹、📄 译文属于哪个文档；右侧「文档 ▾」能看已打开/文件夹其他文档并按需打开。'],
+  [4, '译文块（文档级）', '每篇文档自己的译文；切标签各自保留、切会话不受影响；重启也在（译文存档）。'],
+  [5, '问答块（文件夹级）', '同一文件夹的论文共用会话：切文档标签不换会话、不重载；切到别的文件夹才换。'],
+  [6, '后台生成指示', '问答在后台生成 → 文件夹行圆点 + 会话 chip 圆点；翻译在后台生成 → 标签圆点；切走不中断。'],
+  [7, '左栏：已打开 + 文件夹树', '「已打开」区列出所有标签；文件夹树显示文件夹里的全部文档、已打开标记与计数，点击按需打开。'],
+  [8, 'Welcome', '关闭全部标签（菜单里「关闭全部」）→ 这个书架页；标签条隐藏、右栏收起、底栏禁用。'],
+];
+function toggleAnno() {
+  state.annot = !state.annot;
+  document.body.classList.toggle('annot-on', state.annot);
+  $('#annoBtn').classList.toggle('on', state.annot);
+  document.querySelectorAll('.anno-dot, .anno-card').forEach((n) => n.remove());
+  if (!state.annot) return;
+  const targets = [
+    [1, document.getElementById('tabBar'), 'left: 4px; top: 5px;'],
+    [2, document.getElementById('tabOverflow'), 'left: -6px; top: -6px;'],
+    [3, document.getElementById('aiFolderbar'), 'left: 4px; top: 3px;'],
+    [4, document.getElementById('aibarTranslate'), 'left: -6px; top: -6px;'],
+    [5, document.getElementById('chatSessions'), 'left: 4px; top: 4px;'],
+    [6, document.getElementById('sessChips'), 'left: 4px; top: -5px;'],
+    [7, document.getElementById('openEditors'), 'left: 4px; top: 3px;'],
+  ];
+  for (const [n, el, pos] of targets) {
+    if (!el || el.closest('.hidden')) continue;
+    el.style.position = el.style.position || 'relative';
+    const dot = document.createElement('span');
+    dot.className = 'anno-dot';
+    dot.textContent = String(n);
+    dot.style.cssText += pos;
+    el.append(dot);
+  }
+  const card = document.createElement('div');
+  card.className = 'anno-card';
+  card.innerHTML = `<button class="close-anno" title="关闭">×</button>
+    <div><b>v2 结构批注</b>（点「批注」关闭）</div>
+    ${NOTES.map(([n, t, d]) => `<div class="row"><span class="n">${n}</span><span><b>${t}</b>：${d}</span></div>`).join('')}`;
+  card.querySelector('.close-anno').addEventListener('click', toggleAnno);
+  document.body.append(card);
+}
+
+/* ── 全量渲染 ── */
+function renderAll() {
+  renderTabBar();
+  renderLeft();
+  renderCenter();
+  renderRight();
+  renderFoot();
+}
+bindChrome();
+bindFoot();
+renderAll();
+setTimeout(() => startFakeTranslate('bert'), 1400);        // 演示：译文后台生成（切走继续）
+setTimeout(() => startFakeChatJob('生成模型', 'g1', 'ddpm'), 600);  // 演示：别的文件夹的会话在后台生成
+</script>
+</body>
+</html>
