@@ -15,6 +15,7 @@ fs.copyFileSync(path.join(ROOT, 'test/fixtures/multipage-sample.pdf'), path.join
 const wait = ms => new Promise(r => setTimeout(r, ms));
 const listen = server => new Promise(r => server.listen(0, '127.0.0.1', r));
 let hits = 0;
+const requests = [];
 const mock = http.createServer(async (req, res) => {
   const chunks = []; for await (const chunk of req) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks));
@@ -22,6 +23,7 @@ const mock = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ choices: [{ message: { content: '[]' } }] })); return;
   }
+  requests.push(body);
   hits++;
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
   for (const content of ['mock ', 'answer']) {
@@ -89,8 +91,43 @@ try {
     assert.equal(result.scopeClosed, true, `${kind}: scope popup closed`);
     console.log(`PASS ${kind}: upstream, response, busy reset, scope closed`);
   }
+  /* ── 只发截图、不写文字问题：怎么回由 AI 判断，不能写死提示词 ── */
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const shotsBefore = hits;
+  const entriesBeforeShot = await page.evaluate(() => window.__state.sessionEntries.length);
+  await page.evaluate((png) => {
+    // 故意选「整篇论文」范围：只发截图时也不该顺手把整篇塞进来
+    window.__ctx.setScopeRange('paper');
+    window.__ctx.addImageToChat({ dataUrl: png, width: 1, height: 1, pages: 1 }, 1, '测试截图');
+    const input = document.querySelector('#chatInput');
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('#sendBtn').click();
+  }, PNG);
+  await page.waitForFunction((n) => window.__state.sessionEntries.length > n && !window.__state.busy
+    && window.__state.sessionEntries.at(-1)?.status === 'complete', { timeout: 15000 }, entriesBeforeShot);
+  const shotReq = requests.at(-1);
+  const shotLast = shotReq?.messages?.at(-1)?.content;
+  const shotParts = Array.isArray(shotLast) ? shotLast : [];
+  const shotText = shotParts.length
+    ? String(shotParts.find((p) => p.type === 'text')?.text || '')
+    : String(shotLast || '');
+  assert.equal(hits, shotsBefore + 1, 'screenshot-only: reaches upstream');
+  assert.equal(shotParts.filter((p) => p.type === 'image_url').length, 1, 'screenshot-only: image attached');
+  assert.match(shotText, /没有写文字问题/, 'screenshot-only: asks model to judge first');
+  assert.match(shotText, /以截图本身为中心/, 'screenshot-only: stays focused on the screenshot');
+  assert.match(shotText, /读者截图/, 'screenshot-only: screenshot labeled');
+  assert.ok(!shotText.includes('说明它们在论文里的作用'), 'screenshot-only: no hard-coded instruction');
+  assert.ok(!shotText.includes('【论文全文】') && !shotText.includes('【阅读索引】'),
+    'screenshot-only: whole-paper scope is not dumped');
+  assert.match(String(shotReq.messages[0].content), /截图规则/, 'screenshot-only: visible-only rule injected');
+  const shotBubble = await page.evaluate(() => [...document.querySelectorAll('#aiArea .msg.user')].at(-1)?.textContent || '');
+  assert.ok(!shotBubble.includes('没有写文字问题') && !shotBubble.includes('以截图本身为中心'),
+    'screenshot-only: judge instruction is not displayed as user text');
+  console.log('PASS screenshot-only: AI decides how to answer (no hard-coded prompt)');
+
   assert.deepEqual(errors, []);
-  console.log('PASS no browser exceptions; 13/13 assertions');
+  console.log('PASS no browser exceptions; 22/22 assertions');
 } finally {
   await browser?.close(); server?.kill();
   mock.closeAllConnections(); await new Promise(r => mock.close(r));

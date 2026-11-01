@@ -334,7 +334,7 @@ export function matchGlossary(text, glossaryText) {
   return entries.filter(([k]) => hay.includes(k.toLowerCase()));
 }
 
-export function askMessages({ question, selection, selectionSource = '', context, page, pageRole = '', docTitle, fullText, webResults, history = [], reading, references = [], profileBlock = null, teachingBlock = '', pageImages = [] }) {
+export function askMessages({ question, selection, selectionSource = '', context, page, pageRole = '', docTitle, fullText, webResults, history = [], reading, references = [], profileBlock = null, teachingBlock = '', pageImages = [], screenshotCount = 0 }) {
   const request = reading || resolveReadingRequest({ question, selection, page, history, selectionSource });
   const role = ['selection', 'explicit', 'topic', 'screen'].includes(pageRole)
     ? pageRole : (selection ? 'selection' : 'screen');
@@ -355,6 +355,13 @@ export function askMessages({ question, selection, selectionSource = '', context
     '7. 如果【后台学习记忆】里给出了读者的称呼或身份，可直接用合适的称呼作答；不要解释记忆系统如何工作，也不要承诺「永久记住」「已保存到记忆」这类超出事实的说法。',
     pageImages.length
       ? '8. 这篇 PDF 没有可抽取的文本层（扫描件），本次附带了页面图片。只依据图片里实际可见的内容回答；图片里看不清、被裁掉或没有提供的页面，明确说不确定，不要补造原文、页码或图表编号。如果你实际上无法查看图片（当前模型不支持读图），必须直接说明「当前模型无法读图，建议配置视觉模型」，不要根据标题、提示或常识推测图片内容。'
+      : '',
+    screenshotCount
+      ? `【截图规则】本次附带了读者发来的 ${screenshotCount} 张截图（不是论文页面图，可能是图 / 表 / 公式 / 代码 / 手写）。`
+        + '先判断截图里实际是什么、读者此刻最需要什么，再决定怎么回答（识读原文 / 解释含义 / 翻译 / 说明它在上下文里的作用 / 指出与上下文对不上）。'
+        + '如果这次读者没有写文字问题，以截图本身为中心回答，不要主动总结或扩写到整篇论文；只有截图确实离不开上下文时，才简要引用所在页的一两句话。'
+        + '只依据截图里实际可见的内容回答；看不清、被裁掉、文字模糊的地方明确说不确定，不要补造原文、数字或图表编号。'
+        + '如果你实际上无法查看图片（当前模型不支持读图），必须直接说明「当前模型无法读图，建议配置视觉模型」，不要根据文件名、页码或提示猜截图内容。'
       : '',
     CITATION_RULE,
     request.guidance ? `读者持续的讲解偏好：${request.guidance}` : '',

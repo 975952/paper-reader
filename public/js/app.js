@@ -7633,8 +7633,13 @@ async function send(retryPending = null) {
     // 「当前页」按屏幕实际显示区域现算（不受滚动节流影响）；附件里的页码优先。
     const screenPage = state.doc && viewer ? (viewer.currentVisiblePage?.() ?? viewer.current ?? null) : null;
     const attachmentPage = quotes[0]?.page || images[0]?.page || null;
+    // 没写文字问题、只发来截图时，提示词也不能写死成「请识别并解释」：
+    // 交给模型先判断截图是什么、读者此刻最需要什么，再决定怎么回（识别/解释/翻译/指出对不上）。
+    // 并且以截图本身为中心，不许顺手扩写成整篇论文（用户实测：只截了一个单词，却回了整讲讲义）。
     const question = q || (images.length
-      ? '请识别并解释我加进来的这些内容（图/表/公式/文字），说明它们在论文里的作用。'
+      ? `（读者没有写文字问题，只发来 ${images.length} 张截图。）这次以截图本身为中心回答：先判断截图里实际是什么（插图 / 表格 / 公式 / 算法 / 正文文字 / 手写等），`
+        + '再判断读者此刻最需要什么——识读原文、解释含义、翻译，或者说明这一小块在上下文里起什么作用；然后直接给出最有用的回答。'
+        + '不要主动扩写到整篇论文，不要套固定栏目，不要补造截图里看不见的内容；只有截图确实离不开上下文时，才简要引用所在页的一两句话。'
       : '请解释我加进来的这段内容。');
     const history = snapshotHistory(state.history);
     const selectionSource = selectionFromRight ? 'right' : '';
@@ -7679,8 +7684,9 @@ async function send(retryPending = null) {
     // 这条待发记录的范围固定下来：重试 / 停止后恢复都复用它，不会被之后改的范围串掉
     pending.scope = SCOPE_RANGES[currentRange()].short;
     // 同一条待发问题在失败或停止后重试时复用这两行，不再追加用户消息。
+    // 没写文字问题时不要把给模型的判断指令当成「用户说的话」显示到问答区（用户会以为那是自己发的提示词）。
     pending.userEntry = addEntry({
-      block: 'chat', kind: 'user', text: question, quote: reading.selection,
+      block: 'chat', kind: 'user', text: pending.inputValue.trim() ? question : '', quote: reading.selection,
       thumbs: images.map((im) => im.dataUrl),
     });
     pending.entry = addEntry({
@@ -7719,10 +7725,13 @@ async function send(retryPending = null) {
   // 这条待发记录的范围固定下来：state 的两个标记跟着它走（重试时 pending 原样复用，不会串范围）
   applyRangeForSend(pending.scopeRange || currentRange());
   const images = pending.attachments.filter((a) => a.kind === 'image');
+  // 只发了截图、没写问题：这次以截图为中心，不主动把整篇论文/采样页图塞进来（用户口径：截一个单词就答这个单词）。
+  const shotOnly = !pending.inputValue.trim() && images.length > 0
+    && !pending.attachments.some((a) => a.kind === 'text');
   const baseScope = sendScopeText({
     attachments: pending.attachments,
     history: pending.history,
-    useFullText: pending.useFullText,
+    useFullText: pending.useFullText && !shotOnly,
     useWeb: pending.useWeb,
     query: pending.inputValue,
     docId: pending.docId,
@@ -7782,7 +7791,7 @@ async function send(retryPending = null) {
     if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
     pending.scope = sendScopeText({
       attachments: pending.attachments, history: pending.history,
-      useFullText: pending.useFullText, useWeb: pending.useWeb,
+      useFullText: pending.useFullText && !shotOnly, useWeb: pending.useWeb,
       query: pending.inputValue, docId: pending.docId, contextIncluded: !!context, scanned: scannedDoc,
       contextHint: scopeContextHintFor(pending),
     });
@@ -7804,18 +7813,19 @@ async function send(retryPending = null) {
     }
 
     // ② 上下文。扫描件：页面图片（+ 整篇类问题的采样页）；普通论文：整篇全文 / 索引 + 相关段落。
+    // 只发截图（没写问题）时不吃「整篇」范围：截图本身就是材料，塞整篇只会让模型顺势扩写整个讲义。
     if (scannedDoc) {
       try {
         docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text, {
           page: pending.firstPage || reading.page,
-          whole: pending.useFullText,
+          whole: pending.useFullText && !shotOnly,
         });
       } catch (e) {
         if (isAbort(e)) throw e;
         docCtx = null;
         setHint('读取扫描页失败，这次只带问题本身');
       }
-    } else if (pending.useFullText && pending.docId) {
+    } else if (pending.useFullText && !shotOnly && pending.docId) {
       try {
         docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text);
       } catch (e) {
@@ -7827,14 +7837,15 @@ async function send(retryPending = null) {
     pending.scope = sendScopeText({
       attachments: pending.attachments,
       history: pending.history,
-      useFullText: pending.useFullText,
+      useFullText: pending.useFullText && !shotOnly,
       useWeb: pending.useWeb,
       query: pending.inputValue,
       docId: pending.docId,
       scanned: scannedDoc,
       scanPageCount: docCtx?.pageImages?.length || 0,
-      fullMode: scannedDoc ? (pending.useFullText ? (docCtx?.mode || 'scan') : null)
-        : (pending.useFullText ? (docCtx?.mode || 'unavailable') : null),
+      fullMode: (pending.useFullText && !shotOnly)
+        ? (scannedDoc ? (docCtx?.mode || 'scan') : (docCtx?.mode || 'unavailable'))
+        : null,
       contextIncluded: !!context,
       contextHint: scopeContextHintFor(pending),
     });
@@ -7861,6 +7872,7 @@ async function send(retryPending = null) {
       history: pending.history,
       reading, references,
       pageImages: docCtx?.pageImages || [],
+      screenshotCount: images.length,
       profileBlock: profileForAsk,
       teachingBlock: teachingProgressBlock(),
     });
@@ -7869,6 +7881,9 @@ async function send(retryPending = null) {
     if (images.length || pageImages.length) {
       const last = messages[messages.length - 1];
       const parts = [{ type: 'text', text: last.content }];
+      if (images.length) {
+        parts[0].text = `${parts[0].text}\n\n${images.map((im) => `【读者截图${im.page ? ` · 第${im.page} 页` : ''}】见附图`).join('\n')}`;
+      }
       for (const im of images) parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
       if (pageImages.length) {
         parts[0].text = `${parts[0].text}\n\n${pageImages.map((im) => `【第${im.page}页原图】见附图`).join('\n')}`;
