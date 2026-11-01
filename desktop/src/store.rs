@@ -93,8 +93,30 @@ pub fn write_json(name: &str, value: &Value) -> bool {
         f.write_all(text.as_bytes())?;
         f.flush()?;
         drop(f);
-        // Windows 上 std::fs::rename 走 MoveFileEx(MOVEFILE_REPLACE_EXISTING)，可以直接覆盖
-        std::fs::rename(&tmp, &target)
+        // Windows 上 std::fs::rename 走 MoveFileEx(MOVEFILE_REPLACE_EXISTING)，可以直接覆盖；
+        // 但目标文件可能正被另一个请求读取（EPERM/EACCES/EBUSY）。退避重试几次，
+        // 避免「拖动排序 / 保存顺序」偶发失败（用户实测过）。
+        let mut last_err: Option<std::io::Error> = None;
+        for i in 0..12u64 {
+            match std::fs::rename(&tmp, &target) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let kind = e.kind();
+                    let retryable = matches!(
+                        kind,
+                        std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::Other
+                    );
+                    last_err = Some(e);
+                    if !retryable {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25 + i * 15));
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "rename failed")))
     })();
 
     match write_result {

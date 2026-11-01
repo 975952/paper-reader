@@ -2168,20 +2168,7 @@ async function deleteSelectedFiles() {
 async function moveSelectedFiles(to) {
   const paths = [...state.fileSel];
   if (!paths.length) return;
-  let ok = 0;
-  let failed = 0;
-  for (const rel of paths) {
-    try {
-      const r = await fetch('/api/move', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from: rel, to: to || '' }),
-      });
-      if (r.ok) ok += 1; else failed += 1;
-    } catch { failed += 1; }
-  }
-  clearFileSelection();
-  await refreshPaperList();
-  toast(`已移动 ${ok} 个文件到「${to || '根目录'}」${failed ? `（${failed} 个失败）` : ''}`, failed ? 'err' : 'ok', 3200);
+  await moveFilesTo(paths, to);
 }
 
 /**
@@ -2330,12 +2317,11 @@ function initFiles() {
   for (const type of ['dragenter', 'dragover']) document.addEventListener(type, acceptAnyDrag, true);
   window.addEventListener('drop', (e) => {
     if (e.defaultPrevented) return; // 已被文件列表 / 拖入区 / 左栏兜底处理，避免重复
+    // 内部拖拽的 drop 只由 #fileList / #leftSide 自己处理；窗口级只接「从资源管理器拖进来」。
+    // 这里再兜一次内部 drop，会把文件夹里正常排序的文件误当成「拖到左栏外」移到根目录。
+    if (!isExternalFileDrag(e)) return;
     e.preventDefault();
-    // 内部拖拽 drop 到左栏外（右栏/顶部/任意位置）→ 移到根目录；外部 PDF → 导入根。
-    if (isExternalFileDrag(e)) { importExternalDrop(e.dataTransfer, ''); return; }
-    let payload = null;
-    try { payload = JSON.parse(e.dataTransfer?.getData(PRT_DRAG_MIME) || 'null'); } catch { /* 忽略 */ }
-    if (payload) moveItem(payload.path, '');
+    importExternalDrop(e.dataTransfer, '');
   });
 
   $('#homeOpen')?.addEventListener('click', () => $('#fileInput')?.click());
@@ -2367,11 +2353,13 @@ function initFiles() {
     e.dataTransfer.dropEffect = 'move';
   });
   $('#leftSide').addEventListener('drop', (e) => {
+    if (e.defaultPrevented) return;          // 列表内 drop 已处理（并 stopPropagation 兜底）
     if (e.target.closest?.('#fileList')) return; // 列表内的 drop 已由 bindPaperDrag 处理
     let payload = null;
     try { payload = JSON.parse(e.dataTransfer?.getData(PRT_DRAG_MIME) || 'null'); } catch { /* 忽略 */ }
     if (!payload) return;
     e.preventDefault();
+    if (payload.kind === 'files') { moveFilesTo(payload.paths, ''); return; }
     moveItem(payload.path, '');
   });
 }
@@ -2438,12 +2426,17 @@ function bindPaperDrag(list) {
     const path = li.dataset.path || li.dataset.name || '';
     if (!path) return;
     const kind = li.classList.contains('folder') ? 'folder' : 'file';
-    from = { path, kind };
+    // 拖的是「已框选/多选」里的文件 → 整组一起拖（否则只拖这一行）
+    const group = kind === 'file' && state.fileSel.has(path) && state.fileSel.size > 1
+      ? [...state.fileSel]
+      : null;
+    from = { path, kind, paths: group };
     startPt = { x: Number(e.clientX) || 0, y: Number(e.clientY) || 0 };
     li.classList.add('dragging');
+    for (const other of list.querySelectorAll('li.selected')) other.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
     try {
-      e.dataTransfer.setData(PRT_DRAG_MIME, JSON.stringify({ path, kind }));
+      e.dataTransfer.setData(PRT_DRAG_MIME, JSON.stringify(group ? { kind: 'files', paths: group } : { path, kind }));
       e.dataTransfer.setData('text/plain', path);
     } catch { /* 忽略 */ }
   });
@@ -2494,6 +2487,10 @@ function bindPaperDrag(list) {
 
   list.addEventListener('drop', async (e) => {
     e.preventDefault();
+    // 关键：drop 处理完要 stopPropagation。#fileList 里的排序会同步重绘列表，
+    // 等事件冒泡到 #leftSide / window 时 e.target 已经脱离 DOM，closest('#fileList') 判不出来，
+    // 会被当成「拖到左栏外」→ 把文件移到根目录（用户实测：文件夹里拖动排序，文件却跑到根目录）。
+    e.stopPropagation();
     const payload = dragPayload(e);
     clearMarks();
     if (!payload && !isExternalFileDrag(e)) return;
@@ -2506,33 +2503,59 @@ function bindPaperDrag(list) {
       return importExternalDrop(e.dataTransfer, target);
     }
 
-    // 内部拖拽
+    // 内部拖拽。先看落点是不是「文件行」——文件夹里的文件互相拖是排序，
+  // 不能因为 ul.folder-children[data-parent] 把落点算成「自己所在的文件夹」而提前 return
+  //（用户实测：文件夹里的文件根本拖不动）。
+    const rowLi = e.target.closest?.('li[data-path]:not(.folder)');
     const folderLi = e.target.closest?.('li.folder[data-path]');
-    const targetFolder = folderLi ? folderLi.dataset.path : dropTargetFolder(e);
-    if (payload.kind === 'file') {
-      const li = e.target.closest?.('li[data-path]:not(.folder)');
-      // 拖到自己身上 = 位置没变：必须 no-op。旧实现会「移除后找不到 target」把它 append 到最末尾
-      //（用户实测：选中一个文档轻轻拖一点、松手，文件直接跑到列表最下面）。
-      if (li && fileRowPath(li) === payload.path) return;
-      // 拖到「自己所在的文件夹」行：无操作（服务端也会 no-op，前端先拦省一次请求）
-      if (targetFolder && targetFolder === folderOf(payload.path)) return;
-      // 落在列表空白处：距离不够近（轻轻一拖）或本来就在根目录 → 视为取消，避免文件被甩到最下面
-      if (!targetFolder && !li) {
+    const blankFolder = !rowLi && !folderLi ? dropTargetFolder(e) : '';
+
+    // 多选（框选/toggle）后拖动：整组移动到目标文件夹 / 根目录
+    if (payload.kind === 'files') {
+      let to = '';
+      if (folderLi) to = folderLi.dataset.path;
+      else if (rowLi) to = folderOf(rowLi.dataset.path);
+      else {
         const moved = startPt ? Math.hypot((Number(e.clientX) || 0) - startPt.x, (Number(e.clientY) || 0) - startPt.y) : 999;
-        if (moved < 60 || folderOf(payload.path) === '') return;
+        if (moved < 40) return;
+        to = blankFolder || '';
       }
-      // 同目录 + 落在 PDF 行上 → 排序；其余一律移动
-      if (!targetFolder && li && folderOf(li.dataset.path) === folderOf(payload.path)) {
-        const r = li.getBoundingClientRect();
-        applyPaperOrder(payload.path, li.dataset.path, e.clientY > r.top + r.height / 2);
-        return;
-      }
-      await moveItem(payload.path, targetFolder || '');
+      const targets = payload.paths.filter((p) => folderOf(p) !== to);
+      if (!targets.length) return;
+      await moveFilesTo(targets, to);
       return;
     }
+
+    if (payload.kind === 'file') {
+      // 落在文件行上：同目录 → 排序；跨目录 → 移入那一行所在的文件夹
+      if (rowLi) {
+        if (fileRowPath(rowLi) === payload.path) return;
+        if (folderOf(rowLi.dataset.path) === folderOf(payload.path)) {
+          const r = rowLi.getBoundingClientRect();
+          applyPaperOrder(payload.path, rowLi.dataset.path, e.clientY > r.top + r.height / 2);
+          return;
+        }
+        await moveItem(payload.path, folderOf(rowLi.dataset.path));
+        return;
+      }
+      // 落在文件夹行上：移入（目标就是自己所在目录 → no-op）
+      if (folderLi) {
+        if (folderLi.dataset.path === folderOf(payload.path)) return;
+        await moveItem(payload.path, folderLi.dataset.path);
+        return;
+      }
+      // 落在空白处：拖在「本文件夹自己的空白区」= 没动；距离不够近（轻轻一拖）或本来就在根目录
+      // 也视为取消，避免文件被甩到最下面 / 甩出文件夹。
+      if (blankFolder && blankFolder === folderOf(payload.path)) return;
+      const moved = startPt ? Math.hypot((Number(e.clientX) || 0) - startPt.x, (Number(e.clientY) || 0) - startPt.y) : 999;
+      if (moved < 60 || folderOf(payload.path) === '') return;
+      await moveItem(payload.path, blankFolder || '');
+      return;
+    }
+
     // 文件夹拖拽：改变层级（禁区前端先拦，服务端二次校验）
     if (payload.kind === 'folder') {
-      const to = targetFolder || '';
+      const to = folderLi ? folderLi.dataset.path : (blankFolder || '');
       if (to === payload.path || to.startsWith(`${payload.path}/`)) {
         toast('不能把文件夹移到自己的子目录里', 'err', 3600);
         return;
@@ -2540,6 +2563,26 @@ function bindPaperDrag(list) {
       await moveItem(payload.path, to);
     }
   });
+}
+
+/** 批量移动一组 PDF 到目标文件夹（''=根）；完成一次刷新 + 一条提示 */
+async function moveFilesTo(paths, to) {
+  const list = (paths || []).filter(Boolean);
+  if (!list.length) return;
+  let ok = 0;
+  let failed = 0;
+  for (const rel of list) {
+    try {
+      const r = await fetch('/api/move', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: rel, to: to || '' }),
+      });
+      if (r.ok) ok += 1; else failed += 1;
+    } catch { failed += 1; }
+  }
+  clearFileSelection();
+  await refreshPaperList();
+  toast(`已移动 ${ok} 个文件到「${to || '根目录'}」${failed ? `（${failed} 个失败）` : ''}`, failed ? 'err' : 'ok', 3200);
 }
 
 /** POST /api/move 移动 PDF / 文件夹；成功后刷新列表并同步打开中文件的内部路径 */
@@ -2667,6 +2710,7 @@ function showBatchFileCtx(x, y) {
 
 /** 批量移动的目标文件夹列表（根 + 所有文件夹） */
 function showBatchMoveTargets(menu, paths) {
+  menu.hidden = false;   // 同 showMoveTargets：换列表时把菜单重新显示出来
   menu.innerHTML = '';
   menu.append(el('div', { class: 'ctx-title', text: `移动 ${paths.length} 个文件到` }));
   const pick = (to) => { menu.hidden = true; moveSelectedFiles(to); };
@@ -2710,6 +2754,7 @@ function showFileCtx(x, y, target) {
 
 /** 「移动到…」：菜单原地换成目标列表（根 + 各文件夹；文件夹移动跳过自身/子孙） */
 function showMoveTargets(menu, target) {
+  menu.hidden = false;   // 菜单项点击时先 hidden=true 再回调：换目标列表必须重新显示，否则看起来「没反应」
   menu.innerHTML = '';
   menu.append(el('div', { class: 'ctx-title', text: `移动「${target.name}」到` }));
   const pick = (to) => { menu.hidden = true; moveItem(target.path, to); };

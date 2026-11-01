@@ -3073,3 +3073,44 @@ exe 重编：**10,616,832 字节**，SHA256 `92F43D52134AEE58852D8A4ACA9AEDD456E
 exe 重编：**10,635,776 字节**，SHA256 `F6E8131D807D97464E685C282436EB0D673FFB810B7C0CE25B28C2D6C3A31E04`
 （最终交付，包含 §48–§54 全部改动）。仓库根 `论文阅读器.exe` 已更新；
 桌面副本仍在运行时按 §46 规则跳过——关闭应用后重跑 `desktop\build.bat`，或直接双击仓库根新版。
+
+## 55. 文件拖拽/批量操作修到能用：文件夹内排序、移动到…、整组拖动（2026-11-01 同日，用户第八次反馈）
+
+### 55.1 用户口径
+
+1. 「文件夹里面的文件还是不能够拖动位置」；
+2. 「移动到这个根本就用不了没有反应」；
+3. 「框选多个后点击拖动到其他文件夹或者根目录都没有反应」。
+
+### 55.2 根因与修复
+
+- **文件夹内拖不动 / 拖动反而把文件移到根目录**：
+  - drop 处理器先算 `targetFolder = dropTargetFolder(e)`，文件夹子区里的 `ul.folder-children[data-parent]` 让
+    `targetFolder` 变成「文件自己所在的文件夹」，于是命中「拖到自己所在文件夹 = 无操作」提前 return；
+  - 更隐蔽的一刀：排序后 `applyPaperOrder()` 会**同步重绘列表**，等 drop 继续冒泡到 `#leftSide` 时，
+    `e.target` 已经脱离 DOM，`closest('#fileList')` 判不出来 → 被当成「拖到左栏外」→ `moveItem(path,'')`
+    直接把文件移到根目录（用户看到的「文件夹里拖动，文件跑到根目录」就是这条）。
+  - 修复：drop 先判断落点是否为**文件行**（同目录 → 排序，跨目录 → 移入该行所在文件夹），再处理文件夹行/空白；
+    列表 drop 末尾 `stopPropagation()`；`#leftSide` drop 增加 `defaultPrevented` 早退且内部拖拽只认真正落在列表外；
+    `window` 级 drop 只处理「从资源管理器拖进来」，不再兜内部拖拽；在「本文件夹自己的空白区」松手视为不动。
+- **「移动到…」没反应**：菜单项点击时先 `menu.hidden = true` 再执行回调，而 `showMoveTargets()` /
+  `showBatchMoveTargets()` 只换 `innerHTML` 没有重新显示 → 菜单目标是换出来了但看不见。
+  两个函数开头补 `menu.hidden = false`。
+- **多选后拖动没反应**：拖拽 payload 原来只带被按住的那一个文件。现在 dragstart 若拖的行在多选集合里，
+  payload 改为 `{kind:'files', paths:[...]}`；drop 支持拖到文件夹行 / 别的文件行（进它所在文件夹）/ 根目录空白，
+  调 `moveFilesTo()` 逐个移动并统一刷新 + 一条提示；窗口/左栏兜底也支持整组移回根目录。
+- **顺带修 Windows 偶发 EPERM**：`papers-order.json` 等原子写的 rename 可能因另一个请求正在读而
+  `EPERM/EBUSY`（测试里复现过「顺序保存失败」假故障）。Node `writeDataFile` 与 Rust `store::write_json`
+  都加了退避重试（12 次，25ms 起）；失败才报错。
+
+### 55.3 验证
+
+- `test/files-batch.mjs` 扩到 **24/24**：新增「文件夹已展开且能拖拽排序」「单文件『移动到…』菜单能显示并真的移动」
+  「多选后整组拖进文件夹（所选全部移走、根目录相应减少）」「多选后整组拖到空白处移回根目录」；
+- 回归：`dnd.mjs` 10/10、`folders.mjs` 全部通过；`cargo test --release` 30/30。
+
+### 55.4 交付
+
+exe 重编：**10,642,432 字节**，SHA256 `F036E2CDE68FF06F7880B4AF691006BF74388E43795DA09AD022C90E9E6E4D28`
+（最终交付，包含 §48–§55 全部改动）。仓库根 `论文阅读器.exe` 已更新；
+桌面副本仍在运行时按 §46 规则跳过——关闭应用后重跑 `desktop\build.bat`，或直接双击仓库根新版。

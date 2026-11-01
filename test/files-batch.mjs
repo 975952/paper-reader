@@ -71,6 +71,7 @@ try {
   const page = await browser.newPage();
   const pageErrors = [];
   page.on('pageerror', (e) => pageErrors.push(String(e)));
+  page.on('console', (m) => { if (/PRT_MOVE/.test(m.text())) console.log('[page]', m.text()); });
   page.on('dialog', (d) => d.accept().catch(() => {}));
 
   await page.goto(`${BASE}/?topbar=static`, { waitUntil: 'domcontentloaded' });
@@ -205,6 +206,114 @@ try {
   check('批量移动所选文件到目标文件夹', movedPaths.length === 2, movedPaths.join(','));
   const movedDisk = fs.readdirSync(path.join(PAPERS, '批量移动测试')).filter((f) => f.endsWith('.pdf'));
   check('磁盘上文件确实在目标文件夹里', movedDisk.length === 2, movedDisk.join(','));
+
+  const paperList = async () => (await (await fetch(`${BASE}/api/papers`)).json()).papers || [];
+  const inFolder = (list, folder) => list.filter((p) => p.folder === folder).map((p) => p.name);
+  const expandFolder = async () => {
+    const open = await page.evaluate(() => !!document.querySelector('#fileList ul.folder-children[data-parent="批量移动测试"]'));
+    if (!open) await page.evaluate(() => document.querySelector('#fileList li.folder[data-path="批量移动测试"] .folder-arrow')?.click());
+    await wait(600);
+  };
+
+  /* ── 8. 文件夹里的文件可以拖动排序（之前拖不动：落点被算成「自己所在文件夹」提前 return） ── */
+  await expandFolder();
+  const children = await page.evaluate(() => [...document.querySelectorAll('#fileList ul.folder-children[data-parent="批量移动测试"] li[data-path]:not(.folder)')].map((li) => li.dataset.path));
+  check('文件夹已展开、能看到里面的文件', children.length === 2, children.join(','));
+  if (children.length === 2) {
+    const beforeChildOrder = inFolder(await paperList(), '批量移动测试');
+    await page.evaluate((paths) => {
+      const row = [...document.querySelectorAll(`#fileList ul.folder-children[data-parent="批量移动测试"] li[data-path]`)].find((li) => li.dataset.path === paths[0]);
+      const target = [...document.querySelectorAll(`#fileList ul.folder-children[data-parent="批量移动测试"] li[data-path]`)].find((li) => li.dataset.path === paths[1]);
+      const dt = new DataTransfer();
+      row.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt, clientX: 1, clientY: 1 }));
+      const r = target.getBoundingClientRect();
+      const y = r.bottom - 2;
+      target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: 1, clientY: y }));
+      target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: 1, clientY: y }));
+      row.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+    }, children);
+    await wait(900);
+    const afterChildOrder = inFolder(await paperList(), '批量移动测试');
+    check('文件夹内拖拽可以调整顺序', JSON.stringify(beforeChildOrder) !== JSON.stringify(afterChildOrder),
+      `${beforeChildOrder.join(',')} → ${afterChildOrder.join(',')}`);
+  }
+
+  /* ── 9. 单文件右键「移动到…」菜单真的能用（之前点开菜单后不显示 = 没反应） ── */
+  await expandFolder(); // 上一次排序可能让面板重绘，重新展开
+  const ctxMove = await page.evaluate(() => {
+    const row = document.querySelector('#fileList ul.folder-children[data-parent="批量移动测试"] li[data-path]');
+    const r = row.getBoundingClientRect();
+    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 8 }));
+    [...document.querySelectorAll('#fileCtx .ctx-item')].find((b) => /移动到/.test(b.textContent))?.click();
+    const menu = document.querySelector('#fileCtx');
+    return { hidden: menu.hidden, title: menu.querySelector('.ctx-title')?.textContent || '', items: [...menu.querySelectorAll('.ctx-item')].map((b) => b.textContent) };
+  });
+  check('点「移动到…」后菜单正常显示目标列表', !ctxMove.hidden && /移动/.test(ctxMove.title) && ctxMove.items.length >= 1,
+    JSON.stringify(ctxMove));
+  await page.evaluate(() => {
+    [...document.querySelectorAll('#fileCtx .ctx-item')].find((b) => b.textContent === '根目录')?.click();
+  });
+  await wait(1000);
+  const rootAfterMove = inFolder(await paperList(), '');
+  check('「移动到…根目录」真的把文件移出来了', rootAfterMove.length >= 1, rootAfterMove.join(','));
+
+  /* ── 10. 多选后整组拖到文件夹（之前只拖走一行 / 没反应） ── */
+  await wait(500);
+  const paperListNow = async () => (await (await fetch(`${BASE}/api/papers`)).json()).papers || [];
+  const rootBefore = (await paperListNow()).filter((p) => p.folder === '').length;
+  const folderBefore = (await paperListNow()).filter((p) => p.folder === '批量移动测试').length;
+  const rootRows = await page.evaluate(() => [...document.querySelectorAll('#fileList > li[data-path]:not(.folder)')].map((li) => li.dataset.path));
+  const toMove = rootRows;
+  check('根目录有可多选的文件', toMove.length >= 1, toMove.join(','));
+  await page.evaluate((targets) => {
+    const rows = [...document.querySelectorAll('#fileList > li[data-path]:not(.folder)')];
+    for (const path of targets) {
+      const row = rows.find((li) => li.dataset.path === path);
+      row?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true }));
+    }
+  }, toMove);
+  const selBefore = await page.evaluate(() => [...window.__state.fileSel]);
+  check('准备多选根目录文件', selBefore.length === toMove.length, selBefore.join(','));
+  await page.evaluate((first) => {
+    const row = [...document.querySelectorAll('#fileList > li[data-path]:not(.folder)')].find((li) => li.dataset.path === first);
+    const folder = document.querySelector('#fileList li.folder[data-path="批量移动测试"]');
+    const dt = new DataTransfer();
+    row.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt, clientX: 1, clientY: 1 }));
+    const r = folder.getBoundingClientRect();
+    const y = r.top + r.height / 2;
+    folder.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: 1, clientY: y }));
+    folder.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: 1, clientY: y }));
+    row.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+  }, toMove[0]);
+  await wait(1400);
+  const folderAfter = (await paperListNow()).filter((p) => p.folder === '批量移动测试').length;
+  const rootAfter = (await paperListNow()).filter((p) => p.folder === '').length;
+  check('多选后整组拖进文件夹（所选文件全部移走）',
+    folderAfter === folderBefore + toMove.length && rootAfter === rootBefore - toMove.length,
+    `folder ${folderBefore}→${folderAfter}, root ${rootBefore}→${rootAfter}, moved ${toMove.length}`);
+
+  /* ── 11. 多选后整组拖到列表空白处 = 移回根目录 ── */
+  await expandFolder();
+  await clearSel();
+  const childCount = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#fileList ul.folder-children[data-parent="批量移动测试"] li[data-path]')];
+    for (const row of rows) row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true }));
+    return rows.length;
+  });
+  const selInside = await page.evaluate(() => [...window.__state.fileSel]);
+  check('准备框选文件夹里的文件', childCount >= 2 && selInside.length === childCount, `${childCount} / ${selInside.join(',')}`);
+  await page.evaluate((first) => {
+    const row = [...document.querySelectorAll('#fileList li[data-path]:not(.folder)')].find((li) => li.dataset.path === first);
+    const list = document.querySelector('#fileList');
+    const dt = new DataTransfer();
+    row.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt, clientX: 5, clientY: 5 }));
+    list.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: 5, clientY: 300 }));
+    list.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: 5, clientY: 300 }));
+    row.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+  }, selInside[0]);
+  await wait(1400);
+  const backToRoot = inFolder(await paperList(), '');
+  check('多选后整组拖到空白处移回根目录', backToRoot.length >= 2, backToRoot.join(','));
 
   check('操作期间没有页面错误', pageErrors.length === 0, pageErrors.join(' | '));
   const failed = checks.filter((c) => !c.ok);

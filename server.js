@@ -174,7 +174,21 @@ function writeDataFile(name, obj) {
     const target = path.join(DATA_DIR, name);
     const tmp = `${target}.tmp`;
     await fsp.writeFile(tmp, JSON.stringify(obj, null, 2), 'utf8');
-    await fsp.rename(tmp, target);
+    // Windows 上目标文件可能正被另一个请求读取（EPERM/EBUSY），rename 偶发失败。
+    // 这里退避重试几次，避免「拖动排序保存失败」这种假故障（用户实测过）。
+    let lastErr = null;
+    for (let i = 0; i < 12; i++) {
+      try {
+        await fsp.rename(tmp, target);
+        return;
+      } catch (e) {
+        lastErr = e;
+        if (!['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) break;
+        await new Promise((r) => setTimeout(r, 25 + i * 15));
+      }
+    }
+    try { await fsp.unlink(tmp); } catch { /* ignore */ }
+    throw lastErr || new Error('writeDataFile failed');
   });
   return writeChain;
 }
