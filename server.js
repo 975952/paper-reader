@@ -878,6 +878,12 @@ async function handleChat(req, res) {
   const mt = sec.pickMaxTokens(payload.max_tokens);
   if (mt.error) return sendJson(res, 400, { error: { message: mt.error } });
 
+  /** A 线 P2.5：只读工具的受限透传（形状/大小校验，不合规 400） */
+  const tools = sec.pickTools(payload.tools);
+  if (tools.error) return sendJson(res, 400, { error: { message: tools.error } });
+  const toolChoice = sec.pickToolChoice(payload.tool_choice, tools.value);
+  if (toolChoice.error) return sendJson(res, 400, { error: { message: toolChoice.error } });
+
   /** idleMs：请求体可以缩短看门狗，但同样要夹在范围内 */
   const idleMs = sec.clampNumber(payload.idleMs, sec.LIMITS.idleMs.min, sec.LIMITS.idleMs.max)
     ?? sec.clampNumber(Number(stored.idleMs), sec.LIMITS.idleMs.min, sec.LIMITS.idleMs.max)
@@ -890,6 +896,11 @@ async function handleChat(req, res) {
     temperature: temp.value,
   };
   if (mt.value !== null) body.max_tokens = mt.value;
+  if (tools.value) {
+    body.tools = tools.value;
+    if (toolChoice.value !== null) body.tool_choice = toolChoice.value;
+    if (payload.parallel_tool_calls === false) body.parallel_tool_calls = false;
+  }
 
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;

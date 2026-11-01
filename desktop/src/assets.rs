@@ -53,6 +53,9 @@ mod tests {
             "js/prompts/capabilities/ops.js",
             "js/prompts/capabilities/background.js",
             "js/prompts/capabilities/legacy.js",
+            // A 线 P1.5 / P2.5 新增的独立模块（同样靠 build.bat touch 才会重编）
+            "js/citation-validator.js",
+            "js/agent.js",
         ] {
             assert!(contains(path), "exe 缺少前端文件：{path}（重新跑 desktop\\build.bat）");
         }

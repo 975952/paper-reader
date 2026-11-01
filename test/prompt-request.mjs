@@ -173,10 +173,21 @@ try {
       check(`${name} model 只来自本机 config`, got?.model === 'mock-model', got?.model);
       check(`${name} 请求体里没有 apiKey 泄漏`, !JSON.stringify(got || {}).includes('apiKey'));
     }
-    // tools 字段透传是 P2.5 的需求：P1 阶段后端还不转发（这里登记现状），P2.5 改成硬断言。
+    // tools 字段的受限透传：P2.5 已实现（形状校验在 security.js，Node/Rust 两套后端一致）
     captured.length = 0;
-    await send([{ role: 'user', content: 'hi' }], { tools: [{ type: 'function', function: { name: 'x' } }] });
-    check('P1 阶段 tools 尚未透传（P2.5 改为透传并硬断言）', captured.at(-1)?.tools === undefined);
+    const toolsPayload = [{ type: 'function', function: { name: 'read_page', description: '读页', parameters: { type: 'object', properties: { page: { type: 'integer' } } } } }];
+    await send([{ role: 'user', content: 'hi' }], { tools: toolsPayload, tool_choice: 'auto', parallel_tool_calls: false });
+    check('tools 透传给上游（P2.5 依赖）', JSON.stringify(captured.at(-1)?.tools) === JSON.stringify(toolsPayload),
+      JSON.stringify(captured.at(-1)?.tools || null).slice(0, 80));
+    check('tool_choice 透传', captured.at(-1)?.tool_choice === 'auto', String(captured.at(-1)?.tool_choice));
+    check('parallel_tool_calls=false 透传', captured.at(-1)?.parallel_tool_calls === false);
+    // 非法 tools 必须 400，不能塞给上游
+    captured.length = 0;
+    const badToolRes = await fetch(`${BASE}/api/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], stream: false, tools: [{ type: 'function', function: { name: 'bad name!', parameters: {} } }] }),
+    });
+    check('非法 tools 名返回 400 且不发给上游', badToolRes.status === 400 && captured.length === 0, String(badToolRes.status));
   }
 } finally {
   reader.kill();

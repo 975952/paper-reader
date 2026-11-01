@@ -119,6 +119,8 @@ const CHAT_FIELDS = new Set([
   'messages', 'stream', 'temperature', 'max_tokens', 'idleMs',
   // 视觉模型开关：只允许「这次请求用视觉模型」这一位，模型名仍只来自本机 config
   'useVision',
+  // A 线 P2.5：只读工具调用（形状受限，见 pickTools；前端自造，不透传任意字段）
+  'tools', 'tool_choice', 'parallel_tool_calls',
   // 上下文 / 范围类（前端将来的扩展字段，不参与上游请求体构造）
   'context', 'scope', 'doc', 'docId', 'page', 'files', 'meta', 'webResults',
 ]);
@@ -181,6 +183,68 @@ function pickMaxTokens(v) {
     return { error: `max_tokens 超出上限（最大 ${LIMITS.maxTokens.max}）` };
   }
   return { value: n };
+}
+
+/** 工具名：只允许 OpenAI function 风格的标识符 */
+const TOOL_NAME_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+const TOOLS_MAX_ITEMS = 32;
+const TOOLS_MAX_CHARS = 100000;
+
+/**
+ * A 线 P2.5：`tools` 请求字段的受限透传。
+ * 前端只发只读工具（get_reading_state / read_page / …），这里做形状与大小校验，
+ * 不合规直接 400，绝不把任意对象塞给上游。
+ * 返回 { value: null|Array } 或 { error }。
+ */
+function pickTools(v) {
+  if (v === undefined || v === null) return { value: null };
+  if (!Array.isArray(v)) return { error: 'tools 必须是数组' };
+  if (v.length === 0) return { value: null };
+  if (v.length > TOOLS_MAX_ITEMS) return { error: `tools 最多 ${TOOLS_MAX_ITEMS} 个` };
+  const out = [];
+  for (const item of v) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return { error: 'tools 每一项必须是对象' };
+    if (item.type !== 'function') return { error: 'tools 只支持 type=function' };
+    const fn = item.function;
+    if (!fn || typeof fn !== 'object' || Array.isArray(fn)) return { error: 'tools.function 必须是对象' };
+    const name = String(fn.name || '');
+    if (!TOOL_NAME_RE.test(name)) return { error: `工具名不合法：${name.slice(0, 40)}` };
+    if (fn.description !== undefined && typeof fn.description !== 'string') return { error: '工具 description 必须是字符串' };
+    if (fn.parameters !== undefined && (!fn.parameters || typeof fn.parameters !== 'object')) {
+      return { error: '工具 parameters 必须是对象' };
+    }
+    out.push({
+      type: 'function',
+      function: {
+        name,
+        description: String(fn.description || '').slice(0, 2000),
+        parameters: fn.parameters || { type: 'object', properties: {} },
+      },
+    });
+  }
+  let size = 0;
+  try { size = JSON.stringify(out).length; } catch { return { error: 'tools 无法序列化' }; }
+  if (size > TOOLS_MAX_CHARS) return { error: 'tools 定义太大' };
+  return { value: out };
+}
+
+/**
+ * `tool_choice`：只允许 auto / none / required / {type:'function',function:{name}}，
+ * 且 function.name 必须是本次 tools 里声明过的工具。
+ */
+function pickToolChoice(v, tools) {
+  if (v === undefined || v === null || !tools) return { value: null };
+  if (typeof v === 'string') {
+    if (!['auto', 'none', 'required'].includes(v)) return { error: `tool_choice 不合法：${v}` };
+    return { value: v };
+  }
+  if (typeof v === 'object' && !Array.isArray(v)) {
+    const name = String(v?.function?.name || '');
+    if (v.type !== 'function' || !TOOL_NAME_RE.test(name)) return { error: 'tool_choice 不合法' };
+    if (!tools.some((t) => t.function.name === name)) return { error: `tool_choice 指向未声明的工具：${name}` };
+    return { value: { type: 'function', function: { name } } };
+  }
+  return { error: 'tool_choice 不合法' };
 }
 
 
@@ -542,6 +606,8 @@ module.exports = {
   finiteNumber,
   pickTemperature,
   pickMaxTokens,
+  pickTools,
+  pickToolChoice,
   sanitizeConfigPatch,
   validUrlString,
   checkNotes,

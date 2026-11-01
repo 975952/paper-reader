@@ -7,10 +7,10 @@ import {
   PREREQ_ONE_SYS, splitPrtBlock, hideStreamTail, parsePrereqItems, detectPageObjects,
   pageTextOf, collectDocObjects, sanitiseChips,
 } from './teaching.js';
-import { profileStore, buildProfileBlock, nowISO, nowContext, findItem } from './profile.js';
+import { profileStore, buildProfileBlock, nowISO, nowContext, findItem, selectProfileItems } from './profile.js';
 import { createLearningMemory, parseMemorySuggestions, explicitIdentityFacts, withMemoryObservations } from './learning-memory.js';
 import {
-  Settings, streamChat, testConnection, targetLangFor,
+  Settings, streamChat, testConnection, targetLangFor, searchTerms,
   translateMessages, askMessages, explainMessages, regionMessages,
   digestMessages, webQueryFor, filterWebResults, opMessages, teachMessages, condenseMessages,
   scanPageMessages, sessionSummaryMessages,
@@ -18,6 +18,7 @@ import {
 import { resolveReadingRequest, resolvePageRole, snapshotReadingRequest, snapshotHistory, readingTurn,
   restoreReadingHistory, citedSources, stripPageLabels } from './reading-context.js';
 import { validateCitations, collectAvailablePages, planFor, pagesFromText, formatPageList } from './citation-validator.js';
+import { runAgentLoop, agentStats, AGENT_TOOL_SPECS, AGENT_SYSTEM_NOTE } from './agent.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
 function readFlag(key, dflt = false) {
@@ -1634,6 +1635,12 @@ function initViewer() {
     // 引用定位：〔p.N‖原文片段〕 → 跳页 + 橙色高亮 + 取消
     jumpToQuote, clearQuoteHighlight, decoratePageRefs,
     get quoteState() { return { ...quoteState }; },
+    // P2.5 Agent 读取：开关（写 localStorage）、默认值、最近一次运行统计
+    get agentRead() { return agentReadEnabled(); },
+    setAgentRead(on) { writeFlag('reader.agentRead', !!on); return agentReadEnabled(); },
+    get agentReadDefault() { return AGENT_READ_DEFAULT; },
+    get lastAgent() { return window.__lastAgent || null; },
+    agentLoop: runAgentLoop, agentStats, AGENT_TOOL_SPECS,
     // P1.5 引用核验：统计与降级结果（只读，自动化断言用）
     validateCitations, collectAvailablePages, formatPageList,
     get citationStats() { return lastCitationStats; },
@@ -6874,6 +6881,204 @@ function quoteFragmentParts(html) {
   return { text, html: raw.trim() };
 }
 
+/* ------------------------------------------------------------ P2.5 Agent 读取内容 */
+
+/** 默认开启（2026-11-01 P2.5 真实 API 验收通过后开启；仍可用 reader.agentRead=0 关掉，失败自动回退） */
+const AGENT_READ_DEFAULT = true;
+function agentReadEnabled() {
+  return readFlag('reader.agentRead', AGENT_READ_DEFAULT);
+}
+
+/** 单次「工具决策」调用（非流式 JSON；不支持 tools 的模型会报错 → 调用方回退） */
+async function agentModelCall({ messages, tools, timeoutMs = 12000, signal = null }) {
+  const ctl = new AbortController();
+  const forward = () => ctl.abort();
+  if (signal) {
+    if (signal.aborted) ctl.abort();
+    else signal.addEventListener('abort', forward, { once: true });
+  }
+  const timer = setTimeout(() => ctl.abort(), Math.max(1000, timeoutMs));
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages,
+        tools,
+        tool_choice: 'auto',
+        stream: false,
+        temperature: Settings.data.temperature,
+        baseURL: Settings.data.baseURL,
+        apiKey: Settings.data.apiKey || undefined,
+      }),
+      signal: ctl.signal,
+    });
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try { const j = await res.json(); msg = j?.error?.message || msg; } catch { /* ignore */ }
+      const err = new Error(msg);
+      err.status = res.status;
+      throw err;
+    }
+    const ctype = (res.headers.get('content-type') || '').toLowerCase();
+    const text = await res.text();
+    if (!ctype.includes('json')) throw new Error('工具决策返回的不是 JSON（模型可能不支持 tools）');
+    const json = JSON.parse(text);
+    if (json?.error) throw new Error(json.error.message || '上游返回错误');
+    return json;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.('abort', forward);
+  }
+}
+
+/** 整篇文本按页切（Agent 的 search_paper / read_page 用；按需抽取一次并缓存） */
+async function ensureAgentDocText() {
+  const myDoc = state.doc?.docId || null;
+  if (!myDoc || !viewer?.pdf) return '';
+  if (state.docText && state.docTextDoc === myDoc) return state.docText;
+  if (state.docTextPromise) return state.docTextPromise;
+  state.docTextPromise = (async () => {
+    try {
+      const text = await viewer.getAllText();
+      if (state.doc?.docId === myDoc) { state.docText = text; state.docTextDoc = myDoc; }
+      return text;
+    } catch {
+      return '';
+    } finally {
+      state.docTextPromise = null;
+    }
+  })();
+  return state.docTextPromise;
+}
+
+/** 在整篇文本里按词频找相关页（Agent 的 search_paper） */
+function agentSearchPages(text, query, k = 4) {
+  const terms = searchTerms(query).map((t) => t.toLowerCase()).filter((t) => t.length >= 2);
+  const pages = [];
+  const re = /=====\s*p\.(\d+)\s*=====/g;
+  const marks = [];
+  let m;
+  while ((m = re.exec(text))) marks.push({ page: Number(m[1]), at: m.index, bodyAt: m.index + m[0].length });
+  for (let i = 0; i < marks.length; i++) {
+    const body = text.slice(marks[i].bodyAt, i + 1 < marks.length ? marks[i + 1].at : text.length);
+    const lower = body.toLowerCase();
+    let score = 0;
+    let firstAt = -1;
+    for (const term of terms) {
+      let from = 0;
+      for (;;) {
+        const at = lower.indexOf(term, from);
+        if (at < 0) break;
+        score += 1;
+        if (firstAt < 0 || at < firstAt) firstAt = at;
+        from = at + term.length;
+      }
+    }
+    if (score > 0) pages.push({ page: marks[i].page, score, firstAt, body });
+  }
+  pages.sort((a, b) => b.score - a.score || a.page - b.page);
+  return pages.slice(0, k).map((row) => {
+    const start = Math.max(0, row.firstAt - 120);
+    return { page: row.page, snippet: row.body.slice(start, start + 480).replace(/\s+/g, ' ').trim() };
+  });
+}
+
+/** Agent 工具运行时（全部只读；不写任何状态，除了「读过哪些页」的记录） */
+function createAgentRuntime(pending, { scannedDoc = false } = {}) {
+  const numPages = Number(viewer?.numPages) || 0;
+  const reading = pending.reading || null;
+  return {
+    numPages,
+    async getReadingState() {
+      return {
+        docTitle: state.doc?.name || '',
+        numPages,
+        currentPage: viewer?.currentVisiblePage?.() || viewer?.current || null,
+        scanned: !!scannedDoc,
+        hasTextLayer: !scannedDoc,
+        selection: reading?.selection ? { page: reading?.focus?.page || null, text: String(reading.selection).slice(0, 600) } : null,
+        currentTopic: reading?.inherited ? { page: reading?.focus?.page || null, text: String(reading?.focus?.text || '').slice(0, 600) } : null,
+      };
+    },
+    async readPage(page) {
+      if (scannedDoc) return { page, error: '扫描件没有文本层，请用 read_scan_page / read_page_image' };
+      const text = await viewer.getPageText(page);
+      return { page, chars: String(text || '').length, text: String(text || '').slice(0, 6000) };
+    },
+    async searchPaper(query) {
+      const text = await ensureAgentDocText();
+      if (!text) return { query, pages: [], note: '没有可用全文（可能是扫描件）' };
+      const rows = agentSearchPages(text, query, 4);
+      return { query, pages: rows, note: rows.length ? '' : '没有命中，可以换个词或直接 read_page' };
+    },
+    async readScanPage(page) {
+      if (!scannedDoc) return { page, error: '这不是扫描件，请用 read_page' };
+      const digest = await ensureScanDigest(state.doc.docId, state.docProfile).catch(() => '');
+      const text = pageTextFromScanDigest(digest, page);
+      return { page, chars: text.length, text: text.slice(0, 6000), note: text ? '' : '这一页的图片阅读索引里没有可核对文本，可以用 read_page_image 看原图' };
+    },
+    async readPageImage(page) {
+      if (!Number.isInteger(page)) return { error: 'page 必须是整数' };
+      return { page, note: '已加入页图材料，最终回答会附上这张页图' };
+    },
+    async readMemory(topic) {
+      const items = selectProfileItems(profileStore.data, String(topic), '', 6, { docId: pending.docId || '' });
+      return {
+        items: items.map(({ item }) => ({
+          topic: item.topic, kind: item.memory?.kind || 'knowledge',
+          level: item.level.slice(0, 110), boundary: item.boundary.slice(0, 160),
+        })),
+      };
+    },
+  };
+}
+
+/**
+ * 跑一次「AI 自己决定读哪些页」：成功返回 { messages, pages, imagePages, basis, stats }；
+ * 不支持 tools / 超时 / 任何异常 → 返回 null（调用方静默回退 P1.5 预装路径）。
+ */
+async function runAgentReadPath({ pending, reading, context, references, sources, images, scannedDoc, baseMaterials, signal }) {
+  // 允许测试注入更短的超时，避免用例等 25 秒
+  const limits = window.__agentTestLimits && typeof window.__agentTestLimits === 'object' ? window.__agentTestLimits : {};
+  const totalTimeoutMs = Math.max(1000, Number(limits.totalTimeoutMs) || 25000);
+  const callTimeoutMs = Math.max(500, Number(limits.callTimeoutMs) || 12000);
+  try {
+    const base = askMessages({ ...baseMaterials, availablePages: baseMaterials.availablePages || [], scopeLabel: 'AI 自行读取', objectLabel: objectLabelFor(pending, reading) });
+    const system = String(base[0]?.content || '');
+    base[0] = { role: 'system', content: `${system}\n\n${AGENT_SYSTEM_NOTE}` };
+    const runtime = createAgentRuntime(pending, { scannedDoc });
+    const run = await runAgentLoop({
+      messages: base,
+      runtime,
+      callModel: agentModelCall,
+      signal,
+      totalTimeoutMs,
+      callTimeoutMs,
+    });
+    const stats = agentStats(run);
+    window.__lastAgent = { ok: run.ok, stats, at: Date.now() };
+    if (!run.ok || stats.calls === 0) return null;
+    const messages = run.messages.slice();
+    messages.push({ role: 'user', content: '（材料已经读够，请直接给出最终回答；不要再调用工具。）' });
+    const basisPages = [...new Set(run.pages)].sort((a, b) => a - b);
+    return {
+      messages,
+      // 模型在最后一轮已经写出了完整正文（≥120 字）时，不再多发一次「最终流式」请求：
+      // 这是 P2.5 延迟的主要来源之一（每多一轮 = 多一次完整 LLM 往返）。
+      directContent: String(run.directContent || '').trim().length >= 120 ? String(run.directContent).trim() : '',
+      pages: basisPages,
+      imagePages: run.imagePages || [],
+      basis: `本次依据：AI 自行读取 ${basisPages.length ? `p.${basisPages.join('、')}` : '（未读页）'}（${run.rounds} 轮 / ${stats.calls} 次工具）`,
+      stats,
+    };
+  } catch {
+    return null;
+  } finally {
+    setHint('');
+  }
+}
+
 /* ------------------------------------------------------------ P1.5 引用核验 / 依据回执 */
 
 /** 当前这条回答的引用校验结果（收尾时算一次；渲染器按 raw 查表）。null = 还没算，按旧行为渲染 */
@@ -8364,9 +8569,32 @@ async function send(retryPending = null) {
       }
     }
 
+    // ② P2.5：让 AI 自己决定读哪些页。成功就用它读到的页做材料（白名单=读过的页），
+    // 失败（模型不支持 tools / 超时 / 任何异常）静默回退到下面的 P1.5 预装路径。
+    const agentAllowed = agentReadEnabled() && !shotOnly && !!pending.docId && !!state.doc && !!viewer?.pdf;
+    let agentRun = null;
+    if (agentAllowed) {
+      setHint('AI 正在自己找材料…');
+      agentRun = await runAgentReadPath({
+        pending, reading, context, references, sources,
+        images, scannedDoc,
+        signal: ctl.signal,
+        baseMaterials: {
+          question: pending.question, selection: reading.selection,
+          selectionSource: pending.selectionSource || (reading.focus?.source === 'right' ? 'right' : ''),
+          context, page: pending.firstPage, pageRole: pending.pageRole, docTitle: pending.docTitle,
+          history: pending.history, reading, references, pageImages: [], screenshotCount: images.length,
+          profileBlock: askProfileBlock(state.docText || context || '', pending.question, { docId: pending.docId }),
+          teachingBlock: teachingProgressBlock(),
+        },
+      });
+      setHint('');
+      if (!readingRequestCurrent(pending)) return;
+    }
     // ② 上下文。扫描件：页面图片（+ 整篇类问题的采样页）；普通论文：整篇全文 / 索引 + 相关段落。
     // 只发截图（没写问题）时不吃「整篇」范围：截图本身就是材料，塞整篇只会让模型顺势扩写整个讲义。
-    if (scannedDoc) {
+    // Agent 成功时不再预装材料（它自己读过的页就是材料）。
+    if (!agentRun && scannedDoc) {
       try {
         docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text, {
           page: pending.firstPage || reading.page,
@@ -8377,7 +8605,7 @@ async function send(retryPending = null) {
         docCtx = null;
         setHint('读取扫描页失败，这次只带问题本身');
       }
-    } else if (pending.useFullText && !shotOnly && pending.docId) {
+    } else if (!agentRun && pending.useFullText && !shotOnly && pending.docId) {
       try {
         docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text);
       } catch (e) {
@@ -8415,7 +8643,13 @@ async function send(retryPending = null) {
       docCtx, context, references, scanned: scannedDoc, pending, sources, images, pageRole: pending.pageRole,
     });
     activeCitationPlan = null;   // 新回答开始：先不套上一条的校验结果
-    const messages = askMessages({
+    if (agentRun) {
+      // 白名单 = 初始材料里的页 ∪ AI 自己读过的页；依据回执也换成「AI 自行读取」
+      citationMat.availablePages = [...new Set([...citationMat.availablePages, ...agentRun.pages])]
+        .filter(Number.isInteger).sort((a, b) => a - b);
+      citationMat.basis = agentRun.basis;
+    }
+    const messages = agentRun ? agentRun.messages : askMessages({
       question: pending.question,
       selection: reading.selection,
       // 右栏文字：附件里的 from=right，或追问沿用的对象本身来自右栏
@@ -8437,7 +8671,14 @@ async function send(retryPending = null) {
       objectLabel: objectLabelFor(pending, reading),
     });
     // 图片有两种：用户自己加的截图 + 扫描件的页面上下文；同一条 user 消息里一起发。
-    const pageImages = docCtx?.pageImages || [];
+    // P2.5：Agent 用 read_page_image 要求的页也要附上（视觉模型才看得到）。
+    let pageImages = docCtx?.pageImages || [];
+    if (agentRun?.imagePages?.length) {
+      try {
+        const extraPages = agentRun.imagePages.filter((p) => !pageImages.some((im) => im.page === p));
+        if (extraPages.length) pageImages = [...pageImages, ...await renderScanPages(extraPages.slice(0, 5))];
+      } catch { /* 取页图失败不影响回答 */ }
+    }
     if (images.length || pageImages.length) {
       const last = messages[messages.length - 1];
       const parts = [{ type: 'text', text: last.content }];
@@ -8456,12 +8697,15 @@ async function send(retryPending = null) {
     warnIfNoVisionModel(images.length > 0 || pageImages.length > 0);
 
     setHint('');
-    const full = await chat({
-      messages,
-      signal: ctl.signal,
-      onDelta: (piece, all) => { received = all; target.push(all); },
-      onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
-    });
+    // P2.5：Agent 最后一轮已经给出完整回答时直接采用，不再重复一次流式请求（省一次 LLM 往返）。
+    const full = agentRun?.directContent
+      ? agentRun.directContent
+      : await chat({
+        messages,
+        signal: ctl.signal,
+        onDelta: (piece, all) => { received = all; target.push(all); },
+        onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
+      });
     if (!readingRequestCurrent(pending)) return;
     // 引用核验必须在最终渲染之前完成：不合格的片段降级成纯页码，编造的页码直接不渲染。
     await auditAnswerCitations(full, { availablePages: citationMat.availablePages, scanned: scannedDoc });

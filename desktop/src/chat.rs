@@ -145,6 +145,25 @@ pub fn handle(rq: Request, body: &[u8], _ctx: &Ctx) {
         }
     }
 
+    // A 线 P2.5：只读工具的受限透传（形状/大小校验，不合规 400；与 server.js 行为一致）
+    let tools = match limits::pick_tools(payload.get("tools")) {
+        Ok(v) => v,
+        Err(msg) => return send_json(rq, 400, &err_json(&msg)),
+    };
+    let tool_choice = match limits::pick_tool_choice(payload.get("tool_choice"), tools.as_ref()) {
+        Ok(v) => v,
+        Err(msg) => return send_json(rq, 400, &err_json(&msg)),
+    };
+    if let (Some(tools), Value::Object(m)) = (tools, &mut upstream_body) {
+        m.insert("tools".into(), tools);
+        if let Some(choice) = tool_choice {
+            m.insert("tool_choice".into(), choice);
+        }
+        if matches!(payload.get("parallel_tool_calls"), Some(Value::Bool(false))) {
+            m.insert("parallel_tool_calls".into(), json!(false));
+        }
+    }
+
     // idleMs：请求体可以缩短看门狗，但同样夹在范围内；否则用已保存配置，再否则默认
     let idle_ms = payload
         .get("idleMs")

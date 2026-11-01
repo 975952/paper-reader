@@ -8,9 +8,11 @@ use serde_json::{json, Map, Value};
 
 /// `/api/chat` 允许出现在请求体里的字段（审计 §P0：只允许 messages / stream /
 /// 受限 temperature / max_tokens / 上下文范围）。
-pub const CHAT_FIELDS: [&str; 15] = [
+pub const CHAT_FIELDS: [&str; 18] = [
     "messages", "stream", "temperature", "max_tokens", "idleMs", "useVision",
     "context", "scope", "doc", "docId", "page", "files", "meta", "webResults", "history",
+    // A 线 P2.5：只读工具调用（形状/大小受限，见 pick_tools；与 security.js 一一对应）
+    "tools", "tool_choice", "parallel_tool_calls",
 ];
 
 /// 出现这些字段说明调用方在试图覆盖密钥 / 地址 / 模型 —— 一律忽略。
@@ -36,6 +38,10 @@ pub const MAX_TARGET_LANG_LEN: usize = 32;
 pub const MAX_GLOSSARY_LEN: usize = 100_000;
 /// 用户手写的长期记忆（与 security.js 的 LIMITS.str.longTermMemory 一致）
 pub const MAX_LONG_TERM_MEMORY_LEN: usize = 4000;
+
+/// A 线 P2.5：工具定义的条数 / 序列化大小上限（与 security.js 的 pickTools 一致）
+pub const TOOLS_MAX_ITEMS: usize = 32;
+pub const TOOLS_MAX_CHARS: usize = 100_000;
 
 
 /// 与 security.js 的 BODY_LIMITS 一致。
@@ -527,6 +533,130 @@ pub fn pick_max_tokens(v: Option<&Value>) -> Result<Option<i64>, String> {
     Ok(Some(n))
 }
 
+/// A 线 P2.5：`tools` 请求字段的受限透传（与 security.js 的 pickTools 一一对应）。
+/// 只接受 OpenAI function 形状、≤32 个、序列化后 ≤100KB；不合规返回 Err（→ 400）。
+pub fn pick_tools(v: Option<&Value>) -> Result<Option<Value>, String> {
+    let arr = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Array(a)) => a,
+        _ => return Err("tools 必须是数组".to_string()),
+    };
+    if arr.is_empty() {
+        return Ok(None);
+    }
+    if arr.len() > TOOLS_MAX_ITEMS {
+        return Err(format!("tools 最多 {} 个", TOOLS_MAX_ITEMS));
+    }
+    let mut out: Vec<Value> = Vec::new();
+    for item in arr {
+        let obj = match item {
+            Value::Object(m) => m,
+            _ => return Err("tools 每一项必须是对象".to_string()),
+        };
+        if obj.get("type").and_then(|t| t.as_str()) != Some("function") {
+            return Err("tools 只支持 type=function".to_string());
+        }
+        let func = match obj.get("function") {
+            Some(Value::Object(f)) => f,
+            _ => return Err("tools.function 必须是对象".to_string()),
+        };
+        let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if !valid_tool_name(name) {
+            return Err(format!(
+                "工具名不合法：{}",
+                name.chars().take(40).collect::<String>()
+            ));
+        }
+        if let Some(d) = func.get("description") {
+            if !d.is_string() {
+                return Err("工具 description 必须是字符串".to_string());
+            }
+        }
+        if let Some(p) = func.get("parameters") {
+            if !p.is_object() {
+                return Err("工具 parameters 必须是对象".to_string());
+            }
+        }
+        let description: String = func
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(2000)
+            .collect();
+        let parameters = func
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
+        out.push(json!({
+            "type": "function",
+            "function": { "name": name, "description": description, "parameters": parameters },
+        }));
+    }
+    let encoded = serde_json::to_string(&out).map_err(|_| "tools 无法序列化".to_string())?;
+    if encoded.len() > TOOLS_MAX_CHARS {
+        return Err("tools 定义太大".to_string());
+    }
+    Ok(Some(Value::Array(out)))
+}
+
+fn valid_tool_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap_or(' ');
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// `tool_choice`：auto / none / required / {type:'function',function:{name}}，
+/// 且 name 必须是本次 tools 里声明过的工具。
+pub fn pick_tool_choice(v: Option<&Value>, tools: Option<&Value>) -> Result<Option<Value>, String> {
+    let raw = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(x) => x,
+    };
+    let tool_list = match tools {
+        Some(Value::Array(a)) if !a.is_empty() => a,
+        _ => return Ok(None),
+    };
+    if let Value::String(s) = raw {
+        return if s == "auto" || s == "none" || s == "required" {
+            Ok(Some(Value::String(s.clone())))
+        } else {
+            Err(format!("tool_choice 不合法：{}", s))
+        };
+    }
+    if let Value::Object(m) = raw {
+        if m.get("type").and_then(|t| t.as_str()) != Some("function") {
+            return Err("tool_choice 不合法".to_string());
+        }
+        let name = m
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        if !valid_tool_name(name) {
+            return Err("tool_choice 不合法".to_string());
+        }
+        let declared = tool_list.iter().any(|t| {
+            t.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                == Some(name)
+        });
+        if !declared {
+            return Err(format!("tool_choice 指向未声明的工具：{}", name));
+        }
+        return Ok(Some(json!({ "type": "function", "function": { "name": name } })));
+    }
+    Err("tool_choice 不合法".to_string())
+}
+
 /// 把底层异常 / 上游响应变成可以给用户看的文案。
 /// 与本机路径无关的信息保留，绝对路径 / 完整 URL / token 打码。
 pub fn sanitize_message(msg: &str, fallback: &str) -> String {
@@ -868,5 +998,41 @@ mod tests {
         }
         // 不该误伤正常文案
         assert_eq!(scrub_text("模型没有返回任何内容"), "模型没有返回任何内容");
+    }
+
+    /// A 线 P2.5：tools 的受限透传必须与 Node 端 security.js 同契约。
+    #[test]
+    fn chat_tools_whitelist_and_shape() {
+        // 缺省 / 空数组 → 不转发
+        assert!(pick_tools(None).unwrap().is_none());
+        assert!(pick_tools(Some(&json!([]))).unwrap().is_none());
+        // 非数组 / 非 function / 坏工具名 → 400
+        assert!(pick_tools(Some(&json!("nope"))).is_err());
+        assert!(pick_tools(Some(&json!([{"type": "other"}]))).is_err());
+        assert!(pick_tools(Some(&json!([{"type": "function", "function": {"name": "bad name!"}}]))).is_err());
+        // 合法定义 → 原样（收敛到白名单字段后）转发
+        let ok = pick_tools(Some(&json!([{
+            "type": "function",
+            "function": {"name": "read_page", "description": "读页", "parameters": {"type": "object"}}
+        }]))).unwrap().unwrap();
+        assert_eq!(ok[0]["function"]["name"], json!("read_page"));
+        assert_eq!(ok[0]["function"]["description"], json!("读页"));
+        // tool_choice：auto 合法；未声明工具 / 非法字符串 → 400
+        let tools = Some(&ok);
+        assert_eq!(
+            pick_tool_choice(Some(&json!("auto")), tools).unwrap(),
+            Some(json!("auto"))
+        );
+        assert!(pick_tool_choice(Some(&json!("whatever")), tools).is_err());
+        assert!(pick_tool_choice(
+            Some(&json!({"type": "function", "function": {"name": "search_paper"}})),
+            tools
+        )
+        .is_err());
+        assert!(pick_tool_choice(
+            Some(&json!({"type": "function", "function": {"name": "read_page"}})),
+            tools
+        )
+        .is_ok());
     }
 }
