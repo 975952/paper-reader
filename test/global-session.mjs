@@ -237,7 +237,7 @@ try {
   const cTrans = await translateText();
   const migDebug = {
     globalHasLegacy: ((await fileJson('__global__'))?.entries || []).some((e) => /LEGACY/.test(e.text || '')),
-    migrationFlag: await page.evaluate((docId) => { try { return localStorage.getItem(`reader.migrated.global.v1.${docId}`); } catch { return 'n/a'; } }, C.docId),
+    migrationFlag: await page.evaluate((docId) => { try { return localStorage.getItem(`reader.migrated.global.v2.${docId}`); } catch { return 'n/a'; } }, C.docId),
     chat: cChat.replace(/\s+/g, ' ').slice(0, 200),
     trans: cTrans.replace(/\s+/g, ' ').slice(0, 120),
   };
@@ -318,6 +318,59 @@ try {
   check('6.7 清空后当前会话文件条目为空', Array.isArray(clearedFile?.entries) && clearedFile.entries.length === 0, JSON.stringify(clearedFile?.entries?.length));
   const trAfterClear = await waitSession(A.docId, '__translate', (j) => (j?.entries || []).length >= 1);
   check('6.8 清空会话后文档译文文件仍在', (trAfterClear?.entries || []).length >= 1, `${trAfterClear?.entries?.length} 条`);
+
+  /* ── 7. 热切换不能挂回旧的全局会话（迁移/换会话后必须显示最新全局会话，且不能把旧内容写回文件） ── */
+  // 第 6 节最后停在「新建并清空过」的会话上：用会话菜单切回默认全局会话（不要直接改 localStorage 再刷新，
+  // 那样 beforeunload 会拿空会话按默认 sid 存盘，把默认全局会话冲掉）
+  await showPanel('chat');
+  await wait(300);
+  await openSessionMenu('.sess-row');
+  const sessionTitles = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#sessionMenu .sess-row')];
+    const target = rows.find((r) => /核心贡献|回答1|B 里继续/.test(r.textContent || ''));
+    target?.querySelector('.sess-go')?.click();
+    return rows.map((r) => r.textContent || '');
+  });
+  await wait(1400);
+  check('7.1 切回默认全局会话：能看到 A/B 的旧对话', /回答1/.test(await chatText()) || /回答2/.test(await chatText()), JSON.stringify(sessionTitles));
+  const legacyD = [
+    { block: 'chat', kind: 'user', text: 'D 旧会话问题 LEGACY7', status: 'user' },
+    { block: 'chat', kind: 'assistant', tag: 'answer', text: 'D 旧会话回答 LEGACY7', status: 'complete' },
+  ];
+  // D 在第 4 节已经打开过一次（迁移标记已写），这里清掉标记再放旧文件，模拟「老用户升级后首次打开某篇」
+  await page.evaluate((docId) => { try { localStorage.removeItem(`reader.migrated.global.v2.${docId}`); } catch { /* ignore */ } }, D.docId);
+  await fetch(`${BASE}${sessionFile(D.docId)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entries: legacyD, history: [], ops: [], updatedAt: Date.now() }),
+  });
+  await open('paper-d.pdf');
+  await waitSession('__global__', '', (j) => (j?.entries || []).some((e) => /LEGACY7/.test(e.text || '')));
+  const dChat = (await chatText()).replace(/\s+/g, ' ');
+  check('7.2 D 的旧会话迁移进全局会话并显示', /LEGACY7/.test(dChat), dChat.slice(0, 120));
+  await open('paper-a.pdf');
+  await wait(400);
+  const backAChat = (await chatText()).replace(/\s+/g, ' ');
+  check('7.3 切回 A（热切换）仍显示全局会话（含 D 迁移进来的消息，不挂回旧 DOM）', /LEGACY7/.test(backAChat), backAChat.slice(0, 160));
+  await open('paper-d.pdf');
+  await wait(900);
+  const gAfterToggle = await waitSession('__global__', '', (j) => (j?.entries || []).some((e) => /LEGACY7/.test(e.text || '')));
+  check('7.4 再切回 D：全局会话文件仍含迁移进来的消息（没被旧会话覆盖）', (gAfterToggle?.entries || []).some((e) => /LEGACY7/.test(e.text || '')), `${(gAfterToggle?.entries || []).length} 条`);
+
+  // 7.5 换会话后，停放的旧视图也不能再被挂回（否则切别的标签还是旧会话）
+  await open('paper-b.pdf');
+  await wait(300);
+  await open('paper-a.pdf');
+  await wait(300);
+  await showPanel('chat');
+  await wait(300);
+  await openSessionMenu('.sess-new');
+  await page.click('#sessionMenu .sess-new');
+  await wait(900);
+  await open('paper-b.pdf');
+  await wait(400);
+  const bAfterNewSession = (await chatText()).replace(/\s+/g, ' ');
+  check('7.5 换会话后热切到别的标签：显示新会话（空），不是旧会话',
+    !/回答1/.test(bAfterNewSession) && !/LEGACY7/.test(bAfterNewSession), bAfterNewSession.slice(0, 120));
 
   check('操作期间没有页面错误', pageErrors.length === 0, pageErrors.join(' | '));
   const failed = checks.filter((c) => !c.ok);

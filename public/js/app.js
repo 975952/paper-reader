@@ -817,9 +817,18 @@ let pdfHotAttaches = 0;
    切回时直接挂回去（不重放 restoreSession、不重建目录/笔记），做到「已经打开的不重复渲染」。 */
 const docViews = new Map();
 
-/* B 线 P3：全局问答会话的版本号。每新增一条 chat 消息 +1；
-   切回旧标签时若停放的 DOM 落后于这个版本（别的标签期间又聊了），就不能直接挂回，要按最新会话重放。 */
+/* B 线 P3：全局问答会话的版本号。**任何**会改变全局会话内容的事情都要 +1（新增问答、旧会话迁移进全局、
+   换/新建/删除/清空会话…）；切回旧标签时停放视图版本落后就不能直接挂回，要按最新会话重放。
+   只认「新增聊天消息」是不够的：别的论文打开时懒迁移会把旧聊天并进全局会话，停放视图没收到通知，
+   一挂回就会显示旧内容、且下一次保存把旧内容写回全局文件（实测踩过：切文件会把迁移进来的聊天覆盖掉）。 */
 let chatVersion = 0;
+
+/** 全局会话「内容指纹」：冷恢复读到全局文件后用它判断内容是否变过（只加不删，长度/末条/当前 sid 足够）。 */
+let globalChatSig = '';
+function chatSigOf(sid, entries) {
+  const last = entries.length ? entries[entries.length - 1] : null;
+  return `${sid || ''}|${entries.length}|${last ? `${last.kind || ''}:${String(last.text || '').slice(-40)}` : ''}`;
+}
 
 /** 切走前：停放当前文档的右栏 DOM + 会话状态 + 目录/笔记 HTML + 滚动位置 */
 function parkDocView(docId) {
@@ -5124,7 +5133,10 @@ const SESSION_KEY = 'reader.activeSession';
    - 旧「按文档」的会话文件保持不动，首次打开某篇文档时懒迁移（复制 chat 条目进全局、translate 条目进文档译文文件）。 */
 const GLOBAL_SESSION_DOC = '__global__';
 const TRANSLATE_SID = '__translate';
-const MIGRATE_FLAG_PREFIX = 'reader.migrated.global.v1.';
+/* 懒迁移标记。v1 有个 bug：热切换会拿停放的旧会话覆盖全局文件，把已迁移进来的旧聊天冲掉，
+   但 v1 标记已经写下了（重开也不会再迁）。所以升到 v2：老用户升级后每个文档**再迁一次**（按内容去重，
+   不会重复），把被冲掉的旧聊天补回全局会话。 */
+const MIGRATE_FLAG_PREFIX = 'reader.migrated.global.v2.';
 
 function readActiveSessions() {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY) || '{}') || {}; } catch { return {}; }
@@ -5328,6 +5340,8 @@ async function saveSessionNow() {
   ]);
   if (!chatRes.ok) throw new Error(`HTTP ${chatRes.status}`);
   if (!translateRes.ok) throw new Error(`译文保存失败 HTTP ${translateRes.status}`);
+  // 记住「刚存进去的全局会话指纹」：下次冷恢复读到同样的内容时就不用作废停放视图（热切换仍可复用 DOM）
+  try { globalChatSig = chatSigOf(sid, JSON.parse(both.chat).entries); } catch { globalChatSig = ''; }
 }
 
 /**
@@ -5536,6 +5550,11 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     if (!readingRequestCurrent({ docId, openSeq, sid })) return;
     const chatEntries = Array.isArray(savedChat.entries) ? savedChat.entries : [];
     const translateEntries = Array.isArray(savedTranslate.entries) ? savedTranslate.entries : [];
+    /* 全局会话内容变过（别的论文懒迁移把旧聊天并进来 / 换过会话）→ 让所有停放视图失效，
+       否则热切回时会挂回旧 DOM、还会把旧内容存回全局会话文件（覆盖掉刚迁移进来的条目）。 */
+    const sig = chatSigOf(sid, chatEntries);
+    if (only === 'chat' || (globalChatSig && sig !== globalChatSig)) chatVersion += 1;
+    globalChatSig = sig;
     // 换会话（only='chat'）只重放问答：译文 DOM 没被清，不能再插一遍（下面重放循环按 only 过滤）。
     // 但译文条目必须留在内存与文件缓存里，否则下一次保存会把文档级译文（__translate）覆盖成空。
     const combined = [...chatEntries, ...translateEntries];
@@ -5650,6 +5669,8 @@ async function clearCurrentSession() {
   resetTeachingState();
   // 只清问答；译文属于文档级（__translate），DOM 和文件都不动
   clearChatBlock();
+  chatVersion += 1;                 // 全局会话被清空：作废所有停放视图
+  globalChatSig = '';
   try {
     // 只清全局问答会话；本文档译文（__translate）不动
     const r = await fetch(`/api/session?${sessionQuery(GLOBAL_SESSION_DOC, activeSidFor(state.doc.docId))}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries: [], history: [], ops: [], teaching: null, summary: '', summaryCovered: 0, updatedAt: Date.now() }) });
@@ -5770,6 +5791,7 @@ async function switchSession(sid) {
   try { if (sessionSaveInFlight) await sessionSaveInFlight; await saveSessionNow(); } catch { /* 存不下也允许切 */ }
   setActiveSidFor(docId, sid || '');
   clearChatBlock();                 // 会话只管问答，译文留着
+  chatVersion += 1;                 // 换了会话 = 全局会话内容变了：作废所有停放视图（否则切回旧标签还是旧会话）
   // 译文条目留在内存里：切会话后还会保存，不能因为换会话把文档级译文覆盖成空
   state.sessionEntries = state.sessionEntries.filter((e) => e && e.block === 'translate');
   state.history = [];
@@ -5795,6 +5817,7 @@ async function newSession() {
   try { if (sessionSaveInFlight) await sessionSaveInFlight; await saveSessionNow(); } catch { /* 存不下也允许新建 */ }
   setActiveSidFor(docId, newSid());
   clearChatBlock();                 // 新建会话 = 清空问答区；译文不动（它不属于任何会话）
+  chatVersion += 1;                 // 新建会话 = 全局会话内容变了：作废所有停放视图
   state.sessionEntries = state.sessionEntries.filter((e) => e && e.block === 'translate');
   state.history = [];
   state.sessionSummary = '';
@@ -5825,6 +5848,7 @@ async function deleteSession(sid) {
   if (activeSidFor(docId) === (sid || '')) {
     setActiveSidFor(docId, '');
     clearChatBlock();
+    chatVersion += 1;               // 删了当前会话 = 全局会话内容变了：作废所有停放视图
     // 删会话只清问答；文档级译文条目留在内存里，避免下一次保存把它覆盖成空
     state.sessionEntries = state.sessionEntries.filter((e) => e && e.block === 'translate');
     state.history = [];
