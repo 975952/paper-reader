@@ -19,7 +19,7 @@ import {
 import { resolveReadingRequest, resolvePageRole, snapshotReadingRequest, snapshotHistory, readingTurn,
   restoreReadingHistory, citedSources, stripPageLabels } from './reading-context.js';
 import { validateCitations, collectAvailablePages, planFor, pagesFromText, formatPageList } from './citation-validator.js';
-import { runAgentLoop, agentStats, AGENT_TOOL_SPECS, AGENT_SYSTEM_NOTE, toolStepLabel } from './agent.js';
+import { runAgentLoop, agentStats, AGENT_TOOL_SPECS, AGENT_SYSTEM_NOTE, toolStepLabel, stripAgentMarkup } from './agent.js';
 import { lastPromptDebug as __promptDebug } from './prompts/index.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
@@ -8115,8 +8115,9 @@ async function runAgentReadPath({ pending, reading, context, references, sources
   // 允许测试注入更短的超时，避免用例等 25 秒
   const limits = window.__agentTestLimits && typeof window.__agentTestLimits === 'object' ? window.__agentTestLimits : {};
   // 跨论文读取要临时打开别的 PDF，比只看当前文档慢，总预算放宽
-  const totalTimeoutMs = Math.max(1000, Number(limits.totalTimeoutMs) || 40000);
-  const callTimeoutMs = Math.max(500, Number(limits.callTimeoutMs) || 15000);
+  // 用户口径（2026-11-02）：工具轮次要够——模型发现读错页／页不够时应该能继续调用，而不是停在最后一轮。
+  const totalTimeoutMs = Math.max(1000, Number(limits.totalTimeoutMs) || 75000);
+  const callTimeoutMs = Math.max(500, Number(limits.callTimeoutMs) || 20000);
   try {
     const base = askMessages({ ...baseMaterials, availablePages: baseMaterials.availablePages || [], scopeLabel: 'AI 自行读取', objectLabel: objectLabelFor(pending, reading) });
     const system = String(base[0]?.content || '');
@@ -8137,13 +8138,19 @@ async function runAgentReadPath({ pending, reading, context, references, sources
     window.__lastAgent = { ok: run.ok, stats, at: Date.now() };
     if (!run.ok || stats.calls === 0) return null;
     const messages = run.messages.slice();
-    messages.push({ role: 'user', content: '（材料已经读够，请直接给出最终回答；不要再调用工具。）' });
+    /* 用户口径（2026-11-02）：模型抱怨「本轮材料已经定下、不能再调用」是轮次用完导致的。
+       这里把两种结束原因分清楚：正常读完 vs 轮次用完；后者不说「材料已经读够」，并明确禁止再写工具标记。 */
+    const forcedHint = run.reason === 'max-rounds'
+      ? '（本次工具轮次已经用完。请只基于上面已经读到的材料和初始材料直接给出最终回答；如果确实缺少关键页，直接说明缺哪几页、为什么需要。不要再调用工具，也不要输出工具调用标记或 XML。）'
+      : '（材料已经读够，请直接给出最终回答；不要再调用工具，也不要输出工具调用标记或 XML。）';
+    messages.push({ role: 'user', content: forcedHint });
     const basisPages = [...new Set(run.pages)].sort((a, b) => a - b);
     return {
       messages,
       // 模型在最后一轮已经写出了完整正文（≥120 字）时，不再多发一次「最终流式」请求：
       // 这是 P2.5 延迟的主要来源之一（每多一轮 = 多一次完整 LLM 往返）。
-      directContent: String(run.directContent || '').trim().length >= 120 ? String(run.directContent).trim() : '',
+      directContent: String(stripAgentMarkup(run.directContent || '')).trim().length >= 120
+        ? String(stripAgentMarkup(run.directContent || '')).trim() : '',
       pages: basisPages,
       imagePages: run.imagePages || [],
       /* 跨论文读取时加入的其它论文页图（已渲染好 dataURL，交给 send() 附到最终请求） */
@@ -8500,7 +8507,8 @@ function streamTarget(node) {
   };
   return {
     push(text) {
-      pending = text;
+      // 工具调用标记（DSML / XML）绝不显示给用户：流式期间也实时剥离
+      pending = stripAgentMarkup(text);
       if (raf || timer) return;
       raf = requestAnimationFrame(paint);
       timer = setTimeout(paint, 120);   // rAF 被节流时的兜底
@@ -8510,7 +8518,7 @@ function streamTarget(node) {
       pending = null;
       const wasFollowing = following;
       active = false;
-      node.innerHTML = renderAnswerHTML(finalText);
+      node.innerHTML = renderAnswerHTML(stripAgentMarkup(finalText));
       rawNode = null; paintedText = '';
       hideFollow();
       bodyEl?.removeEventListener('scroll', onBodyScroll);
@@ -9775,10 +9783,9 @@ async function send(retryPending = null) {
 
     // ② P2.5：让 AI 自己决定读哪些页。成功就用它读到的页做材料（白名单=读过的页），
     // 失败（模型不支持 tools / 超时 / 任何异常）静默回退到下面的 P1.5 预装路径。
-    // P2.5 v1 边界：只对「纯文本问题 + 文本型 PDF」启用 Agent；
-    // 带附件（截图/加进来的文字）或扫描件时，P1.5 的精确材料已经够用，
-    // 再让模型自己翻页只会多花一轮工具（且扫描件页图走视觉路径更稳）。
-    const agentAllowed = agentReadEnabled() && !shotOnly && !pending.attachments.length
+    // 用户口径（2026-11-02）：带截图提问时也要能自己继续查页（截图是附加材料，不是禁止工具的理由）；
+    // 只有「只发截图没写问题」（shotOnly）才不启用，避免模型把截图当成唯一依据乱翻。
+    const agentAllowed = agentReadEnabled() && !shotOnly
       && !!pending.docId && !!state.doc && !!viewer?.pdf;
     let agentRun = null;
     let agentProgress = null;
@@ -9920,7 +9927,7 @@ async function send(retryPending = null) {
     // 直接采用 directContent 会让模型根本没看到图 —— 这种情况必须再走一次最终流式请求。
     const directAnswer = String(agentRun?.directContent || '');
     const mustStreamForImages = !!directAnswer && (pageImages.length > 0 || images.length > 0);
-    const full = directAnswer && !mustStreamForImages
+    const rawFull = directAnswer && !mustStreamForImages
       ? directAnswer
       : await chat({
         messages,
@@ -9928,6 +9935,7 @@ async function send(retryPending = null) {
         onDelta: (piece, all) => { received = all; target.push(all); },
         onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
       });
+    const full = stripAgentMarkup(rawFull);
     if (!readingRequestCurrent(pending)) return;
     // 引用核验必须在最终渲染之前完成：不合格的片段降级成纯页码，编造的页码直接不渲染。
     await auditAnswerCitations(full, { availablePages: citationMat.availablePages, scanned: scannedDoc });
@@ -9945,9 +9953,10 @@ async function send(retryPending = null) {
     if (!readingRequestCurrent(pending)) return;
     if (isAbort(e)) {
       // 保留已经收到的回答；状态放在回答下方，绝不覆盖回答正文。
-      target.done(received);
-      finishEntry(pending.entry, received, {
-        page: pending.firstPage, sources: citedSources(received, sources), meta, status: 'stopped', basis: citationMat?.basis, onRetry: () => send(pending),
+      const kept = stripAgentMarkup(received);
+      target.done(kept);
+      finishEntry(pending.entry, kept, {
+        page: pending.firstPage, sources: citedSources(kept, sources), meta, status: 'stopped', basis: citationMat?.basis, onRetry: () => send(pending),
       });
     } else {
       target.fail(errText(e));

@@ -3,19 +3,22 @@
  *
  * 设计（docs/提示词工程-设计.md §2.6 + docs/上下文策略-调研.md）：
  *  - 工具只读：get_reading_state / read_page(n) / search_paper(q) / read_scan_page(n) /
- *    read_page_image(n) / read_memory(topic)；
- *  - 循环最多 3 轮、每轮最多 3 个工具、整体超时 25s；
+ *    read_page_image(n) / read_memory(topic) / list_papers / read_other_paper / read_other_paper_image；
+ *  - 循环最多 AGENT_MAX_ROUNDS 轮、每轮最多 AGENT_MAX_CALLS_PER_ROUND 个工具（见常量：用户口径
+ *    2026-11-02 放宽到 5 轮/4 个 —— 模型发现读错页时要能继续调用，而不是卡在最后一轮）；
  *  - 不支持 tools / 超时 / 任何异常 → **静默回退 P1.5 预装路径**（本模块只负责返回 null，不碰 UI）；
  *  - 引用白名单天然成立：最终回答只能引用「它自己读过的页」+ 初始材料里的页（由调用方合并）。
- *  - 默认关闭（`reader.agentRead`），验收通过后再默认开启。
+ *  - 正文里出现 DSML 形式的工具调用时，parseModelResponse 会把它还原成 toolCalls（继续执行），
+ *    显示前由 stripAgentMarkup 剥离，绝不把调用标记露给用户。
+ *  - 默认开启（`reader.agentRead`），失败自动回退。
  *
  * 本模块零依赖、纯逻辑，Node 可直接 import 做单测。
  */
 
-export const AGENT_MAX_ROUNDS = 3;
-export const AGENT_MAX_CALLS_PER_ROUND = 3;
-export const AGENT_TOTAL_TIMEOUT_MS = 25000;
-export const AGENT_CALL_TIMEOUT_MS = 12000;
+export const AGENT_MAX_ROUNDS = 5;
+export const AGENT_MAX_CALLS_PER_ROUND = 4;
+export const AGENT_TOTAL_TIMEOUT_MS = 45000;
+export const AGENT_CALL_TIMEOUT_MS = 15000;
 export const AGENT_MAX_TOOL_RESULT_CHARS = 12000;
 export const AGENT_MAX_TOOLS = 32;
 
@@ -139,9 +142,12 @@ export const AGENT_TOOL_SPECS = [
 
 /** 放进 system 末尾的「工具模式」说明（简短，不改变原有规则） */
 export const AGENT_SYSTEM_NOTE = [
-  '【工具模式】你可以使用只读工具自己决定读哪些材料，最多 3 轮、每轮最多 3 个工具。',
+  `【工具模式】你可以使用只读工具自己决定读哪些材料，最多 ${AGENT_MAX_ROUNDS} 轮、每轮最多 ${AGENT_MAX_CALLS_PER_ROUND} 个工具。`,
   '读当前打开的论文：get_reading_state 看进度，search_paper 找页再 read_page 读正文；',
   '**扫描件没有文本层**：直接用 read_page_image（或 read_scan_page，效果一样：把该页原图给模型看），不要用 read_page，也不要等 OCR 转写。',
+  /* 用户口径（2026-11-02）：发现读错页/页不对，要直接继续调用工具修正，不要停下来问用户，也不要把错页将就成材料。 */
+  '**读到的页不对 / 不够时，立刻继续调用工具取正确页**（例如页图上的印刷页码和预期不符、或用 search_paper 发现相关页在别处）；不要把错页将就当材料回答，也不要问用户「要不要我继续读」——需要什么就直接读。',
+  '用户说的页码可能是**书里印刷页码**，PDF 页码可能整体偏移：读到页图先核对页眉/页脚的印刷页码，确认偏移后再换算；换算结果要在关键结论前再读一页验证，读错就马上改读正确页。',
   '【能看的材料】除了当前打开的论文（read_page / search_paper / get_reading_state），你还可以看 papers 文件夹里**所有已导入的论文**：',
   '先用 list_papers 找到目标文件（返回顺序 = 左侧文件树顺序；用户说「第 N 篇」时按这个序号数），',
   '再用 read_other_paper({name, page}) 读指定页、用 read_other_paper({name, query}) 在整篇里检索；扫描件/无文本层时用 read_other_paper_image 取页图。',
@@ -151,6 +157,8 @@ export const AGENT_SYSTEM_NOTE = [
   '引用原文用 `> ` 引用块，不要堆成普通段落；问「第 N 句话」时先原样引用那一句再解释。',
   '只依据实际读到的材料回答；引用页码只能来自你读过的页或材料里出现的页。',
   '材料够了就直接给最终回答（不要再调用工具）；工具调用失败时基于已有材料作答，不要编造。',
+  /* 防止工具调用标记漏进正文：没有工具通道时模型可能把调用写成 DSML 文本，程序会剥离，但最好根本不写。 */
+  '不要输出工具调用标记 / XML / 类似 <｜｜DSML｜｜ invoke …> 的文本；工具调用只走工具通道。没有工具可用时直接用已有材料回答，或说明还缺哪几页。',
 ].join('\n');
 
 const clip = (v, n) => String(v ?? '').slice(0, n);
@@ -158,6 +166,68 @@ const toInt = (v) => {
   const n = typeof v === 'number' ? v : Number.parseInt(String(v ?? ''), 10);
   return Number.isInteger(n) ? n : null;
 };
+
+/* ---------------------------------------------------------------- 工具调用标记（DSML）
+ * 用户 2026-11-02 的真实记录里出现过两种坏情况：
+ *  ① 工具轮次用完 / 没有工具通道时，模型把工具调用写成 DSML 文本（<｜｜DSML｜｜ invoke name="read_scan_page">…），
+ *     结果原样显示在回答里；
+ *  ② 模型发现读错页了，但轮次已经用完，没有机会再调用 —— 用户明确要求「发现不对就直接继续调用」。
+ * 这里同时做：*还原*（DSML → toolCalls，让 Agent 能继续执行）和 *剥离*（显示前去掉标记，绝不露给用户）。
+ * 正则容忍全角/半角竖线、大小写、换行，以及流式传输截断的半截标记。 */
+function dsmlTagRe(word) {
+  return new RegExp(`<[^>]*DSML[^>]*\\b${word}\\b[^>]*>`, 'gi');
+}
+
+/** 从回答正文里解析 DSML 形式的工具调用；解析不到返回 []。 */
+export function parseDsmlToolCalls(content) {
+  const text = String(content || '');
+  if (!/DSML/i.test(text)) return [];
+  const calls = [];
+  const invokeRe = /<[^>]*DSML[^>]*\binvoke\b[^>]*?name="([^"]+)"[^>]*>([\s\S]*?)<[^>]*DSML[^>]*\binvoke\s*>/gi;
+  const paramRe = /<[^>]*DSML[^>]*\bparameter\b[^>]*?name="([^"]+)"[^>]*>([\s\S]*?)<[^>]*DSML[^>]*\bparameter\s*>/gi;
+  let m;
+  while ((m = invokeRe.exec(text))) {
+    const name = clip(m[1].trim(), 80);
+    if (!name) continue;
+    const args = {};
+    let pm;
+    paramRe.lastIndex = 0;
+    while ((pm = paramRe.exec(m[2]))) {
+      const key = clip(pm[1].trim(), 80);
+      if (!key) continue;
+      let val = pm[2].trim();
+      if (/^-?\d+$/.test(val)) val = Number(val);
+      else if (val === 'true' || val === 'false') val = val === 'true';
+      else if (val === 'null') val = null;
+      args[key] = val;
+    }
+    calls.push({ id: `dsml_${calls.length}`, name, args });
+  }
+  return calls;
+}
+
+/** 把 DSML 工具调用标记从回答里剥离（含流式中途的半截标记）。 */
+export function stripAgentMarkup(text) {
+  let s = String(text ?? '');
+  if (!/DSML/i.test(s)) return s;
+  const countTags = (re) => (s.match(re) || []).length;
+  // ① 流式中途：calls / invoke 块还没闭合 → 从块首整段隐藏（参数文本也绝不显示给用户）
+  const callsOpen = s.search(/<[^>]*DSML[^>]*\bcalls\b[^>]*>/i);
+  if (callsOpen >= 0 && countTags(/<[^>]*DSML[^>]*\bcalls\b[^>]*>/gi) % 2 === 1) {
+    s = s.slice(0, callsOpen);
+  } else {
+    const invokeOpen = s.search(/<[^>]*DSML[^>]*\binvoke\b[^>]*>/i);
+    if (invokeOpen >= 0 && countTags(/<[^>]*DSML[^>]*\binvoke\b[^>]*>/gi) % 2 === 1) s = s.slice(0, invokeOpen);
+  }
+  // ② 完整块整段删除（连同里面只给程序看的参数文本）
+  s = s.replace(/<[^>]*DSML[^>]*\bcalls\b[^>]*>[\s\S]*?<[^>]*DSML[^>]*\bcalls\b[^>]*>/gi, '');
+  s = s.replace(/<[^>]*DSML[^>]*\binvoke\b[^>]*>[\s\S]*?<[^>]*DSML[^>]*\binvoke\b[^>]*>/gi, '');
+  // ③ 残留控制标签 / 被截断的半个标记
+  s = s.replace(/<[^>]*DSML[^>]*>/gi, '');
+  s = s.replace(/<[^>]*$/g, (tail) => (/DSML/i.test(tail) ? '' : tail));
+  s = s.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+  return s.replace(/^\s+|\s+$/g, '');
+}
 
 /** 工具参数校验（严格白名单；越界/类型错直接返回错误给模型，不抛） */
 export function validateToolCall(call, { numPages = 0 } = {}) {
@@ -209,7 +279,7 @@ export function validateToolCall(call, { numPages = 0 } = {}) {
 export function parseModelResponse(json) {
   const msg = json?.choices?.[0]?.message || json?.message || {};
   const rawCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : (Array.isArray(json?.tool_calls) ? json.tool_calls : []);
-  const toolCalls = rawCalls.map((c, i) => {
+  let toolCalls = rawCalls.map((c, i) => {
     let args = c?.function?.arguments ?? c?.arguments ?? {};
     if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
     return {
@@ -218,8 +288,18 @@ export function parseModelResponse(json) {
       args: args && typeof args === 'object' ? args : {},
     };
   });
+  let content = typeof msg.content === 'string' ? msg.content : '';
+  /* 工具通道没解析出来、但正文里写着 DSML 调用时：把它当成工具调用继续执行。
+     用户口径（2026-11-02）：「发现不对要能直接继续调用」——不能让模型因为格式写成文本就丢掉这次读取。 */
+  if (!toolCalls.length) {
+    const dsmlCalls = parseDsmlToolCalls(content);
+    if (dsmlCalls.length) {
+      toolCalls = dsmlCalls;
+      content = stripAgentMarkup(content);
+    }
+  }
   return {
-    content: typeof msg.content === 'string' ? msg.content : '',
+    content,
     toolCalls,
     finishReason: json?.choices?.[0]?.finish_reason || '',
   };
@@ -235,16 +315,23 @@ export async function executeToolCall(call, runtime) {
   if (check.error) return { ok: false, error: check.error };
   try {
     const { name, args } = check;
-    if (name === 'get_reading_state') return { ok: true, value: await runtime.getReadingState() };
-    if (name === 'read_page') return { ok: true, value: await runtime.readPage(args.page) };
-    if (name === 'search_paper') return { ok: true, value: await runtime.searchPaper(args.query) };
-    if (name === 'read_scan_page') return { ok: true, value: await runtime.readScanPage(args.page) };
-    if (name === 'read_page_image') return { ok: true, value: await runtime.readPageImage(args.page) };
-    if (name === 'read_memory') return { ok: true, value: await runtime.readMemory(args.topic) };
-    if (name === 'list_papers') return { ok: true, value: await runtime.listPapers() };
-    if (name === 'read_other_paper') return { ok: true, value: await runtime.readOtherPaper(args) };
-    if (name === 'read_other_paper_image') return { ok: true, value: await runtime.readOtherPaperImage(args) };
-    return { ok: false, error: `未知工具：${name}` };
+    let value;
+    if (name === 'get_reading_state') value = await runtime.getReadingState();
+    else if (name === 'read_page') value = await runtime.readPage(args.page);
+    else if (name === 'search_paper') value = await runtime.searchPaper(args.query);
+    else if (name === 'read_scan_page') value = await runtime.readScanPage(args.page);
+    else if (name === 'read_page_image') value = await runtime.readPageImage(args.page);
+    else if (name === 'read_memory') value = await runtime.readMemory(args.topic);
+    else if (name === 'list_papers') value = await runtime.listPapers();
+    else if (name === 'read_other_paper') value = await runtime.readOtherPaper(args);
+    else if (name === 'read_other_paper_image') value = await runtime.readOtherPaperImage(args);
+    else return { ok: false, error: `未知工具：${name}` };
+    /* 工具实现用 { error } 表示「这次没办成」（例如对文本型 PDF 调 read_scan_page）。
+       统一当失败处理：否则错误会被当成正常材料、页图集合也会误收。 */
+    if (value && typeof value === 'object' && !Array.isArray(value) && value.error) {
+      return { ok: false, error: String(value.error) };
+    }
+    return { ok: true, value };
   } catch (e) {
     return { ok: false, error: `工具执行失败：${e?.message || e}` };
   }
@@ -402,6 +489,8 @@ export async function runAgentLoop({
           }
         }
         if (call.name === 'read_page_image' && Number.isInteger(v.page)) imagePages.add(v.page);
+        /* 注意：read_scan_page 的页图由 runtime 直接收进 extraImages（最终请求会附上），
+           这里不能再收进 imagePages，否则同一页会被渲染两次、重复附给模型。 */
       }
       work.push({
         role: 'tool',
