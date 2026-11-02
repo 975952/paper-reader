@@ -4072,6 +4072,7 @@ P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放�
 - 合并发布 `release-2026-11-02d`，资产 `paper-reader-2026-11-02d.exe`：
   - 直接下载：<https://github.com/975952/paper-reader/releases/download/release-2026-11-02d/paper-reader-2026-11-02d.exe>
   - Release 页：<https://github.com/975952/paper-reader/releases/tag/release-2026-11-02d>
+  - 未登录直接下载核对：**200 / 10,867,712 B**，SHA256 与本地 exe 一致；`/releases/latest` 302 指向这一版。
 - 按用户要求**未运行任何 `test/` 套件**；只用 `test/artifacts/` 下的临时手动冒烟脚本验证。
 - README / 使用说明书同步：新增翻页预加载、双页显示（§3.6）说明，快捷键表与底栏速查同步更新。
 
