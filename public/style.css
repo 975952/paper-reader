@@ -757,6 +757,15 @@ body.dragging .viewer { pointer-events: none; }
   overflow-anchor: none; }
 .pages { display: flex; flex-direction: column; align-items: center; width: max-content; min-width: 100%; gap: 14px; padding: 14px 0 50px; }
 
+/* 双页显示（用户口径 2026-11-02）：两页一行、按行换行。页宽仍由 JS 布局按比例写死，
+   这里只负责换成横向 flex 并留出页间距；间距值必须和 pdfview.js 的 TWO_UP_GAP 一致。 */
+.pages.two-up {
+  width: 100%; max-width: 100%;
+  flex-direction: row; flex-wrap: wrap; align-items: flex-start; align-content: flex-start;
+  justify-content: center;
+  column-gap: 18px; row-gap: 18px;
+}
+
 .pages.zoom-preview .textLayer { visibility: hidden; }
 
 .viewer::-webkit-scrollbar,

@@ -638,6 +638,8 @@ const DEFAULT_UI_STYLE = Object.freeze({
   showPage: true, showQuote: true, showSources: false,
   useFullText: true, useWeb: true,
   zoomSpeed: 1,
+  // 双页显示：PDF 两页并排（页宽减半、按行换行）。属于用户偏好，跟着 reader.ui 存。
+  twoUp: false,
 });
 let uiStyle = { ...DEFAULT_UI_STYLE };
 
@@ -1700,6 +1702,9 @@ function applyUiStyle() {
      但「恢复默认设置」是直接换 uiStyle 再 applyUiStyle() —— 两条路都要把值推给 viewer，
      否则点完「恢复默认」滑杆回到 1.0、实际手势还是旧速度。 */
   viewer?.setZoomSpeed?.(uiStyle.zoomSpeed);
+  // 双页显示也跟着 uiStyle 走（点底栏按钮 / 恢复默认设置两条路都会经过这里）
+  viewer?.setTwoUp?.(!!uiStyle.twoUp);
+  syncTwoUpButton();
   applyMessageVisibility();
 }
 
@@ -1735,6 +1740,7 @@ function initViewer() {
     /* 双指缩放速度：开局就把存档里的值交给 viewer（触摸屏捏合的跟手倍率），
        之后设置页改动走 viewer.setZoomSpeed()。这样不依赖「先 applyUiStyle 再建 viewer」的顺序。 */
     zoomSpeed: clampZoomSpeed(uiStyle.zoomSpeed),
+    twoUp: !!uiStyle.twoUp,
     onNoteClick: (id) => openNoteEditorById(id),
     /* 正文 [n] 的点击不再走 viewer 回调：热点是 pointer-events:none 的，
        点击由 initSelection 里的 mouseup 用 viewer.citeAt(x,y) 判命中后直接 handleCite()
@@ -1849,11 +1855,19 @@ function initViewer() {
   const retBtn = $('#returnPosition');
   if (retBtn) retBtn.onclick = () => returnToPreviousPosition();
 
-  $('#footPrevPage').onclick = () => viewer.goToPage(viewer.current - 1);
-  $('#footNextPage').onclick = () => viewer.goToPage(viewer.current + 1);
+  $('#footPrevPage').onclick = () => viewer.stepPage(-1);
+  $('#footNextPage').onclick = () => viewer.stepPage(1);
   $('#footZoomIn').onclick = () => viewer.setScale(viewer.scale * 1.15);
   $('#footZoomOut').onclick = () => viewer.setScale(viewer.scale / 1.15);
   $('#footFitWidth').onclick = () => viewer.fitWidth();
+  const twoUpBtn = $('#footTwoUp');
+  if (twoUpBtn) {
+    twoUpBtn.onclick = () => {
+      uiStyle = { ...uiStyle, twoUp: !uiStyle.twoUp };
+      saveUi();
+      applyUiStyle();
+    };
+  }
 
   $('#pageInput')?.addEventListener('change', (e) => {
     const n = parseInt(e.target.value, 10);
@@ -1963,6 +1977,17 @@ function syncZoom(scale) {
   if (lbl) lbl.textContent = `${pct}%`;
   const r = $('#zoomRange');
   if (r && document.activeElement !== r) r.value = String(clamp(pct, Number(r.min), Number(r.max)));
+}
+
+/** 底栏「双页显示」按钮的状态（是否选中 + 无障碍状态 + 提示文案） */
+function syncTwoUpButton() {
+  const btn = $('#footTwoUp');
+  if (!btn) return;
+  const on = !!uiStyle.twoUp;
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.setAttribute('aria-label', on ? '切换为单页显示' : '双页显示');
+  btn.title = on ? '切换为单页显示' : '双页显示（两页并排）';
 }
 
 
@@ -10504,8 +10529,8 @@ function initShortcuts() {
     if (e.key === '+' || e.key === '=') { viewer?.setScale(viewer.scale * 1.15); return; }
     if (e.key === '-' || e.key === '_') { viewer?.setScale(viewer.scale / 1.15); return; }
     if (e.key === '0') { viewer?.fitWidth(); return; }
-    if (e.key === 'PageDown') { e.preventDefault(); viewer?.goToPage(viewer.current + 1); return; }
-    if (e.key === 'PageUp') { e.preventDefault(); viewer?.goToPage(viewer.current - 1); return; }
+    if (e.key === 'PageDown') { e.preventDefault(); viewer?.stepPage(1); return; }
+    if (e.key === 'PageUp') { e.preventDefault(); viewer?.stepPage(-1); return; }
     if (e.key === 'Home') { e.preventDefault(); viewer?.goToPage(1); return; }
     if (e.key === 'End') { e.preventDefault(); viewer?.goToPage(viewer.numPages); return; }
   });

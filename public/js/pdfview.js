@@ -68,6 +68,18 @@ const HIT_PAD_MAX = 6;
 
 const CHAR_HIT_ROW_WEIGHT = 10000;
 
+/* 背景预渲染（用户口径 2026-11-02）：不用「翻到了才加载」——平时就在后台把视口前后的页先画好，
+   翻动 / 滚动时目标位置已经有画面。渲染顺序始终以视口为中心：视口下方先备 PREFETCH_AHEAD 页，
+   再补视口上方 PREFETCH_BACK 页；用户一滚就重算窗口，先画当前该看的。
+   KEEP_* 比预渲染窗口再宽几页，避免来回翻时刚画的页被回收、又要重画。 */
+const PREFETCH_AHEAD = 12;
+const PREFETCH_BACK = 4;
+const KEEP_AHEAD = 22;
+const KEEP_BACK = 8;
+
+/** 双页显示：两页之间的水平间距（必须和 CSS `.pages.two-up` 的 column-gap 一致；算适应宽度时要用） */
+const TWO_UP_GAP = 18;
+
 function layerScale(el) {
   const m = /^scale\(([\d.]+)\)$/.exec(el?.style?.transform || '');
   const k = m ? Number(m[1]) : NaN;
@@ -246,6 +258,11 @@ export class PdfViewer {
     // 缩放手势期间只做一次合成层变换；停止后再提交真实页面尺寸。
     // 这样触摸板/滑块不会在每个 input 上触发全量布局和 PDF 重绘。
     this._zoomPreview = null;
+    // 背景预渲染（不想「翻到了才加载」）：见 _schedulePrefetch / _runPrefetchPass
+    this._prefetchTimer = 0;
+    this._prefetchRunning = false;
+    // 双页显示（两页并排）：排版交给 `.pages.two-up` 的 flex 换行，布局仍按 offsets/heights 走
+    this._twoUp = !!opts.twoUp;
 
     this._onScroll = throttle(() => this._handleScroll(), 60);
     this.container.addEventListener('scroll', this._onScroll, { passive: true });
@@ -262,6 +279,7 @@ export class PdfViewer {
       if (!this.pdf) return;
       for (const i of Array.from(this.rendered.keys())) this._teardownPage(i);
       this._renderVisible(true);
+      this._schedulePrefetch(160);
     };
     this._watchDpr();
 
@@ -450,6 +468,7 @@ export class PdfViewer {
   }
 
   close() {
+    this._cancelPrefetch();
     this._cancelZoomPreview();
     this._gen++;            // 作废上一份文档的所有在途任务
     for (const i of Array.from(this.rendered.keys())) this._teardownPage(i);
@@ -483,6 +502,7 @@ export class PdfViewer {
    */
   detach() {
     if (!this.pdf) return null;
+    this._cancelPrefetch();
     const handle = {
       pdf: this.pdf,
       url: this.url,
@@ -542,6 +562,7 @@ export class PdfViewer {
     this.pagesEl.className = 'pages';
     this.container.querySelectorAll('.pages').forEach((node) => node.remove());
     this.container.append(this.pagesEl);
+    this._applyTwoUpClass();
     this._buildPageEls();
     this._fitMode = handle.fitMode !== false;
     this.scale = Number(handle.scale) || this._computeFitScale();
@@ -562,6 +583,7 @@ export class PdfViewer {
     await this._renderVisible(true, gen);
     if (gen !== this._gen) return { numPages: 0, stale: true };
     this._handleScroll();
+    this._schedulePrefetch(80);
     return { numPages: this.numPages, hot: true };
   }
 
@@ -611,6 +633,7 @@ export class PdfViewer {
     // 只清掉上一次的页面容器，保留通过 #welcome 显示的欢迎页
     this.container.querySelectorAll('.pages').forEach((n) => n.remove());
     this.container.append(this.pagesEl);
+    this._applyTwoUpClass();
 
     this._buildPageEls();
     // 打开就自动匹配窗口大小：按页面宽度铺满阅读区，并进入「适配模式」，
@@ -628,6 +651,8 @@ export class PdfViewer {
     await this._renderVisible(true, gen);
     if (gen !== this._gen) return { numPages: 0, stale: true };
     this._handleScroll();
+    // 首屏出来后在后台把接下来的几页先画好：翻动时不用等
+    this._schedulePrefetch(80);
     return { numPages: this.numPages };
   }
 
@@ -756,10 +781,52 @@ export class PdfViewer {
 
   _computeFitScale() {
     const pad = 32;
-    const avail = Math.max(200, this.container.clientWidth - pad);
+    // 双页显示：两页并排，每页只能占「去掉中间间距」后的一半宽度
+    const span = this._twoUp ? 2 : 1;
+    const gap = this._twoUp ? TWO_UP_GAP : 0;
+    const avail = Math.max(200, this.container.clientWidth - pad - gap);
     const size = this._sizeOf(1);
     const w = (size && size.width) || 612;   // 没有文档时 baseSizes 是空的
-    return clamp(avail / w, 0.15, 6);
+    return clamp(avail / (w * span), 0.15, 6);
+  }
+
+  /** 按当前是单页还是双页，给 .pages 带上/去掉 two-up 类 */
+  _applyTwoUpClass() {
+    if (!this.pagesEl) return;
+    this.pagesEl.classList.toggle('two-up', this._twoUp);
+  }
+
+  /**
+   * 单页 / 双页显示切换（用户口径 2026-11-02：可以双页并排看了）。
+   * 双页只是排版变化：两页一行、按行换行；页尺寸/虚拟化/预渲染都沿用 offsets/heights。
+   */
+  setTwoUp(on) {
+    const next = !!on;
+    if (next === this._twoUp && this.pagesEl?.classList.contains('two-up') === next) return;
+    this._twoUp = next;
+    this._applyTwoUpClass();
+    if (!this.pdf) return;
+    this.commitZoomPreview();
+    this._cancelPrefetch();
+    // 切换排版后按新宽度重新适配：双页时每页只能占一半宽，沿用旧比例会横向溢出
+    this.fitWidth();
+    this._schedulePrefetch(80);
+  }
+
+  /** 双页时一行两页：返回某一页所在「行」的第一页（单页模式就是它自己） */
+  _rowStartOf(page) {
+    const i = clamp(Math.round(Number(page) || 1), 1, this.numPages || 1);
+    if (!this._twoUp || i === 1) return i;
+    // 页在 DOM 里是 1..N 顺序排的，双页时 (1,2)(3,4)… 两页一行
+    return i % 2 === 0 ? i - 1 : i;
+  }
+
+  /** 翻页按钮用：双页模式一次翻一行（两页），单页模式翻一页 */
+  stepPage(delta) {
+    const cur = this.current || 1;
+    if (!this._twoUp) return this.goToPage(cur + delta);
+    const start = this._rowStartOf(cur);
+    return this.goToPage(clamp(start + delta * 2, 1, this.numPages || 1));
   }
 
   layout({ keepAnchor = false } = {}) {
@@ -820,6 +887,8 @@ export class PdfViewer {
   }
 
   _beginZoomPreview() {
+    // 缩放手势期间别在后台抢主线程
+    this._cancelPrefetch();
     const c = this.container;
     const containerRect = c.getBoundingClientRect();
     const pagesRect = this.pagesEl.getBoundingClientRect();
@@ -938,6 +1007,19 @@ export class PdfViewer {
   }
 
   _writePreviewTransform(preview, k, tx, ty) {
+    if (this._twoUp) {
+      /* 双页是 flex 换行布局，「逐页预演」的纵向代数不适用：手势期间只把整层缩放（以手势点为原点），
+         松手提交时再按新比例真实重排 —— 预览帧只是过渡。 */
+      if (Math.abs(k - 1) < 1e-4) {
+        this.pagesEl.style.transform = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px)`;
+        return;
+      }
+      const ox = preview.scrollX + (preview.refX - preview.cLeft) - preview.originX;
+      const oy = preview.scrollY + (preview.refY - preview.cTop) - preview.originY;
+      this.pagesEl.style.transformOrigin = `${ox.toFixed(1)}px ${oy.toFixed(1)}px`;
+      this.pagesEl.style.transform = `scale(${k.toFixed(5)})`;
+      return;
+    }
     if (Math.abs(k - 1) < 1e-4) {
       // 纯平移：整层一条 transform，等价且最省
       this.pagesEl.style.transform = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px)`;
@@ -1215,6 +1297,7 @@ export class PdfViewer {
       }
     } finally {
       this._rerenderRunning = false;
+      this._schedulePrefetch(140);
       if (didWork && this._rerenderWanted && !this._destroyed) {
         clearTimeout(this._rerenderTimer);
         this._rerenderTimer = setTimeout(() => {
@@ -1227,14 +1310,72 @@ export class PdfViewer {
     }
   }
 
-  /** 回收远离视口、留着只会吃内存的页面 */
+  /** 回收远离视口、留着只会吃内存的页面（保留范围比预渲染窗口宽几页，来回翻不用重画） */
   _reclaimFar() {
     const [first, last] = this._visibleRange();
-    const keepLo = Math.max(1, first - 4);
-    const keepHi = Math.min(this.numPages, last + 4);
+    const keepLo = Math.max(1, first - KEEP_BACK);
+    const keepHi = Math.min(this.numPages, last + KEEP_AHEAD);
     for (const i of Array.from(this.rendered.keys())) {
       if (i < keepLo || i > keepHi) this._teardownPage(i);
     }
+  }
+
+  /* ------------------------------------------------- 背景预渲染 */
+
+  /** 取消待触发的预渲染 */
+  _cancelPrefetch() {
+    if (this._prefetchTimer) { clearTimeout(this._prefetchTimer); this._prefetchTimer = 0; }
+  }
+
+  /** 安排一次后台预渲染（合并短时间内的多次请求） */
+  _schedulePrefetch(delay = 120) {
+    if (this._destroyed) return;
+    this._cancelPrefetch();
+    this._prefetchTimer = setTimeout(() => {
+      this._prefetchTimer = 0;
+      if (this._destroyed) return;
+      const run = () => { this._runPrefetchPass(); };
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 500 });
+      else run();
+    }, delay);
+  }
+
+  /**
+   * 后台把视口下方（其次上方）还没画的页依次画好，让翻动/滚动时目标位置已有画面。
+   * 每画一页都让出一帧，并且每轮都重算一次视口 —— 用户一滚就优先画新位置。
+   */
+  async _runPrefetchPass() {
+    if (this._prefetchRunning || this._destroyed || !this.pdf || !this.offsets.length || this._zoomPreview) return;
+    // 正文区还没切出来（打开文档的中间态）不预渲染：此时布局尺寸都是 0，会白画一遍
+    if (!(this.container?.clientHeight > 0)) return;
+    this._prefetchRunning = true;
+    try {
+      for (let n = 0; n < 64; n++) {
+        if (this._destroyed || this._zoomPreview || !this.pdf) return;
+        const gen = this._gen;
+        const [first, last] = this._visibleRange();
+        let next = 0;
+        // ① 视口下方最近的一页优先（读论文就是往下翻）
+        for (let i = last + 1; i <= Math.min(this.numPages, last + PREFETCH_AHEAD); i++) {
+          if (!this.rendered.has(i) && !this.renderTasks.has(i)) { next = i; break; }
+        }
+        // ② 再看视口上方（往回翻）
+        if (!next) {
+          for (let i = first - 1; i >= Math.max(1, first - PREFETCH_BACK); i--) {
+            if (!this.rendered.has(i) && !this.renderTasks.has(i)) { next = i; break; }
+          }
+        }
+        if (!next) break;
+        // 大文档后面页的尺寸可能还是第 1 页占位：先量真实尺寸再画，避免页面高度不对
+        if (!this.baseSizes[next]) await this._measurePageSize(next);
+        if (this._destroyed || gen !== this._gen) return;
+        if (this.rendered.has(next) || this.renderTasks.has(next)) continue;
+        await this._renderPage(next, { gen });
+        await nextFrame();
+      }
+      this._reclaimFar();
+    } catch { /* 预渲染失败不影响正常阅读 */ }
+    finally { this._prefetchRunning = false; }
   }
 
   _resumeInflight(inflight, gen = this._gen) {
@@ -1376,6 +1517,7 @@ export class PdfViewer {
     if (!this.pdf || !Number.isInteger(i) || i < 1 || i > this.numPages) return;
     this._teardownPage(i);
     await this._renderPage(i, { force: true, priority: true, gen: this._gen });
+    this._schedulePrefetch(80);
   }
 
   _renderPlan(i, cssW, cssH) {
@@ -1648,6 +1790,8 @@ export class PdfViewer {
     const p = run().finally(() => {
       this.renderTasks.delete(i);
       if (this._perf) { this._perf.renders++; this._perf.renderMs += performance.now() - t0; }
+      // 画完一页继续在后台补下一页（翻动时目标位置就先有画面了）
+      this._schedulePrefetch(160);
     });
     this.renderTasks.set(i, p);
     return p;
@@ -1690,12 +1834,15 @@ export class PdfViewer {
       if (probe >= this.offsets[i]) cur = i;
       else break;
     }
+    // 双页：同一行的两页 offset 相同，页码取左边那页（回来切页时也从左页算）
+    if (this._twoUp && cur > 1 && this.offsets[cur] === this.offsets[cur - 1]) cur -= 1;
     if (cur !== this.current) {
       this.current = cur;
       this.opts.onPageChange?.(cur, this.numPages);
     }
     this._renderVisible();
     this._refreshSlices();
+    this._schedulePrefetch(120);
   }
 
   async goToPage(n, { smooth = false } = {}) {
@@ -1708,6 +1855,7 @@ export class PdfViewer {
     this.current = target;
     this.opts.onPageChange?.(target, this.numPages);
     await this._renderVisible(true);
+    this._schedulePrefetch(60);
   }
 
   capturePosition() {
@@ -1724,6 +1872,7 @@ export class PdfViewer {
     this.container.scrollTo({ top: clamp(Number(position.scrollTop) || 0, 0, maxTop), behavior: 'auto' });
     this._handleScroll();
     await this._renderVisible(true);
+    this._schedulePrefetch(80);
   }
 
   /* ------------------------------------------------------------ 文本 */
@@ -2294,6 +2443,7 @@ export class PdfViewer {
     this.current = target;
     this.opts.onPageChange?.(target, this.numPages);
     await this._renderVisible(true);
+    this._schedulePrefetch(60);
   }
 
   /* ------------------------------------------------------------ 选区 */
