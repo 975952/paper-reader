@@ -3880,3 +3880,29 @@ P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放�
 
 - exe 重新编译：**10,851,840 B**，SHA256 `64D931D0…`；桌面副本因用户应用运行中被跳过（关闭后重跑 `desktop\build.bat` 或复制根目录 exe）。
 - 按用户要求**未运行任何 `test/` 套件**；只用临时手动冒烟脚本验证（见 §73.3）。
+
+---
+
+## 74. 发布到 GitHub（公开仓库 + Release 下载）（2026-11-02）
+
+### 74.1 做了什么
+
+- 本地 14 个阶段提交已经全部推到 `origin/main`（HEAD `e7bb6c5`），并打了 tag `release-2026-11-02` 一起推送；
+  （本机直连 GitHub git 会被重置，push 时走本机代理 `127.0.0.1:10808`；API 直连可用。）
+- 用仓库凭证创建了 GitHub Release：`release-2026-11-02`，上传资产 `paper-reader-2026-11-02.exe`
+  （**10,851,840 B**，SHA256 `5AD5126A…`）；用带 token 的 API 下载核对过：大小/哈希与本地 exe 一致，
+  且 exe 里确认内嵌的是当前前端（`focusExistingResult` / `folderKeyOf` / `result-flash` 等标记都在）。
+  - 注意：GitHub 会把非 ASCII 的资产名回退成 `default.exe`，所以资产文件名用 ASCII 的 `paper-reader-2026-11-02.exe`。
+- 按用户要求把仓库改成 **public**（`PATCH /repos/975952/paper-reader {private:false}`）；
+  公开前做了自检：496 个被跟踪文件里没有真实密钥（只有测试里的 `sk-fake-*` 假 key），
+  `docs/archive` 扫描无服务器/密码等敏感信息（仅用户名路径与文档里讨论用的 169.254 元数据地址）。
+- README 更新：下载段落从「private 需登录」改成公开仓库 + 最新 Release 链接，功能段同步本版行为
+  （文件夹会话、扫描件直接读图、文件可跨文件夹转移等）。
+- 验证（未登录、无 token）：Release 页 200、仓库页 200、直接下载 **200 / 10,851,840 B**。
+
+### 74.2 链接
+
+- 直接下载：<https://github.com/975952/paper-reader/releases/download/release-2026-11-02/paper-reader-2026-11-02.exe>
+- 最新构建：<https://github.com/975952/paper-reader/releases/latest>
+- Release 页：<https://github.com/975952/paper-reader/releases/tag/release-2026-11-02>
+- 仓库：<https://github.com/975952/paper-reader>
