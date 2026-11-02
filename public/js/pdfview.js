@@ -1295,7 +1295,15 @@ export class PdfViewer {
 
   _visibleRange() {
     const top = this.container.scrollTop;
-    const bottom = top + this.container.clientHeight;
+    const viewH = this.container.clientHeight;
+    const bottom = top + viewH;
+    /* 容器还不可见时（换文档时正文区尚未切出来）读到的 clientHeight/offsetHeight 全是 0，
+       按几何算会把「整篇」当成可见 → 一次给几千页排渲染任务（大文档直接把主线程拖死）。
+       这种情况下只给当前页，等正文区切出来后再按真实布局补画。 */
+    if (!(viewH > 0)) {
+      const cur = clamp(this.current || 1, 1, this.numPages || 1);
+      return [cur, cur];
+    }
     let first = 1;
     let last = this.numPages;
     for (let i = 1; i <= this.numPages; i++) {

@@ -3936,20 +3936,31 @@ P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放�
 4. **修好页型结果缓存永远不命中**：`DOC_PROFILE_VERSION` 与写盘时的 `profile.version` 口径不一致，
    等于每次打开都重新扫描；现在升到 `${PROMPT_SYSTEM_VERSION}-scan2`，并让 `saveCachedDocProfile`
    写入同一个版本，第二次打开直接命中缓存（不再重扫）。
+5. **修掉大文档「打开即渲染整篇」的隐藏问题**（`_visibleRange`）：
+   打开文档时正文区还没切到阅读态，容器 `clientHeight` 和页面 `offsetHeight` 都还是 0，
+   旧实现按几何算可见范围 → 把**整篇**当成可见，一次给几千页排渲染任务
+   （2000 页文档实测 `rendered=1945`，每页的文本层/命中盒把主线程拖死，表现就是「打不开」）。
+   现在容器高度为 0 时只返回当前页；切到阅读态后由 `fitWidth` / `refreshPage(1)` 按真实布局补画。
+   这一条把 150MB/2000 页从 **>90s 打不开**降到 **0.94s 出首屏**（只渲染 2 页），
+   30MB/800 页也从 4.1s 降到 **0.8s**。
 
 ### 75.3 手动冒烟（**没有跑 test/ 套件**）
 
-- 用 `test/artifacts/make-big-pdf.mjs` 生成 **30.2MB / 800 页** 合成 PDF；`manual-large-pdf.mjs` 全过：
-  - 首屏打开约 **4.1–4.3s**（冷启浏览器；刷新重开连续 4 轮 **2.4–3.5s**，
-    页面内部 `domContentLoaded` 都在 0.5s 内），打开期间 `/api/pdf` 只有 **3 个 Range 请求**（不会再拉全文）；
-  - 打开后只预量 **60 页**尺寸（不会 800 页全测）；页型扫描抽样 **29 页**判定为「文本型」；
-    刷新后页型缓存命中（`localStorage` 有 `reader.docProfile.*`，不再重扫）；
-  - 跳第 700 页 **396–416ms**、再跳回第 400 页 **73–75ms**（跳页时只补目标附近尺寸，measured 65 页）；
+- 用 `test/artifacts/make-big-pdf.mjs` 生成三档合成 PDF：
+  **30.2MB / 800 页**、**150.6MB / 2000 页**、**300.8MB / 3000 页**；三档都跑手动冒烟，全过：
+  - 首屏打开：30MB **785ms**、150MB **942ms**、300MB **1146ms**（都只渲染当前 1–2 页）；
+  - 打开时 `/api/pdf` 只有 **3–4 个 Range 请求**（不拉全文）；页尺寸只预量 **60 页**；
+  - 页型判定抽样 **29 页**、判定为文本型；缓存落盘，30MB 文档刷新重开 **516ms** 且不重扫；
+  - 跳远页：30MB→第 700 页 **104ms**、150MB→第 1900 页 **119ms**、300MB→第 2900 页 **134ms**
+    （跳页时按需补目标附近尺寸，measured 65 页）；
   - 全程无页面错误。
-- 扫描件路径回归 `manual-scan-image.mjs` 全过（判定扫描件、直接读页图、不触发 OCR 转写、问答与教学正常）。
-- 过程记录：中途试过「懒加载尺寸 + 渲染递归」方案，打开 800 页文档 60s 没出首屏，已回退为上面的分段测量方案（见 75.2）。
-- headless 浏览器里偶发过一次 CDP `evaluate` 被本机其它应用负载拖住（页面自己的 `domContentLoaded` 仍是 0.2–0.5s），
-  复跑连续 4 轮 reload 全部 2.4–3.5s，判定为环境偶发、与功能无关。
+- 扫描件回归 `manual-scan-image.mjs`、提示回归 `manual-toast.mjs` 全过
+  （扫描件判定/直接读页图/不触发 OCR、成功类提示静默、问题类与「已生成」族照常显示）。
+- 过程记录：中途试过「懒加载尺寸 + 渲染递归」方案，打开 800 页文档 60s 没出首屏，已回退成上面的分段测量方案；
+  150MB/2000 页最初表现为打不开，用 CDP `Debugger.pause` 抓栈定位到 `_tileTextHitBoxes`，
+  再顺着 `rendered=1945` 找到 `_visibleRange` 在隐藏容器上的误判（见 75.2 第 5 条）。
+- headless 里偶发的 CDP 通信被本机其它应用负载拖住属于环境问题（页面内部 `domContentLoaded` 仍 0.2–0.5s），
+  复跑即正常，与桌面版无关。
 
 ### 75.4 右下角提示只留问题类（`util.js`）
 
@@ -3966,15 +3977,18 @@ P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放�
 
 ### 75.5 交付
 
-- exe 重新编译：**10,857,984 B**，SHA256 `D0AB4DD9A7ECD144F1D22C3C1D73A8D03F2828B8A2BEF8DA49315D74FFCDCED4`；
+- exe 最终重新编译：**10,858,496 B**，
+  SHA256 `22294DE7883F2E804C9E58E91689B1590F5B52D920711CB306EC27F7D2332749`；
   桌面副本因用户应用运行中被跳过（关闭应用后重跑 `desktop\build.bat`，或复制根目录 exe）。
-- README / 使用说明书同步：新增大文件说明、提示只留问题类、扫描件说明改为输入框下方小字。
+- README / 使用说明书同步：新增大文件说明（含实测到 300MB/3000 页）、提示只留问题类、
+  扫描件说明改为输入框下方小字。
 - 按用户要求**未运行任何 `test/` 套件**；只用 `test/artifacts/` 下的临时手动冒烟脚本验证（可单独重复执行）。
-- 已发布 `release-2026-11-02b`，资产 `paper-reader-2026-11-02b.exe`（**10,857,984 B**，
-  SHA256 `D0AB4DD9…`）；未登录直接下载核对：**200 / 10,857,984 B**，哈希与本地 exe 一致；
-  `/releases/latest` 302 指向这一版。
-  - 直接下载：<https://github.com/975952/paper-reader/releases/download/release-2026-11-02b/paper-reader-2026-11-02b.exe>
-  - Release 页：<https://github.com/975952/paper-reader/releases/tag/release-2026-11-02b>
+- 发布历史：`release-2026-11-02b`（10,857,984 B）是大文件优化的第一版；之后修了
+  `_visibleRange` 的「打开即渲染整篇」问题（见 75.2 第 5 条），最终发布 **`release-2026-11-02c`**：
+  - 资产 `paper-reader-2026-11-02c.exe`（**10,858,496 B**，SHA256 `22294DE7…`）；
+    未登录直接下载核对：**200 / 10,858,496 B**，哈希与本地 exe 一致；`/releases/latest` 302 指向这一版。
+  - 直接下载：<https://github.com/975952/paper-reader/releases/download/release-2026-11-02c/paper-reader-2026-11-02c.exe>
+  - Release 页：<https://github.com/975952/paper-reader/releases/tag/release-2026-11-02c>
 - 提醒：桌面上的 exe 当时正在使用，构建脚本跳过了桌面副本；关掉应用后重跑 `desktop\build.bat`
   （或把仓库根目录的 `论文阅读器.exe` 复制到桌面）即为本版。
 
