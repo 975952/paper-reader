@@ -74,10 +74,17 @@ export function fmtSize(bytes) {
   return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${u[i]}`;
 }
 
+/* 用户口径（2026-11-02）：右下角的弹出提示**只在出问题时**出现，成功/信息类一律不弹（很影响心情）。
+   唯一保留的成功类提示是「结果已经生成 / 已定位过去」这一族；另外「失败/未保存/请重新…」这类
+   即使调用方标成 ok 也属于问题，继续显示。 */
+const TOAST_KEEP = /已在结果区|已定位过去|已恢复问题|已生成|点「重新生成」|直接用缓存|已翻过|失败|出错|错误|异常|超时|未保存|已不在|请重新|未配置|不可用|无法|丢失|重试|拒绝|断开|过期|无效|不支持|问题|忽略/;
+
 export function toast(msg, kind = '', ms = 2600) {
+  const text = String(msg || '');
+  if (kind !== 'err' && kind !== 'error' && !TOAST_KEEP.test(text)) return;
   const wrap = $('#toastWrap');
   if (!wrap) return;
-  const node = el('div', { class: `toast ${kind}`, text: msg });
+  const node = el('div', { class: `toast ${kind}`, text });
   wrap.append(node);
   setTimeout(() => {
     node.style.transition = 'opacity .25s, transform .25s';

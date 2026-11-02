@@ -531,6 +531,7 @@ export class PdfViewer {
     this.name = handle.name || '';
     this.numPages = Number(handle.numPages) || this.pdf.numPages || 0;
     this.baseSizes = (handle.baseSizes || []).slice();
+    this._sizeTasks = new Map();
     if (!this.baseSizes[1]) {
       const first = await this.pdf.getPage(1);
       const vp1 = first.getViewport({ scale: 1 });
@@ -566,11 +567,14 @@ export class PdfViewer {
 
   /* ------------------------------------------------------------ 加载 */
 
-  async load(url, name = '') {
+  async load(url, name = '', { size = 0 } = {}) {
     this.close();
     this._destroyed = false;
     const gen = this._gen;   // 本次加载的代际；任何异步回跳先比对它
     const lib = await initPdfjs();
+    // 几十 MB 以上的 PDF：只按需取需要的字节范围（disableAutoFetch/disableStream），
+    // 不把整个 PDF 流式拉下来，也不让 pdf.js 后台把全文都载入内存。
+    const big = Number(size) > 20 * 1024 * 1024;
     const task = lib.getDocument({
       url,
       cMapUrl: '/vendor/cmaps/',
@@ -580,6 +584,10 @@ export class PdfViewer {
       // 中文/日文等 CID 字体需要 cMap；提高一点容错
       useSystemFonts: true,
       isEvalSupported: false,
+      // 大文件块调大减少请求次数；小文件保持原来的块大小
+      rangeChunkSize: big ? 512 * 1024 : 64 * 1024,
+      disableAutoFetch: big,
+      disableStream: big,
     });
     this.opts.onStatus?.('正在解析 PDF…');
     const pdf = await task.promise;
@@ -588,6 +596,8 @@ export class PdfViewer {
     this.url = url;
     this.name = name;
     this.numPages = pdf.numPages;
+    // 页尺寸按需测量的去重表（大文档跳页时才用）
+    this._sizeTasks = new Map();
 
     // 首页尺寸先拿到，立刻出画面
     const first = await pdf.getPage(1);
@@ -623,11 +633,13 @@ export class PdfViewer {
 
   async _loadRemainingSizes(firstPage, gen = this._gen) {
     const total = this.numPages;
-    let done = 1;
-    const CONC = 6;
+    if (total <= 1) { this.opts.onProgress?.(total, total); return; }
+    // ① 先快速补前 24 页：保证首屏、前几页滚动都有真实高度
+    const FAST = Math.min(total, 24);
     let next = 2;
-    const worker = async () => {
-      while (next <= total && gen === this._gen && !this._destroyed) {
+    let done = 1;
+    const fastWorker = async () => {
+      while (next <= FAST && gen === this._gen && !this._destroyed) {
         const i = next++;
         if (this.baseSizes[i]) { done++; continue; }
         try {
@@ -640,19 +652,83 @@ export class PdfViewer {
           this.baseSizes[i] = { ...this.baseSizes[1] };
         }
         done++;
-        if (done % 5 === 0 || done === total) {
-          this.opts.onProgress?.(done, total);
-        }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(CONC, Math.max(0, total - 1)) }, worker));
-    if (gen !== this._gen) return;
-    // 补齐后修正尺寸
+    await Promise.all(Array.from({ length: Math.min(4, Math.max(0, FAST - 1)) }, fastWorker));
+    if (gen !== this._gen || this._destroyed) return;
     this.layout({ keepAnchor: true });
-    // 尺寸补齐前 _handleScroll 可能把页码停在保守值；补齐后立刻按真实偏移再同步一次
+    this._handleScroll();
+    this.opts.onProgress?.(done, total);
+    // ② 超大文档（>400 页）：只补到前 60 页尺寸，其余页先用第 1 页尺寸占位；
+    //    跳页时（goToPage）会按需补目标附近页尺寸，避免一打开就发几百上千个 getPage 请求。
+    const restLimit = total > 400 ? 60 : total;
+    // ③ 中小文档：后台补齐其余页尺寸（并发 6，原行为）
+    let n = FAST + 1;
+    let finished = done;
+    const restWorker = async () => {
+      while (n <= restLimit && gen === this._gen && !this._destroyed) {
+        const i = n++;
+        if (this.baseSizes[i]) { finished++; continue; }
+        try {
+          const p = await this.pdf.getPage(i);
+          if (gen !== this._gen) return;
+          const vp = p.getViewport({ scale: 1 });
+          this.baseSizes[i] = { width: vp.width, height: vp.height, rotation: vp.rotation };
+        } catch {
+          if (gen !== this._gen) return;
+          this.baseSizes[i] = { ...this.baseSizes[1] };
+        }
+        finished++;
+        if (finished % 5 === 0 || finished === restLimit) this.opts.onProgress?.(finished, Math.max(finished, total));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, Math.max(0, restLimit - FAST)) }, restWorker));
+    if (gen !== this._gen) return;
+    this.layout({ keepAnchor: true });
     this._handleScroll();
     this.opts.onProgress?.(total, total);
   }
+
+  /** 测量某一页的真实尺寸（按需、去重、可并发） */
+  async _measurePageSize(i) {
+    if (this.baseSizes[i]) return this.baseSizes[i];
+    if (!this._sizeTasks) this._sizeTasks = new Map();
+    if (this._sizeTasks.has(i)) return this._sizeTasks.get(i);
+    if (!this.pdf) return null;
+    const gen = this._gen;
+    const task = (async () => {
+      try {
+        const p = await this.pdf.getPage(i);
+        if (gen !== this._gen || this._destroyed) return null;
+        const vp = p.getViewport({ scale: 1 });
+        this.baseSizes[i] = { width: vp.width, height: vp.height, rotation: vp.rotation };
+        return this.baseSizes[i];
+      } catch {
+        return null;
+      } finally {
+        this._sizeTasks.delete(i);
+      }
+    })();
+    this._sizeTasks.set(i, task);
+    return task;
+  }
+
+  /** 大文件：按需补 center 附近未测量页的尺寸；有变化就重排并返回 true */
+  async _ensureSizesAround(center, radius = 6) {
+    if (!this.pdf) return false;
+    const c = Math.round(Number(center) || 1);
+    const lo = Math.max(1, c - radius);
+    const hi = Math.min(this.numPages, c + radius);
+    const missing = [];
+    for (let i = lo; i <= hi; i++) if (!this.baseSizes[i]) missing.push(i);
+    if (!missing.length) return false;
+    const gen = this._gen;
+    await Promise.all(missing.slice(0, 26).map((i) => this._measurePageSize(i)));
+    if (gen !== this._gen || this._destroyed) return false;
+    this.layout({ keepAnchor: true });
+    return true;
+  }
+
 
   _buildPageEls() {
     const frag = document.createDocumentFragment();
@@ -1617,6 +1693,8 @@ export class PdfViewer {
   async goToPage(n, { smooth = false } = {}) {
     const target = clamp(Math.round(n), 1, this.numPages || 1);
     if (!this.pageEls[target]) return;
+    // 大文件里目标页尺寸可能还没测过：先补目标附近，否则 scrollTop 会落错位置
+    if (!this.baseSizes[target]) await this._ensureSizesAround(target, 2);
     this._pendingScrollTo = target;
     this.container.scrollTo({ top: this.offsets[target] ?? 0, behavior: smooth ? 'smooth' : 'auto' });
     this.current = target;
@@ -1697,8 +1775,24 @@ export class PdfViewer {
       m1[0] * m2[2] + m1[2] * m2[3], m1[1] * m2[2] + m1[3] * m2[3],
       m1[0] * m2[4] + m1[2] * m2[5] + m1[4], m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
     ];
+    /* 大文件只抽样一部分页面判断页型：几十上百 MB 的 PDF 逐页读文本层 + 算子表会很慢，
+       而且这个结果只用来决定「要不要按页图理解」，抽样足够。 */
+    const total = this.numPages;
+    const indices = [];
+    if (total <= 60) {
+      for (let i = 1; i <= total; i++) indices.push(i);
+    } else {
+      const want = 30;
+      for (let i = 1; i <= Math.min(10, total); i++) indices.push(i);
+      if (!indices.includes(total)) indices.push(total);
+      for (let k = 1; k <= want - 12; k++) {
+        const i = Math.max(1, Math.min(total, Math.round(1 + (k * (total - 1)) / (want - 11))));
+        if (!indices.includes(i)) indices.push(i);
+      }
+      indices.sort((a, b) => a - b);
+    }
     const pages = [];
-    for (let i = 1; i <= this.numPages; i++) {
+    for (const i of indices) {
       if (gen !== this._gen || this._destroyed || shouldStop()) return null;
       const page = await this.pdf.getPage(i);
       const viewport = page.getViewport({ scale: 1 });
@@ -1733,7 +1827,6 @@ export class PdfViewer {
             ctm = Array.isArray(a) && a.length >= 6 ? a.slice(0, 6) : [1, 0, 0, 1, 0, 0];
           } else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject) {
             imageCount++;
-            // 图像画在单位正方形上再由 CTM 放大 → |det(CTM)| 就是它在页面上的面积
             imageCoverage += Math.abs(ctm[0] * ctm[3] - ctm[1] * ctm[2]) / pageArea;
           } else if (fn === OPS.paintImageMaskXObject || fn === OPS.paintImageMaskXObjectRepeat
             || fn === OPS.paintImageMaskXObjectGroup || fn === OPS.paintInlineImageXObjectGroup) {
@@ -1757,24 +1850,29 @@ export class PdfViewer {
       pages.push({
         page: i, kind, chars: textChars, imageCount, coverage, vectorOps, oddRatio,
       });
-      onProgress?.(i, this.numPages);
+      onProgress?.(pages.length, indices.length);
     }
     if (gen !== this._gen || this._destroyed) return null;
+    const sampled = pages.length;
     const textChars = pages.reduce((n, p) => n + p.chars, 0);
     const scanPages = pages.filter((p) => p.kind === 'scan').map((p) => p.page);
     const figurePages = pages.filter((p) => p.kind === 'figure').map((p) => p.page);
-    // 过半页面是扫描页，或整篇平均每页不到 20 字 → 按扫描件处理
-    const scanned = scanPages.length >= Math.max(1, Math.ceil(pages.length * 0.5))
-      || textChars < pages.length * 20;
+    const avgChars = Math.round(textChars / Math.max(1, sampled));
+    const scanRatio = scanPages.length / Math.max(1, sampled);
+    // 过半抽样页是扫描页，或抽样平均每页不到 20 字 → 按扫描件处理
+    const scanned = scanRatio >= 0.5 || avgChars < 20;
     const profile = {
       version: 1,
-      numPages: this.numPages,
+      numPages: total,
       pages,
       scanned,
       scanPages,
       figurePages,
       textChars,
-      avgChars: Math.round(textChars / Math.max(1, pages.length)),
+      avgChars,
+      // 抽样信息（大文件：pages 只包含抽样页；app 侧缓存版本会区分）
+      sampled: sampled < total,
+      sampledPages: sampled,
       scannedAt: Date.now(),
     };
     this.scanCache.set('doc', profile);

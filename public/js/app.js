@@ -3633,7 +3633,10 @@ async function openDocColdSwitch({ name, url, docId, path }) {
     const cachedHandle = pdfHandles.get(docId) || null;
     hotSwitch = !!cachedHandle;
     const tAttach = performance.now();
-    const r = hotSwitch ? await viewer.attach(cachedHandle) : await viewer.load(url, name);
+    // 把文件大小传给 viewer：几十/上百 MB 的 PDF 走「只取需要的字节范围」策略
+    const paperMeta = (state.papers || []).find((p) => p && p.docId === docId);
+    const paperSize = Number(paperMeta?.size) || 0;
+    const r = hotSwitch ? await viewer.attach(cachedHandle) : await viewer.load(url, name, { size: paperSize });
     hotMark('attach', tAttach);
     if (cachedHandle) {
       pdfHandles.delete(docId);
@@ -9085,7 +9088,9 @@ function setHint(t) {
 /* ------------------------------------------------------------ 扫描件：页型 / 页图 / 图片阅读索引 */
 
 // A 线 P3：页型识别与图片阅读索引的缓存键都带提示词系统版本（提示词/转写规则一改就失效）
-const DOC_PROFILE_VERSION = PROMPT_SYSTEM_VERSION;
+// 页型扫描缓存版本：v1 的实现里 profile.version 跟这个常量对不上，等于缓存永远不命中、每次打开都重扫；
+// 这里升到 scan2 并让 saveCachedDocProfile 写入匹配版本，同时大文件改用抽样扫描（见 pdfview.scanDocProfile）。
+const DOC_PROFILE_VERSION = `${PROMPT_SYSTEM_VERSION}-scan2`;
 const SCAN_DIGEST_VERSION = PROMPT_SYSTEM_VERSION;
 /** 扫描件一次问答带几张页图（整篇类问题） */
 const SCAN_PAGES_MAX = 5;
@@ -9117,7 +9122,7 @@ function loadCachedDocProfile(docId) {
 function saveCachedDocProfile(docId, profile) {
   try {
     const key = docProfileCacheKey(docId);
-    if (key) localStorage.setItem(key, JSON.stringify(profile));
+    if (key) localStorage.setItem(key, JSON.stringify({ ...profile, version: DOC_PROFILE_VERSION }));
   } catch { /* localStorage 满了也不影响阅读 */ }
 }
 function loadCachedScanDigest(docId) {
@@ -9144,11 +9149,11 @@ function applyDocProfile(docId, profile) {
   if (profile?.scanned && !state.scanNoticeShown[docId]) {
     state.scanNoticeShown[docId] = true;
     // 主模型支持视觉时（如 deepseek-flash）直接读页面图；单独配了视觉模型更稳。
+    // 用户口径（2026-11-02）：右下角只弹问题类提示，扫描件说明属于信息类 → 放到输入框下方的小字里，不弹窗。
     const hasVision = String(Settings.data.visionModel || '').trim();
-    toast(hasVision
+    setHint(hasVision
       ? `扫描件：没有文本层，问答将按页面图片理解（读图模型：${hasVision}）`
-      : '扫描件：没有文本层，问答与「读懂论文」将按页面图片理解（图片交给主模型；若主模型不能读图，请到设置里配置视觉模型）',
-    'ok', 7000);
+      : '扫描件：没有文本层，问答与「读懂论文」将按页面图片理解（图片交给主模型；若主模型不能读图，请到设置里配置视觉模型）');
   }
 }
 
