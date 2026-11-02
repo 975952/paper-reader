@@ -7,12 +7,12 @@ Windows 桌面端的 PDF 阅读器，带 AI 辅助：划词翻译/解释、整�
 
 - 发布页：<https://github.com/975952/paper-reader/releases>
 - 最新构建（直接下载）：<https://github.com/975952/paper-reader/releases/latest>
-- 本版直接下载：<https://github.com/975952/paper-reader/releases/download/release-2026-11-02e/paper-reader-2026-11-02e.exe>
+- 本版直接下载：<https://github.com/975952/paper-reader/releases/download/release-2026-11-02f/paper-reader-2026-11-02f.exe>
 - 应用（Windows 10/11，免安装）：`paper-reader.exe`，双击运行。
 
 仓库是公开的。第一次打开后在设置里填 API Key 和模型名（任何 OpenAI 兼容接口都行，例如 DeepSeek）。
 
-> 当前最新：`release-2026-11-02e`（大文件优化 + 翻页预加载 + 双页显示 + AI 工具使用修复 + 提示只留问题类；
+> 当前最新：`release-2026-11-02f`（大文件优化 + 翻页预加载 + 双页显示 + AI 工具使用修复 + 提示只留问题类；
 > exe 内嵌全部前端，改了 `public/` 源码要重新编译 exe 才会生效）。
 
 ## 功能

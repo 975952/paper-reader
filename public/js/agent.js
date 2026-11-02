@@ -147,6 +147,8 @@ export const AGENT_SYSTEM_NOTE = [
   '**扫描件没有文本层**：直接用 read_page_image（或 read_scan_page，效果一样：把该页原图给模型看），不要用 read_page，也不要等 OCR 转写。',
   /* 用户口径（2026-11-02）：发现读错页/页不对，要直接继续调用工具修正，不要停下来问用户，也不要把错页将就成材料。 */
   '**读到的页不对 / 不够时，立刻继续调用工具取正确页**（例如页图上的印刷页码和预期不符、或用 search_paper 发现相关页在别处）；不要把错页将就当材料回答，也不要问用户「要不要我继续读」——需要什么就直接读。',
+  /* 用户口径（2026-11-02）：不要用「需要我接着读下一页吗」结尾 —— 要读就直接读，答完就停。 */
+  '**不要用「需要我接着读第 N 页吗」「你说一声我就去读」这类问题结尾**：还需要关键内容就直接在轮次内读完再回答；不需要就别提，把答案给完整。',
   '用户说的页码可能是**书里印刷页码**，PDF 页码可能整体偏移：读到页图先核对页眉/页脚的印刷页码，确认偏移后再换算；换算结果要在关键结论前再读一页验证，读错就马上改读正确页。',
   '【能看的材料】除了当前打开的论文（read_page / search_paper / get_reading_state），你还可以看 papers 文件夹里**所有已导入的论文**：',
   '先用 list_papers 找到目标文件（返回顺序 = 左侧文件树顺序；用户说「第 N 篇」时按这个序号数），',
@@ -377,13 +379,17 @@ export function summarizeToolResult(call, result) {
   }
   if (name === 'read_scan_page') {
     const page = toInt(v.page) || toInt(args.page) || '?';
+    if (v.duplicate) return `第 ${page} 页原图已经在材料里`;
     if (v.imageAttached) return `已加入第 ${page} 页原图（直接读图）`;
     return `已读取扫描页第 ${page} 页`;
   }
-  if (name === 'read_page' || name === 'read_scan_page') {
-    const page = toInt(v.page) || toInt(args.page);
+  if (name === 'read_page') {
+    const page = toInt(v.page) || toInt(args.page) || '?';
+    if (v.duplicate) return `第 ${page} 页原图已经在材料里`;
+    // 扫描件上模型可能先调 read_page：runtime 会自动改取页图，这里如实显示「自动改用页图」
+    if (v.imageAttached) return `已加入第 ${page} 页原图（直接读图，自动改用页图）`;
     const chars = String(v.text || '').length;
-    return `已读取第 ${page || '?'} 页（${chars.toLocaleString()} 字）`;
+    return `已读取第 ${page} 页（${chars.toLocaleString()} 字）`;
   }
   if (name === 'read_page_image') return `已加入第 ${toInt(v.page) || toInt(args.page) || '?'} 页原图`;
   if (name === 'read_memory') {

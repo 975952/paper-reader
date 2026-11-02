@@ -7951,6 +7951,21 @@ function createAgentRuntime(pending, { scannedDoc = false } = {}) {
     const hit = list.find((p) => p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q));
     return hit || null;
   };
+  /** 把「当前论文的某一页」渲染成页图收进材料；同一页只收一次（重复调用直接告诉模型已经在材料里） */
+  const attachCurrentPageImage = async (page) => {
+    const n = Number(page) || 1;
+    if (n < 1 || (numPages && n > numPages)) return { page: n, error: `页码超出范围（1–${numPages || '?'}）` };
+    const already = other.images.some((im) => im.page === n && !String(im.label || '').includes('《'));
+    if (already) return { page: n, imageAttached: true, duplicate: true, chars: 0, text: '', note: '这一页原图已经在材料里了' };
+    if (other.images.length >= 4) return { page: n, error: '本次已加入 4 张页图，先用它们回答' };
+    try {
+      const shot = await viewer.capturePageImage(n, { maxDim: 1400 });
+      other.images.push({ ...shot, page: n, label: `第 ${n} 页` });
+      return { page: n, imageAttached: true, chars: 0, text: '', note: '已把这一页的原图加入回答材料（直接读图，不做转写）' };
+    } catch (e) {
+      return { page: n, error: `取第 ${n} 页页图失败：${e?.message || e}` };
+    }
+  };
   const paperBrief = (p) => ({ name: p.name, folder: p.folder, path: p.path, index: p.index });
   return {
     numPages,
@@ -8017,7 +8032,8 @@ function createAgentRuntime(pending, { scannedDoc = false } = {}) {
       };
     },
     async readPage(page) {
-      if (scannedDoc) return { page, error: '扫描件没有文本层，请用 read_scan_page / read_page_image' };
+      /* 扫描件没有文本层：不先报错再让模型重试 —— 直接自动改取页图（少一轮往返、过程列表也少一条失败）。 */
+      if (scannedDoc) return attachCurrentPageImage(page);
       const text = await viewer.getPageText(page);
       return { page, chars: String(text || '').length, text: String(text || '').slice(0, 6000) };
     },
@@ -8029,16 +8045,7 @@ function createAgentRuntime(pending, { scannedDoc = false } = {}) {
     },
     async readScanPage(page) {
       if (!scannedDoc) return { page, error: '这不是扫描件，请用 read_page' };
-      // 用户口径（2026-11-02）：扫描件**直接读图**，不再逐页 AI 转写（旧路径要串行 8 次调用，慢）
-      const n = Number(page) || 1;
-      if (other.images.length >= 4) return { page: n, error: '本次已加入 4 张页图，先用它们回答' };
-      try {
-        const shot = await viewer.capturePageImage(n, { maxDim: 1400 });
-        other.images.push({ ...shot, page: n, label: `第 ${n} 页` });
-        return { page: n, imageAttached: true, chars: 0, text: '', note: '已把这一页的原图加入回答材料（直接读图，不做转写），最终回答会附上这张图' };
-      } catch (e) {
-        return { page: n, error: `取第 ${n} 页页图失败：${e?.message || e}` };
-      }
+      return attachCurrentPageImage(page);
     },
     async readPageImage(page) {
       if (!Number.isInteger(page)) return { error: 'page 必须是整数' };
@@ -9896,14 +9903,23 @@ async function send(retryPending = null) {
     // 图片有两种：用户自己加的截图 + 扫描件的页面上下文；同一条 user 消息里一起发。
     // P2.5：Agent 用 read_page_image 要求的页也要附上（视觉模型才看得到）。
     let pageImages = docCtx?.pageImages || [];
+    // 跨论文页图 / read_scan_page 拿到的页图（dataURL 已渲染好，带 label 标明来源）
+    // 当前论文的页可能已经作为「扫描件上下文」在 pageImages 里（例如问的就是这一页）：同一页不要附第二遍。
+    const basePages = new Set(pageImages
+      .filter((im) => Number.isInteger(im.page) && !String(im.label || '').includes('《'))
+      .map((im) => im.page));
+    if (agentRun?.extraImages?.length) {
+      const fresh = agentRun.extraImages.filter((im) => !(Number.isInteger(im.page) && !String(im.label || '').includes('《') && basePages.has(im.page)));
+      pageImages = [...pageImages, ...fresh.slice(0, 4)];
+    }
     if (agentRun?.imagePages?.length) {
       try {
-        const extraPages = agentRun.imagePages.filter((p) => !pageImages.some((im) => im.page === p));
+        // 同一页已经在 extraImages 里（read_scan_page 与 read_page_image 被同时调用）就不再渲染第二遍
+        const attached = new Set(pageImages.map((im) => im.page).filter((n) => Number.isInteger(n)));
+        const extraPages = agentRun.imagePages.filter((p) => !attached.has(p));
         if (extraPages.length) pageImages = [...pageImages, ...await renderScanPages(extraPages.slice(0, 5))];
       } catch { /* 取页图失败不影响回答 */ }
     }
-    // 跨论文读取：其它论文的页图（read_other_paper_image 拿到的 dataURL，带label标明是哪篇）
-    if (agentRun?.extraImages?.length) pageImages = [...pageImages, ...agentRun.extraImages.slice(0, 4)];
     if (images.length || pageImages.length) {
       const last = messages[messages.length - 1];
       const parts = [{ type: 'text', text: last.content }];
