@@ -4134,6 +4134,9 @@ P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放�
 - 发布 `release-2026-11-02e`，资产 `paper-reader-2026-11-02e.exe`：
   - 直接下载：<https://github.com/975952/paper-reader/releases/download/release-2026-11-02e/paper-reader-2026-11-02e.exe>
   - Release 页：<https://github.com/975952/paper-reader/releases/tag/release-2026-11-02e>
+  - 未登录直接下载核对：**200 / 10,874,368 B**，SHA256 `83D88FAB…` 与本地 exe 一致；`/releases/latest` 302 指向这一版。
+- 桌面 `论文阅读器.exe` 正在运行、无法覆盖，已把带本轮修复的 exe 覆盖到桌面 **`论文阅读器-新版.exe`**；
+  关掉旧应用后双击「新版」即可（想保留原图标就把它重命名回 `论文阅读器.exe`）。
 - README / 使用说明书同步：AI 工具轮次、读错页自动继续读、工具标记不外露（§16.3）。
 - 按用户要求**未运行任何 `test/` 套件**；只用 `test/artifacts/` 下的临时手动冒烟脚本验证。
 
