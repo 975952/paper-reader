@@ -3970,4 +3970,11 @@ P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放�
   桌面副本因用户应用运行中被跳过（关闭应用后重跑 `desktop\build.bat`，或复制根目录 exe）。
 - README / 使用说明书同步：新增大文件说明、提示只留问题类、扫描件说明改为输入框下方小字。
 - 按用户要求**未运行任何 `test/` 套件**；只用 `test/artifacts/` 下的临时手动冒烟脚本验证（可单独重复执行）。
+- 已发布 `release-2026-11-02b`，资产 `paper-reader-2026-11-02b.exe`（**10,857,984 B**，
+  SHA256 `D0AB4DD9…`）；未登录直接下载核对：**200 / 10,857,984 B**，哈希与本地 exe 一致；
+  `/releases/latest` 302 指向这一版。
+  - 直接下载：<https://github.com/975952/paper-reader/releases/download/release-2026-11-02b/paper-reader-2026-11-02b.exe>
+  - Release 页：<https://github.com/975952/paper-reader/releases/tag/release-2026-11-02b>
+- 提醒：桌面上的 exe 当时正在使用，构建脚本跳过了桌面副本；关掉应用后重跑 `desktop\build.bat`
+  （或把仓库根目录的 `论文阅读器.exe` 复制到桌面）即为本版。
 
