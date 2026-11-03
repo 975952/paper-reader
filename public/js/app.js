@@ -4986,6 +4986,25 @@ function syncComposerMode(id = rightPanelInCol(1)) {
     clip.classList.toggle('hidden', translating);
   }
   if (sendBtn) sendBtn.title = translating ? '翻译' : '发送';
+  const fontControls = $('#translateFontControls');
+  const fontValue = $('#translateFontValue');
+  if (fontControls) fontControls.classList.toggle('hidden', !translating);
+  const setTranslateFont = (value, persist = true) => {
+    const px = clamp(Math.round(Number(value) || 14), 12, 24);
+    document.documentElement.style.setProperty('--translate-input-fs', `${px}px`);
+    if (fontValue) fontValue.textContent = `${px}px`;
+    if (persist) { try { localStorage.setItem('reader.translate.inputFontSize', String(px)); } catch { /* 忽略 */ } }
+  };
+  if (!document.documentElement.dataset.translateFontReady) {
+    let initial = 14;
+    try { initial = Number(localStorage.getItem('reader.translate.inputFontSize')) || 14; } catch { /* 忽略 */ }
+    setTranslateFont(initial, false);
+    $('#translateFontDown')?.addEventListener('click', () => setTranslateFont(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--translate-input-fs')) - 1));
+    $('#translateFontUp')?.addEventListener('click', () => setTranslateFont(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--translate-input-fs')) + 1));
+    document.documentElement.dataset.translateFontReady = '1';
+  } else if (fontValue) {
+    fontValue.textContent = `${parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--translate-input-fs')) || 14}px`;
+  }
   const target = $('#translateTargetLang');
   if (target && !target.dataset.ready) {
     try {
