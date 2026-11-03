@@ -2072,7 +2072,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   justify-content: center;
 }
 
-.side.right:not([data-active-panel="chat"]) > .composer { display: none; }
+.side.right:not([data-active-panel="chat"]):not([data-active-panel="translate"]) > .composer { display: none; }
+.side.right[data-active-panel="translate"] #composerScope,
+.side.right[data-active-panel="translate"] #composerHint,
+.side.right[data-active-panel="translate"] #sendScope { display: none !important; }
+.translate-target-label,
+.translate-target { display: none; }
+.side.right[data-active-panel="translate"] .translate-target-label,
+.side.right[data-active-panel="translate"] .translate-target { display: inline-flex; }
+.translate-target-label { color: var(--fg-faint); font-size: var(--ui-fs-xs); }
+.translate-target { min-width: 82px; padding: 2px 5px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elev); color: var(--fg); font: inherit; font-size: var(--ui-fs-xs); }
 
 /* ── 区域之间的分隔线统一为一条 1px 暖灰线，不用卡片阴影 ──
    只写 border-top-color：宽度与样式由各区域自己的既有规则决定，这里不越权。 */
@@ -2749,71 +2758,60 @@ body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
 .ai-tool-btn:hover { background: var(--bg-sunken); border-color: var(--border); color: var(--accent); }
 .ai-tool-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .ai-tool-btn svg { width: 13px; height: 13px; }
-/* 截图翻译条目：译文块默认隐藏 .acts（「最纯净的界面」），只把这类的重试按钮放出来 */
+/* 译文卡片：方向、原文与译文分层显示，区别于普通问答气泡 */
+.ai-block[data-block="translate"] .msg.msg-translation {
+  margin: 12px 10px 16px;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+.ai-block[data-block="translate"] .msg.msg-translation .translation-direction {
+  display: flex;
+  align-items: center;
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: var(--ui-fs-xs);
+  font-weight: 650;
+  letter-spacing: .02em;
+}
+.ai-block[data-block="translate"] .msg.msg-translation .translation-source {
+  max-height: 120px;
+  overflow: auto;
+  margin: 0 0 9px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 5px 5px 0;
+  background: var(--bg-sunken);
+  color: var(--fg-dim);
+  font-size: var(--ui-fs-xs);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ai-block[data-block="translate"] .msg.msg-translation .text {
+  padding: 1px 0 3px;
+  color: var(--fg);
+  font-size: var(--ui-fs-sm);
+  line-height: 1.75;
+}
+.ai-block[data-block="translate"] .msg.msg-translation .acts:not(:empty),
+.ai-block[data-block="translate"] .msg.msg-translation .acts:not(:empty) * { display: inline-flex !important; }
+.ai-block[data-block="translate"] .msg.msg-translation .acts:not(:empty) { gap: 6px; padding: 4px 0 2px; opacity: .75; }
+.ai-block[data-block="translate"] .msg.msg-translation .shots { margin: 4px 0 8px; }
+.ai-block[data-block="translate"] .msg .shot-item { position: relative; flex: 0 1 auto; min-width: 0; }
+.ai-block[data-block="translate"] .msg .shot-index {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--fg-faint);
+  font-size: var(--ui-fs-2xs);
+}
 .ai-block[data-block="translate"] .msg.msg-shot-translate .acts,
 .ai-block[data-block="translate"] .msg.msg-shot-translate .acts * { display: inline-flex !important; }
 .ai-block[data-block="translate"] .msg.msg-shot-translate .acts { gap: 6px; padding: 2px 0 6px; }
-.ai-block[data-block="translate"] .msg.msg-shot-translate .shots { margin: 2px 0 7px; }
-/* 文本输入翻译条目：成功时仍保持译文块「最纯净」的界面；失败/停止时 .acts 非空才放行重试按钮 */
 .ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty),
 .ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty) * { display: inline-flex !important; }
 .ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty) { gap: 6px; padding: 2px 0 6px; }
-
-/* ── 译文面板：文本输入翻译（粘贴/手输 → 翻译，2026-11-03） ── */
-.tr-text {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 4px 10px 6px;
-  padding: 8px 9px;
-  background: var(--bg-sunken);
-  border: 1px solid var(--border-strong);
-  border-radius: 9px;
-}
-.tr-text.hidden { display: none; }
-.tr-text-area {
-  width: 100%;
-  min-height: calc(62px * var(--ctl-scale));
-  max-height: calc(180px * var(--ctl-scale));
-  resize: vertical;
-  padding: 6px 8px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  color: var(--fg);
-  font: inherit;
-  font-size: var(--ui-fs-sm);
-  line-height: 1.6;
-}
-.tr-text-area:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.tr-text-foot { display: flex; align-items: center; gap: 7px; }
-.tr-text-hint { flex: 1 1 auto; min-width: 0; color: var(--fg-faint); font-size: var(--ui-fs-2xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tr-text-lang {
-  flex: 0 0 auto;
-  padding: 2px 4px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--fg-dim);
-  font: inherit;
-  font-size: var(--ui-fs-xs);
-}
-.tr-text-btn {
-  flex: 0 0 auto;
-  padding: 3px 10px;
-  background: transparent;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  color: var(--fg-dim);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--ui-fs-xs);
-  line-height: 1.5;
-}
-.tr-text-btn:hover { background: var(--bg-elev); color: var(--accent); border-color: var(--accent); }
-.tr-text-btn.primary { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-.tr-text-btn.primary:hover { background: var(--accent); color: var(--accent-fg); }
-.tr-text-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 

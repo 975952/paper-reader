@@ -4781,8 +4781,7 @@ function ensureBlock(id) {
   const meta0 = AI_BLOCKS.find((b) => b.id === id) || {};
   const hint = el('div', { class: 'ai-hint', text: meta0.hint || '' });
   const body = el('div', { class: 'ai-body' }, hint);
-  // 译文面板的工具条：框选论文区域 → 翻译截图里的文字；文本输入 → 粘贴/手输直接翻。
-  // 放在 ai-body 外面，滚动译文时按钮不会被带着滚走。
+  // 译文面板的工具条只放辅助入口（截图框选）；文字直接用右栏底部的常驻 composer 输入。
   const tools = id === 'translate' ? el('div', { class: 'ai-tools' },
     el('button', {
       type: 'button', class: 'ai-tool-btn',
@@ -4792,14 +4791,8 @@ function ensureBlock(id) {
         state.startRegion?.('translate');
       },
     }, iconEl('region'), el('span', { text: '截图翻译' })),
-    el('button', {
-      type: 'button', class: 'ai-tool-btn', id: 'trTextBtn',
-      title: '粘贴或输入文字，直接翻译（Ctrl+Enter 翻译）',
-      onclick: () => toggleTranslateInput(),
-    }, iconEl('translate'), el('span', { text: '文本翻译' })),
   ) : null;
-  const trInput = id === 'translate' ? buildTranslateInputPanel() : null;
-  const root = el('section', { class: 'ai-block', dataset: { block: id, panel: id } }, tools, trInput, body);
+  const root = el('section', { class: 'ai-block', dataset: { block: id, panel: id } }, tools, body);
 
   // R7：滚动时刷新底部渐隐（滚到底就摘掉标记）
   body.addEventListener('scroll', updateScrollFades, { passive: true });
@@ -4977,19 +4970,45 @@ function rightPanelInCol(n) {
   return list[0] || '';
 }
 
+function composerMode() { return rightPanelInCol(1) === 'translate' ? 'translate' : 'chat'; }
+function syncComposerMode(id = rightPanelInCol(1)) {
+  const translating = id === 'translate';
+  const input = $('#chatInput');
+  const clip = $('#clipBtn');
+  const sendBtn = $('#sendBtn');
+  if (input) {
+    input.placeholder = translating ? '粘贴或输入要翻译的文字…（Enter 翻译，Shift+Enter 换行）' : '问点什么…（Enter 发送）';
+    if (translating) input.maxLength = 20000;
+    else input.removeAttribute('maxlength');
+  }
+  if (clip) {
+    clip.title = translating ? '截图翻译请使用上方「截图翻译」按钮' : '截图 / 长截图，加进对话';
+    clip.classList.toggle('hidden', translating);
+  }
+  if (sendBtn) sendBtn.title = translating ? '翻译' : '发送';
+  const target = $('#translateTargetLang');
+  if (target && !target.dataset.ready) {
+    try {
+      const saved = localStorage.getItem('reader.translate.targetLang');
+      if (saved === '中文' || saved === 'English') target.value = saved;
+    } catch { /* 忽略 */ }
+    target.addEventListener('change', () => { try { localStorage.setItem('reader.translate.targetLang', target.value); } catch { /* 忽略 */ } });
+    target.dataset.ready = '1';
+  }
+}
+
 /** 一列的结果区长什么样（只改 DOM，不改导航） */
 function renderCol(n) {
   const area = rightAreaEl(n);
   if (!area) return;
   const id = rightPanelInCol(n);
-  // 把「这一栏此刻显示的是谁」写到 <aside> 上：CSS 需要它来决定要不要显示输入区。
-  // 用户口径：「译文不需要输入啊」—— 译文栏只显示译文，不给输入框；
-  // 问答栏才需要输入框。见 style.css 的 [data-active-panel="translate"] 那一条。
+  // 把当前面板写到 <aside>：问答与译文共用常驻 composer，由模式切换提示、目标语言和发送行为。
   const col = rightColEl(n);
   if (col) {
     if (id) col.dataset.activePanel = id;
     else delete col.dataset.activePanel;
   }
+  if (n === 1) syncComposerMode(id);
   if (!id) {
     if (n === 1) {
       // 空态：译文 / 问答一块都没开。文案改成右键也能开第 2 栏（入口在图标坞上）
@@ -5127,7 +5146,10 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
     : null;
   const shots = (imageSrc ? [imageSrc] : (thumbs || [])).filter(Boolean);
   const shot = shots.length
-    ? el('div', { class: 'shots' }, ...shots.map((src) => el('img', { class: 'shot-img', src })))
+    ? el('div', { class: 'shots' }, ...shots.map((src, i) => el('div', { class: 'shot-item' },
+      el('span', { class: 'shot-index', text: `图 ${i + 1}` }),
+      el('img', { class: 'shot-img', src, alt: `附件图片 ${i + 1}` }),
+    )))
     : null;
   const textEl = el('div', {
     class: 'text',
@@ -5136,6 +5158,18 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   });
   const acts = el('div', { class: 'acts hidden' });
   const root = el('div', { class: `msg ${isUser ? 'user' : 'assistant'}`, dataset: { operation: tag || '', page: page || '' } }, role, ref, shot, textEl, acts);
+  if (block === 'translate' && tag === 'translation') {
+    root.classList.add('msg-translation');
+    const targetLang = retry?.targetLang || (retry?.kind === 'translate' ? targetLangFor(String(quote || '')) : '中文');
+    const sourceText = retry?.kind === 'translate-text' ? String(retry.text || '') : '';
+    const originLang = sourceText && targetLang === 'English' && /[\u4e00-\u9fff]/.test(sourceText) ? '中文' : '原文';
+    const direction = el('div', { class: 'translation-direction', text: `${retry?.kind === 'translate-text' ? '文本翻译' : '译文'} · ${originLang} → ${targetLang}` });
+    root.insertBefore(direction, ref || shot || textEl);
+    if (sourceText) {
+      root.querySelector('.ref')?.remove();
+      root.insertBefore(el('div', { class: 'translation-source', text: sourceText }), textEl);
+    }
+  }
   // 全局序号：分块之后 DOM 顺序 ≠ 时间顺序，取「最新一条」要靠它
   state.msgSeq = (state.msgSeq || 0) + 1;
   root.dataset.seq = String(state.msgSeq);
@@ -5190,8 +5224,12 @@ function finishEntry(entry, fullText, { page, onAsk, onRetry, retryLabel = '', s
   }
   entry.acts.replaceChildren();
   entry.acts.classList.remove('hidden');
-  const bare = entry.root.dataset.operation === 'translation';  appendAll(entry.acts,
-    bare ? null : el('button', {
+  const bare = entry.root.dataset.operation === 'translation';
+  const translationCopy = bare
+    ? el('button', { class: 'act-icon', title: '复制译文', 'aria-label': '复制译文', onclick: () => copyText(fullText) }, iconEl('copy'))
+    : null;
+  appendAll(entry.acts,
+    bare ? translationCopy : el('button', {
       class: 'act-icon', title: '复制这段回答', 'aria-label': '复制这段回答',
       onclick: () => copyText(fullText),
     }, iconEl('copy')),
@@ -5427,10 +5465,15 @@ async function fetchAttachmentDataUrl(ref, docId, sid) {
 
 /** 按会话条目里的 shots[] 取回图片；返回 { thumbs, missing } */
 async function hydrateShotThumbs(shots, docId, sid) {
-  const rows = (Array.isArray(shots) ? shots : []).filter((s) => s && validAttachmentId(s.id));
-  const urls = await Promise.all(rows.map((s) => fetchAttachmentDataUrl(s.id, docId, sid)));
-  const thumbs = urls.filter(Boolean);
-  return { thumbs, missing: urls.length > thumbs.length };
+  const rows = (Array.isArray(shots) ? shots : []).slice(0, 6);
+  const urls = await Promise.all(rows.map((s) => s && validAttachmentId(s.id)
+    ? fetchAttachmentDataUrl(s.id, docId, sid) : Promise.resolve('')));
+  // 保留原始索引；过滤缺失项会把图 2 挪成图 1，重新生成时造成错配。
+  const missingThumb = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="100%" height="100%" fill="#888" opacity=".12"/><text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" fill="#777" font-size="14">截图文件缺失</text></svg>',
+  );
+  const thumbs = urls.map((url) => url || missingThumb);
+  return { thumbs, missing: urls.some((url) => !url) };
 }
 
 /** 一张附件图片 → 会话里存的最小描述 { id, w, h, label } */
@@ -6103,14 +6146,14 @@ async function restoreSession(docId, { only = 'all' } = {}) {
        * 截图附件单独存：会话里只记了 id，这里按 id 把原图取回来（本机 HTTP）再渲染；
        * 取不到（图片被清掉 / 老会话没有 id）才退回原来的「截图附件未保存」提示。
        */
-      const shotRefs = (Array.isArray(row.shots) ? row.shots : []).filter((s) => s && validAttachmentId(s.id));
+      const shotRefs = (Array.isArray(row.shots) ? row.shots : []).slice(0, 6);
       let thumbs = [];
       let shotsLost = false;
       if (row.screenshot || shotRefs.length) {
         if (shotRefs.length) {
           const hydrated = await hydrateShotThumbs(shotRefs, docId, sid);
           thumbs = hydrated.thumbs;
-          shotsLost = !thumbs.length;
+          shotsLost = hydrated.missing;
         } else {
           shotsLost = true;   // 老会话：只存了「有过截图」的标记，没有图片本体
         }
@@ -8887,61 +8930,6 @@ function revealPanel(id) {
 /** 兼容旧名字：译文结果走的就是 revealPanel('translate') */
 function revealTranslatePanel() { revealPanel('translate'); }
 
-/** 译文面板：文本输入翻译的编辑区（粘贴/手输 → 翻译；不依赖 PDF 选区） */
-function buildTranslateInputPanel() {
-  const ta = el('textarea', {
-    class: 'tr-text-area', id: 'trTextArea', rows: '4', maxlength: '20000',
-    placeholder: '粘贴或输入要翻译的文字…（Ctrl+Enter 翻译，Esc 关闭）',
-  });
-  const lang = el('select', { class: 'tr-text-lang', id: 'trTextLang', title: '目标语言', 'aria-label': '目标语言' },
-    el('option', { value: '中文', text: '译成中文' }),
-    el('option', { value: 'English', text: '译成 English' }),
-  );
-  try {
-    const saved = localStorage.getItem('reader.translate.targetLang');
-    if (saved === '中文' || saved === 'English') lang.value = saved;
-  } catch { /* 忽略 */ }
-  lang.addEventListener('change', () => {
-    try { localStorage.setItem('reader.translate.targetLang', lang.value); } catch { /* 忽略 */ }
-  });
-  const panel = el('div', { class: 'tr-text hidden', id: 'trTextPanel' });
-  const submit = () => {
-    const text = String(ta.value || '').trim();
-    if (!text) { toast('先粘贴或输入要翻译的文字', 'err', 2000); ta.focus(); return; }
-    if (state.busy) { toast('正在生成中，先等它跑完或点停止再翻译', 'err', 3200); return; }
-    panel.classList.add('hidden');
-    doTranslateText({ text, targetLang: lang.value });
-  };
-  panel.append(
-    ta,
-    el('div', { class: 'tr-text-foot' },
-      el('span', { class: 'tr-text-hint', text: 'Ctrl+Enter 翻译 · 最多 2 万字' }),
-      lang,
-      el('button', { type: 'button', class: 'tr-text-btn primary', text: '翻译', onclick: submit }),
-      el('button', {
-        type: 'button', class: 'tr-text-btn', text: '关闭', title: 'Esc',
-        onclick: () => panel.classList.add('hidden'),
-      }),
-    ),
-  );
-  ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); panel.classList.add('hidden'); }
-    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); }
-  });
-  return panel;
-}
-
-/** 打开/收起译文面板的文本翻译编辑区 */
-function toggleTranslateInput() {
-  ensureBlock('translate');
-  revealTranslatePanel();
-  const panel = document.getElementById('trTextPanel');
-  if (!panel) return;
-  const opening = panel.classList.contains('hidden');
-  panel.classList.toggle('hidden', !opening);
-  if (opening) document.getElementById('trTextArea')?.focus();
-}
-
 /**
  * 文本输入翻译（2026-11-03 用户要求）：粘贴/手输文字直接翻，不依赖 PDF 选区。
  * 与划词/截图翻译共用 translateMessages 与同一条流式管线，结果仍按时间堆在译文面板。
@@ -9375,6 +9363,7 @@ function hideDocLoading() {
 
 function initComposer() {
   $('#composer').addEventListener('submit', (e) => { e.preventDefault(); send(); });
+  syncComposerMode();
   $('#stopBtn').onclick = () => { abortStream('user'); setHint('正在停止…'); };
   $('#clipBtn').onclick = () => state.startRegion?.();
   // 「清空会话」不再常驻在输入框下面，改挂在会话菜单里。
@@ -10020,6 +10009,21 @@ function translateOnlyAsk(text) {
 async function send(retryPending = null) {
   const ta = $('#chatInput');
   if (state.busy) return;
+  if (!retryPending && composerMode() === 'translate') {
+    const text = String(ta.value || '').trim();
+    if (!text) return;
+    if (text.length > 20000) { toast('最多翻译 20,000 字', 'err', 2400); return; }
+    const lang = $('#translateTargetLang')?.value === 'English' ? 'English' : '中文';
+    if (!ensureReady()) return;
+    ta.value = '';
+    ta.style.height = 'auto';
+    await doTranslateText({ text, targetLang: lang });
+    if (!state.sessionEntries.some((e) => e?.retry?.kind === 'translate-text' && e.retry.text === text)) {
+      ta.value = text;
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return;
+  }
   let pending = retryPending;
   if (!pending && state.doc && state.viewerDocId !== state.doc.docId) {
     flashHint('论文正在打开，请稍候');
@@ -10365,15 +10369,23 @@ async function send(retryPending = null) {
     }
     if (images.length || pageImages.length) {
       const last = messages[messages.length - 1];
-      const parts = [{ type: 'text', text: last.content }];
-      if (images.length) {
-        parts[0].text = `${parts[0].text}\n\n${images.map((im) => `【读者截图${im.page ? ` · 第${im.page} 页` : ''}】见附图`).join('\n')}`;
-      }
-      for (const im of images) parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
-      if (pageImages.length) {
-        parts[0].text = `${parts[0].text}\n\n${pageImages.map((im) => (im.label ? `【${im.label}原图】见附图` : `【第${im.page}页原图】见附图`)).join('\n')}`;
-        for (const im of pageImages) parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
-      }
+      // 多图必须显式建立「标签 → 紧随其后的图片」一一对应。旧做法先把所有标签
+      // 合并成一段、再把图片连着追加，导致多张图时来源错配（例如把 Stable 当成单摆）。
+      const parts = [{
+        type: 'text',
+        text: `${last.content}\n\n【多图对应规则】本条消息里的每张图片都是独立材料。按下面编号逐张查看，只能把紧邻编号对应的图作为该项证据；不要把一张图中的文字、物体、页码或结论套用到另一张图。用户截图与论文页图是不同来源，回答时分开说明。\n\n【强制逐图核对】回答前在内部逐张核对图像内容与紧邻标签，先判断图 1 的内容，再判断图 2，以此类推；如果用户问两图差异，只能比较对应序号下实际看到的内容。若某张图不可读取，明确指出具体序号，不要拿另一张图代替。不要输出核对过程，只给结论。`,
+      }];
+      images.forEach((im, i) => {
+        const pageLabel = im.page ? `；截取自第 ${im.page} 页` : '';
+        const label = String(im.label || '用户添加的截图').replace(/[\r\n]/g, ' ').slice(0, 100);
+        parts.push({ type: 'text', text: `【用户截图 ${i + 1}/${images.length}${pageLabel}${label ? `；${label}` : ''}】下一张图片是此截图。` });
+        parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
+      });
+      pageImages.forEach((im, i) => {
+        const label = String(im.label || (im.page ? `第 ${im.page} 页` : `论文页图 ${i + 1}`)).replace(/[\r\n]/g, ' ').slice(0, 120);
+        parts.push({ type: 'text', text: `【论文上下文页图 ${i + 1}/${pageImages.length}；${label}】下一张图片是论文页面上下文，不是用户截图。` });
+        parts.push({ type: 'image_url', image_url: { url: im.dataUrl } });
+      });
       last.content = parts;
     }
     // 右栏只呈现回答正文与来源，不显示全文字数、联网条数等内部统计。

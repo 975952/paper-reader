@@ -78,6 +78,12 @@ function qaSystemBlocks() {
     { id: 'base-rules', text: BASE_RULES },
     { id: 'task', text: QA_TASK },
     { id: 'translate-only', fn: (ctx) => (ctx.translateIntent ? TASK_TRANSLATE_ONLY : '') },
+    { id: 'multi-image-mapping', fn: (ctx) => {
+      const total = (Number(ctx.screenshotCount) || 0) + (Array.isArray(ctx.pageImages) ? ctx.pageImages.length : 0);
+      return total > 1
+        ? '【多图逐一对应】本次有多张独立图片。按用户消息中每个编号标签与其紧邻图片一一对应，分别识别，绝不可把一张图的内容、页码、结论套给另一张图。比较时先确认各自图像，再按编号比较；无法读取某张图时指出其编号。不要输出内部核对过程。'
+        : '';
+    } },
     { id: 'rule-page-images', fn: (ctx) => askPageImageRule(ctx.pageImages) },
     { id: 'screenshot-rule', fn: (ctx) => screenshotRule(ctx.screenshotCount) },
     { id: 'guidance', fn: (ctx) => (ctx.request.guidance ? `读者持续的讲解偏好：${ctx.request.guidance}` : '') },
