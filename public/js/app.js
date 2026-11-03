@@ -4785,7 +4785,7 @@ function ensureBlock(id) {
   const tools = id === 'translate' ? el('div', { class: 'ai-tools' },
     el('button', {
       type: 'button', class: 'ai-tool-btn',
-      title: '框选论文区域，翻译截图里的文字（也可按 R；图片需要视觉模型）',
+      title: '框选论文区域放进输入框，再按 Enter 翻译截图里的文字（也可按 R；图片需要视觉模型）',
       onclick: () => {
         if (state.busy) { toast('正在生成中，先等它跑完或点停止再截图翻译', 'err', 3200); return; }
         state.startRegion?.('translate');
@@ -4982,29 +4982,11 @@ function syncComposerMode(id = rightPanelInCol(1)) {
     else input.removeAttribute('maxlength');
   }
   if (clip) {
-    clip.title = translating ? '截图翻译请使用上方「截图翻译」按钮' : '截图 / 长截图，加进对话';
-    clip.classList.toggle('hidden', translating);
+    // 问答 / 译文都用同一个截图入口：截图先放进下方输入框，和问答一致（用户 m05190）。
+    clip.title = translating ? '截图翻译：框选后放进输入框，再按 Enter 翻译' : '截图 / 长截图，加进对话';
+    clip.classList.remove('hidden');
   }
   if (sendBtn) sendBtn.title = translating ? '翻译' : '发送';
-  const fontControls = $('#translateFontControls');
-  const fontValue = $('#translateFontValue');
-  if (fontControls) fontControls.classList.toggle('hidden', !translating);
-  const setTranslateFont = (value, persist = true) => {
-    const px = clamp(Math.round(Number(value) || 14), 12, 24);
-    document.documentElement.style.setProperty('--translate-input-fs', `${px}px`);
-    if (fontValue) fontValue.textContent = `${px}px`;
-    if (persist) { try { localStorage.setItem('reader.translate.inputFontSize', String(px)); } catch { /* 忽略 */ } }
-  };
-  if (!document.documentElement.dataset.translateFontReady) {
-    let initial = 14;
-    try { initial = Number(localStorage.getItem('reader.translate.inputFontSize')) || 14; } catch { /* 忽略 */ }
-    setTranslateFont(initial, false);
-    $('#translateFontDown')?.addEventListener('click', () => setTranslateFont(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--translate-input-fs')) - 1));
-    $('#translateFontUp')?.addEventListener('click', () => setTranslateFont(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--translate-input-fs')) + 1));
-    document.documentElement.dataset.translateFontReady = '1';
-  } else if (fontValue) {
-    fontValue.textContent = `${parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--translate-input-fs')) || 14}px`;
-  }
   const target = $('#translateTargetLang');
   if (target && !target.dataset.ready) {
     try {
@@ -9293,7 +9275,8 @@ function addImageToChat(shot, page, label, { allowBusy = false } = {}) {
     w: shot.width, h: shot.height, pages: shot.pages || 1, label,
   });
   renderAttachments();
-  revealPanel('chat');            // 同上：截图进来时也要让用户看得见它加到了哪里
+  // 译文面板里框选的截图也留在下方输入框（截图先放框里、再按 Enter 翻译，和问答一致，用户 m05190）
+  if (rightPanelInCol(1) !== 'translate') revealPanel('chat');
   $('#chatInput').focus();
   flashHint(`已加入截图${shot.pages > 1 ? `（跨 ${shot.pages} 页）` : ''}，共 ${state.attachments.length} 项`);
 }
@@ -10030,14 +10013,24 @@ async function send(retryPending = null) {
   if (state.busy) return;
   if (!retryPending && composerMode() === 'translate') {
     const text = String(ta.value || '').trim();
-    if (!text) return;
+    const shots = state.attachments.filter((a) => a.kind === 'image');
+    if (!text && !shots.length) return;
     if (text.length > 20000) { toast('最多翻译 20,000 字', 'err', 2400); return; }
     const lang = $('#translateTargetLang')?.value === 'English' ? 'English' : '中文';
     if (!ensureReady()) return;
     ta.value = '';
     ta.style.height = 'auto';
-    await doTranslateText({ text, targetLang: lang });
-    if (!state.sessionEntries.some((e) => e?.retry?.kind === 'translate-text' && e.retry.text === text)) {
+    // 截图先取下来：文字和截图都从这一份附件走，发送后输入框清空（和问答一致，用户 m05190）
+    if (shots.length) takeAttachments();
+    if (text) await doTranslateText({ text, targetLang: lang });
+    for (const a of shots) {
+      await doTranslateShot({
+        shot: { dataUrl: a.dataUrl, width: a.w || 0, height: a.h || 0 },
+        page: a.page || null,
+        label: a.label || '截图',
+      });
+    }
+    if (text && !state.sessionEntries.some((e) => e?.retry?.kind === 'translate-text' && e.retry.text === text)) {
       ta.value = text;
       ta.dispatchEvent(new Event('input', { bubbles: true }));
     }
@@ -10648,15 +10641,15 @@ async function captureToChat(topDoc, bottomDoc, leftVp, rightVp) {
   const captured = await captureRegionShot(topDoc, bottomDoc, leftVp, rightVp);
   if (!captured) return;
   addImageToChat(captured.shot, captured.page, captured.label, { allowBusy: true });
-  showAiBlock('chat');
 }
 
-/** 截图翻译：框选区域直接交给视觉模型翻译，结果进译文面板（需要视觉模型 + 已配置 Key） */
+/** 截图翻译：截图先进下方输入框（和问答一样），再按 Enter / 发送翻译图中文字（2026-11-03 用户 m05190） */
 async function captureToTranslate(topDoc, bottomDoc, leftVp, rightVp) {
   if (state.busy) return;
   const captured = await captureRegionShot(topDoc, bottomDoc, leftVp, rightVp);
   if (!captured) return;
-  await doTranslateShot({ shot: captured.shot, page: captured.page, label: captured.label });
+  addImageToChat(captured.shot, captured.page, captured.label, { allowBusy: true });
+  flashHint('截图已放进输入框 · 按 Enter 翻译截图，可同时输入要翻译的文字');
 }
 
 

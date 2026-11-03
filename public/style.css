@@ -2082,14 +2082,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .translate-target-label,
 .translate-target { display: none; }
 .side.right[data-active-panel="translate"] .translate-target-label,
-.side.right[data-active-panel="translate"] .translate-target,
-.side.right[data-active-panel="translate"] .translate-font-controls { display: inline-flex; }
+.side.right[data-active-panel="translate"] .translate-target { display: inline-flex; }
 .translate-target-label { color: var(--fg-faint); font-size: var(--ui-fs-xs); }
 .translate-target { min-width: 82px; padding: 2px 5px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elev); color: var(--fg); font: inherit; font-size: var(--ui-fs-xs); }
-.translate-font-controls { align-items: center; gap: 4px; margin-left: auto; color: var(--fg-dim); font-size: var(--ui-fs-xs); font-variant-numeric: tabular-nums; }
-.translate-font-controls button { min-width: 27px; height: 24px; padding: 0 5px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg-elev); color: var(--fg); font: inherit; cursor: pointer; }
-.translate-font-controls button:hover { border-color: var(--border-strong); background: var(--bg-sunken); }
-.translate-font-controls span { min-width: 32px; text-align: center; }
 
 /* ── 区域之间的分隔线统一为一条 1px 暖灰线，不用卡片阴影 ──
    只写 border-top-color：宽度与样式由各区域自己的既有规则决定，这里不越权。 */
@@ -2766,86 +2761,46 @@ body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
 .ai-tool-btn:hover { background: var(--bg-sunken); border-color: var(--border); color: var(--accent); }
 .ai-tool-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .ai-tool-btn svg { width: 13px; height: 13px; }
-/* 译文卡片：轻量方向标签 + 原文参照 + 正文字号译文，避免多层重边框 */
-.ai-block[data-block="translate"] .msg.msg-translation {
-  margin: 10px 12px 14px;
-  padding: 0 2px 12px;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-}
+/* 译文消息：整体沿用问答消息的扁平结构（.msg 默认间距 / 分隔线 / 正文阅读字号 / 截图尺寸），
+   只补一行轻量元信息和原文参照，不再套额外卡片。 */
 .ai-block[data-block="translate"] .msg.msg-translation .translation-direction {
-  display: inline-flex;
-  align-items: center;
-  margin: 0 0 8px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: var(--bg-sunken);
-  color: var(--fg-dim);
+  margin: 0;
+  color: var(--fg-faint);
   font-size: var(--ui-fs-xs);
-  font-weight: 600;
-  line-height: 1.4;
+  line-height: 1.5;
 }
 .ai-block[data-block="translate"] .msg.msg-translation .translation-source {
-  max-height: 110px;
+  max-height: 6.5em;
   overflow: auto;
-  margin: 0 0 10px;
-  padding: 7px 10px;
+  margin: 1px 0 2px;
+  padding: 0 0 0 8px;
   border-left: 2px solid var(--border-strong);
-  border-radius: 0 6px 6px 0;
-  background: color-mix(in srgb, var(--bg-sunken) 58%, transparent);
   color: var(--fg-dim);
-  font-size: var(--ui-fs);
-  line-height: 1.55;
+  font-size: var(--ui-fs-xs);
+  line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.ai-block[data-block="translate"] .msg.msg-translation .text {
-  padding: 0 1px;
-  color: var(--fg);
-  font-size: var(--ai-fs);
-  line-height: var(--ai-lh);
-}
 .ai-block[data-block="translate"] .msg.msg-translation .acts:not(:empty),
 .ai-block[data-block="translate"] .msg.msg-translation .acts:not(:empty) * { display: inline-flex !important; }
-.ai-block[data-block="translate"] .msg.msg-translation .acts:not(:empty) { gap: 6px; padding: 7px 0 0; opacity: .82; }
-.ai-block[data-block="translate"] .msg.msg-translation .shots { margin: 8px 0 10px; gap: 8px; }
-.ai-block[data-block="translate"] .msg.msg-translation .shot-item { position: relative; flex: 0 1 auto; min-width: 0; }
+.ai-block[data-block="translate"] .msg.msg-translation .acts:not(:empty) { gap: 6px; padding: 2px 0 0; opacity: .82; }
+/* 截图缩略图直接用问答消息的 .shot-img 尺寸（max-height 220px），这里只把序号压成一行小字 */
 .ai-block[data-block="translate"] .msg.msg-translation .shot-index {
   display: block;
-  margin: 0 0 4px 1px;
-  color: var(--fg-dim);
-  font-size: var(--ui-fs-xs);
+  margin: 0 0 3px 1px;
+  color: var(--fg-faint);
+  font-size: var(--ui-fs-2xs);
   line-height: 1.4;
-}
-.ai-block[data-block="translate"] .msg.msg-translation .shot-img {
-  display: block;
-  width: auto;
-  max-width: min(100%, 420px);
-  max-height: 190px;
-  object-fit: contain;
-  object-position: left top;
-  border: 1px solid var(--border);
-  border-radius: 5px;
 }
 .ai-block[data-block="translate"] .msg.msg-shot-translate .acts,
 .ai-block[data-block="translate"] .msg.msg-shot-translate .acts * { display: inline-flex !important; }
-.ai-block[data-block="translate"] .msg.msg-shot-translate .acts { gap: 6px; padding: 5px 0 0; }
+.ai-block[data-block="translate"] .msg.msg-shot-translate .acts { gap: 6px; padding: 2px 0 0; }
 .ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty),
 .ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty) * { display: inline-flex !important; }
-.ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty) { gap: 6px; padding: 5px 0 0; }
+.ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty) { gap: 6px; padding: 2px 0 0; }
 
-/* 翻译输入字号只作用于译文模式；与阅读字号、界面字号分离。 */
-.side.right[data-active-panel="translate"] #chatInput { font-size: var(--translate-input-fs, 14px); }
+/* 输入框内的截图预览：和问答共用同一个圆角框（用户 m05190） */
 .composer-row > .attach-row:not(.hidden) { margin: 0 0 2px; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
 .composer-row > #chatInput { min-height: 38px; }
-.composer-row > #clipBtn { margin-left: auto; }
-.composer-row > #stopBtn { margin-left: auto; }
-@media (max-width: 460px) {
-  .composer-opts { gap: 5px; }
-  .translate-font-controls { gap: 2px; }
-  .translate-font-controls button { min-width: 24px; }
-}
 
 

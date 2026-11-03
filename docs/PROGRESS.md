@@ -4645,7 +4645,7 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 - 构建：`desktop\\build.bat` 成功，release exe 11,069,952 B，SHA256 校验通过；构建前未发现运行中的论文阅读器进程，因此更新了项目根与桌面副本，未关闭任何应用。
 - 提交与推送结果见下方后续记录。
 
-## §87 译文输入与结果卡片视觉微调（2026-11-03）
+## §87 译文输入与结果卡片视觉微调（2026-11-03，已被 §88 修正）
 
 ### 87.1 用户要求
 
@@ -4669,5 +4669,36 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 - `docs/使用说明书.md` §4.6、§16.7 补充字号调节、框内缩略图与卡片排版说明。
 - `desktop\\build.bat` 成功重建项目根 `论文阅读器.exe`：11,074,048 B，SHA256 `7464295E557BB0E14CAB700C73C9B3D496D191F4DEEA85DD12103E9201739752`；桌面副本因用户正在使用而安全跳过，未关闭/覆盖。用户重启后可关闭阅读器并重跑构建脚本更新桌面副本。
 - 实现提交 `4854513`（`微调译文输入字号、截图预览与结果卡片`）已推送到 `origin/main`；工作树干净。
+
+## §88 译文输入与结果回归问答原生样式（2026-11-03，用户 m06091 反馈）
+
+### 88.1 用户反馈
+
+用户 m06091 原话：「？你是傻逼吧，你他妈的这样设计干什么，'而且截图就放在下面的框里面啊，和问答一样。而且这个渲染还是很丑，而且图片文字大小比例很不协调'一点都没有改进，而且你他妈的字号可以调你不会就让它和问答的字号是一样的吗」
+
+→ 三点明确要求：① 不要独立字号控件，**译文输入字号直接等于问答输入框**；② 截图要像问答一样**先放进下方输入框**再发送；③ 译文结果**沿用问答消息排版**，图片 / 文字比例和普通回答一致。§87 的独立 A−/A＋ 控件与专属译文卡片方向作废。
+
+### 88.2 实现
+
+- `public/index.html`：删除 `#translateFontControls`（A− / 数值 / A＋）整块；`#attachRow` 保持在 `.composer-row` 内、`#chatInput` 之前——译文与问答共用同一个圆角输入框，截图预览就在框内。
+- `public/js/app.js`：
+  - `syncComposerMode` 删除全部字号控件逻辑与 `--translate-input-fs`；`#clipBtn` 在译文面板也常显（title 改「截图翻译：框选后放进输入框，再按 Enter 翻译」）。
+  - `captureToTranslate`（译文面板 ⌖ / `R`）不再松手立即翻译，改为 `addImageToChat(...)` 把截图放进底部输入框，`flashHint('截图已放进输入框 · 按 Enter 翻译截图，可同时输入要翻译的文字')`；`addImageToChat` 仅在非译文面板时才 `revealPanel('chat')`，`captureToChat` 去掉强制切问答。
+  - `send()` 译文分支读取 `state.attachments` 里的图片：有截图先 `takeAttachments()`，输入了文字先 `doTranslateText()`，再按序逐张 `doTranslateShot()`；文本翻译失败仍恢复输入。
+- `public/style.css`：删除 `.translate-font-controls` 全套规则与 `--translate-input-fs`；译文消息删除专属卡片样式，直接沿用 `.msg` 问答消息扁平结构——方向一行 `--ui-fs-xs`/`--fg-faint`、原文左 2px 竖线 `--ui-fs-xs`、正文默认 `--ai-fs`/`--ai-lh`、截图用通用 `.msg .shot-img { max-height: 220px }`；只保留复制 / 重试 `.acts` 显示 override 与 `.composer-row > .attach-row` 分隔线。
+
+### 88.3 验证
+
+- 仅运行隔离手动冒烟 `test/artifacts/smoke-translation-redesign.mjs`（隔离数据 `test/artifacts/translation-redesign-smoke/{data,papers}`、假配置、拦截 `/api/chat` 返回模拟 SSE，不请求真实模型；Node 服务跑在 8985）：**23/23 全部通过**。
+- 覆盖：译文输入字号 == 问答输入框字号（且译文面板不再有独立字号控件）、reload 后仍一致、截图入框可见 / 可移除 / 等待 Enter、截图翻译请求含 `image_url` 与译文提示词、结果沿用问答正文与图片尺寸（`max-height: 220px`）、方向 / 原文 / 复制译文、切回问答恢复普通 composer、双图 `标签→对应图片` 顺序、多图 system 规则、缩略图图号、无横向溢出、无 `pageerror`。
+- 调试脚本时发现并规避一个**启动竞态**：reload 后 boot 阶段的 `restoreSession` 仍在异步执行，会 `clearTranslateBlock()` 后重放磁盘条目，把刚发出的译文清掉（仅自动化极端时序触发，用户手动操作基本不会）；测试改为等 `window.__state.doc.name` 后再静置 2s 才交互，未改产品代码。
+- 未运行 `test/` 正式套件；未改用户 `data/`、`papers/`；桌面阅读器 PID 129192 未关闭或覆盖。
+
+### 88.4 文档与交付
+
+- `docs/使用说明书.md` §4.2（译文栏有常驻输入框）、§4.5（截图后进输入框再 Enter）、§4.6（字号跟随问答 / 结果沿用问答排版 / 框选截图进输入框）、§7 引用块、§16.6、§16.7 与附录速查同步更新。
+- 构建：`desktop\build.bat` 重建项目根 `论文阅读器.exe`：11,070,976 B，SHA256 `95764B198DD95CF29FDC1919C4FC6C6911ABF8F7540633E750BA106E49C7EB73`（22:54:45）；桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 正被用户运行（PID 129192）占用，脚本按设计安全跳过，未关闭用户进程——重启后重跑 `desktop\build.bat` 即可同步桌面副本。
+- 提交 `095ec66`（`译文输入与结果完全对齐问答：字号跟随问答、截图先入框、去掉专属卡片`）；本轮推送时 GitHub 直连与本地代理 `127.0.0.1:10808` 均不可达（`Connection was reset` / `Could not connect`），本地 `main` 领先 `origin/main` **2 个提交**（上一轮 `1510bb0` + 本轮 `095ec66`），网络恢复后执行 `git push origin main` 即可。
+- 桌面预览副本：另存为 `C:\Users\Wang Wenbo\Desktop\论文阅读器-译文对齐.exe`（11,070,976 B，同项目根 exe），用户正在运行的旧桌面副本未被关闭或覆盖。
 
 
