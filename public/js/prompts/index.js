@@ -38,7 +38,7 @@ export { qaHistory, opHistory, teachHistory } from './history.js';
 
 /* 能力兼容壳 */
 export { askMessages, explainMessages, prepareAsk } from './capabilities/qa.js';
-export { translateMessages } from './capabilities/translate.js';
+export { translateMessages, translateShotMessages } from './capabilities/translate.js';
 export {
   teachMessages, condenseMessages, TEACH_PLAN_TASK, PREREQ_TASK, WALK_TASK, VISUAL_TASK,
   WALK_CONTINUE_SYS, walkReteachSys, PREREQ_ONE_SYS, CONDENSE_SYS, TEACH_TASKS,

@@ -12,7 +12,7 @@ import { profileStore, buildProfileBlock, nowISO, nowContext, findItem, selectPr
 import { createLearningMemory, parseMemorySuggestions, explicitIdentityFacts, withMemoryObservations } from './learning-memory.js';
 import {
   Settings, streamChat, testConnection, targetLangFor, searchTerms,
-  translateMessages, askMessages, explainMessages,
+  translateMessages, translateShotMessages, askMessages, explainMessages,
   digestMessages, webQueryFor, filterWebResults, opMessages, teachMessages, condenseMessages,
   scanPageMessages, sessionSummaryMessages,
 } from './ai.js';
@@ -50,7 +50,7 @@ function nextFrame(ms = 120) {
 
 /** AI 区的分块定义。默认一个都不显示，用到哪块就自动出现，也可以手动增删。 */
 const AI_BLOCKS = [
-  { id: 'translate', title: '译文', hint: '划选正文后点「译」，译文按时间堆在这里' },
+  { id: 'translate', title: '译文', hint: '划选正文后点「译」，或框选截图翻译图表/公式；译文按时间堆在这里' },
   { id: 'chat', title: '问答', hint: '点「释」在这里解释这段；「＋对话」加入选中的文字或截图，然后你自己提问' },
 ];
 
@@ -4781,7 +4781,19 @@ function ensureBlock(id) {
   const meta0 = AI_BLOCKS.find((b) => b.id === id) || {};
   const hint = el('div', { class: 'ai-hint', text: meta0.hint || '' });
   const body = el('div', { class: 'ai-body' }, hint);
-  const root = el('section', { class: 'ai-block', dataset: { block: id, panel: id } }, body);
+  // 译文面板的工具条：框选论文区域 → 直接翻译截图里的文字（图表/公式/扫描页）。
+  // 放在 ai-body 外面，滚动译文时按钮不会被带着滚走。
+  const tools = id === 'translate' ? el('div', { class: 'ai-tools' },
+    el('button', {
+      type: 'button', class: 'ai-tool-btn',
+      title: '框选论文区域，翻译截图里的文字（也可按 R；图片需要视觉模型）',
+      onclick: () => {
+        if (state.busy) { toast('正在生成中，先等它跑完或点停止再截图翻译', 'err', 3200); return; }
+        state.startRegion?.('translate');
+      },
+    }, iconEl('region'), el('span', { text: '截图翻译' })),
+  ) : null;
+  const root = el('section', { class: 'ai-block', dataset: { block: id, panel: id } }, tools, body);
 
   // R7：滚动时刷新底部渐隐（滚到底就摘掉标记）
   body.addEventListener('scroll', updateScrollFades, { passive: true });
@@ -5243,6 +5255,14 @@ function serialiseRetryPayload(raw) {
   if (kind === 'translate' || kind === 'explain') {
     return { kind, docId: String(raw.docId || '').slice(0, 240), text: String(raw.text || '').slice(0, 6000), page: raw.page || null,
       source: raw.source === 'right' ? 'right' : '' };
+  }
+  if (kind === 'translate-shot') {
+    // 截图翻译：不存图片本体（单独存附件），只记附件 id + 页码 + 标签，重试/恢复时按 id 取回原图
+    return {
+      kind, docId: String(raw.docId || '').slice(0, 240), sid: String(raw.sid || '').slice(0, 40),
+      page: raw.page || null, label: String(raw.label || '截图').slice(0, 120),
+      refId: validAttachmentId(raw.refId) ? raw.refId : '',
+    };
   }
   if (kind === 'operation') {
     return { kind, docId: String(raw.docId || '').slice(0, 240), opId: String(raw.opId || '').slice(0, 120), block: String(raw.block || 'chat').slice(0, 40) };
@@ -5895,6 +5915,10 @@ function restoreRetryCallback(row, entry, priorUser) {
       else doExplain(sel);
       return;
     }
+    if (payload.kind === 'translate-shot') {
+      retryTranslateShot(payload);
+      return;
+    }
     if (payload.kind === 'operation') {
       runOperation(payload.opId, { force: true, block: payload.block || 'chat', retryEntry: entry });
       return;
@@ -6073,6 +6097,9 @@ async function restoreSession(docId, { only = 'all' } = {}) {
       const text = `${String(row.text || '').slice(0, 12000)}${shotsLost ? '\n\n【截图附件未保存，请重新添加截图】' : ''}`;
       const entry = addEntry({ ...row, text, thumbs, restore: true });
       entry.root.__sessionRecord = row;
+      // 截图翻译条目：恢复后也要让失败/停止时的「重试截图翻译」按钮可见
+      // （译文块默认隐藏 .acts，只靠这个类打开 override，见 style.css）
+      if (row.retry && row.retry.kind === 'translate-shot') entry.root.classList.add('msg-shot-translate');
       const priorUser = [...state.sessionEntries.slice(0, rowIndex)].reverse().find((x) => x?.kind === 'user');
       // 恢复出来的回答也要能存笔记：标题默认用上一条用户消息（重放时补上 __question）
       if (row.kind !== 'user' && priorUser) entry.root.__question = String(priorUser.text || '').slice(0, 600);
@@ -8927,6 +8954,118 @@ async function doTranslate(sel) {
   }
 }
 
+/** 截图翻译的重试描述（只存附件 id + 页码/标签，不存 base64 图片本体） */
+function translateShotRetryPayload({ docId, sid, page, label, refId = '' }) {
+  return {
+    kind: 'translate-shot',
+    docId: String(docId || ''),
+    sid: String(sid || '').slice(0, 40),
+    page: page || null,
+    label: String(label || '截图').slice(0, 120),
+    refId: validAttachmentId(refId) ? refId : '',
+  };
+}
+
+/**
+ * 截图翻译（2026-11-03）：把框选到的 PDF 区域当图片发给模型，直接翻译图里的文字。
+ * 与划词翻译的区别：选区来自像素而不是文本层，所以图表、公式、扫描页也能翻。
+ */
+async function doTranslateShot({ shot, page = null, label = '截图', refId = '', sid = '', docId = '' } = {}) {
+  const dataUrl = String(shot?.dataUrl || '');
+  if (!dataUrl || state.busy) return;
+  const curDocId = state.doc?.docId || null;
+  const targetDoc = String(docId || '') || curDocId;
+  if (!targetDoc) { toast('先打开一篇论文，再框选截图翻译', 'err'); return; }
+  if (targetDoc !== curDocId) { toast('这张截图属于另一篇论文，请切回原论文后重试', 'err', 3200); return; }
+  if (!ensureReady()) return;
+  revealTranslatePanel();
+  const pageNo = Number(page) > 0 ? Number(page) : null;
+  const label0 = String(label || '截图').slice(0, 120);
+  const sessionSid = String(sid || '') || activeSidFor(targetDoc);
+  let finalRef = validAttachmentId(refId) ? refId : '';
+  const retryOf = (rid) => translateShotRetryPayload({ docId: targetDoc, sid: sessionSid, page: pageNo, label: label0, refId: rid || '' });
+
+  const entry = addEntry({
+    block: 'translate', tag: 'translation', page: pageNo, quote: label0,
+    thumbs: [dataUrl], retry: retryOf(finalRef), reveal: true,
+  });
+  // 译文块默认隐藏 .acts（「最纯净的界面」）：截图翻译失败/被停止时要让重试按钮可见
+  entry.root.classList.add('msg-shot-translate');
+
+  const target = streamTarget(entry.body);
+  const ctl = makeController();
+  if (!ctl) return;
+  setBusy(true, '0s');
+  let received = '';
+  try {
+    // 图片单独存：会话 JSON 只记 {id,w,h,label}，恢复/重试时按 id 取回原图
+    if (!finalRef) {
+      finalRef = await uploadAttachment(dataUrl, targetDoc, sessionSid);
+      const rec = entry.root.__sessionRecord;
+      if (finalRef && rec) {
+        rec.screenshot = true;
+        rec.shots = [{ id: finalRef, w: Number(shot?.width) || 0, h: Number(shot?.height) || 0, label: label0 }];
+        rec.retry = retryOf(finalRef);
+      }
+      if (rec) scheduleSessionSave();
+    }
+    warnIfNoVisionModel(true);
+    const messages = translateShotMessages({
+      page: pageNo, docTitle: state.doc?.name || '', label: label0, targetLang: '中文',
+    });
+    const last = messages[messages.length - 1];
+    if (last && typeof last.content === 'string') {
+      last.content = [
+        { type: 'text', text: last.content },
+        { type: 'image_url', image_url: { url: dataUrl } },
+      ];
+    }
+    const full = await chat({
+      messages,
+      signal: ctl.signal,
+      onDelta: (piece, all) => { received = all; target.push(all); },
+      onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
+    });
+    const clean = String(full || '').trim();
+    target.done(clean);
+    finishEntry(entry, clean, { page: pageNo });
+  } catch (e) {
+    if (isAbort(e)) {
+      target.done(received);
+      finishEntry(entry, received, { page: pageNo, status: 'stopped', onRetry: () => retryTranslateShot(retryOf(finalRef)) });
+    } else {
+      const rec = entry.root.__sessionRecord;
+      if (rec) { rec.status = 'failed'; rec.text = ''; rec.meta = ''; }
+      target.fail(errText(e));
+      entry.root.classList.add('err');
+      entry.acts.replaceChildren(el('button', { text: '重试截图翻译', onclick: () => retryTranslateShot(retryOf(finalRef)) }));
+      entry.acts.classList.remove('hidden');
+      entry.root.querySelectorAll('.entry-meta').forEach((node) => node.remove());
+      entry.root.append(el('div', { class: 'entry-meta failed', text: `截图翻译失败：${errText(e)}` }));
+      scheduleSessionSave();
+    }
+  } finally {
+    if (state.abort === ctl) { state.abort = null; state.abortReason = ''; setBusy(false); }
+    scrollBody(entry.root.closest('.ai-body'));
+  }
+}
+
+/** 重试截图翻译：按附件 id 取回原图再跑（原图已被清理时提示重新框选） */
+function retryTranslateShot(payload) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const docId = p.docId || state.doc?.docId || '';
+  if (!docId || docId !== state.doc?.docId) { toast('这张截图属于另一篇论文，请切回原论文后重试', 'err', 3200); return; }
+  if (state.busy) { toast('正在生成中，先等它跑完或点停止再重试', 'err', 3200); return; }
+  const sid = p.sid || activeSidFor(docId);
+  const refId = validAttachmentId(p.refId) ? p.refId : '';
+  if (!refId) { toast('截图没有保存下来，请重新框选翻译', 'err', 4200); return; }
+  (async () => {
+    const dataUrl = await fetchAttachmentDataUrl(refId, docId, sid);
+    if (!dataUrl) { toast('截图文件已不在，请重新框选翻译', 'ok', 5200); return; }
+    await doTranslateShot({ shot: { dataUrl, width: 0, height: 0 }, page: p.page || null, label: p.label || '截图', refId, sid, docId });
+  })();
+}
+
 async function doExplain(sel) {
   if (state.busy) return;
   const text = sel.cleanText || cleanText(sel.text);
@@ -10170,6 +10309,8 @@ function initRegion() {
   let dragging = false;
   let lastPointer = null;
   let autoTimer = null;
+  /** 框选目标：chat = 加进问答附件；translate = 截图翻译（2026-11-03） */
+  let regionIntent = 'chat';
 
   const stop = () => {
     overlay.classList.add('hidden');
@@ -10187,15 +10328,19 @@ function initRegion() {
   };
   state.stopRegion = stop;
 
-  /** 进入 / 退出截图模式。顶部 ⎚ 和输入框边上的 ✂ 走的是同一个入口 */
-  const startRegion = () => {
+  /** 进入 / 退出截图模式。输入框边的 ✂ 默认加进问答；译文面板的「截图翻译」传 'translate' */
+  const startRegion = (intent) => {
     if (!overlay.classList.contains('hidden')) { stop(); return; }
     if (!viewer?.pdf) { toast('先打开一篇 PDF', 'err'); return; }
+    regionIntent = intent === 'translate' ? 'translate' : 'chat';
+    state.regionIntent = regionIntent;
     overlay.classList.remove('hidden');
     hint.classList.remove('hidden');
     $('#regionBtn')?.classList.add('on');
     $('#clipBtn')?.classList.add('on');
-    hint.innerHTML = '拖动框住要加进对话的区域 · 拖到上下边缘会自动滚动（长截图）· <kbd>Esc</kbd> 取消';
+    hint.innerHTML = regionIntent === 'translate'
+      ? '拖动框住要翻译的区域 · 拖到上下边缘会自动滚动（长截图）· <kbd>Esc</kbd> 取消'
+      : '拖动框住要加进对话的区域 · 拖到上下边缘会自动滚动（长截图）· <kbd>Esc</kbd> 取消';
   };
   state.startRegion = startRegion;
 
@@ -10267,7 +10412,8 @@ function initRegion() {
     const rightVp = Math.max(startX, cx);
     stop();
     if (rightVp - leftVp < 14 || bottomDoc - topDoc < 14) return;
-    await captureToChat(topDoc, bottomDoc, leftVp, rightVp);
+    if (regionIntent === 'translate') await captureToTranslate(topDoc, bottomDoc, leftVp, rightVp);
+    else await captureToChat(topDoc, bottomDoc, leftVp, rightVp);
   });
 }
 
@@ -10290,18 +10436,16 @@ function locateDoc(docY) {
   return { page: best, y: Math.max(0, Math.min(h, docY - o)) };
 }
 
-async function captureToChat(topDoc, bottomDoc, leftVp, rightVp) {
-  if (state.busy) return;
-  // 注意：截图本身不需要 API Key（图只是先放进附件区），
-  // 所以这里绝不能调 ensureReady()，否则没配密钥时截图会被静默拦掉
+/** 框选区域 → 截图；不碰 API Key、不决定去哪个面板，返回 { shot, page, label } 或 null */
+async function captureRegionShot(topDoc, bottomDoc, leftVp, rightVp) {
   const a = locateDoc(topDoc);
   const b = locateDoc(bottomDoc);
   const pageEl = viewer.pageEls[a.page];
-  if (!pageEl) return;
+  if (!pageEl) return null;
   const pr = pageEl.getBoundingClientRect();
   const x = clamp(leftVp - pr.left, 0, pr.width);
   const w = clamp(rightVp - pr.left, 0, pr.width) - x;
-  if (w < 8) { toast('选框太窄', 'err'); return; }
+  if (w < 8) { toast('选框太窄', 'err'); return null; }
 
   setBusy(true, '截图中…');
   try {
@@ -10314,13 +10458,31 @@ async function captureToChat(topDoc, bottomDoc, leftVp, rightVp) {
       });
     }
     const label = a.page === b.page ? `截图 p.${a.page}` : `长截图 p.${a.page}–${b.page}`;
-    addImageToChat(shot, a.page, label, { allowBusy: true });
-    showAiBlock('chat');
+    return { shot, page: a.page, label };
   } catch (e) {
     toast(`截图失败：${e.message}`, 'err', 4000);
+    return null;
   } finally {
     setBusy(false);
   }
+}
+
+async function captureToChat(topDoc, bottomDoc, leftVp, rightVp) {
+  if (state.busy) return;
+  // 注意：截图本身不需要 API Key（图只是先放进附件区），
+  // 所以这里绝不能调 ensureReady()，否则没配密钥时截图会被静默拦掉
+  const captured = await captureRegionShot(topDoc, bottomDoc, leftVp, rightVp);
+  if (!captured) return;
+  addImageToChat(captured.shot, captured.page, captured.label, { allowBusy: true });
+  showAiBlock('chat');
+}
+
+/** 截图翻译：框选区域直接交给视觉模型翻译，结果进译文面板（需要视觉模型 + 已配置 Key） */
+async function captureToTranslate(topDoc, bottomDoc, leftVp, rightVp) {
+  if (state.busy) return;
+  const captured = await captureRegionShot(topDoc, bottomDoc, leftVp, rightVp);
+  if (!captured) return;
+  await doTranslateShot({ shot: captured.shot, page: captured.page, label: captured.label });
 }
 
 
@@ -10715,7 +10877,12 @@ function initShortcuts() {
     if (e.key === 't' || e.key === 'T') { if (hasSel) { e.preventDefault(); doTranslate(state.selection); } return; }
     if (e.key === 'e' || e.key === 'E') { if (hasSel) { e.preventDefault(); doExplain(state.selection); } return; }
     if (e.key === 'q' || e.key === 'Q') { if (hasSel) { e.preventDefault(); addToChat(state.selection); } return; }
-    if (e.key === 'r' || e.key === 'R') { e.preventDefault(); state.startRegion?.(); return; }
+    if (e.key === 'r' || e.key === 'R') {
+      e.preventDefault();
+      // 在译文面板里按 R = 截图翻译；其它情况仍是「框选加进问答」
+      state.startRegion?.(rightPanelInCol(1) === 'translate' ? 'translate' : 'chat');
+      return;
+    }
     if (e.key === '+' || e.key === '=') { viewer?.setScale(viewer.scale * 1.15); return; }
     if (e.key === '-' || e.key === '_') { viewer?.setScale(viewer.scale / 1.15); return; }
     if (e.key === '0') { viewer?.fitWidth(); return; }

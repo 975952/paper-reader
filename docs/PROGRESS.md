@@ -4454,4 +4454,74 @@ P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放�
 - **桌面副本需用户关闭阅读器后重跑 `desktop\build.bat`（或手动复制项目根 exe 覆盖桌面副本）才能看到修复**。
 - 未 commit（沿用不 commit 一把梭的约定，保留 §80 未提交改动与本轮修改）。
 
+## 84. 译文截图翻译（2026-11-03，用户 m02130 需求）
+
+### 84.1 需求与范围
+
+- 用户（m02130）：「上传一次，然后做译文也要有截图翻译功能」。
+- **上传**：先把会话系统 P0 + 真实数据 bug 修复提交推送 —— commit `fa1dca6`
+  「会话系统 P0：默认选择卡片 + 历史面板 + 双后端 meta/接口 + 真实数据 bug 修复」
+  （19 files changed, +5213 −166；新增 `docs/会话系统-示意.html`、`docs/会话系统-重新设计.md`、
+  `public/js/sessions.js`、`test/regress.mjs`），`git push origin main` 成功（`99ff93b..fa1dca6`）。
+- **功能**：右栏「译文」面板支持框选 PDF 区域 → 把截图里的文字翻译进译文流（带缩略图）；
+  问答面板的截图行为保持不变（框选后加进对话附件）。不改用户 `data/`、`papers/`；
+  不跑 `test/` 正式套件；不干扰用户正在使用的桌面版。
+
+### 84.2 实现
+
+- **提示词**：`public/js/prompts/capabilities/translate.js` 新增 `translateScreenshot`
+  （id `translate.screenshot`，v1.0.0，kind qa，`multimodal:'image'`，`materials:['screenshot']`，
+  `historyMax:0`，`memory:[]`）与 `translateShotMessages(input)`；`prompts/index.js`、`ai.js` 导出，
+  `app.js` 引入。规则：按阅读顺序翻译可见文字；公式/变量/数字/引用编号/图表编号原样保留；
+  图表为主时补一行「图表说明：…」；看不清用「…」标注不猜造；只输出译文；默认目标语言中文。
+- **入口**：`app.js` 的 `ensureBlock('translate')` 在 body 前生成 `.ai-tools` 工具栏，
+  按钮 `.ai-tool-btn`（region 图标 +「截图翻译」），生成中守卫并 toast；`AI_BLOCKS` 的
+  translate hint 更新为「划选正文后点「译」，或框选截图翻译图表/公式；译文按时间堆在这里」。
+- **框选**：`initRegion` 增加 `regionIntent`（chat|translate）；`startRegion(intent)` 切换遮罩
+  提示文案并记录 `state.regionIntent`；松手按意图分派 `captureToChat` / `captureToTranslate`。
+  抽出 `captureRegionShot(topDoc,bottomDoc,leftVp,rightVp)` 复用几何裁剪 / `setBusy('截图中…')` /
+  单页 `captureRegion` / 跨页 `captureRange`，返回 `{shot,page,label}`。
+- **发送**：`doTranslateShot({shot,page,label,refId,sid,docId})`：doc/busy/dataUrl 校验 →
+  `revealTranslatePanel` → `addEntry({block:'translate',tag:'translation',page,quote:label,thumbs:[dataUrl],retry})`
+  → 加 `msg-shot-translate` 类 → `uploadAttachment(dataUrl,docId,activeSidFor(docId))` 存图
+  （`record.screenshot=true`、`shots=[{id,w,h,label}]`、更新 retry、`scheduleSessionSave`）→
+  `warnIfNoVisionModel(true)` → `chat(translateShotMessages + 最后一条 user content 拆 text+image_url)`
+  → 成功 `finishEntry`；abort → stopped + onRetry；失败 → 「截图翻译失败：…」+ 重试按钮。
+- **重试**：`serialiseRetryPayload` 新增 kind `translate-shot`（docId/sid/page/label/refId，
+  refId 仅合法附件 id 保留）；`restoreRetryCallback` 分支调 `retryTranslateShot(payload)`
+  （`fetchAttachmentDataUrl` 取回原图 → `doTranslateShot`；取不到提示重新框选）；
+  `restoreSession` 重放时对带 translate-shot 重试的行补 `msg-shot-translate` 类，
+  保证刷新后「重试截图翻译」按钮可见。
+- **R 键**：译文面板按 `R` 进入翻译框选；问答面板按 `R` 仍是框选加进对话。
+- **样式**：`style.css` 新增 `.ai-tools` / `.ai-tool-btn`（主题变量）；译文块 `.acts` 默认隐藏的
+  规则加例外 `.msg-shot-translate .acts { display:inline-flex !important; }`。
+
+### 84.3 验证（手动冒烟，未跑 test/ 正式套件）
+
+- 环境：隔离 Node 服务（`PRT_REQUIRE_TOKEN=0`、`PRT_DATA_DIR`/`PRT_PAPERS_DIR` 指向
+  `test/artifacts/shot-translate-smoke`，端口 8981，假 Key + visionModel）；mock 上游记录请求并回 SSE。
+- 脚本 `test/artifacts/smoke-shot-translate.mjs`：**32/32 全过**。要点：译文块工具栏按钮存在
+  （问答块 0）；框选后遮罩提示含「翻译」、拖框 {333,178}→{593,348}；发给模型的最后一条 user
+  content 含 `image_url`（data:image/png;base64,…）+ 文本「【论文】翻译示例.pdf（第 1 页）
+  【截图】截图 p.1【任务】…」；system 提示词含「图表说明」「翻译这张截图」；译文条目
+  `msg assistant msg-shot-translate` 带缩略图与译文文本；`/api/session?doc=翻译示例-25c17ca2&sid=__translate`
+  持久化 `screenshot:true`、`shots[{id:'ab03518cb4eab5b9b08098013a5f11f7',…}]`、
+  `retry.kind='translate-shot'`（refId 同上）；附件落盘 `data/attachments/…/<id>.png`；
+  刷新后条目与缩略图恢复；划词翻译仍正常；按 `R` 在译文/问答面板分别进入截图翻译/加进对话框选，
+  `Esc` 关闭；mock 500 时显示「截图翻译失败：mock vision 500」且重试按钮可见、修好后重试成功；
+  全程无 pageerror（仅 mock 500 的预期内 resource 报错）。
+- 截图：`test/artifacts/shot-translate-main.png`、`shot-translate-restored.png`、
+  `shot-translate-retry.png`。
+- 提示词黄金基线：`test/_prompts.mjs` 的 `SCENARIOS` 是固定场景清单，新提示词不在其中 →
+  `test/fixtures/prompts-baseline.json` 无需变更；本轮未运行 `test/` 正式套件。
+
+### 84.4 文档与交付
+
+- `docs/使用说明书.md`：新增 §4.5「截图翻译」、§7 框选小注、§13.2 `R` 键说明、
+  §16.6 技术记录；附录界面速查补「译文栏顶部有『截图翻译』」。
+- exe：`desktop\build.bat` 重建项目根 `论文阅读器.exe`（11,044,352 B，SHA256 校验通过）；
+  桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 运行中 → 脚本按设计跳过（未杀/未覆盖），
+  **需用户关闭阅读器后重跑 build.bat 或手动复制项目根 exe 才能拿到新版**。
+- 本功能完成后再次显式 `git add` 指定文件并 commit + push（不用 `git add -A`）。
+
 

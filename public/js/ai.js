@@ -293,7 +293,7 @@ export async function testConnection() {
 // 黄金快照：test/prompts.mjs；设计文档：docs/提示词工程-设计.md。
 
 export {
-  translateMessages, askMessages, explainMessages,
+  translateMessages, translateShotMessages, askMessages, explainMessages,
   digestMessages, opMessages, teachMessages, sessionSummaryMessages,
   scanPageMessages, condenseMessages,
 } from './prompts/index.js';

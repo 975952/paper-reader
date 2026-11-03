@@ -2725,3 +2725,36 @@ body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
   text-align: center;
 }
 
+/* ── 译文面板工具栏：框选截图翻译（2026-11-03） ── */
+.ai-tools {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 0;
+}
+.ai-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--ui-fs-xs);
+  line-height: 1.6;
+}
+.ai-tool-btn:hover { background: var(--bg-sunken); border-color: var(--border); color: var(--accent); }
+.ai-tool-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ai-tool-btn svg { width: 13px; height: 13px; }
+/* 截图翻译条目：译文块默认隐藏 .acts（「最纯净的界面」），只把这类的重试按钮放出来 */
+.ai-block[data-block="translate"] .msg.msg-shot-translate .acts,
+.ai-block[data-block="translate"] .msg.msg-shot-translate .acts * { display: inline-flex !important; }
+.ai-block[data-block="translate"] .msg.msg-shot-translate .acts { gap: 6px; padding: 2px 0 6px; }
+.ai-block[data-block="translate"] .msg.msg-shot-translate .shots { margin: 2px 0 7px; }
+
+
