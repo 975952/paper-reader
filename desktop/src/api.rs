@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{empty, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
 use tiny_http::{Method, Request};
@@ -1138,6 +1138,398 @@ fn doc_key_candidates(doc: &str) -> Vec<String> {
     out
 }
 
+/* ------------------------------------------- 会话 meta（P0 会话系统 v4） */
+
+/// 用户手改标题的上限
+const SESSION_TITLE_MAX: usize = 120;
+/// 自动派生标题上限（设计文档：首条用户消息 28 字）
+const SESSION_DERIVED_TITLE_MAX: usize = 28;
+const SESSION_TS_MIN: f64 = 1e11;
+const SESSION_TS_MAX: f64 = 1e14;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Node 的 String.prototype.slice / .length 按 UTF-16 code unit 计；
+/// 这里也按 UTF-16 截断，保证 Node / Rust 写出的内容指纹逐字节一致。
+fn utf16_clip(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let w = ch.len_utf16();
+        if used + w > max {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out
+}
+
+fn utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+fn collaps_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 合法的毫秒时间戳；0 表示没有/不合法
+fn session_ts(v: Option<&Value>) -> u64 {
+    let n = v.and_then(Value::as_f64).unwrap_or(0.0);
+    if n > SESSION_TS_MIN && n < SESSION_TS_MAX {
+        n.round() as u64
+    } else {
+        0
+    }
+}
+
+fn session_entries(data: &Value) -> Vec<Value> {
+    data.get("entries").and_then(Value::as_array).cloned().unwrap_or_default()
+}
+
+fn session_first_user_text(data: &Value) -> String {
+    session_entries(data)
+        .into_iter()
+        .find(|e| {
+            e.get("kind").and_then(Value::as_str) == Some("user")
+                && e.get("text").and_then(Value::as_str).map(|t| !t.trim().is_empty()).unwrap_or(false)
+        })
+        .and_then(|e| e.get("text").and_then(Value::as_str).map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
+fn session_last_entry_text(data: &Value) -> String {
+    session_entries(data)
+        .into_iter()
+        .rev()
+        .find(|e| e.get("text").and_then(Value::as_str).map(|t| !t.trim().is_empty()).unwrap_or(false))
+        .and_then(|e| e.get("text").and_then(Value::as_str).map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
+/// 标题：用户改过就用用户的；否则用首条用户消息；旧「解释/翻译」会话没有用户消息时
+/// 退到首条有文字的助手消息，再退到首条 quote。都去掉【…】界面标记后截 28 字。
+/// server.js 的 sessionTitleOf 必须保持一致。
+fn session_title_of(data: &Value) -> String {
+    let saved = collaps_ws(data.get("title").and_then(Value::as_str).unwrap_or(""));
+    if !saved.is_empty() {
+        return utf16_clip(&saved, SESSION_TITLE_MAX);
+    }
+    let clean = |s: &str| -> String {
+        let first = collaps_ws(s);
+        let mut cleaned = String::new();
+        let mut skipping = false;
+        for c in first.chars() {
+            if c == '【' {
+                skipping = true;
+                continue;
+            }
+            if skipping {
+                if c == '】' {
+                    skipping = false;
+                }
+                continue;
+            }
+            cleaned.push(c);
+        }
+        collaps_ws(&cleaned)
+    };
+    let user = session_first_user_text(data);
+    if !collaps_ws(&user).is_empty() {
+        return utf16_clip(&clean(&user), SESSION_DERIVED_TITLE_MAX);
+    }
+    for e in session_entries(data) {
+        if let Some(t) = e.get("text").and_then(Value::as_str) {
+            if !t.trim().is_empty() {
+                return utf16_clip(&clean(t), SESSION_DERIVED_TITLE_MAX);
+            }
+        }
+    }
+    for e in session_entries(data) {
+        if let Some(t) = e.get("quote").and_then(Value::as_str) {
+            if !t.trim().is_empty() {
+                return utf16_clip(&clean(t), SESSION_DERIVED_TITLE_MAX);
+            }
+        }
+    }
+    String::new()
+}
+
+fn json_str_list(v: Option<&Value>) -> Vec<String> {
+    v.and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|x| x.as_str()).map(|s| s.to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// docIds/docTitles 按 docId 合并去重（旧文件的引用也不能丢），最多留 12 个
+fn merge_session_doc_refs(old: Option<&Value>, incoming: &Value) -> (Vec<Value>, Vec<Value>) {
+    let mut ids: Vec<String> = Vec::new();
+    let mut titles: Vec<String> = Vec::new();
+    fn add(id: &str, title: &str, ids: &mut Vec<String>, titles: &mut Vec<String>) {
+        let key = utf16_clip(&collaps_ws(id), 120);
+        if key.is_empty() {
+            return;
+        }
+        if let Some(i) = ids.iter().position(|x| x == &key) {
+            if titles[i].is_empty() {
+                titles[i] = utf16_clip(&collaps_ws(title), 200);
+            }
+            return;
+        }
+        ids.push(key);
+        titles.push(utf16_clip(&collaps_ws(title), 200));
+    }
+    let old_ids = old.map(|o| json_str_list(o.get("docIds"))).unwrap_or_default();
+    let old_titles = old.map(|o| json_str_list(o.get("docTitles"))).unwrap_or_default();
+    for (i, id) in old_ids.iter().enumerate() {
+        add(id, old_titles.get(i).map(|s| s.as_str()).unwrap_or(""), &mut ids, &mut titles);
+    }
+    let new_ids = json_str_list(incoming.get("docIds"));
+    let new_titles = json_str_list(incoming.get("docTitles"));
+    for (i, id) in new_ids.iter().enumerate() {
+        add(id, new_titles.get(i).map(|s| s.as_str()).unwrap_or(""), &mut ids, &mut titles);
+    }
+    let start = ids.len().saturating_sub(12);
+    (
+        ids[start..].iter().map(|s| json!(s)).collect(),
+        titles[start..].iter().map(|s| json!(s)).collect(),
+    )
+}
+
+/// 内容指纹：与 server.js 的 sessionContentFingerprint 完全一致
+fn session_content_fingerprint(data: &Value) -> String {
+    let entries = data.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
+    let last_text = entries
+        .iter()
+        .rev()
+        .find(|e| e.get("text").and_then(Value::as_str).map(|t| !t.is_empty()).unwrap_or(false))
+        .and_then(|e| e.get("text").and_then(Value::as_str))
+        .unwrap_or("");
+    let history_len = data.get("history").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+    let summary_len = utf16_len(data.get("summary").and_then(Value::as_str).unwrap_or(""));
+    let covered = data.get("summaryCovered").and_then(Value::as_u64).unwrap_or(0);
+    let ops_len = data.get("ops").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+    format!(
+        "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+        entries.len(),
+        utf16_clip(last_text, 80),
+        history_len,
+        summary_len,
+        covered,
+        ops_len
+    )
+}
+
+/// POST /api/session 落盘前的整理：把 meta 补进 payload（与 Node 的 prepareSessionRecord 一致）
+fn prepare_session_record(payload: &Value, old: Option<&Value>) -> Value {
+    let now = now_ms();
+    let fp = session_content_fingerprint(payload);
+    let prev_fp = match old {
+        Some(o) => o
+            .get("contentFp")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| session_content_fingerprint(o)),
+        None => String::new(),
+    };
+    let changed = old.is_none() || fp != prev_fp;
+    let (doc_ids, doc_titles) = merge_session_doc_refs(old, payload);
+    let old_bool = |k: &str| old.and_then(|o| o.get(k)).and_then(Value::as_bool).unwrap_or(false);
+    let pinned = old_bool("pinned") || payload.get("pinned").and_then(Value::as_bool).unwrap_or(false);
+    let archived = old_bool("archived") || payload.get("archived").and_then(Value::as_bool).unwrap_or(false);
+    let created_old = session_ts(old.and_then(|o| o.get("createdAt")));
+    let created_in = session_ts(payload.get("createdAt"));
+    let created_at = if created_old > 0 {
+        created_old
+    } else if created_in > 0 {
+        created_in
+    } else {
+        now
+    };
+    let updated_old = session_ts(old.and_then(|o| o.get("updatedAt")));
+    let updated_in = session_ts(payload.get("updatedAt"));
+    let updated_at = if changed {
+        if updated_in > 0 {
+            updated_in
+        } else {
+            now
+        }
+    } else if updated_old > 0 {
+        updated_old
+    } else {
+        now
+    };
+    let last_opened_old = session_ts(old.and_then(|o| o.get("lastOpenedAt")));
+    let last_opened_in = session_ts(payload.get("lastOpenedAt"));
+    let last_opened_at = if last_opened_in > 0 {
+        last_opened_in
+    } else if last_opened_old > 0 {
+        last_opened_old
+    } else {
+        updated_at
+    };
+    let title_raw = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|s| !collaps_ws(s).is_empty())
+        .or_else(|| old.and_then(|o| o.get("title").and_then(Value::as_str)));
+    let title = utf16_clip(&collaps_ws(title_raw.unwrap_or("")), SESSION_TITLE_MAX);
+    let title_source = if payload.get("titleSource").and_then(Value::as_str) == Some("user")
+        || old.and_then(|o| o.get("titleSource")).and_then(Value::as_str) == Some("user")
+    {
+        "user"
+    } else {
+        "auto"
+    };
+    let folder_path = payload
+        .get("folderPath")
+        .and_then(Value::as_str)
+        .map(|s| utf16_clip(s, 400))
+        .or_else(|| old.and_then(|o| o.get("folderPath")).and_then(Value::as_str).map(|s| s.to_string()))
+        .unwrap_or_default();
+    let pinned_at = if pinned {
+        let po = session_ts(old.and_then(|o| o.get("pinnedAt")));
+        let pi = session_ts(payload.get("pinnedAt"));
+        if po > 0 {
+            po
+        } else if pi > 0 {
+            pi
+        } else {
+            updated_at
+        }
+    } else {
+        0
+    };
+    let archived_at = if archived {
+        let ao = session_ts(old.and_then(|o| o.get("archivedAt")));
+        let ai = session_ts(payload.get("archivedAt"));
+        if ao > 0 {
+            ao
+        } else if ai > 0 {
+            ai
+        } else {
+            updated_at
+        }
+    } else {
+        0
+    };
+    let content_rev = old
+        .and_then(|o| o.get("contentRev"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        + if changed { 1 } else { 0 };
+
+    let mut out = payload.as_object().cloned().unwrap_or_default();
+    out.insert("v".to_string(), json!(4));
+    out.insert("folderPath".to_string(), json!(folder_path));
+    out.insert("title".to_string(), json!(title));
+    out.insert("titleSource".to_string(), json!(title_source));
+    out.insert("createdAt".to_string(), json!(created_at));
+    out.insert("updatedAt".to_string(), json!(updated_at));
+    out.insert("lastOpenedAt".to_string(), json!(last_opened_at));
+    out.insert("pinned".to_string(), json!(pinned));
+    out.insert("pinnedAt".to_string(), json!(pinned_at));
+    out.insert("archived".to_string(), json!(archived));
+    out.insert("archivedAt".to_string(), json!(archived_at));
+    out.insert("docIds".to_string(), Value::Array(doc_ids));
+    out.insert("docTitles".to_string(), Value::Array(doc_titles));
+    out.insert("contentRev".to_string(), json!(content_rev));
+    out.insert("contentFp".to_string(), json!(fp));
+    Value::Object(out)
+}
+
+/// 文件时间（毫秒）：(mtime, created)；created 拿不到时退回 mtime
+fn session_file_times(name: &str) -> (u64, u64) {
+    let p = store::data_path(name);
+    let md = match std::fs::metadata(&p) {
+        Ok(m) => m,
+        Err(_) => return (0, 0),
+    };
+    let to_ms = |t: std::io::Result<SystemTime>| -> u64 {
+        t.ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    };
+    let mtime = to_ms(md.modified());
+    let mut created = to_ms(md.created());
+    if created == 0 {
+        created = mtime;
+    }
+    (mtime, created)
+}
+
+/// 单条会话的列表项（与 Node 版 /api/sessions 的 describe 一致）
+fn describe_session(name: &str, sid: &str, folder_hint: &str) -> Option<Value> {
+    let data = store::read_json_opt(name)?;
+    if !data.is_object() {
+        return None;
+    }
+    let (mtime, created_fallback) = session_file_times(name);
+    let updated = {
+        let t = session_ts(data.get("updatedAt"));
+        if t > 0 { t } else { mtime }
+    };
+    let created = {
+        let t = session_ts(data.get("createdAt"));
+        if t > 0 {
+            t
+        } else if created_fallback > 0 {
+            created_fallback
+        } else {
+            updated
+        }
+    };
+    let folder = data
+        .get("folderPath")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| folder_hint.to_string());
+    let last_opened = session_ts(data.get("lastOpenedAt"));
+    Some(json!({
+        "sid": sid,
+        "folderPath": folder,
+        "title": session_title_of(&data),
+        "titleSource": if data.get("titleSource").and_then(Value::as_str) == Some("user") { "user" } else { "auto" },
+        "preview": utf16_clip(&collaps_ws(&session_last_entry_text(&data)), 80),
+        "count": session_entries(&data).len(),
+        "createdAt": created,
+        "updatedAt": updated,
+        "lastOpenedAt": if last_opened > 0 { last_opened } else { updated },
+        "pinned": data.get("pinned").and_then(Value::as_bool).unwrap_or(false),
+        "pinnedAt": session_ts(data.get("pinnedAt")),
+        "archived": data.get("archived").and_then(Value::as_bool).unwrap_or(false),
+        "archivedAt": session_ts(data.get("archivedAt")),
+        "docIds": json_str_list(data.get("docIds")).iter().map(|s| json!(s)).collect::<Vec<Value>>(),
+        "docTitles": json_str_list(data.get("docTitles")).iter().map(|s| json!(s)).collect::<Vec<Value>>(),
+        "contentRev": data.get("contentRev").and_then(Value::as_u64).unwrap_or(0),
+    }))
+}
+
+/// 全部文件夹模式下从文件名尾部猜 sid（newSid 只由 base36 组成）
+fn sid_from_session_rest(rest: &str) -> String {
+    if let Some(idx) = rest.rfind('-') {
+        let tail = &rest[idx + 1..];
+        if tail.len() >= 6
+            && tail.len() <= 24
+            && tail.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        {
+            return tail.to_string();
+        }
+    }
+    String::new()
+}
+
+fn json_has_key(v: &Value, k: &str) -> bool {
+    v.as_object().map(|o| o.contains_key(k)).unwrap_or(false)
+}
+
 /* ------------------------------------------------- 图片附件（单独存） */
 
 const ATTACHMENT_EXTS: [&str; 3] = ["png", "jpg", "webp"];
@@ -1323,7 +1715,7 @@ pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(40)
         .collect::<String>();
-    // 读 / 写 / 删都先解析到"真正存在的那一份"，避免修了幂等之后老会话读不到
+    // 读 / 写 / 删 / 改都先解析到"真正存在的那一份"，避免修了幂等之后老会话读不到
     let file = session_file_resolved(&doc, &sid);
     match method {
         Method::Get => send_json(rq, 200, &store::read_json(&file, json!({"entries":[],"history":[],"ops":[]}))),
@@ -1336,13 +1728,124 @@ pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
             if let Err(msg) = limits::check_session(&payload) {
                 return send_json(rq, 413, &err_json(&msg));
             }
-            if !store::write_json(&file, &payload) {
+            // 会话 meta（v4）：标题/文件夹/时间戳/置顶归档/内容指纹由服务端统一维护，
+            // 前端只传 entries/history/ops… 也能补出一份完整会话文件
+            let old = store::read_json_opt(&file);
+            let stored = prepare_session_record(&payload, old.as_ref());
+            if !store::write_json(&file, &stored) {
                 return send_json(rq, 500, &err_json("保存阅读会话失败，请重试"));
             }
             // 图片单独存：会话写成功之后按「还引用着的 id」清理本会话的附件目录
             // （清空会话 = 没有引用 → 图全删；发送失败留下的孤儿图也在这里被清掉）
-            prune_attachments(&doc, &sid, &payload);
-            send_json(rq, 200, &json!({"ok":true}));
+            prune_attachments(&doc, &sid, &stored);
+            send_json(
+                rq,
+                200,
+                &json!({
+                    "ok": true,
+                    "updatedAt": stored.get("updatedAt").and_then(Value::as_u64).unwrap_or(0),
+                    "contentRev": stored.get("contentRev").and_then(Value::as_u64).unwrap_or(0),
+                }),
+            );
+        }
+        // 会话 meta 的小改动（标题 / 置顶 / 归档 / 打开时间），只允许白名单字段
+        Method::Patch => {
+            let patch = match parse_json(body) {
+                Ok(v) => v,
+                Err(e) => return send_json(rq, 400, &err_json(&e)),
+            };
+            if !patch.is_object() {
+                return send_json(rq, 400, &err_json("会话 meta 必须是对象"));
+            }
+            let cur = match store::read_json_opt(&file) {
+                Some(v) if v.is_object() => v,
+                _ => return send_json(rq, 404, &err_json("会话不存在或已被删除")),
+            };
+            let now = now_ms();
+            let mut next = cur.as_object().cloned().unwrap_or_default();
+            if json_has_key(&patch, "title") {
+                let t = utf16_clip(
+                    &collaps_ws(patch.get("title").and_then(Value::as_str).unwrap_or("")),
+                    SESSION_TITLE_MAX,
+                );
+                if t.is_empty() {
+                    next.remove("title");
+                    next.insert("titleSource".to_string(), json!("auto"));
+                } else {
+                    next.insert("title".to_string(), json!(t));
+                    next.insert("titleSource".to_string(), json!("user"));
+                }
+            }
+            if json_has_key(&patch, "titleSource") {
+                let keep_user = patch.get("titleSource").and_then(Value::as_str) == Some("user")
+                    && next.get("title").and_then(Value::as_str).map(|s| !s.is_empty()).unwrap_or(false);
+                next.insert(
+                    "titleSource".to_string(),
+                    json!(if keep_user { "user" } else { "auto" }),
+                );
+            }
+            if json_has_key(&patch, "pinned") {
+                let pinned = patch.get("pinned").and_then(Value::as_bool).unwrap_or(false);
+                let cur_at = session_ts(next.get("pinnedAt"));
+                let at = if pinned {
+                    if cur_at > 0 { cur_at } else { now }
+                } else {
+                    0
+                };
+                next.insert("pinned".to_string(), json!(pinned));
+                next.insert("pinnedAt".to_string(), json!(at));
+            }
+            if json_has_key(&patch, "archived") {
+                let archived = patch.get("archived").and_then(Value::as_bool).unwrap_or(false);
+                let cur_at = session_ts(next.get("archivedAt"));
+                let at = if archived {
+                    if cur_at > 0 { cur_at } else { now }
+                } else {
+                    0
+                };
+                next.insert("archived".to_string(), json!(archived));
+                next.insert("archivedAt".to_string(), json!(at));
+            }
+            if json_has_key(&patch, "lastOpenedAt") {
+                let t = session_ts(patch.get("lastOpenedAt"));
+                if t > 0 {
+                    next.insert("lastOpenedAt".to_string(), json!(t));
+                }
+            }
+            next.insert("v".to_string(), json!(4));
+            if session_ts(next.get("createdAt")) == 0 {
+                let fallback = session_ts(next.get("updatedAt"));
+                next.insert(
+                    "createdAt".to_string(),
+                    json!(if fallback > 0 { fallback } else { now }),
+                );
+            }
+            let next = Value::Object(next);
+            if !store::write_json(&file, &next) {
+                return send_json(rq, 500, &err_json("更新会话失败，请重试"));
+            }
+            let title_source = if next.get("titleSource").and_then(Value::as_str) == Some("user") {
+                "user"
+            } else {
+                "auto"
+            };
+            send_json(
+                rq,
+                200,
+                &json!({
+                    "ok": true,
+                    "session": {
+                        "sid": sid,
+                        "title": session_title_of(&next),
+                        "titleSource": title_source,
+                        "pinned": next.get("pinned").and_then(Value::as_bool).unwrap_or(false),
+                        "pinnedAt": session_ts(next.get("pinnedAt")),
+                        "archived": next.get("archived").and_then(Value::as_bool).unwrap_or(false),
+                        "archivedAt": session_ts(next.get("archivedAt")),
+                        "lastOpenedAt": session_ts(next.get("lastOpenedAt")),
+                    }
+                }),
+            );
         }
         // 删掉一个会话文件（不碰论文本身）。与 Node 版一致：文件本来就不在也算成功（幂等）。
         Method::Delete => {
@@ -1361,66 +1864,180 @@ pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
 
 pub fn sessions(rq: Request, _method: &Method, raw_query: &str) {
     let doc = query_get(raw_query, "doc").unwrap_or_else(|| "default".to_string());
-    let keys = doc_key_candidates(&doc);
+    let folder_path = utf16_clip(&query_get(raw_query, "folderPath").unwrap_or_default(), 400);
+    let scope_all = query_get(raw_query, "scope").map(|s| s == "all").unwrap_or(false);
+    let archived = query_get(raw_query, "archived").unwrap_or_else(|| "all".to_string());
+    let q = collaps_ws(&query_get(raw_query, "q").unwrap_or_default()).to_lowercase();
+    let limit = query_get(raw_query, "limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(200)
+        .clamp(1, 500);
 
+    let names = store::list_data_files();
     let mut out: Vec<Value> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    for name in store::list_data_files() {
-        // 先判断这个文件名属于哪个候选键、sid 是什么；不属于任何一个就跳过
-        let sid = keys.iter().find_map(|key| {
-            let legacy = format!("session-{}.json", key);
-            let prefix = format!("session-{}-", key);
-            if name == legacy {
-                Some(String::new())
-            } else if name.starts_with(&prefix) && name.ends_with(".json") {
-                Some(name[prefix.len()..name.len() - 5].to_string())
-            } else {
-                None
+    if scope_all {
+        for name in &names {
+            let rest = match name.strip_prefix("session-").and_then(|s| s.strip_suffix(".json")) {
+                Some(r) => r,
+                None => continue,
+            };
+            if rest.contains("__translate") || seen.iter().any(|s| s == name) {
+                continue;
             }
-        });
-        let sid = match sid {
-            Some(s) => s,
-            None => continue,
-        };
-        if seen.contains(&name) {
-            continue;
+            seen.push(name.clone());
+            let sid = sid_from_session_rest(rest);
+            if let Some(item) = describe_session(name, &sid, "") {
+                out.push(item);
+            }
         }
-        seen.push(name.clone());
-        let data = store::read_json(&name, json!(null));
-        if data.is_null() {
-            continue;
+    } else {
+        // 当前文件夹：沿用候选 key 前缀扫（历史哈希算法不同留下的老会话也能列出来）
+        for key in doc_key_candidates(&doc) {
+            let legacy = format!("session-{}.json", key);
+            if names.iter().any(|n| n == &legacy) && !seen.iter().any(|s| s == &legacy) {
+                seen.push(legacy.clone());
+                if let Some(item) = describe_session(&legacy, "", &folder_path) {
+                    out.push(item);
+                }
+            }
+            let prefix = format!("session-{}-", key);
+            for name in &names {
+                if !name.starts_with(&prefix) || !name.ends_with(".json") || seen.iter().any(|s| s == name) {
+                    continue;
+                }
+                seen.push(name.clone());
+                let sid = name[prefix.len()..name.len() - 5].to_string();
+                if let Some(item) = describe_session(name, &sid, &folder_path) {
+                    out.push(item);
+                }
+            }
         }
-        let entries = data.get("entries").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let first_user = entries.iter().find(|e| e.get("kind").and_then(|k| k.as_str()) == Some("user"));
-        let last_text = entries.iter().rev().find(|e| {
-            e.get("text").and_then(|t| t.as_str()).map(|t| !t.trim().is_empty()).unwrap_or(false)
-        });
-        let clip = |v: Option<&Value>, n: usize| -> String {
-            v.and_then(|x| x.get("text"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(n)
-                .collect()
-        };
-        let updated = data.get("updatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        out.push(json!({
-            "sid": sid,
-            "count": entries.len(),
-            "title": clip(first_user, 60),
-            "preview": clip(last_text, 80),
-            "updatedAt": updated,
-        }));
     }
+    // archived=0 只看活跃（默认），1 只看已归档，all 全都返回
+    if archived == "0" || archived == "1" {
+        let want = archived == "1";
+        out.retain(|s| s.get("archived").and_then(Value::as_bool).unwrap_or(false) == want);
+    }
+    if !q.is_empty() {
+        out.retain(|s| {
+            let hay = format!(
+                "{}\n{}\n{}",
+                s.get("title").and_then(Value::as_str).unwrap_or(""),
+                s.get("preview").and_then(Value::as_str).unwrap_or(""),
+                s.get("folderPath").and_then(Value::as_str).unwrap_or("")
+            )
+            .to_lowercase();
+            hay.contains(&q)
+        });
+    }
+    let ts = |s: &Value, k: &str| s.get(k).and_then(Value::as_f64).unwrap_or(0.0);
     out.sort_by(|a, b| {
-        let av = a.get("updatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let bv = b.get("updatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+        let ap = a.get("pinned").and_then(Value::as_bool).unwrap_or(false);
+        let bp = b.get("pinned").and_then(Value::as_bool).unwrap_or(false);
+        if ap != bp {
+            return if ap { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+        }
+        if ap && bp {
+            return ts(b, "pinnedAt")
+                .partial_cmp(&ts(a, "pinnedAt"))
+                .unwrap_or(std::cmp::Ordering::Equal);
+        }
+        ts(b, "updatedAt")
+            .partial_cmp(&ts(a, "updatedAt"))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
-    send_json(rq, 200, &json!({ "sessions": out }));
+    let total = out.len();
+    out.truncate(limit);
+    send_json(
+        rq,
+        200,
+        &json!({ "sessions": out, "scope": if scope_all { "all" } else { "folder" }, "total": total }),
+    );
+}
+
+/// 递归复制目录（对应 Node 版 fsp.cp({recursive:true})）
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// POST /api/sessions/move-folder：文件夹改名/移动后，把会话文件与截图附件搬到新文件夹键。
+/// 旧文件保留不删（回退保险）；目标已存在时被本次内容覆盖。
+pub fn sessions_move_folder(rq: Request, body: &[u8]) {
+    let payload = match parse_json(body) {
+        Ok(v) => v,
+        Err(e) => return send_json(rq, 400, &err_json(&e)),
+    };
+    let valid_key = |k: &str| {
+        !k.is_empty()
+            && k.len() <= 120
+            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    };
+    let from_key = payload.get("fromKey").and_then(Value::as_str).unwrap_or("");
+    let to_key = payload.get("toKey").and_then(Value::as_str).unwrap_or("");
+    if !valid_key(from_key) || !valid_key(to_key) {
+        return send_json(rq, 400, &err_json("文件夹 key 不合法"));
+    }
+    let to_path = utf16_clip(payload.get("toPath").and_then(Value::as_str).unwrap_or(""), 400);
+    let empty_ok = json!({ "ok": true, "migrated": 0, "attachments": 0 });
+    if from_key == to_key {
+        return send_json(rq, 200, &empty_ok);
+    }
+    let from_doc = doc_id_of(from_key);
+    let to_doc = doc_id_of(to_key);
+    let from_prefix = format!("session-{}-", from_doc);
+    let names = store::list_data_files();
+    let mut migrated = 0usize;
+    let mut attachments = 0usize;
+    for name in &names {
+        if !name.starts_with(&from_prefix) || !name.ends_with(".json") {
+            continue;
+        }
+        let sid = &name[from_prefix.len()..name.len() - 5];
+        // 译文伪会话（__translate）仍属于文档，不跟文件夹会话一起搬
+        if sid.is_empty() || sid.contains("__translate") {
+            continue;
+        }
+        let data = match store::read_json_opt(name) {
+            Some(v) if v.is_object() => v,
+            _ => continue,
+        };
+        let mut obj = data.as_object().cloned().unwrap_or_default();
+        obj.insert("v".to_string(), json!(4));
+        if !to_path.is_empty() {
+            obj.insert("folderPath".to_string(), json!(to_path));
+        }
+        let target = format!("session-{}-{}.json", to_doc, sid);
+        if !store::write_json(&target, &Value::Object(obj)) {
+            continue;
+        }
+        migrated += 1;
+        // 截图附件目录：attachments/<fromDocKey>-<sid> → attachments/<toDocKey>-<sid>
+        let old_dir = attachment_dir(from_key, sid);
+        if old_dir.is_dir() {
+            let new_dir = attachment_dir(to_key, sid);
+            if copy_dir_all(&old_dir, &new_dir).is_ok() {
+                attachments += std::fs::read_dir(&old_dir)
+                    .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_file()).count())
+                    .unwrap_or(0);
+            }
+        }
+    }
+    send_json(
+        rq,
+        200,
+        &json!({ "ok": true, "migrated": migrated, "attachments": attachments }),
+    );
 }
 
 /* ------------------------------------------------------------ 静态资源 */

@@ -27,6 +27,8 @@
 | `public/js/prompts/`（实现） | 提示词系统落地：registry / compose / base / contracts / materials / memory / history / budget + capabilities（A 线 P1，见 PROGRESS §57）；引用核验器 `public/js/citation-validator.js`（A 线 P1.5，见 §58） |
 | [`多标签工作区-设计.md`](多标签工作区-设计.md) | 多标签工作区的设计 v2：标签交互、Welcome 语义、译文文档级、问答文件夹级、后台任务、迁移、状态模型、P0–P4 |
 | [`多标签工作区-示意.html`](多标签工作区-示意.html) | 多标签工作区的可交互界面示意 v2（浏览器直接打开） |
+| [`会话系统-重新设计.md`](会话系统-重新设计.md) | 会话系统 v4 重新设计（2026-11-03）：现状审计 → VS Code Copilot / Cursor / Claude Code / JetBrains / Codex 调研 → 会话一等公民、进文件夹策略、历史面板、数据/接口、P0–P2 实施与测试计划 |
+| [`会话系统-示意.html`](会话系统-示意.html) | 上述会话系统的可交互界面示意（会话头 / 快速切换 / 历史面板 / 空态 / 删除确认；浏览器直接打开） |
 
 ## 调研记录
 

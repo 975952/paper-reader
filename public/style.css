@@ -2440,3 +2440,288 @@ body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
 .msg .acts button.act-chip.deep { color: var(--fg-faint); border-style: dashed; }
 .msg .acts button.act-chip.dunno { color: var(--fg-faint); }
 .msg .acts button.act-chip:disabled { opacity: .55; cursor: default; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   会话系统 P0（2026-11，用户拍板 B：进文件夹默认显示空态选择卡片）
+   - 会话头：标题（点开快速切换浮层）+ 运行状态点 + 新建 + 历史
+   - 快速切换浮层（.sess-quick，绝对定位在会话头下方）
+   - 全高历史面板（.sess-history，作为 #rightSide 的 flex 兄弟，打开时隐藏 .ai / .composer）
+   - 进文件夹选择卡片（.entry-card，由 sessions.js 动态创建、app.js 的 renderCol 挂进 #aiArea）
+   - 应用内确认框（.sess-confirm-mask，fixed 覆盖全屏）
+   颜色/字号/阴影一律用既有变量，跟随所有主题（浅色 / 暗色 / black / graphite / light）。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 会话头 ─────────────────────────────────────────────────────────────── */
+.sessbar {
+  justify-content: flex-start; align-items: center; gap: 1px;
+  padding: 1px 6px 3px 6px;
+}
+.sess-btn {
+  flex: 1 1 auto; min-width: 0; max-width: none;
+  gap: 6px; padding: 3px 8px;
+  border-radius: 7px;
+  color: var(--fg); font-weight: 600;
+}
+.sess-btn:hover { background: var(--bg-sunken); color: var(--accent); }
+.sess-btn[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent); }
+.sess-dot {
+  flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.sess-dot[hidden] { display: none; }
+.sess-dot.running { animation: sess-dot-pulse 1.2s ease-in-out infinite; }
+@keyframes sess-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.sess-icon-btn {
+  flex: 0 0 auto; width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--fg-faint); cursor: pointer;
+  padding: 0; font: inherit;
+}
+.sess-icon-btn:hover { background: var(--bg-sunken); color: var(--accent); }
+.sess-icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sess-icon-btn:disabled { opacity: .4; cursor: default; }
+.sess-icon-btn[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent); }
+
+/* ── 快速切换浮层 ───────────────────────────────────────────────────────── */
+.sess-quick {
+  position: absolute; left: 8px; right: 8px; top: calc(100% - 1px);
+  z-index: 40;
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.sess-quick.hidden { display: none; }
+.sess-quick-head { display: flex; align-items: baseline; justify-content: space-between; padding: 0 2px; }
+.sess-quick-title { font-size: var(--ui-fs-xs); font-weight: 600; color: var(--fg-dim); }
+.sess-quick-hint { font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+.sess-quick-search,
+.sess-hist-search,
+.sess-rename-input {
+  width: 100%; box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--fg);
+  font: inherit; font-size: var(--ui-fs-xs);
+}
+.sess-quick-search:focus, .sess-hist-search:focus, .sess-rename-input:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.sess-quick-list { display: flex; flex-direction: column; gap: 1px; max-height: 280px; overflow-y: auto; }
+.sess-quick-row {
+  display: flex; flex-direction: column; gap: 1px; align-items: flex-start;
+  padding: 5px 7px; border: 0; border-radius: 6px;
+  background: none; cursor: pointer; text-align: left; color: var(--fg);
+  font: inherit; font-size: var(--ui-fs-xs); width: 100%;
+}
+.sess-quick-row:hover { background: var(--bg-sunken); }
+.sess-quick-row.on { background: var(--accent-soft); }
+.sess-quick-row.on .sess-quick-name { color: var(--accent); font-weight: 600; }
+.sess-quick-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-quick-meta { font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+.sess-quick-foot { display: flex; gap: 6px; padding-top: 2px; border-top: 1px solid var(--border); }
+.sess-quick-all, .sess-quick-new {
+  flex: 1 1 0; padding: 5px 7px;
+  border: 0; border-radius: 6px; background: none; cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-xs); color: var(--fg-dim); text-align: center;
+}
+.sess-quick-all:hover, .sess-quick-new:hover { background: var(--bg-sunken); color: var(--accent); }
+.sess-quick-new { color: var(--accent); }
+
+/* ── 全高历史面板 ───────────────────────────────────────────────────────── */
+.side.right[data-sess-view="history"] > .ai,
+.side.right[data-sess-view="history"] > .composer { display: none; }
+.sess-history {
+  flex: 1 1 0; min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg);
+}
+.sess-history.hidden { display: none; }
+.sess-hist-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
+  padding: 4px 8px 6px;
+}
+.sess-hist-back {
+  flex: 0 0 auto; width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 6px; background: none; cursor: pointer;
+  color: var(--fg-dim); padding: 0;
+}
+.sess-hist-back:hover { background: var(--bg-sunken); color: var(--accent); }
+.sess-hist-title { flex: 1 1 auto; min-width: 0; font-size: var(--ui-fs-xs); font-weight: 600; color: var(--fg); }
+.sess-hist-new {
+  flex: 0 0 auto; padding: 4px 8px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg-elev); color: var(--fg-dim); cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-xs);
+}
+.sess-hist-new:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.sess-hist-searchrow { flex: 0 0 auto; padding: 0 8px 6px; }
+.sess-hist-scope { flex: 0 0 auto; display: flex; gap: 4px; padding: 0 8px 6px; }
+.sess-scope-chip {
+  padding: 3px 9px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: transparent; color: var(--fg-faint); cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-2xs);
+}
+.sess-scope-chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.sess-hist-list { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 0 6px 10px; }
+.sess-group {
+  padding: 10px 6px 3px;
+  font-size: var(--ui-fs-2xs); color: var(--fg-faint); font-weight: 600;
+  letter-spacing: .02em;
+}
+.sess-group-btn {
+  display: block; width: 100%; border: 0; background: none; cursor: pointer;
+  text-align: left; font: inherit; font-size: var(--ui-fs-2xs); color: var(--fg-faint); font-weight: 600;
+  border-radius: 6px;
+}
+.sess-group-btn:hover { color: var(--accent); background: var(--bg-sunken); }
+.sess-hrow {
+  display: flex; align-items: center; gap: 2px;
+  padding: 1px 2px; border-radius: 8px;
+}
+.sess-hrow:hover { background: var(--bg-sunken); }
+.sess-hrow.on { background: var(--accent-soft); }
+.sess-hrow.archived { opacity: .68; }
+.sess-hgo {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+  padding: 5px 7px; border: 0; background: none; cursor: pointer; text-align: left;
+  color: var(--fg); font: inherit; font-size: var(--ui-fs-xs);
+}
+.sess-htitle { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-hrow.on .sess-htitle { color: var(--accent); font-weight: 600; }
+.sess-hmeta { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+.sess-rename-input { padding: 3px 6px; }
+.sess-hacts { flex: 0 0 auto; display: flex; align-items: center; gap: 1px; opacity: 0; transition: opacity .12s; }
+.sess-hrow:hover .sess-hacts, .sess-hrow:focus-within .sess-hacts { opacity: 1; }
+.sess-hact {
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 5px; background: none; cursor: pointer;
+  color: var(--fg-faint);
+}
+.sess-hact:hover { background: var(--bg-elev); color: var(--accent); }
+.sess-hact.on { color: var(--accent); }
+.sess-hact.danger:hover { color: var(--err-text, var(--fg)); }
+.sess-hist-foot {
+  flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  padding: 6px 8px 8px; border-top: 1px solid var(--border);
+}
+.sess-foot-btn {
+  padding: 4px 7px; border: 0; border-radius: 6px;
+  background: none; cursor: pointer; font: inherit; font-size: var(--ui-fs-2xs); color: var(--fg-faint);
+  text-align: left;
+}
+.sess-foot-btn:hover { background: var(--bg-sunken); color: var(--accent); }
+.sess-hist-modes { width: 100%; padding-top: 2px; }
+
+/* 默认进入方式三档（选择卡片 / 自动恢复 / 总是新会话） */
+.sess-mode-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.sess-mode-label { font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+.sess-mode-chip {
+  padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px;
+  background: transparent; color: var(--fg-faint); cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-2xs);
+}
+.sess-mode-chip:hover { border-color: var(--accent); color: var(--accent); }
+.sess-mode-chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* ── 进文件夹选择卡片（挂在 #aiArea 里，占满结果区） ───────────────────── */
+.ai > .entry-card {
+  flex: 1 1 0; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; align-items: stretch; gap: 10px;
+  padding: 20px 18px 26px;
+  background: var(--bg);
+}
+.ai > .entry-card.hidden { display: none; }
+.entry-big-ic {
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent);
+}
+.entry-big-ic svg { width: 18px; height: 18px; }
+.entry-title { font-size: calc(var(--ui-fs) + 2px); font-weight: 600; color: var(--fg); line-height: 1.4; }
+.entry-sub { font-size: var(--ui-fs-xs); color: var(--fg-dim); line-height: 1.6; }
+.entry-primary {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  margin-top: 2px; padding: 10px 12px;
+  border: 1px solid var(--accent); border-radius: 10px;
+  background: var(--accent-soft); color: var(--accent);
+  cursor: pointer; text-align: left; font: inherit;
+}
+.entry-primary:hover { filter: brightness(1.03); }
+.entry-primary-main { font-size: var(--ui-fs); font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry-primary-meta { font-size: var(--ui-fs-2xs); color: var(--fg-dim); }
+.entry-new {
+  align-self: flex-start;
+  padding: 6px 11px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-elev); color: var(--fg-dim); cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-xs);
+}
+.entry-new:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.entry-empty-hint { font-size: var(--ui-fs-xs); color: var(--fg-faint); }
+.entry-recent { display: flex; flex-direction: column; gap: 1px; }
+.entry-recent-title { font-size: var(--ui-fs-2xs); color: var(--fg-faint); padding: 2px 0; }
+.entry-recent-row {
+  display: flex; flex-direction: column; gap: 1px; align-items: flex-start;
+  padding: 5px 7px; border: 0; border-radius: 7px;
+  background: none; cursor: pointer; text-align: left; color: var(--fg);
+  font: inherit; font-size: var(--ui-fs-xs); width: 100%;
+}
+.entry-recent-row:hover { background: var(--bg-sunken); }
+.entry-recent-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry-recent-meta { font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+.entry-modes { padding-top: 2px; }
+.entry-hint { font-size: var(--ui-fs-2xs); color: var(--fg-faint); line-height: 1.6; }
+
+/* ── 应用内确认框（会话删除 / 清空） ────────────────────────────────────── */
+.sess-confirm-mask {
+  position: fixed; inset: 0; z-index: 220;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--fg) 30%, transparent);
+}
+.sess-confirm-mask.hidden { display: none; }
+.sess-confirm {
+  width: min(360px, 100%);
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 14px 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.sess-confirm-title { font-size: calc(var(--ui-fs) + 1px); font-weight: 600; color: var(--fg); }
+.sess-confirm-body { font-size: var(--ui-fs-xs); color: var(--fg-dim); line-height: 1.65; }
+.sess-confirm-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.sess-confirm-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-elev); color: var(--fg-dim); cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-xs);
+}
+.sess-confirm-btn:hover { border-color: var(--border-strong); color: var(--fg); }
+.sess-confirm-btn.danger { border-color: var(--err-text, var(--fg)); color: var(--err-text, var(--fg)); }
+.sess-confirm-btn.danger:hover { background: var(--err-text, var(--fg)); color: var(--accent-fg); }
+.sess-confirm-btn.ghost { background: transparent; }
+.sess-confirm-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ── 聊天空态：新会话没有消息时给一句提示（否则面板看起来「新建了但什么都没有」） ── */
+.ai-block[data-block="chat"] > .ai-body:empty::before {
+  content: '这是新会话，在下面输入问题开始对话…';
+  display: block;
+  margin: auto;
+  padding: 18px 14px;
+  max-width: 269px;
+  color: var(--fg-faint);
+  font-size: var(--ui-fs-sm);
+  line-height: 1.8;
+  text-align: center;
+}
+

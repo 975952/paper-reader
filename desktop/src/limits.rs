@@ -50,6 +50,9 @@ pub const BODY_CONFIG: usize = 1024 * 1024;
 pub const BODY_STATE: usize = 1024 * 1024;
 pub const BODY_NOTES: usize = 4 * 1024 * 1024;
 pub const BODY_SESSION: usize = 16 * 1024 * 1024;
+// 会话 meta 的 PATCH（/api/session 的 PATCH）与文件夹迁移：只改标题/置顶/归档，
+// 正常不到 1KB；与 security.js 的 BODY_LIMITS.sessionPatch 一致。
+pub const BODY_SESSION_PATCH: usize = 64 * 1024;
 // 图片附件（单张）：与 security.js 的 BODY_LIMITS.attachment / server.js 的 ATTACHMENT_LIMIT 一致。
 // 图片单独存成文件，不进会话 JSON，所以这是「单张图」的上限。
 pub const BODY_ATTACHMENT: usize = 8 * 1024 * 1024;

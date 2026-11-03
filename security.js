@@ -389,6 +389,8 @@ const BODY_LIMITS = {
   papers: 1 * 1024 * 1024,
   notes: 4 * 1024 * 1024,
   session: 16 * 1024 * 1024,
+  // 会话 meta 的 PATCH（/api/session 的 PATCH）：只改标题/置顶/归档/最后打开时间，正常不到 1KB
+  sessionPatch: 64 * 1024,
   // 图片附件（/api/attachment 的 POST）：单张截图的上限，与 server.js 的 ATTACHMENT_LIMIT 一致。
   // 图片单独存成文件，不进会话 JSON —— 所以这里给的是「单张图」的上限，不是整个会话的。
   attachment: 8 * 1024 * 1024,

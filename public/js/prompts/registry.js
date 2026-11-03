@@ -13,7 +13,7 @@
  */
 
 /** 系统级版本：进入教学/索引等缓存键（P3 起统一使用） */
-export const PROMPT_SYSTEM_VERSION = '2026.11.3';
+export const PROMPT_SYSTEM_VERSION = '2026.11.4';
 
 const REQUIRED = ['id', 'version', 'kind', 'system', 'user'];
 

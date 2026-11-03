@@ -1722,6 +1722,154 @@ async function handleUpload(req, res, url) {
   }
 }
 
+/* ------------------------------------------- 会话 meta（P0 会话系统 v4） */
+
+/** 用户手改标题的上限 */
+const SESSION_TITLE_MAX = 120;
+/** 自动派生标题上限（设计文档：首条用户消息 28 字） */
+const SESSION_DERIVED_TITLE_MAX = 28;
+const SESSION_TS_MIN = 1e11;
+const SESSION_TS_MAX = 1e14;
+
+function collapsWs(s) {
+  return String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+}
+
+/** 合法的毫秒时间戳；0 表示没有/不合法 */
+function sessionTs(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > SESSION_TS_MIN && n < SESSION_TS_MAX ? Math.round(n) : 0;
+}
+
+/**
+ * 会话内容指纹：只回答「这次保存是不是真的改了内容」。
+ * 规则故意保持简单：条目数 + 最后一条文本前 80 字 + history 长度 + summary 长度 +
+ * summaryCovered + ops 数。desktop/src/api.rs 有完全相同的实现 ——
+ * 换后端（Node ↔ Rust）不能造成 updatedAt 抖动。
+ */
+function sessionContentFingerprint(data) {
+  const entries = Array.isArray(data?.entries) ? data.entries : [];
+  const lastWithText = [...entries].reverse().find((e) => e && typeof e.text === 'string' && e.text);
+  const history = Array.isArray(data?.history) ? data.history : [];
+  const ops = Array.isArray(data?.ops) ? data.ops : [];
+  return [
+    entries.length,
+    String(lastWithText ? lastWithText.text : '').slice(0, 80),
+    history.length,
+    String(data?.summary || '').length,
+    Number(data?.summaryCovered) || 0,
+    ops.length,
+  ].join('\u0001');
+}
+
+function sessionEntries(data) {
+  return Array.isArray(data?.entries) ? data.entries : [];
+}
+
+function sessionFirstUserText(data) {
+  const hit = sessionEntries(data).find((e) => e && e.kind === 'user' && typeof e.text === 'string' && e.text.trim());
+  return hit ? hit.text : '';
+}
+
+function sessionLastEntryText(data) {
+  const hit = [...sessionEntries(data)].reverse().find((e) => e && typeof e.text === 'string' && e.text.trim());
+  return hit ? hit.text : '';
+}
+
+/** 标题：用户改过就用用户的；否则用首条用户消息；旧「解释/翻译」会话没有用户消息时
+ *  退到首条有文字的助手消息，再退到首条 quote。都去掉【…】界面标记后截 28 字。
+ *  desktop/src/api.rs 的 session_title_of 必须保持一致。 */
+function sessionTitleOf(data) {
+  const saved = collapsWs(data?.title);
+  if (saved) return saved.slice(0, SESSION_TITLE_MAX);
+  const clean = (s) => collapsWs(collapsWs(s).replace(/【[^】]{0,60}】/g, ' '));
+  const userHit = sessionFirstUserText(data);
+  if (collapsWs(userHit)) return clean(userHit).slice(0, SESSION_DERIVED_TITLE_MAX);
+  for (const e of sessionEntries(data)) {
+    if (e && typeof e.text === 'string' && e.text.trim()) return clean(e.text).slice(0, SESSION_DERIVED_TITLE_MAX);
+  }
+  for (const e of sessionEntries(data)) {
+    if (e && typeof e.quote === 'string' && e.quote.trim()) return clean(e.quote).slice(0, SESSION_DERIVED_TITLE_MAX);
+  }
+  return '';
+}
+
+/** docIds/docTitles 按 docId 合并去重（旧文件的引用也不能丢），最多留 12 个 */
+function mergeSessionDocRefs(oldData, incoming) {
+  const ids = [];
+  const titles = [];
+  const add = (id, title) => {
+    const key = collapsWs(id).slice(0, 120);
+    if (!key) return;
+    const i = ids.indexOf(key);
+    if (i >= 0) { if (!titles[i]) titles[i] = collapsWs(title).slice(0, 200); return; }
+    ids.push(key);
+    titles.push(collapsWs(title).slice(0, 200));
+  };
+  const oldIds = Array.isArray(oldData?.docIds) ? oldData.docIds : [];
+  const oldTitles = Array.isArray(oldData?.docTitles) ? oldData.docTitles : [];
+  oldIds.forEach((id, i) => add(id, oldTitles[i]));
+  const newIds = Array.isArray(incoming?.docIds) ? incoming.docIds : [];
+  const newTitles = Array.isArray(incoming?.docTitles) ? incoming.docTitles : [];
+  newIds.forEach((id, i) => add(id, newTitles[i]));
+  return { docIds: ids.slice(-12), docTitles: titles.slice(-12) };
+}
+
+/**
+ * POST /api/session 落盘前的整理：把 meta 补进 payload。
+ * - updatedAt 只在内容真的变了时才更新（指纹没变就沿用旧值）；
+ * - createdAt / pinned / archived / title 等客户端没传时沿用旧文件；
+ * - 永远不丢 payload 里的内容字段。
+ */
+function prepareSessionRecord(payload, oldData, now) {
+  const old = oldData && typeof oldData === 'object' && !Array.isArray(oldData) ? oldData : null;
+  const fp = sessionContentFingerprint(payload);
+  const prevFp = old ? (typeof old.contentFp === 'string' ? old.contentFp : sessionContentFingerprint(old)) : '';
+  const changed = !old || fp !== prevFp;
+  const refs = mergeSessionDocRefs(old, payload);
+  const pinned = old?.pinned === true || payload?.pinned === true;
+  const archived = old?.archived === true || payload?.archived === true;
+  const createdAt = sessionTs(old?.createdAt) || sessionTs(payload?.createdAt) || now;
+  const updatedAt = changed ? (sessionTs(payload?.updatedAt) || now) : (sessionTs(old?.updatedAt) || now);
+  const title = collapsWs(payload?.title || old?.title).slice(0, SESSION_TITLE_MAX);
+  const titleSource = (payload?.titleSource === 'user' || old?.titleSource === 'user') ? 'user' : 'auto';
+  return {
+    ...payload,
+    v: 4,
+    folderPath: typeof payload?.folderPath === 'string' ? payload.folderPath.slice(0, 400)
+      : (typeof old?.folderPath === 'string' ? old.folderPath : ''),
+    title,
+    titleSource,
+    createdAt,
+    updatedAt,
+    lastOpenedAt: sessionTs(payload?.lastOpenedAt) || sessionTs(old?.lastOpenedAt) || updatedAt,
+    pinned,
+    pinnedAt: pinned ? (sessionTs(old?.pinnedAt) || sessionTs(payload?.pinnedAt) || updatedAt) : 0,
+    archived,
+    archivedAt: archived ? (sessionTs(old?.archivedAt) || sessionTs(payload?.archivedAt) || updatedAt) : 0,
+    docIds: refs.docIds,
+    docTitles: refs.docTitles,
+    contentRev: (Number(old?.contentRev) || 0) + (changed ? 1 : 0),
+    contentFp: fp,
+  };
+}
+
+/**
+ * 定位会话文件：先按 docKeyCandidates 找已存在的（老键），都没有就用规范文件名的。
+ * 与 desktop/src/api.rs 的 session_file_resolved 同规则。
+ */
+async function resolveSessionFileName(doc, sid) {
+  const keys = docKeyCandidates(doc);
+  for (const key of keys) {
+    const name = sid ? `session-${key}-${sid}.json` : `session-${key}.json`;
+    try {
+      await fsp.access(path.join(DATA_DIR, name));
+      return name;
+    } catch { /* 试下一个候选 */ }
+  }
+  return sid ? `session-${docIdOf(doc)}-${sid}.json` : `session-${docIdOf(doc)}.json`;
+}
+
 async function handle(req, res) {
   const host = String(req.headers.host || '').toLowerCase();
   const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`]);
@@ -1965,8 +2113,7 @@ async function handle(req, res) {
   if (pathname === '/api/session') {
     const doc = url.searchParams.get('doc') || 'default';
     const sid = (url.searchParams.get('sid') || '').replace(/[^\w-]/g, '').slice(0, 40);
-    const docKey = docIdOf(doc);
-    const file = sid ? `session-${docKey}-${sid}.json` : `session-${docKey}.json`;
+    const file = await resolveSessionFileName(doc, sid);
     if (req.method === 'GET') return sendJson(res, 200, await readDataFile(file, { entries: [], history: [], ops: [] }));
     if (req.method === 'POST') {
       // 审计 §P1：条目数 + 总字符数 + 附件元数据大小
@@ -1974,15 +2121,74 @@ async function handle(req, res) {
       if (payload === null) return undefined;
       const bad = sec.checkSession(payload);
       if (bad) return sendJson(res, 413, { error: { message: bad } });
-      try { await writeDataFile(file, payload); }
-      catch (e) {
+      let stored;
+      try {
+        const old = await readDataFile(file, null);
+        stored = prepareSessionRecord(payload, old, Date.now());
+        await writeDataFile(file, stored);
+      } catch (e) {
         sec.diag(`保存阅读会话失败: ${e && e.message}`);
         return sendJson(res, 500, { error: { message: '保存阅读会话失败，请重试' } });
       }
       // 图片单独存：会话写成功之后按「还引用着的 id」清理本会话的附件目录
       // （清空会话 = 没有引用 → 图全删；发送失败留下的孤儿图也在这里被清掉）
-      await pruneAttachments(doc, sid, payload);
-      return sendJson(res, 200, { ok: true });
+      await pruneAttachments(doc, sid, stored);
+      return sendJson(res, 200, { ok: true, updatedAt: stored.updatedAt, contentRev: stored.contentRev });
+    }
+    if (req.method === 'PATCH') {
+      // P0 会话系统：只允许改 meta 白名单字段（标题/置顶/归档/最后打开时间），不许借此改内容
+      const patch = await readJsonBodyOrReq(req, res, sec.BODY_LIMITS.sessionPatch);
+      if (patch === null) return undefined;
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+        return sendJson(res, 400, { error: { message: '会话 meta 必须是对象' } });
+      }
+      const cur = await readDataFile(file, null);
+      if (!cur || typeof cur !== 'object' || Array.isArray(cur)) {
+        return sendJson(res, 404, { error: { message: '会话不存在或已被删除' } });
+      }
+      const now = Date.now();
+      const next = { ...cur };
+      if (Object.prototype.hasOwnProperty.call(patch, 'title')) {
+        const t = collapsWs(patch.title).slice(0, SESSION_TITLE_MAX);
+        if (t) { next.title = t; next.titleSource = 'user'; }
+        else { delete next.title; next.titleSource = 'auto'; }
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'titleSource')) {
+        next.titleSource = patch.titleSource === 'user' ? 'user' : 'auto';
+        if (!next.title && next.titleSource === 'user') next.titleSource = 'auto';
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'pinned')) {
+        next.pinned = patch.pinned === true;
+        next.pinnedAt = next.pinned ? (sessionTs(cur.pinnedAt) || now) : 0;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'archived')) {
+        next.archived = patch.archived === true;
+        next.archivedAt = next.archived ? (sessionTs(cur.archivedAt) || now) : 0;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'lastOpenedAt')) {
+        const t = sessionTs(patch.lastOpenedAt);
+        if (t) next.lastOpenedAt = t;
+      }
+      next.v = 4;
+      if (!sessionTs(next.createdAt)) next.createdAt = sessionTs(cur.updatedAt) || now;
+      try { await writeDataFile(file, next); }
+      catch (e) {
+        sec.diag(`更新会话失败: ${e && e.message}`);
+        return sendJson(res, 500, { error: { message: '更新会话失败，请重试' } });
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        session: {
+          sid,
+          title: sessionTitleOf(next),
+          titleSource: next.titleSource === 'user' ? 'user' : 'auto',
+          pinned: next.pinned === true,
+          pinnedAt: sessionTs(next.pinnedAt),
+          archived: next.archived === true,
+          archivedAt: sessionTs(next.archivedAt),
+          lastOpenedAt: sessionTs(next.lastOpenedAt),
+        },
+      });
     }
     if (req.method === 'DELETE') {
       try { await fsp.rm(path.join(DATA_DIR, file), { force: true }); }
@@ -1997,45 +2203,144 @@ async function handle(req, res) {
     return send(res, 405, 'Method Not Allowed');
   }
 
+  /**
+   * P0 会话系统：文件夹改名/移动后把该文件夹的会话复制到新键。
+   * 复制而不是移动：旧文件保留作为回退备份（本机 disk 成本可忽略）。
+   * 截图附件目录也复制一份到新键，否则老会话里的截图会 404。
+   */
+  if (pathname === '/api/sessions/move-folder') {
+    if (req.method !== 'POST') return send(res, 405, 'Method Not Allowed');
+    const body = await readJsonBodyOrReq(req, res, sec.BODY_LIMITS.sessionPatch);
+    if (body === null) return undefined;
+    const fromKey = String(body.fromKey || '').trim();
+    const toKey = String(body.toKey || '').trim();
+    const toPath = typeof body.toPath === 'string' ? body.toPath.slice(0, 400) : '';
+    if (!/^[A-Za-z0-9._-]{1,120}$/.test(fromKey) || !/^[A-Za-z0-9._-]{1,120}$/.test(toKey) || fromKey === toKey) {
+      return sendJson(res, 400, { error: { message: '迁移参数不合法' } });
+    }
+    const fromDocKey = docIdOf(fromKey);
+    const toDocKey = docIdOf(toKey);
+    let names = [];
+    try { names = await fsp.readdir(DATA_DIR); } catch { names = []; }
+    let migrated = 0;
+    try {
+      for (const name of names) {
+        const m = /^session-(.+)\.json$/.exec(name);
+        if (!m) continue;
+        const rest = m[1];
+        if (rest.endsWith('-__translate') || rest.endsWith('__translate')) continue;
+        let sid = '';
+        if (rest === fromDocKey) sid = '';
+        else if (rest.startsWith(`${fromDocKey}-`)) sid = rest.slice(fromDocKey.length + 1);
+        else continue;
+        const data = await readDataFile(name, null);
+        if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+        const next = { ...data, v: 4, folderPath: toPath || data.folderPath || '' };
+        const targetName = sid ? `session-${toDocKey}-${sid}.json` : `session-${toDocKey}.json`;
+        await writeDataFile(targetName, next);
+        migrated += 1;
+      }
+    } catch (e) {
+      sec.diag(`迁移会话失败: ${e && e.message}`);
+      return sendJson(res, 500, { error: { message: '迁移会话失败，请重试' } });
+    }
+    let attachments = 0;
+    const attRoot = path.join(DATA_DIR, 'attachments');
+    let attNames = [];
+    try { attNames = await fsp.readdir(attRoot); } catch { attNames = []; }
+    for (const dirName of attNames) {
+      let tail = '';
+      if (dirName === fromDocKey) tail = '';
+      else if (dirName.startsWith(`${fromDocKey}-`)) tail = dirName.slice(fromDocKey.length);
+      else continue;
+      const fromDir = path.join(attRoot, dirName);
+      const toDir = path.join(attRoot, `${toDocKey}${tail}`);
+      if (fromDir === toDir) continue;
+      try { await fsp.cp(fromDir, toDir, { recursive: true, force: true }); attachments += 1; }
+      catch (e) { sec.diag(`迁移截图附件失败: ${e && e.message}`); }
+    }
+    return sendJson(res, 200, { ok: true, migrated, attachments });
+  }
+
   if (pathname === '/api/attachment') return handleAttachment(req, res, url);
 
   if (pathname === '/api/sessions') {
     const doc = url.searchParams.get('doc') || 'default';
-    const keys = docKeyCandidates(doc);
-    const fileFor = (key, sid) => (sid ? `session-${key}-${sid}.json` : `session-${key}.json`);
+    const folderPath = (url.searchParams.get('folderPath') || '').slice(0, 400);
+    const scope = url.searchParams.get('scope') === 'all' ? 'all' : 'folder';
+    const archivedParam = url.searchParams.get('archived');
+    const archivedFilter = archivedParam === '1' || archivedParam === '0' ? archivedParam : 'all';
+    const q = collapsWs(url.searchParams.get('q') || '').toLowerCase().slice(0, 200);
+    const limit = Math.max(1, Math.min(500, Number(url.searchParams.get('limit')) || 200));
     let names = [];
     try { names = await fsp.readdir(DATA_DIR); } catch { names = []; }
     const out = [];
     const seen = new Set();
-    const describe = async (fileName, sid) => {
+    const describe = async (fileName, sid, folderPathHint) => {
       if (seen.has(fileName)) return;
       seen.add(fileName);
       const data = await readDataFile(fileName, null);
-      if (!data || typeof data !== 'object') return;
-      const entries = Array.isArray(data.entries) ? data.entries : [];
-      const firstUser = entries.find((e) => e && e.kind === 'user');
-      const lastText = [...entries].reverse().find((e) => e && typeof e.text === 'string' && e.text.trim());
-      let mtime = 0;
-      try { mtime = (await fsp.stat(path.join(DATA_DIR, fileName))).mtimeMs; } catch { /* 忽略 */ }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      let stat = null;
+      try { stat = await fsp.stat(path.join(DATA_DIR, fileName)); } catch { stat = null; }
+      const mtime = stat ? Math.round(stat.mtimeMs) : 0;
+      const createdFallback = stat && stat.birthtimeMs ? Math.round(stat.birthtimeMs) : 0;
+      const updatedAt = sessionTs(data.updatedAt) || mtime;
       out.push({
         sid,
-        count: entries.length,
-        title: String((firstUser && firstUser.text) || '').replace(/\s+/g, ' ').trim().slice(0, 60),
-        preview: String((lastText && lastText.text) || '').replace(/\s+/g, ' ').trim().slice(0, 80),
-        updatedAt: Number(data.updatedAt) || mtime || 0,
+        folderPath: (typeof data.folderPath === 'string' && data.folderPath) ? data.folderPath : (folderPathHint || ''),
+        title: sessionTitleOf(data),
+        titleSource: data.titleSource === 'user' ? 'user' : 'auto',
+        preview: collapsWs(sessionLastEntryText(data)).slice(0, 80),
+        count: sessionEntries(data).length,
+        createdAt: sessionTs(data.createdAt) || createdFallback || updatedAt,
+        updatedAt,
+        lastOpenedAt: sessionTs(data.lastOpenedAt) || updatedAt,
+        pinned: data.pinned === true,
+        pinnedAt: sessionTs(data.pinnedAt),
+        archived: data.archived === true,
+        archivedAt: sessionTs(data.archivedAt),
+        docIds: Array.isArray(data.docIds) ? data.docIds.slice(0, 12) : [],
+        docTitles: Array.isArray(data.docTitles) ? data.docTitles.slice(0, 12) : [],
+        contentRev: Number(data.contentRev) || 0,
       });
     };
-    // 对每一个候选 key：老的单会话文件 + 该 key 下的所有 sid 文件
-    for (const key of keys) {
-      if (names.includes(fileFor(key, ''))) await describe(fileFor(key, ''), '');
-      const prefix = `session-${key}-`;
+    if (scope === 'all') {
+      // 全部文件夹：直接扫 data/ 下的所有会话文件（跳过译文伪会话）
       for (const name of names) {
-        if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
-        await describe(name, name.slice(prefix.length, -'.json'.length));
+        const m = /^session-(.+)\.json$/.exec(name);
+        if (!m) continue;
+        const rest = m[1];
+        if (rest.endsWith('-__translate') || rest.endsWith('__translate')) continue;
+        // 新格式尾部是 sid（newSid 只由 base36 组成）；老格式 session-<key>.json 没有 sid
+        const sidMatch = /^(.*)-([a-z0-9]{6,24})$/.exec(rest);
+        await describe(name, sidMatch ? sidMatch[2] : '', '');
+      }
+    } else {
+      const keys = docKeyCandidates(doc);
+      const fileFor = (key, sid) => (sid ? `session-${key}-${sid}.json` : `session-${key}.json`);
+      // 对每一个候选 key：老的单会话文件 + 该 key 下的所有 sid 文件
+      for (const key of keys) {
+        if (names.includes(fileFor(key, ''))) await describe(fileFor(key, ''), '', folderPath);
+        const prefix = `session-${key}-`;
+        for (const name of names) {
+          if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
+          await describe(name, name.slice(prefix.length, -'.json'.length), folderPath);
+        }
       }
     }
-    out.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    return sendJson(res, 200, { sessions: out });
+    let items = out;
+    if (archivedFilter === '0') items = items.filter((s) => !s.archived);
+    else if (archivedFilter === '1') items = items.filter((s) => s.archived);
+    if (q) items = items.filter((s) => `${s.title}\n${s.preview}\n${s.folderPath}`.toLowerCase().includes(q));
+    items.sort((a, b) => {
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      if (a.pinned && b.pinned) return (b.pinnedAt || 0) - (a.pinnedAt || 0);
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
+    });
+    const total = items.length;
+    items = items.slice(0, limit);
+    return sendJson(res, 200, { sessions: items, scope, total });
   }
 
   if (pathname === '/api/health') return sendJson(res, 200, { ok: true, port: PORT });

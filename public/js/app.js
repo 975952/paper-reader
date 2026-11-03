@@ -21,6 +21,11 @@ import { resolveReadingRequest, resolvePageRole, snapshotReadingRequest, snapsho
 import { validateCitations, collectAvailablePages, planFor, pagesFromText, formatPageList } from './citation-validator.js';
 import { runAgentLoop, agentStats, AGENT_TOOL_SPECS, AGENT_SYSTEM_NOTE, toolStepLabel, stripAgentMarkup } from './agent.js';
 import { lastPromptDebug as __promptDebug } from './prompts/index.js';
+import {
+  initSessions, sessionsOnFolderEntered, sessionsOnDocOpened, sessionsOnSessionChanged,
+  sessionsMigrateFolder, sessionsRefreshHeader, sessionsSetBusy,
+  sessionsIsEntryMode, sessionsLeaveEntryForNewSession, sessionsEntryCardEl,
+} from './sessions.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
 function readFlag(key, dflt = false) {
@@ -795,6 +800,8 @@ let serverState = {};
   initRelations();
   initOps();
   initPageRefs();
+  // 会话系统 P0：会话头 / 快速切换 / 历史面板 / 进文件夹选择卡片（sessions.js 需要 app.js 注入回调）
+  initSessions(sessionsContext());
 
   await profileStore.load();
   await loadServerState();
@@ -2839,6 +2846,18 @@ async function moveItem(from, to) {
       state.doc.path = newPath;
       state.doc.name = finalName;
     }
+    // 文件夹被移动：会话属于文件夹（folderKey 是路径哈希），先把当前文件夹同步到新路径，
+    // 再迁移会话文件 + localStorage 里的 activeSession 键（失败不阻塞文件移动）
+    if (!/\.pdf$/i.test(from)) {
+      const newPath = to ? `${to}/${finalName}` : finalName;
+      const cur = currentFolderPath();
+      if (cur === from || cur.startsWith(`${from}/`)) {
+        state.currentFolder = newPath + cur.slice(from.length);
+        persistCurrentFolder();
+        renderFolderSwitch();
+      }
+      try { await sessionsMigrateFolder(from, newPath); } catch { /* 会话迁移失败不影响文件移动 */ }
+    }
     await refreshPaperList();
   } catch (e) {
     toast(`移动失败：${e.message}`, 'err', 5000);
@@ -3075,6 +3094,17 @@ function startInlineRename(folderPath, name) {
         state.doc.url = `/api/pdf?name=${encodeURIComponent(base)}`;
         state.doc.path = base;
       }
+      // 文件夹改名：会话属于文件夹（folderKey 是路径哈希），同步当前文件夹并迁移会话键
+      // （旧会话文件保留作回退备份；失败不阻塞改名）
+      const parent = folderPath.includes('/') ? folderPath.slice(0, folderPath.lastIndexOf('/')) : '';
+      const newPath = parent ? `${parent}/${j.name || to}` : (j.name || to);
+      const cur = currentFolderPath();
+      if (cur === folderPath || cur.startsWith(`${folderPath}/`)) {
+        state.currentFolder = newPath + cur.slice(folderPath.length);
+        persistCurrentFolder();
+        renderFolderSwitch();
+      }
+      try { await sessionsMigrateFolder(folderPath, newPath); } catch { /* 会话迁移失败不影响改名 */ }
       await refreshPaperList();
       toast(`已重命名「${name}」→「${to}」`, 'ok', 2600);
     } catch (e) {
@@ -3729,7 +3759,10 @@ async function openDocColdSwitch({ name, url, docId, path }) {
     hotMark('notes', tStage);
     if (superseded()) return;
     tStage = performance.now();
-    await restoreSession(docId);
+    // 只恢复文档级译文；问答归属由 sessions.js 决定（恢复上次 / 新建 / 显示选择卡片，用户拍板 B）
+    await restoreSession(docId, { only: 'translate' });
+    if (superseded()) return;
+    await sessionsOnDocOpened(docId);
     hotMark('session', tStage);
     if (superseded()) return;
   }
@@ -4956,6 +4989,17 @@ function renderCol(n) {
     }
     return;
   }
+  // 会话选择卡片模式：chat 栏优先挂「继续上次 / 新建」卡片（sessions.js 动态创建，不写死进 index.html）
+  if (id === 'chat') {
+    const card = sessionsEntryCardEl();
+    if (card && card.dataset.show === '1') {
+      if (area.children.length === 1 && area.firstElementChild === card) return;
+      rememberBodyScroll('chat');
+      area.replaceChildren(card);
+      applyBodyScroll('chat');
+      return;
+    }
+  }
   const block = ensureBlock(id);
   if (area.children.length === 1 && area.firstElementChild === block) return;
   rememberBodyScroll(id);          // 换块 / 变空态之前先记位置（节点会短暂离开文档）
@@ -5431,6 +5475,10 @@ function buildSessionPayload() {
     ops,
     teaching: serializeTeachingState(),
     updatedAt: Date.now(),
+    // P0 会话系统 v4：归属文件夹 + 涉及文档（服务端派生 meta、跨文件夹列表要用）
+    folderPath: currentFolderPath(),
+    docIds: docId ? [docId] : [],
+    docTitles: state.doc?.name ? [state.doc.name] : [],
     summary: String(state.sessionSummary || '').slice(0, 2000),
     summaryCovered: Math.max(0, Number(state.summaryCovered) || 0),
     // A 线 P3：摘要所属提示词版本（读取时版本不同视为旧摘要，可重算）
@@ -5517,11 +5565,15 @@ async function migrateLegacySession(docId) {
       });
       if (!saveRes.ok) return;   // 失败不标记，下次重试
     }
-    // ② chat 条目 → 所属文件夹的默认会话（复制，不删旧文件）
+    // ② chat 条目 → 所属文件夹里的一个会话（每个旧文档一条，用稳定 sid 保证重试幂等）
     const oldChat = oldEntries.filter((e) => e && e.block !== 'translate');
     if (oldChat.length) {
-      const folderKey = folderKeyOf(folderOfDoc(docId));
-      const gRes = await fetch(`/api/session?${sessionQuery(folderKey, '')}`);
+      const folderPath = folderOfDoc(docId);
+      const folderKey = folderKeyOf(folderPath);
+      // 旧「按文档」会话迁进文件夹后必须有真实 sid：如果写进无 sid 的默认文件，
+      // 列表里 sid='' 会和「没有活动会话」的空串撞在一起（头像标题、当前行判断全乱）。
+      const legacySid = `legacy-${fnv1a8(docId)}`;
+      const gRes = await fetch(`/api/session?${sessionQuery(folderKey, legacySid)}`);
       const gSaved = gRes.ok ? await gRes.json() : {};
       const existing = new Set((gSaved.entries || []).map(dedupeKey));
       const merged = [...(gSaved.entries || [])];
@@ -5538,13 +5590,16 @@ async function migrateLegacySession(docId) {
         .map((op) => ({ id: `${docId}:${op.id}`, text: op.text.slice(0, 12000), at: op.at || Date.now(), page: op.page || null }));
       const mergedOps = [...(Array.isArray(gSaved.ops) ? gSaved.ops : [])];
       for (const op of oldOps) if (!mergedOps.some((x) => x.id === op.id)) mergedOps.push(op);
-      const saveRes = await fetch(`/api/session?${sessionQuery(folderKey, '')}`, {
+      const saveRes = await fetch(`/api/session?${sessionQuery(folderKey, legacySid)}`, {
         method: 'POST', headers,
         body: JSON.stringify({
           ...gSaved,
           entries: merged.slice(-180),
           ops: mergedOps.slice(-40),
           teaching: gSaved.teaching || null,
+          folderPath,
+          docIds: [docId],
+          docTitles: state.doc?.docId === docId && state.doc?.name ? [state.doc.name] : [],
           updatedAt: Date.now(),
         }),
       });
@@ -5583,9 +5638,8 @@ function resetFolderAiRecords() {
   state.teaching = { walk: null, current: null };
 }
 
-/** 为当前文件夹开启一个**新会话**（旧会话文件保留，可在会话菜单里选回） */
-function startFolderSession() {
-  setActiveSidFor(null, newSid());
+/** 进文件夹时重置「会话视图状态」（不动 activeSid；choose / resume 档共用） */
+function resetSessionViewState() {
   globalChatSig = '';
   chatDomSig = '';
   chatVersion += 1;
@@ -5597,6 +5651,28 @@ function startFolderSession() {
   state.summaryCovered = 0;
   state._fileEntries = [];
   state._fileDocId = '';
+}
+
+/** 为当前文件夹开启一个**新会话**（旧会话文件保留，可在会话菜单里选回） */
+function startFolderSession() {
+  setActiveSidFor(null, newSid());
+  resetSessionViewState();
+}
+
+/** 用户拍板 B（2026-11-03）：进文件夹默认显示「空态选择卡片」；
+ *  reader.session.onEnter = choose（默认）/ resume（自动恢复上次）/ new（旧行为：总是新会话） */
+function sessionOnEnterMode() {
+  try {
+    const v = localStorage.getItem('reader.session.onEnter');
+    return v === 'resume' || v === 'new' ? v : 'choose';
+  } catch { return 'choose'; }
+}
+
+/** 进入文件夹：按默认策略处理 activeSid；具体「恢复/卡片/新会话」由 sessions.js 在文档打开后决定 */
+function beginFolderEntry() {
+  if (sessionOnEnterMode() === 'new') setActiveSidFor(null, newSid());
+  resetSessionViewState();
+  sessionsOnFolderEntered(currentFolderPath());
 }
 
 /**
@@ -5611,7 +5687,7 @@ function ensureFolderForDoc(docId) {
   if (!changed) {
     if (state.folderClosed) {
       state.folderClosed = false;
-      startFolderSession();
+      beginFolderEntry();
     }
     return false;
   }
@@ -5619,9 +5695,9 @@ function ensureFolderForDoc(docId) {
   state.folderClosed = false;
   persistCurrentFolder();
   closeTabsNotInFolder(path);
-  startFolderSession();
+  beginFolderEntry();
   renderFolderSwitch();
-  flashHint(`已切换文件夹：${folderDisplayName(path)}（新会话）`);
+  flashHint(`已切换文件夹：${folderDisplayName(path)}`);
   return true;
 }
 
@@ -5636,16 +5712,16 @@ async function switchFolder(path) {
   state.folderClosed = false;
   persistCurrentFolder();
   closeTabsNotInFolder(target);
-  startFolderSession();
+  beginFolderEntry();
   renderFolderSwitch();
   if (!tabsStore.tabs.length) {
     // 旧标签已关；这里不要再把旧文档的会话/译文写回新文件夹（skipSave）
     await goWelcome({ skipSave: true });
-    state.folderClosed = false;   // 刚进入这个文件夹，会话已建好；首个文件直接沿用
+    state.folderClosed = false;   // 刚进入这个文件夹；首个文件会按 onEnter 策略进入
   } else if (state.doc && folderOfDoc(state.doc.docId) === target) {
     await openDoc({ docId: tabsStore.tabs[0].docId, name: tabsStore.tabs[0].name, url: tabsStore.tabs[0].url, path: tabsStore.tabs[0].path });
   }
-  flashHint(`已切换文件夹：${folderDisplayName(target)}（新会话）`);
+  flashHint(`已切换文件夹：${folderDisplayName(target)}`);
 }
 
 /** 左栏「当前文件夹」按钮的文案 */
@@ -5916,7 +5992,8 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     /* 问答块是全局共用的：切换论文时**不重绘**它。只有两种情况才重放问答：
        ① 换会话（only='chat'）：会话内容换了；② 聊天 DOM 和磁盘上的全局会话对不上（首次打开/迁移过）。
        译文块永远是按文档的：换论文时清空后重放，换会话时原样保留。 */
-    const replayChat = only === 'chat' || chatDomSig !== sig;
+    // P0 会话选择卡片：only='translate' 时只恢复文档级译文，问答留到用户选了会话/开始新会话再重放
+    const replayChat = only === 'chat' || (only !== 'translate' && chatDomSig !== sig);
     if (replayChat) clearChatBlock();
     if (only !== 'chat') clearTranslateBlock();
     // 换会话（only='chat'）只重放问答：译文 DOM 没被清，不能再插一遍（下面重放循环按 only 过滤）。
@@ -6025,8 +6102,51 @@ async function restoreSession(docId, { only = 'all' } = {}) {
   } catch (e) { toast(`读取当前论文会话失败：${e.message}`, 'err', 5000); }
 }
 
-async function clearCurrentSession() {
-  if (!state.doc || !confirm(`清空「${state.doc.name}」的对话和 AI 结果？`)) return;
+/** 当前会话里有没有「问答」内容（只剩译文条目不算）：空会话不落盘，避免列表被空会话刷屏 */
+function sessionHasChatContent() {
+  return state.sessionEntries.some((e) => e && (e.block || 'chat') !== 'translate');
+}
+
+/* ── 会话系统 P0 适配层：把 app.js 内部的会话动作包装成 sessions.js 需要的 ctx ──
+   sessions.js 只管列表/会话头/历史面板/选择卡片这些「一等公民」界面；
+   真正的会话读写、AI 区渲染、忙闲守卫仍由 app.js 负责，避免循环 import。 */
+function sessionsContext() {
+  return {
+    isBusy: () => !!state.busy,
+    hasDoc: () => !!state.doc,
+    doc: () => (state.doc ? { docId: state.doc.docId, name: state.doc.name } : null),
+    currentSid: () => (state.doc ? activeSidFor(state.doc.docId) : ''),
+    folderPath: () => currentFolderPath(),
+    folderKey: () => currentFolderKey(),
+    folderKeyOf: (path) => folderKeyOf(path),
+    folderDisplayName: (path) => folderDisplayName(path),
+    toast,
+    adoptList: (rows) => { sessionStore.list = rows; },
+    showChatAndRender: () => { showAiBlock('chat'); renderAiArea(); },
+    renderAi: () => renderAiArea(),
+    continueSession: (sid, opts) => switchSession(sid, opts || {}),
+    startNewSession: (opts) => newSession(opts || {}),
+    deleteSession: (sid) => deleteSession(sid, { confirm: false }),
+    clearCurrentSession: () => clearCurrentSession({ confirm: false }),
+    saveNow: () => saveSessionNow(),
+    paperMemoryOff: () => isPaperMemoryOff(state.doc?.docId || ''),
+    togglePaperMemory: () => togglePaperMemory(),
+    restoreChatOnly: () => restoreChatOnly(),
+  };
+}
+
+/** 选择卡片 →「继续上次」/切回同 sid 时只重放问答（译文已经在文档打开时恢复过了） */
+async function restoreChatOnly() {
+  if (!state.doc) return;
+  await restoreSession(state.doc.docId, { only: 'chat' });
+  renderSessionBar();
+  updateSendScope();
+  loadPaperMemory();
+}
+
+async function clearCurrentSession({ confirm: askConfirm = true } = {}) {
+  if (!state.doc) return;
+  if (askConfirm && !confirm(`清空「${state.doc.name}」的对话和 AI 结果？`)) return;
   closeSessionMenu();
   persistSession.cancel?.();
   // 只清问答；译文条目留在内存里（文档级，不属于任何会话），下次保存不会被覆盖成空
@@ -6047,6 +6167,7 @@ async function clearCurrentSession() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     toast('当前论文会话已清空', 'ok');
     loadPaperMemory();
+    sessionsOnSessionChanged({ refresh: false });
   } catch (e) { toastAction(`清空失败：${e.message}`, '重试', clearCurrentSession, 'err', 10000); }
 }
 
@@ -6152,13 +6273,23 @@ async function toggleSessionMenu() {
   if (sessionStore.open) renderSessionMenu();
 }
 
-/** 把当前会话存盘后，切到另一个 sid（空串 = 老的单会话文件） */
-async function switchSession(sid) {
+/** 把当前会话存盘后，切到另一个 sid（空串 = 老的单会话文件）
+ *  force=true：选择卡片里点「继续上次」时即使 sid 相同也要重新重放问答 */
+async function switchSession(sid, { force = false } = {}) {
   if (!state.doc) return;
+  if (state.busy) {
+    toast('正在生成中，先等它跑完或点停止再切换会话', 'err', 3200);
+    return;
+  }
   const docId = state.doc.docId;
-  if (activeSidFor(docId) === (sid || '')) { closeSessionMenu(); return; }
-  persistSession.cancel?.();
-  try { if (sessionSaveInFlight) await sessionSaveInFlight; await saveSessionNow(); } catch { /* 存不下也允许切 */ }
+  if (!force && activeSidFor(docId) === (sid || '')) { closeSessionMenu(); return; }
+  // force=true 来自「进文件夹选择卡片」：此时问答根本还没从磁盘装回来，
+  // 先 saveSessionNow 会把当前空条目写进目标会话（实测会清空！）——必须跳过。
+  // 空会话（只有译文条目）也不存，避免新建后没说话就留下一堆空会话文件。
+  if (!force && sessionHasChatContent()) {
+    persistSession.cancel?.();
+    try { if (sessionSaveInFlight) await sessionSaveInFlight; await saveSessionNow(); } catch { /* 存不下也允许切 */ }
+  }
   setActiveSidFor(docId, sid || '');
   clearChatBlock();                 // 会话只管问答，译文留着
   chatVersion += 1;                 // 换了会话 = 全局会话内容变了：作废所有停放视图（否则切回旧标签还是旧会话）
@@ -6174,15 +6305,24 @@ async function switchSession(sid) {
   renderSessionBar();
   updateSendScope();
   toast('已切换会话', 'ok', 1600);
+  sessionsOnSessionChanged({ refresh: false });
 }
 
-/** 新建一个空会话并切过去 */
-async function newSession() {
+/** 新建一个空会话并切过去；silent=true：进文件夹自动新建（不弹提示）
+ *  fromEntry=true：从「进文件夹选择卡片」进来，问答还没装回内存 —— 不能先保存（会把空条目写进旧会话） */
+async function newSession({ silent = false, fromEntry = false } = {}) {
   if (!state.doc) return;
+  if (state.busy) {
+    toast('正在生成中，先等它跑完或点停止再新建会话', 'err', 3200);
+    return;
+  }
   const docId = state.doc.docId;
   // 先把当前会话存盘，再换 sid（顺序不能反，否则那几轮对话就存到新会话名下了）
-  persistSession.cancel?.();
-  try { if (sessionSaveInFlight) await sessionSaveInFlight; await saveSessionNow(); } catch { /* 存不下也允许新建 */ }
+  // fromEntry=true：问答还没从磁盘装回内存，保存会写空条目，必须跳过
+  if (!fromEntry && sessionHasChatContent()) {
+    persistSession.cancel?.();
+    try { if (sessionSaveInFlight) await sessionSaveInFlight; await saveSessionNow(); } catch { /* 存不下也允许新建 */ }
+  }
   setActiveSidFor(docId, newSid());
   clearChatBlock();                 // 新建会话 = 清空问答区；译文不动（它不属于任何会话）
   chatVersion += 1;                 // 新建会话 = 全局会话内容变了：作废所有停放视图
@@ -6192,22 +6332,28 @@ async function newSession() {
   state.summaryCovered = 0;
   // 新会话 = 清掉 AI 功能记录（深入阅读/教学缓存），菜单里不再显示「已生成」
   resetFolderAiRecords();
-  // 立刻落盘一次：不存的话新会话在服务端没有文件，会话列表里就看不到它，
-  // 用户会以为「新建了但列表里没有」（实测踩过）。空会话也是一次有效的保存。
-  try { await saveSessionNow(); } catch { /* 存不下也不阻塞新建 */ }
+  // 新会话先不落盘：首次发消息时 addEntry/finishEntry 会 scheduleSessionSave，
+  // 那时才在服务端创建文件（设计 §3.5.3）。空会话不进列表，也就不会出现
+  //「新建了几个空会话、继续上次却是空白」的问题。
   await loadSessionList();
   loadPaperMemory();
   closeSessionMenu();
   renderSessionBar();
   updateSendScope();
-  toast('已新建会话', 'ok', 1600);
+  if (!silent) toast('已新建会话', 'ok', 1600);
+  sessionsOnSessionChanged({ refresh: false });
 }
 
-/** 删掉一个会话文件（不碰论文 / 笔记）；删的是当前会话就退回老会话或新建 */
-async function deleteSession(sid) {
+/** 删掉一个会话文件（不碰论文 / 笔记）；删的是当前会话就退回老会话或新建
+ *  confirm=false：sessions.js 已用应用内确认框问过了 */
+async function deleteSession(sid, { confirm: askConfirm = true } = {}) {
   if (!state.doc) return;
+  if (state.busy) {
+    toast('正在生成中，先等它跑完或点停止再删除会话', 'err', 3200);
+    return;
+  }
   const docId = state.doc.docId;
-  if (!confirm('删除这个会话？论文和笔记不受影响。')) return;
+  if (askConfirm && !confirm('删除这个会话？论文和笔记不受影响。')) return;
   try {
     const r = await fetch(`/api/session?${sessionQuery(currentFolderKey(), sid)}`, { method: 'DELETE' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -6228,24 +6374,16 @@ async function deleteSession(sid) {
   renderSessionMenu();
   renderSessionBar();
   toast('会话已删除', 'ok', 1600);
+  sessionsOnSessionChanged({ refresh: false });
 }
 
 function renderSessionBar() {
-  const btn = $('#sessBtn');
   const bar = $('#sessBar');
-  if (!btn || !bar) return;
-  // 会话条只在问答块开着的时候出现
+  if (!bar) return;
+  // 会话头只在问答块开着的时候出现（译文页不该挂着会话信息）
   const chatActive = !!state.doc && rightPanelInCol(1) === 'chat';
-  if (!chatActive) { bar.classList.add('hidden'); return; }
-  bar.classList.remove('hidden');
-  const cur = activeSidFor(state.doc.docId);
-  const row = sessionStore.list.find((s) => (s.sid || '') === cur);
-  // 默认会话（老的单会话文件，sid 为空）不撒谎：有标题就用标题，没标题就叫「会话」
-  const name = row?.title || (cur ? '新会话' : '会话');
-  btn.title = `${name} · 点击切换或新建会话`;
-  btn.setAttribute('aria-label', `当前会话：${name}。点击切换或新建会话`);
-  const label = $('#sessLabel');
-  if (label) label.textContent = name;
+  bar.classList.toggle('hidden', !chatActive);
+  if (chatActive) sessionsRefreshHeader();
 }
 
 /** 回答下面的来源列表：编号 + 标题（只提供外链） */
@@ -8595,9 +8733,30 @@ function ensureReady() {
   return true;
 }
 
-/** 统一入口：注入空闲超时，避免界面像卡死一样一直转 */
+/** 统一入口：注入空闲超时，避免界面像卡死一样一直转。
+ *  用户记录里出现过「接口暂时不可用，请检查连接后重试」连着弹两次（上游偶发 5xx / 网络断一下）；
+ *  这里在「还没有任何内容到达」时自动等 0.9s 重试一次，用户不用手动点重试。 */
 function chat(opts) {
-  return streamChat({ idleMs: Number(Settings.data.idleMs) || 60000, ...opts });
+  const run = (wrapped) => streamChat({ idleMs: Number(Settings.data.idleMs) || 60000, ...wrapped });
+  return (async () => {
+    let started = false;
+    const wrapped = {
+      ...opts,
+      onDelta: (piece, all) => { started = true; opts.onDelta?.(piece, all); },
+      onReasoning: (piece, all) => { started = true; opts.onReasoning?.(piece, all); },
+    };
+    try {
+      return await run(wrapped);
+    } catch (e) {
+      if (started || opts.signal?.aborted) throw e;
+      const msg = String(e?.message || '');
+      const transient = /HTTP\s*(?:5\d\d|429)|接口暂时不可用|网络|failed to fetch|fetch failed|socket|ECONN|EAI_AGAIN|upstream|temporar|unavailable|overload|bad gateway|gateway|rate.?limit|限流|繁忙/i.test(msg);
+      if (!transient) throw e;
+      await new Promise((r) => setTimeout(r, 900));
+      if (opts.signal?.aborted) throw e;
+      return run(wrapped);
+    }
+  })();
 }
 
 function makeController() {
@@ -8634,6 +8793,7 @@ function setBusy(on, hint = '') {
   const clearBtn = $('#clearSession');
   if (clearBtn) clearBtn.disabled = on;
   updateSendScope();
+  sessionsSetBusy(on);
 }
 
 /** 输入框旁边那句范围提示（`#sendScope`）：只讲这次会发什么，不再讲带了几轮历史。 */
@@ -9595,6 +9755,11 @@ async function send(retryPending = null) {
     return;
   }
   if (!ensureReady()) return;
+  // 会话选择卡片（用户拍板 B）：不选会话直接输入发送 = 自动开一个新会话，再发这条消息
+  if (!pending && sessionsIsEntryMode()) {
+    const ok = await sessionsLeaveEntryForNewSession();
+    if (!ok) return;
+  }
 
   if (!pending) {
     const inputValue = ta.value;

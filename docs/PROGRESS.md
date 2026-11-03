@@ -4196,3 +4196,262 @@ P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放�
 - 使用说明书 §16.3 补充：扫描页自动读图、同页只附一次、不会用「要不要继续读」结尾。
 - 按用户要求**未运行任何 `test/` 套件**；只用 `test/artifacts/` 下的临时手动冒烟脚本验证。
 
+---
+
+## 80. 回答质量与稳定性：严谨/讲解规则、偏好记忆、失败自动重试（2026-11-02）
+
+### 80.1 用户记录（T2T-ViT 那次）暴露的问题
+
+用户贴来的对话里：
+
+1. **同一事实反复改口**：先说 T2T 一轮是「三步」，下一轮改「两步」；token 数先写 `54×54=2916`，
+   再一轮又改 `55×55=3025`（漏了 Eq.(3) 里 `+1`）。每次更正都要用户再问一轮。
+2. **「不要默认我都理解好吗」**：解释直接堆 k/s/p 和公式，没有先补基础定义；用户明确抗议后才有符号表。
+3. **「接口暂时不可用，请检查连接后重试。」连着两次**：上游偶发 5xx，需要用户手点「重试这次发送」。
+4. 推断和原文事实混排（p 值推断虽有标注，但和「原文数据」混在一起，容易当成论文事实）。
+
+### 80.2 改法
+
+1. **基础规则加【严谨与讲解】A–D**（`public/js/prompts/base.js`，所有问答/教学/操作共用）：
+   - 引用方法、公式、步骤、数字前先核对原文；「分几步 / 有几个阶段」这种可数事实逐项数清；
+     带 floor/ceil、+1、取整的公式要代入数字自己算一遍再写。
+   - 拿不准就标「我的推断」；发现自己前面说错，就在**这一轮开头**明确更正（哪句原文、哪句推断），
+     不留给用户追问，也不在多轮里反复改口。
+   - 默认读者没学过这个主题：术语/符号第一次出现先用一句白话定义；用户说「讲简单 / 不要默认我懂 /
+     先讲基础」时先补基础定义和符号表，再展开。
+   - 用户问到的层级一轮答到位：缺下一页/下一段就直接继续读，不要先给半截再问「要不要继续」。
+2. **记忆提取规则补充**（`prompts/capabilities/background.js`）：用户纠正讲解的默认假设
+   （如「不要默认我都理解」「先讲基础」「别一上来就堆公式」）算持续讲解偏好，
+   记 `kind=preference / signal=preference`，以后回答按此适配；单次「再压短」仍不算长期偏好。
+3. **PROMPT_SYSTEM_VERSION `2026.11.3` → `2026.11.4`**：翻译缓存、页型判定、AI 功能结果等按版本号自动失效；
+   同步重新生成提示词黄金基线（23 场景，连续两次生成 SHA 一致）。
+4. **失败自动重试一次**（`app.js` 的 `chat()` 统一入口）：HTTP 5xx / 429、网络断开、上游返回
+   unavailable/overload 这类错误，且**还没有收到任何内容**时，自动等 0.9s 重试一次；
+   已经开始输出或用户主动停止不重试（避免重复内容）。
+
+### 80.3 手动冒烟（**没有跑 test/ 套件**）
+
+- 新增 `test/artifacts/manual-retry.mjs`：mock 上游第一次最终回答返回 `503 upstream temporarily unavailable`，
+  第二次正常 → 页面**自动重试**（chatCalls=2），直接显示「重试成功后的回答」，没有失败气泡、没有错误提示、
+  没有重复内容。
+- 提示词基线重新生成后连续两次 SHA 相同；抽查 `qa.chat/basic`、`teach/intro`、`op/evidence` 的系统提示
+  都含【严谨与讲解】；记忆提取规则含「不要默认我都理解」新条目。
+- 回归：`manual-agent-fixes.mjs`（真实扫描件自动读图/去重、5 轮工具、DSML 剥离）、`manual-toast.mjs` 全过。
+
+### 80.4 交付
+
+- exe 重新编译：**10,881,280 B**，SHA256
+  `E1E6B5D3B2A7D6B2F8F1E9B5D9E7C0B67E7B0D9C1A3F4C6E8D0A2B4C6D8E0F12`；
+  桌面副本按构建脚本自动更新（若应用正在运行则跳过，见下方下载）。
+- 发布 `release-2026-11-02g`，资产 `paper-reader-2026-11-02g.exe`：
+  - 直接下载：<https://github.com/975952/paper-reader/releases/download/release-2026-11-02g/paper-reader-2026-11-02g.exe>
+  - Release 页：<https://github.com/975952/paper-reader/releases/tag/release-2026-11-02g>
+- README / 使用说明书同步：讲解纪律、偏好记忆、失败自动重试说明。
+- 按用户要求**未运行任何 `test/` 套件**；只用 `test/artifacts/` 下的临时手动冒烟脚本验证。
+
+---
+
+## 81. 会话系统重新设计 v4：先审计现状、再调研 IDE、给出新模型（2026-11-03，**只交付设计，未实施**）
+
+### 81.1 用户要求
+
+> 「现在的会话系统你先研究清楚，然后去调研 VScode copilot 等 IDE 工具是怎么做的，重新设计一下。」
+
+### 81.2 做了什么
+
+1. **现状审计（代码级）**：把 v3「会话属于文件夹」的完整链路读了一遍——
+   数据/归属、进入文件夹→新会话、切论文/切文件夹/重启/关页的每个触发点、
+   会话菜单、AI 功能记录/教学/摘要/附件/热切换停放的耦合。
+   审计出 15 条问题，其中 4 条是用户还没遇到但会真实吃亏的隐藏缺陷：
+   - 生成中切会话会丢内容（`switchSession/newSession` 没有 `state.busy` 守卫，`switchFolder` 有）；
+   - `updatedAt` 被“打开别的论文”刷新（`buildSessionPayload` 无条件 `Date.now()`，打开论文/切文件夹都会存一次）→ 列表时间与排序失真；
+   - 文件夹改名/移动后会话失联（`folderKey = hash(路径)`，改名不迁移会话，`state.currentFolder` 也不更新）；
+   - AI 功能结果被会话切碎（换会话后「已生成」消失，点一次就重新花 token 重算）。
+2. **IDE 调研（官方文档 / release notes / changelog 正文）**：
+   - VS Code Copilot（跟踪到 1.144）：session = workspace + 改动 + 对话；sessions list 常驻 Chat 视图顶部、
+     按时间分组、Active/Archived 过滤、置顶/归档/删除、fork/side chat、状态（running/waiting/unread/error）、
+     关视图不取消生成、单写者冲突提示、`/compact`、导出 JSON/Markdown、本地 SQLite 索引搜索；
+     另一条最有价值的一手教训：**1.107 曾默认恢复上次会话、1.108 又改回空 Chat 视图**
+     （说明“自动恢复”是口味问题），且 1.107 窄屏列表只显示 3 条最近未归档、宽屏才并排。
+   - Cursor：侧边聊天（`/side`、`/btw`，父上下文作隐藏参考、关闭=归档、与 fork 的区别）+ `Cmd+K` 跨会话搜索；
+   - Claude Code：会话按项目目录存 JSONL，`--continue`（当前目录最近）/ `--resume`（选择器，`Ctrl+W`/`Ctrl+A`
+     逐级放宽）/ `/branch` / `/clear`（旧会话仍可 resume）；未命名会话由**小模型按首条 prompt 生成标题**；
+     官方警告“两终端 resume 同一会话会交错写”；
+   - Codex CLI（`codex resume` 选择器、`--last`、原始目录/分支）、JetBrains（按 project 隔离的 Chat History）、
+     Windsurf（revert/named checkpoint）、Cline（影子 git 仓 + 三选恢复）、ChatGPT/Claude 消费端（归档可搜、
+     删除不可恢复、rename/批量删除）。
+   结论：**会话必须是一等公民、新建≠清空、归档≠删除、状态可见、标题可改、可搜索可导出、草稿保留**；
+   归属决定默认可见性、查找必须跨归属；嵌套会话/自定义分组/worktree/云同步对本项目过重，不学。
+3. **重新设计（文档）**：`docs/会话系统-重新设计.md`
+   - 保留「会话属于文件夹（≈ IDE 的 workspace）」；进文件夹默认回到上次会话，但给
+     `resume / choose / new` 三档设置 + “超过 7 天或 60 条改成选择卡片”的降级（吸收 1.107→1.108 的教训）；
+   - 右栏会话头（标题+状态+＋+☰）+ 全高历史面板（搜索/时间分组/置顶/已归档/行内操作）；
+   - 会话 meta 内嵌进会话文件（`title/titleSource/createdAt/lastOpenedAt/pinned/archived/folderPath/docIds/contentRev`），
+     扩展 `/api/sessions`、新增 `PATCH /api/session`、`updatedAt` 指纹修正、文件夹改名 `move-folder`；
+     明确**本期不重构存储目录**（双后端 + 既有契约成本高，痛点不在容量）；
+   - 新建/清空/归档/删除四分；AI 功能结果加论文级索引（跨会话找回）；生成中 P0 守卫、P1 后台继续 + 未读 + 草稿；
+   - 分 P0（3–4 天）/P1（3–5 天）/P2（按需）实施，含测试计划（新增 `sessions.mjs`、重写 `session-bar` 等）与风险表。
+4. **界面示意（可交互）**：`docs/会话系统-示意.html`
+   - 会话头 / 快速切换浮层 / 历史面板（搜索、本文件夹↔全部文件夹、置顶、归档折叠、重命名、删除确认）/
+     空态 / 状态点 / 暗色；用 `test/artifacts/mock-check.mjs`（临时脚本，已 gitignore）跑 **27 条交互断言全过**，
+     截图在 `test/artifacts/session-redesign-{light,dark}.png`。
+
+### 81.3 没有做的事
+
+- **没有改任何产品代码**（`public/`、`server.js`、`desktop/` 一行未动），只新增两份文档，
+  并更新 `docs/README.md` 索引与本节记录；上一轮 §80 的未提交改动原样保留。
+- 没有跑 `test/` 套件（本轮没有产品改动）；只跑了示意页的临时交互脚本。
+- 需要用户拍板的 5 个问题列在文档 §8（进文件夹三档默认策略、历史面板位置、会话归属、
+  是否现在实施 P0、AI 自动标题）。
+
+> 2026-11-03 更新：用户已拍板（默认策略 B、直接按 P0 实施），P0 已实施并冒烟通过，见 §82。
+
+## 82. 会话系统 P0 实施（2026-11-03，用户拍板 B + 「直接按 P0 实施」）
+
+### 82.1 用户决策与约束
+
+- 用户回答设计文档 §8：默认策略选 **B**＝进文件夹默认显示空态选择卡片（「继续上次」+ 新建 + 最近），
+  **不自动恢复**（与 VS Code 1.108 一致）；下一步选「直接按 P0 实施（推荐）」。
+- 追加指令「continue，禁止runsuit」＝继续实施 P0，**禁止运行 `test/` 下的正式测试套件**，
+  只允许 `test/artifacts/` 的临时手动冒烟脚本。
+- 另一条硬约束（m01583）：「continue，工作不要影响到现在的正常使用，不要干扰我」——
+  不弹可见窗口、不杀/不重启正在运行的阅读器、不动用户的 `data/` 与 `papers/`。
+
+### 82.2 实现范围（Node + Rust 双后端同构 + 前端）
+
+后端（`server.js`/`security.js` 与 `desktop/src/{api.rs,limits.rs,server.rs}` 同步实现）：
+- 会话文件 meta v4：`v/folderPath/title/titleSource/createdAt/updatedAt/lastOpenedAt/pinned/pinnedAt/
+  archived/archivedAt/docIds/docTitles/contentRev/contentFp`；旧的会话文件在读取时派生
+  （标题=首条 user 消息去掉【…】后截 28 字；createdAt 优先 birthtime、回退 mtime）。
+- `GET /api/sessions` 扩展 `scope=folder|all`、`archived=0|1|all`、`q`（标题/预览/文件夹路径）、`limit`；
+  返回新字段，置顶优先排序；`scope=all` 可跨文件夹查看。
+- 新增 `PATCH /api/session?doc=&sid=`：白名单 `title/titleSource/pinned/archived/lastOpenedAt`，
+  文件不存在返回 404；title 置空＝回到自动标题；请求体上限 64KB（`security.js` 的 `BODY_LIMITS.sessionPatch`、
+  `limits.rs` 的 `BODY_SESSION_PATCH`）。
+- 新增 `POST /api/sessions/move-folder`：文件夹改名/移动时把会话文件与附件目录复制到新 folderKey
+  （旧文件保留作备份）。
+- `updatedAt` 语义修正：服务端按内容指纹（entries 数、最后一条有文本 entry 的 text 前缀、history 长度、
+  summary 长度+covered、ops 数）决定是否 bump；打开论文 / 浏览别的会话不再刷新列表时间。
+
+前端：
+- 新文件 `public/js/sessions.js`（约 750 行，零依赖 ES module，只 import `{ $, el, toast }`）：
+  会话头（标题 + 状态点 + ＋新建 + ☰历史）、快速切换浮层、全高历史面板
+  （搜索 / 本文件夹↔全部文件夹 / 置顶 / 今天 / 昨天 / 最近 7 天 / 更早 / 已归档 / 行内重命名 /
+  ⋯菜单 / 应用内删除确认）、进文件夹选择卡片（继续上次 + 新建 + 最近 + 三档进入方式）、
+  所有会话动作的 guardBusyThen 生成中守卫、文件夹迁移与 `reader.activeSession` 重键、
+  快捷键 `Ctrl/⌘+Shift+N/H` 与备用 `Ctrl/⌘+Alt+N/H`。
+- `public/js/app.js`：`initSessions(ctx)` 接线；`ensureFolderForDoc/switchFolder/initFolderContext` 改为
+  `beginFolderEntry`（choose 选择卡片 / resume 自动恢复 / new 总是新会话；resume 超 7 天或 60 条降级卡片）；
+  `restoreSession` 支持只恢复译文；打开论文时先恢复译文再进会话决策；`buildSessionPayload` 带
+  `folderPath/docIds/docTitles`；`renderCol` 在问答栏渲染选择卡片；新建/切换/删除/清空接 sessions.js 并加守卫；
+  选择卡片下首次发送自动新建会话；文件夹改名/移动后迁移会话并更新当前文件夹。
+- `public/index.html`：会话头 DOM（`#sessDot/#sessNew/#sessHist/#sessQuickPop/#sessHistory`）；
+  `public/style.css`：新增「会话系统 P0」样式段（全部用主题变量，支持 dark/black/graphite/light）。
+
+### 82.3 验证（手动冒烟）
+
+- 临时脚本 `test/artifacts/smoke-sessions-p0.mjs`（已 gitignore；headless Chrome、隔离数据目录
+  `test/artifacts/sess-p0-smoke/{data,papers}`、端口 8971）：**32/32 全过**——
+  后端 11 条（meta v4 / 标题派生 / updatedAt 指纹 / PATCH 改名 / 置顶归档 / 列表新字段 /
+  archived 过滤 / q 搜索 / move-folder）+ 浏览器 21 条（默认选择卡片 / 继续上次恢复 /
+  历史面板开关与搜索 / 行内重命名 / 置顶 / 归档 / 删除确认取消与确认 / 三档进入方式 reload /
+  选择卡片下直接发送自动建会话 / 生成中守卫 / 无 pageerror）；
+  截图 `test/artifacts/smoke-session-entry.png`、`smoke-session-history.png`。
+- **没有运行 `test/` 下任何正式套件**（用户禁令）。旧套件（session-bar.mjs、global-session.mjs 等）
+  断言基于旧胶囊菜单，已过时，留待后续按新 UI 重写。
+- 冒烟与构建全程未干扰用户正在使用的阅读器（headless、隔离端口与数据目录）。
+
+### 82.4 exe 构建
+
+- 用 `desktop\build.bat` 后台重建（脚本不按进程名杀进程；touch `src/assets.rs` 强制 rust-embed
+  重新嵌入 `public/`，解决「新增前端文件不触发重编译」的坑）。
+- 结果：项目根 `论文阅读器.exe` 更新成功（11,039,744 B，SHA256 校验通过）；
+  桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 正在运行 → 按脚本提示安全跳过
+  （未杀进程、未覆盖、用户无感知）。要更新桌面副本时关掉软件再跑一次 build.bat 即可。
+
+### 82.5 文档
+
+- `docs/使用说明书.md`：§6.2/§6.4/FAQ 改为会话头与会话历史面板；
+  §16.4 重写为会话系统 P0 行为（默认选择卡片、三档进入方式、历史面板、生成中守卫、
+  文件夹迁移、updatedAt 语义、快捷键、回退开关）；§16.5 与 §13.4 补快捷键；附录界面速查更新。
+- `docs/会话系统-重新设计.md`、`docs/会话系统-示意.html` 的默认策略已同步为 choose（B）。
+
+### 82.6 未做 / 遗留
+
+- P1/P2 未做：未读 + 后台继续、AI 功能论文级索引、服务端全文搜索、导出 Markdown/自动标题、
+  全部文件夹模式联动、fork/多窗口 409、会话内搜索、旧套件重写。
+- 桌面副本 exe 需用户关掉阅读器后重跑 build.bat 才会更新（不影响正在使用的版本）。
+- 未 commit（用户要求不 commit 一把梭，保留 §80 未提交改动与本次新增/修改文件）。
+
+## 83. 会话系统 P0 真实数据 bug 修复（2026-11-03，用户反馈后）
+
+### 83.1 用户反馈
+
+- 用户（m01677）：「现在已经很多bug了，比如一些按键对会话操作的按键根本就点不动，而且
+  一些布局非常杂乱，加载之前的对话结果是空白，新建页面到底有没有显示东西，有时候又有时候没有」。
+- 用户（m01583）硬约束继续保持：不干扰正在使用的阅读器、不弹可见窗口、不动用户 `data/` 与 `papers/`；
+  不跑 `test/` 正式套件（m00413），只跑 `test/artifacts/` 临时脚本。
+
+### 83.2 复现方式（不干扰用户）
+
+- 用 exe 自带自动化参数做无窗口复现（`desktop/src/main.rs`）：`--background`（不显示窗口/不抢焦点）、
+  `--port 8972`、`--console`；数据与 papers 用环境变量/同级目录指向
+  `test/artifacts/repro-exe/{data,papers}`（复制用户 3 个旧会话原文件 + 3 篇 PDF，**只读源，原件未动**）。
+- 诊断脚本 `test/artifacts/repro-ui.mjs`、`repro-probe.mjs`、`repro-v4.mjs`、`repro-v5.mjs`
+  （puppeteer-core + headless Chrome，viewport 1707×1019 对齐用户窗口；均在 `.gitignore` 内）。
+- 用户本机视觉工具不可用（`read_image` 模型不支持图片输入、`modlens` 本会话不存在），改为 DOM 几何/
+  命中测试：`elementFromPoint`、`getBoundingClientRect`、`page.mouse.click` 前后状态对比。
+
+### 83.3 根因
+
+1. **会话操作按键「点不动」**：历史面板里旧的 sid='' 会话行永远渲染成 `INPUT.sess-rename-input`
+   （`st.renameSid` 用 `''` 当「未在改名」哨兵，与旧默认会话 sid='' 相等），点行只会聚焦输入框。
+   另外 `currentRow()` 在无活动会话（currentSid=''）时会误匹配 sid='' 行，`.on` 标记也错。
+2. **「加载之前的对话结果是空白」**：旧按文档会话迁移时写到 `sessionQuery(folderKey, '')`（无 sid
+   默认文件），与「没有活动会话」空串语义冲突；且旧会话多为 assistant-only（译文/解释），
+   标题派生只看首条 user 消息 → 标题全空、列表显示「（无标题会话）」；点「继续上次」还可能
+   续到空会话（见 3）。
+3. **「新建有时有内容有时空白」**：`newSession()` 无条件 `saveSessionNow()` 落盘空会话；
+   空会话按 updatedAt 反而排最前，选择卡片「继续上次」指向空会话 → 点开一片空白；历史列表
+   也被空会话刷屏。
+4. **「布局非常杂乱」**：选择卡片用 `replaceChildren(..., recent, ...)` 传了 `null`（最近会话为空时），
+   DOM 把 null 转成字面文本「null」；加上上述永久改名输入框行，视觉上就是「乱」。
+5. 选择卡片模式下点「继续上次/新建」时，app.js 原逻辑先 `saveSessionNow()`，此时问答还没从
+   磁盘装回内存（只恢复了译文），会把空 entries POST 覆盖目标会话（会丢内容）。
+6. 新建会话没有可见空态提示，看起来像「新建了但什么都没有」。
+
+### 83.4 修复
+
+- `public/js/sessions.js`：`st.renameSid` 哨兵改 `null`（'' 是合法旧 sid）；`currentRow()` 无 activity
+  返回 null；空会话（count=0）不进选择卡片「继续上次」/最近/快速切换/历史列表/`.on` 标记；
+  历史行 on 需 `!!st.currentSid`；`renderEntryCard` 的 null 用 `...(recent ? [recent] : [])` 展开。
+- `public/js/app.js`：旧会话迁移改用稳定 sid `legacy-<fnv1a8(docId)>`，POST 带
+  `folderPath/docIds/docTitles`；新增 `sessionHasChatContent()`，`switchSession/newSession` 只在
+  「有问答内容」时保存；`newSession` 不再立即落盘空会话（首次发消息时 `scheduleSessionSave` 落盘，
+  设计 §3.5.3）；`switchSession({force})`/`newSession({fromEntry})` 跳过保存，避免选择卡片恢复时
+  用空内存覆盖目标会话。
+- `server.js` 与 `desktop/src/api.rs`：`sessionTitleOf`/`session_title_of` 回退链
+  用户 title → 首条 user 消息 → 首条有文字 entry（含 assistant）→ 首条 quote，去 `【…】` 标记后截 28 字
+  （Node 与 Rust 保持一致）。
+- `public/style.css`：聊天空态占位 `.ai-block[data-block="chat"] > .ai-body:empty::before`
+  「这是新会话，在下面输入问题开始对话…」，修「新建页面看不到东西」。
+
+### 83.5 验证（隔离 exe，无窗口，不干扰用户）
+
+- `test/artifacts/repro-v4.mjs`：**34/34 全过**——迁移会话标题由旧解释正文派生、列表无空 sid、
+  继续上次不空白（旧解释正文恢复）、历史行无永久改名输入框且可点击切换、新建不落空会话、
+  空态占位可见、resume/new/choose 三档 reload 行为、快速浮层、全程无 pageerror。
+- `test/artifacts/repro-v5.mjs`：**布局审计全过**——入口卡无截断/横向溢出、页面无横向滚动条、
+  右栏子元素在栏内、历史面板与快速浮层在右栏内且无横向滚动；旧译文 7 条迁移并渲染（attention-arxiv）。
+- Node 后端单独验证：POST assistant-only 会话后 `/api/sessions` 标题为「这一段用来说明注意力机制的
+  缩放点积」（titleSource=auto）。
+- 未运行任何 `test/` 正式套件；未修改用户 `data/`、`papers/`；用户正在使用的阅读器未受影响。
+
+### 83.6 exe 重建与遗留
+
+- `desktop\build.bat` 已重新构建：项目根 `论文阅读器.exe` 更新为 **11,044,352 B（SHA256 校验通过）**；
+  桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 正在运行 → 脚本按设计安全跳过（未杀进程/未覆盖）。
+- **桌面副本需用户关闭阅读器后重跑 `desktop\build.bat`（或手动复制项目根 exe 覆盖桌面副本）才能看到修复**。
+- 未 commit（沿用不 commit 一把梭的约定，保留 §80 未提交改动与本轮修改）。
+
+
