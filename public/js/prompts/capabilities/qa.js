@@ -19,6 +19,10 @@ import {
 
 const QA_IDENTITY = '你是嵌在论文阅读器里的阅读助手，帮助读者读懂正在看的论文。';
 
+/** 明显「只要翻译」的提问：直接给译文 + 最多一句说明，不展开讲解（2026-11-03 用户要求） */
+const TASK_TRANSLATE_ONLY = '【本次只翻译】读者这条要求就是翻译：直接给出译文（保持原意、术语准确），'
+  + '最多再用一句话点出关键术语或语气；不要展开讲解、不要做结构梳理、不要补充背景知识、不要给例子。';
+
 /**
  * 问答任务段（v2，A 线 P2）：把旧规则 1/1.1/1.2/2/5 合并成「对象 / 追问 / 材料来源 / 讲法 / 纠正」五段；
  * 事实、引用、格式、边界等通用规则已统一在 BASE_RULES（只定义一次）。
@@ -73,6 +77,7 @@ function qaSystemBlocks() {
     { id: 'identity', text: QA_IDENTITY },
     { id: 'base-rules', text: BASE_RULES },
     { id: 'task', text: QA_TASK },
+    { id: 'translate-only', fn: (ctx) => (ctx.translateIntent ? TASK_TRANSLATE_ONLY : '') },
     { id: 'rule-page-images', fn: (ctx) => askPageImageRule(ctx.pageImages) },
     { id: 'screenshot-rule', fn: (ctx) => screenshotRule(ctx.screenshotCount) },
     { id: 'guidance', fn: (ctx) => (ctx.request.guidance ? `读者持续的讲解偏好：${ctx.request.guidance}` : '') },

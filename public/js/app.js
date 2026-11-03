@@ -4781,7 +4781,7 @@ function ensureBlock(id) {
   const meta0 = AI_BLOCKS.find((b) => b.id === id) || {};
   const hint = el('div', { class: 'ai-hint', text: meta0.hint || '' });
   const body = el('div', { class: 'ai-body' }, hint);
-  // 译文面板的工具条：框选论文区域 → 直接翻译截图里的文字（图表/公式/扫描页）。
+  // 译文面板的工具条：框选论文区域 → 翻译截图里的文字；文本输入 → 粘贴/手输直接翻。
   // 放在 ai-body 外面，滚动译文时按钮不会被带着滚走。
   const tools = id === 'translate' ? el('div', { class: 'ai-tools' },
     el('button', {
@@ -4792,8 +4792,14 @@ function ensureBlock(id) {
         state.startRegion?.('translate');
       },
     }, iconEl('region'), el('span', { text: '截图翻译' })),
+    el('button', {
+      type: 'button', class: 'ai-tool-btn', id: 'trTextBtn',
+      title: '粘贴或输入文字，直接翻译（Ctrl+Enter 翻译）',
+      onclick: () => toggleTranslateInput(),
+    }, iconEl('translate'), el('span', { text: '文本翻译' })),
   ) : null;
-  const root = el('section', { class: 'ai-block', dataset: { block: id, panel: id } }, tools, body);
+  const trInput = id === 'translate' ? buildTranslateInputPanel() : null;
+  const root = el('section', { class: 'ai-block', dataset: { block: id, panel: id } }, tools, trInput, body);
 
   // R7：滚动时刷新底部渐隐（滚到底就摘掉标记）
   body.addEventListener('scroll', updateScrollFades, { passive: true });
@@ -5262,6 +5268,14 @@ function serialiseRetryPayload(raw) {
       kind, docId: String(raw.docId || '').slice(0, 240), sid: String(raw.sid || '').slice(0, 40),
       page: raw.page || null, label: String(raw.label || '截图').slice(0, 120),
       refId: validAttachmentId(raw.refId) ? raw.refId : '',
+    };
+  }
+  if (kind === 'translate-text') {
+    // 文本输入翻译（2026-11-03）：原文直接存在 payload 里（不依赖 PDF 选区），重试/恢复后原样再翻
+    return {
+      kind, docId: String(raw.docId || '').slice(0, 240),
+      text: String(raw.text || '').slice(0, 20000),
+      targetLang: raw.targetLang === 'English' ? 'English' : '中文',
     };
   }
   if (kind === 'operation') {
@@ -5850,6 +5864,8 @@ function focusExistingResult(entry, label = '') {
   let root = entry.root || null;
   if (!root) {
     const blockId = entry.block === 'translate' ? 'translate' : 'chat';
+    // 结果块可能还没挂载（例如一直待在译文面板）：先确保块存在，否则会把「有记录」误判成「没有」
+    ensureBlock(blockId);
     const body = state.blockMeta?.[blockId]?.body;
     root = [...(body?.querySelectorAll?.('.msg') || [])].find((node) => node.__sessionRecord === entry) || null;
   }
@@ -5917,6 +5933,11 @@ function restoreRetryCallback(row, entry, priorUser) {
     }
     if (payload.kind === 'translate-shot') {
       retryTranslateShot(payload);
+      return;
+    }
+    if (payload.kind === 'translate-text') {
+      // 文本输入翻译：原文存在 payload 里，直接原样再翻一次
+      doTranslateText({ text: payload.text || '', targetLang: payload.targetLang === 'English' ? 'English' : '中文' });
       return;
     }
     if (payload.kind === 'operation') {
@@ -6104,10 +6125,14 @@ async function restoreSession(docId, { only = 'all' } = {}) {
       // 恢复出来的回答也要能存笔记：标题默认用上一条用户消息（重放时补上 __question）
       if (row.kind !== 'user' && priorUser) entry.root.__question = String(priorUser.text || '').slice(0, 600);
       const retry = restoreRetryCallback(row, entry, priorUser);
+      // 用户口径：恢复出来的回答下面也要有「重新生成」按钮（只要有当时的请求记录）
+      const canRegenerate = row.kind !== 'user' && row.block !== 'translate'
+        && row.retry && typeof row.retry === 'object';
       if (row.kind !== 'user' && (row.text || row.status === 'stopped' || row.status === 'complete')) finishEntry(entry, row.text || '', {
         page: row.page, sources: row.sources, meta: row.meta, basis: row.basis,
         status: row.status === 'stopped' ? 'stopped' : 'complete',
-        onRetry: row.status === 'stopped' ? retry : null,
+        onRetry: (row.status === 'stopped' || (row.status === 'complete' && canRegenerate)) ? retry : null,
+        retryLabel: '重新生成',
       });
       else if (row.kind !== 'user' && row.status === 'failed') {
         entry.body.textContent = '上次发送失败。问题、文字附件和截图都保留在这次请求里，点「重试这次发送」即可。';
@@ -6612,9 +6637,8 @@ function initOps() {
     const opButton = (op) => {
       const walk = activeWalk();
       const progress = op.id === 'walk' && walk ? ` · 进行到第 ${walk.step} 步` : '';
-      const cached = op.id !== 'visual' && !!teachingEntryFor(op.id);
       return el('button', {
-        class: 'ops-item' + (cached ? ' cached' : ''),
+        class: 'ops-item',
         type: 'button',
         title: op.hint,
         dataset: { op: op.id },
@@ -6626,7 +6650,7 @@ function initOps() {
       },
       el('span', { class: 'ops-icon' }, iconEl(hasIcon(op.icon) ? op.icon : 'ops')),
       el('span', { class: 'ops-text' },
-        el('span', { class: 'ops-title', text: op.title + (cached ? ' · 已生成' : '') + progress }),
+        el('span', { class: 'ops-title', text: op.title + progress }),
         el('span', { class: 'ops-hint', text: op.hint })));
     };
     for (const op of TEACHING_OPS) menu.append(opButton(op));
@@ -6661,12 +6685,15 @@ function walkSid() {
   return state.doc ? activeSidFor(state.doc.docId) : '';
 }
 
-/** 会话里找到某能力最近一条已完成回答（用于菜单「已生成」与缓存命中） */
+/** 当前会话里找到「当前这篇论文」某能力最近一条已完成回答（跨论文/跨会话都不算命中） */
 function teachingEntryFor(opId) {
   const op = teachingOpById(opId);
   if (!op) return null;
+  const docId = state.doc?.docId || '';
+  if (!docId) return null;
   return [...state.sessionEntries].reverse().find((x) => x?.block === 'chat' && x?.tag === op.title
-    && (x.status === 'complete' || x.status === 'stopped') && x?.kind !== 'user') || null;
+    && (x.status === 'complete' || x.status === 'stopped') && x?.kind !== 'user'
+    && (x.docId || '') === docId) || null;
 }
 
 /** 重置教学状态（换会话 / 新建会话 / 清空会话时调用） */
@@ -6863,29 +6890,17 @@ async function runTeaching(opId, {
   const autoDirected = opId === 'intro';
   const teachPage = autoDirected ? (viewer?.currentVisiblePage?.() ?? viewer.current) : viewer.current;
 
-  // 缓存只给「一次生成、内容稳定」的三项；图表公式依赖页/对象，autoDirected 依赖位置与记忆，都不缓存
+  // 点击语义（用户拍板）：没打开会话 → 先建一个新会话再生成；
+  // 会话已打开、且当前这篇论文在这条会话里已有结果 → 直接定位过去；
+  // 没有（或结果节点已不在）→ 直接重新生成。内存缓存不再冒充「已生成」。
   if (!force && !retryEntry && !history.length) {
-    if (autoDirected) {
-      // 本次会话里已经有一条讲解：直接定位过去，不重复花钱（点「重新生成」才会按最新位置与记忆重讲）
-      const existing = teachingEntryFor(opId);
-      if (existing) {
-        focusExistingResult(existing, '先给我讲明白');
+    if (sessionsIsEntryMode()) {
+      const left = await sessionsLeaveEntryForNewSession();
+      if (!left) return null;
+    } else {
+      const existing = opId !== 'visual' ? teachingEntryFor(opId) : null;
+      if (existing && focusExistingResult(existing, autoDirected ? '先给我讲明白' : op.title)) {
         return { text: String(existing.text || '') };
-      }
-    } else if (opId !== 'visual') {
-      const hit = teachingCacheGet(docId, opId);
-      // 恢复出来的会话里已经有这条结果（跨重启的「已生成」）：直接定位过去，不重新花钱
-      const existing = teachingEntryFor(opId);
-      if (existing) {
-        focusExistingResult(existing, op.title);
-        return hit || { text: String(existing.text || '') };
-      }
-      if (hit) {
-        // 缓存有、DOM 没有（清过问答区）：直接把缓存内容补回一条结果，不重新花钱
-        const restored = addEntry({ block: 'chat', tag: entryTag, text: hit.text, kind: 'assistant', retry: { kind: 'teaching', docId, opId, block: 'chat', ask, extraUser: extraUser.slice(0, 4000), ...(teaching ? { teaching } : {}) } });
-        finishEntry(restored, hit.text, { page: hit.page || null, retryLabel: '重新生成', onRetry: () => runTeaching(opId, { force: true, retryEntry: restored, extraUser, ask, tag, teaching }) });
-        renderTeachingExtras(restored, { opId, chips: hit.chips || [], teaching: hit.teaching || teaching });
-        return hit;
       }
     }
   }
@@ -8236,44 +8251,32 @@ function createAgentProgress(entry) {
   const box = el('div', { class: 'agent-steps', 'aria-live': 'polite' });
   entry.root.insertBefore(box, entry.body);
   const bodyEl = entry.body.closest('.ai-body');
+  // 用户口径（2026-11-03）：过程不要逐条列细，也不要「已加入图片」这类汇报；
+  // 只保留一条笼统的状态行，回答一出来就整行撤掉。
   let current = null;
-  const addItem = (text, cls = 'running') => {
-    const item = el('div', { class: `as-item ${cls}` },
-      el('span', { class: 'as-ico', 'aria-hidden': 'true' }),
-      el('span', { class: 'as-text', text }));
-    box.append(item);
-    scrollEntryToTop(bodyEl, entry.root);
-    return item;
-  };
-  const finishItem = (item, text, ok = true) => {
-    if (!item) return;
-    item.className = `as-item ${ok ? 'done' : 'fail'}`;
-    const label = item.querySelector('.as-text');
-    if (label) label.textContent = text;
+  const show = (text) => {
+    if (!box.isConnected) return;
+    if (!current) {
+      current = el('div', { class: 'as-item running' },
+        el('span', { class: 'as-ico', 'aria-hidden': 'true' }),
+        el('span', { class: 'as-text', text }));
+      box.append(current);
+      scrollEntryToTop(bodyEl, entry.root);
+    } else {
+      const label = current.querySelector('.as-text');
+      if (label) label.textContent = text;
+    }
   };
   return {
     onStep(ev) {
-      if (!ev || !box.isConnected) return;
-      if (ev.type === 'round') {
-        current = addItem('正在思考…');
-      } else if (ev.type === 'tools') {
-        // 用户口径：不要「决定先查资料」这类编排话术；把「思考中」撤掉，下面只逐条列实际动作
-        current?.remove();
-        current = null;
-      } else if (ev.type === 'tool_start') {
-        current = addItem(`正在${toolStepLabel(ev.call)}…`);
-      } else if (ev.type === 'tool_done') {
-        finishItem(current, ev.summary || '完成', !!ev.ok);
-        current = null;
-      } else if (ev.type === 'ready') {
-        current?.remove();
-        current = null;
-      }
+      if (!ev) return;
+      if (ev.type === 'round' || ev.type === 'tool_start') show('正在查阅论文材料…');
+      else if (ev.type === 'ready') { current?.remove(); current = null; }
+      // tool_done / tools：不更新、不逐条列动作；失败也不在过程里刷细节
     },
     finish() {
-      if (current) finishItem(current, '完成');
       current = null;
-      if (!box.children.length) box.remove();
+      box.remove();
     },
     remove() { box.remove(); },
   };
@@ -8883,6 +8886,129 @@ function revealPanel(id) {
 
 /** 兼容旧名字：译文结果走的就是 revealPanel('translate') */
 function revealTranslatePanel() { revealPanel('translate'); }
+
+/** 译文面板：文本输入翻译的编辑区（粘贴/手输 → 翻译；不依赖 PDF 选区） */
+function buildTranslateInputPanel() {
+  const ta = el('textarea', {
+    class: 'tr-text-area', id: 'trTextArea', rows: '4', maxlength: '20000',
+    placeholder: '粘贴或输入要翻译的文字…（Ctrl+Enter 翻译，Esc 关闭）',
+  });
+  const lang = el('select', { class: 'tr-text-lang', id: 'trTextLang', title: '目标语言', 'aria-label': '目标语言' },
+    el('option', { value: '中文', text: '译成中文' }),
+    el('option', { value: 'English', text: '译成 English' }),
+  );
+  try {
+    const saved = localStorage.getItem('reader.translate.targetLang');
+    if (saved === '中文' || saved === 'English') lang.value = saved;
+  } catch { /* 忽略 */ }
+  lang.addEventListener('change', () => {
+    try { localStorage.setItem('reader.translate.targetLang', lang.value); } catch { /* 忽略 */ }
+  });
+  const panel = el('div', { class: 'tr-text hidden', id: 'trTextPanel' });
+  const submit = () => {
+    const text = String(ta.value || '').trim();
+    if (!text) { toast('先粘贴或输入要翻译的文字', 'err', 2000); ta.focus(); return; }
+    if (state.busy) { toast('正在生成中，先等它跑完或点停止再翻译', 'err', 3200); return; }
+    panel.classList.add('hidden');
+    doTranslateText({ text, targetLang: lang.value });
+  };
+  panel.append(
+    ta,
+    el('div', { class: 'tr-text-foot' },
+      el('span', { class: 'tr-text-hint', text: 'Ctrl+Enter 翻译 · 最多 2 万字' }),
+      lang,
+      el('button', { type: 'button', class: 'tr-text-btn primary', text: '翻译', onclick: submit }),
+      el('button', {
+        type: 'button', class: 'tr-text-btn', text: '关闭', title: 'Esc',
+        onclick: () => panel.classList.add('hidden'),
+      }),
+    ),
+  );
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); panel.classList.add('hidden'); }
+    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); }
+  });
+  return panel;
+}
+
+/** 打开/收起译文面板的文本翻译编辑区 */
+function toggleTranslateInput() {
+  ensureBlock('translate');
+  revealTranslatePanel();
+  const panel = document.getElementById('trTextPanel');
+  if (!panel) return;
+  const opening = panel.classList.contains('hidden');
+  panel.classList.toggle('hidden', !opening);
+  if (opening) document.getElementById('trTextArea')?.focus();
+}
+
+/**
+ * 文本输入翻译（2026-11-03 用户要求）：粘贴/手输文字直接翻，不依赖 PDF 选区。
+ * 与划词/截图翻译共用 translateMessages 与同一条流式管线，结果仍按时间堆在译文面板。
+ */
+async function doTranslateText({ text, targetLang = '中文' } = {}) {
+  const raw = String(text || '').replace(/\r\n?/g, '\n').trim();
+  if (!raw || state.busy) return;
+  if (!ensureReady()) return;
+  const body = raw.slice(0, 20000);
+  const lang = targetLang === 'English' ? 'English' : (targetLang === '中文' ? '中文' : targetLangFor(body));
+  revealTranslatePanel();
+  const retryOf = () => ({
+    kind: 'translate-text', docId: state.doc?.docId || null,
+    text: body, targetLang: lang,
+  });
+  const retry = () => doTranslateText({ text: body, targetLang: lang });
+  const key = `translate.input@${PROMPT_SYSTEM_VERSION}::${lang}::${body.length}-${hashStr(body)}`;
+  const cached = state.cache.get(key);
+  if (cached) {
+    const existing = [...state.sessionEntries].reverse().find((x) => x?.block === 'translate'
+      && x?.tag === 'translation' && x?.status === 'complete' && String(x?.text || '') === String(cached)
+      && String(x?.retry?.kind || '') === 'translate-text');
+    if (existing) {
+      existing.root?.scrollIntoView?.({ block: 'nearest' });
+      toast('这段文字翻过，直接用原结果', 'ok', 1800);
+      return;
+    }
+  }
+  const quote = body.length > 400 ? `${body.slice(0, 400)}…` : body;
+  const entry = addEntry({ block: 'translate', tag: 'translation', page: null, quote,
+    retry: retryOf(), reveal: true });
+  entry.root.classList.add('msg-text-translate');
+  if (cached) {
+    entry.body.innerHTML = renderMarkdown(cached);
+    finishEntry(entry, cached);
+    toast('这段文字翻过，直接用缓存', 'ok', 1500);
+    return;
+  }
+  const target = streamTarget(entry.body);
+  const ctl = makeController();
+  if (!ctl) return;
+  setBusy(true, '0s');
+  let received = '';
+  try {
+    const full = await chat({
+      messages: translateMessages({ text: body, targetLang: lang, context: '', page: null, docTitle: state.doc?.name }),
+      signal: ctl.signal,
+      onDelta: (piece, all) => { received = all; target.push(all); },
+      onTick: (ms) => setBusy(true, `${(ms / 1000).toFixed(0)}s`),
+    });
+    const clean = full.trim();
+    target.done(clean);
+    state.cache.set(key, clean);
+    // 成功时保持译文块「最纯净」的界面（不摆按钮）；失败/停止时 .acts 非空才显示重试
+    finishEntry(entry, clean);
+  } catch (e) {
+    if (isAbort(e)) {
+      target.done(received);
+      finishEntry(entry, received, { status: 'stopped', retryLabel: '重新翻译', onRetry: retry });
+    } else {
+      target.fail(errText(e));
+      addFailureRetry(entry, errText(e), retry);
+    }
+  } finally {
+    if (state.abort === ctl) { state.abort = null; state.abortReason = ''; setBusy(false); }
+  }
+}
 
 async function doTranslate(sel) {
   if (state.busy) return;
@@ -9880,6 +10006,17 @@ async function readingSources(reading, references, signal) {
   return unique.length ? unique : webSearch(query, signal);
 }
 
+/** 明显「只要翻译」的提问：问答里直接给译文 + 最多一句说明，不展开讲解（2026-11-03 用户要求） */
+function translateOnlyAsk(text) {
+  const q = String(text || '').trim();
+  if (!q || q.length > 80) return false;
+  if (!/(翻译|译成|译为|译一下|译下|中译英|英译中|转成中文|转成英文|translate|translation)/i.test(q)) return false;
+  // 明确同时要求讲解/分析的不算「只翻译」
+  if (/(解释|讲解|讲讲|分析|为什么|原理|推导|总结|概括|对比|区别|举例|例子)/.test(q)
+    && !/(只|仅|只要).{0,6}(翻译|译文|译成|译为)/.test(q)) return false;
+  return true;
+}
+
 async function send(retryPending = null) {
   const ta = $('#chatInput');
   if (state.busy) return;
@@ -10203,6 +10340,8 @@ async function send(retryPending = null) {
       availablePages: citationMat.availablePages,
       scopeLabel: scopeLabelFor(pending, { scanned: scannedDoc, images }),
       objectLabel: objectLabelFor(pending, reading),
+      // 明显「只要翻译」→ 只给译文 + 最多一句说明（见 prompts/capabilities/qa.js）
+      translateIntent: translateOnlyAsk(pending.question),
     });
     // 图片有两种：用户自己加的截图 + 扫描件的页面上下文；同一条 user 消息里一起发。
     // P2.5：Agent 用 read_page_image 要求的页也要附上（视觉模型才看得到）。
@@ -10263,7 +10402,11 @@ async function send(retryPending = null) {
     target.done(full);
     state.history = snapshotHistory([...state.history, ...readingTurn(reading, full)]);
     scheduleSessionSummary();
-    finishEntry(pending.entry, full, { page: pending.firstPage, sources: citedSources(full, sources), meta, status: 'complete', basis: citationMat.basis });
+    finishEntry(pending.entry, full, {
+      page: pending.firstPage, sources: citedSources(full, sources), meta, status: 'complete', basis: citationMat.basis,
+      // 用户要求：正常问答的回答下面也要能「重新生成」（复用这条 pending，原地重跑，不新加一轮问答）
+      retryLabel: '重新生成', onRetry: () => send(pending),
+    });
     scheduleMemoryExtraction({ question: pending.inputValue, answer: full, history: pending.history,
       topic: reading.selection || reading.focus?.text || '',
       source: { docId: pending.docId || '', paper: pending.docTitle || '', capability: 'chat' } });

@@ -660,11 +660,9 @@ body.dragging .viewer { pointer-events: none; }
   padding: 6px 8px; border-radius: 8px; font: inherit; color: var(--fg);
 }
 .ops-item:hover { background: var(--accent-soft); }
-.ops-item.cached .ops-title::after { content: ''; }
 .ops-icon { flex: 0 0 auto; width: 18px; text-align: center; font-size: var(--ui-fs); line-height: 1.45; }
 .ops-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .ops-title { font-size: var(--ui-fs-md); font-weight: 600; color: var(--fg); }
-.ops-item.cached .ops-title { color: var(--accent); }
 .ops-hint { font-size: var(--ui-fs-2xs); color: var(--fg-faint); line-height: 1.45; }
 
 
@@ -2756,5 +2754,66 @@ body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
 .ai-block[data-block="translate"] .msg.msg-shot-translate .acts * { display: inline-flex !important; }
 .ai-block[data-block="translate"] .msg.msg-shot-translate .acts { gap: 6px; padding: 2px 0 6px; }
 .ai-block[data-block="translate"] .msg.msg-shot-translate .shots { margin: 2px 0 7px; }
+/* 文本输入翻译条目：成功时仍保持译文块「最纯净」的界面；失败/停止时 .acts 非空才放行重试按钮 */
+.ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty),
+.ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty) * { display: inline-flex !important; }
+.ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty) { gap: 6px; padding: 2px 0 6px; }
+
+/* ── 译文面板：文本输入翻译（粘贴/手输 → 翻译，2026-11-03） ── */
+.tr-text {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 10px 6px;
+  padding: 8px 9px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+}
+.tr-text.hidden { display: none; }
+.tr-text-area {
+  width: 100%;
+  min-height: calc(62px * var(--ctl-scale));
+  max-height: calc(180px * var(--ctl-scale));
+  resize: vertical;
+  padding: 6px 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--ui-fs-sm);
+  line-height: 1.6;
+}
+.tr-text-area:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tr-text-foot { display: flex; align-items: center; gap: 7px; }
+.tr-text-hint { flex: 1 1 auto; min-width: 0; color: var(--fg-faint); font-size: var(--ui-fs-2xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tr-text-lang {
+  flex: 0 0 auto;
+  padding: 2px 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: var(--ui-fs-xs);
+}
+.tr-text-btn {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--ui-fs-xs);
+  line-height: 1.5;
+}
+.tr-text-btn:hover { background: var(--bg-elev); color: var(--accent); border-color: var(--accent); }
+.tr-text-btn.primary { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.tr-text-btn.primary:hover { background: var(--accent); color: var(--accent-fg); }
+.tr-text-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 

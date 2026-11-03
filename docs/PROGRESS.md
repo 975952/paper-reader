@@ -4525,3 +4525,98 @@ P2 的「每标签进度/搜索/草稿」「右栏块按标签/文件夹停放�
 - 本功能完成后再次显式 `git add` 指定文件并 commit + push（不用 `git add -A`）。
 
 
+## 85. 翻译能力增强与过程精简（2026-11-03，用户 m03060 需求）
+
+### 85.1 用户要求
+
+用户原话（m03060）：「翻译也要有文本输入翻译啊。而且我仍认为这个专门的翻译功能应该做好一点，
+你可以先去调研一下，而且问答里面，如果明显是只需要翻译的就应该只翻译，也只需要简单解释。
+而且不要输已加入什么图片，就是思考过程不要列的这么细，看起来不太舒服。，
+把上面的要求全部一条一条整理好，一项项完成」
+
+拆成 5 项：①译文面板支持粘贴/输入文本直接翻译；②先调研主流翻译功能再改进译文面板；
+③问答中明显只是要翻译时只给译文 + 简单解释；④去掉「已加入图片」类过程输出、思考过程不要逐条列细；
+⑤整理清单逐项完成。另有上一轮遗留（m02949 + m02965）：内置「读懂论文」点击三态、去掉「已生成」变绿、
+AI 回答下面补「重新生成」按钮。
+
+### 85.2 调研结论
+
+- 沉浸式翻译（immersivetranslate.com）：把翻译拆成多入口——输入框翻译（连敲空格触发、`/en`、`/zh`
+  等语言命令、只翻部分内容）、文字翻译、图片翻译、圈选翻译、PDF/文档翻译、双语对照；
+- DeepL / Google 类工具标配：文本输入框 + 目标语言选择 + 复制结果 + 历史记录；
+- 落到本项目的改进：译文面板加「文本翻译」输入区（目标语言选择、Ctrl+Enter、历史按时间堆叠）、
+  与划词 / 截图翻译共用同一条流式管线、结果带原文引用与重试持久化。本轮不做复制按钮 / 双语对照（后续）。
+
+### 85.3 实现
+
+- **译文「文本翻译」**（`public/js/app.js`）：
+  - `buildTranslateInputPanel()` 生成 `.tr-text#trTextPanel`：textarea `#trTextArea`（rows 4、
+    maxlength 20000、占位「粘贴或输入要翻译的文字…（Ctrl+Enter 翻译，Esc 关闭）」）、
+    底部 hint、目标语言 select `#trTextLang`（中文/English，存 `localStorage reader.translate.targetLang`）、
+    「翻译」「关闭」按钮；`Ctrl/⌘+Enter` 提交、`Esc` 收起。
+  - `toggleTranslateInput()`：`ensureBlock('translate')` + `revealTranslatePanel()`，切换面板显隐并聚焦。
+  - `doTranslateText({ text, targetLang = '中文' })`：规范化/截 20000 字 → `addEntry({block:'translate',
+    tag:'translation', page:null, quote:body.slice(0,400), retry:{kind:'translate-text',docId,text,targetLang}})` →
+    加 `msg-text-translate` 类 → `chat(translateMessages({ text, targetLang, context:'', page:null, docTitle }))`
+    流式渲染 → 成功 `finishEntry`；abort → stopped +「重新翻译」；失败 → `addFailureRetry`；
+    缓存键 `translate.input@${PROMPT_SYSTEM_VERSION}::${lang}::${len}-${hash}`，命中则滚动定位。
+  - `ensureBlock('translate')` 的 `.ai-tools` 新增按钮 `#trTextBtn`（「文本翻译」），
+    root 子节点顺序 `tools, trInput, body`。
+  - 重试持久化：`serialiseRetryPayload` 增加 `kind='translate-text'`（docId/text≤20000/targetLang）；
+    `restoreRetryCallback` 增加对应分支调 `doTranslateText`。
+  - 样式（`public/style.css`）：`.tr-text` / `.tr-text-area` / `.tr-text-foot` / `.tr-text-lang` /
+    `.tr-text-btn` 全部用主题变量；译文块 `.acts` 默认隐藏的例外加
+    `.ai-block[data-block="translate"] .msg.msg-text-translate .acts:not(:empty)`。
+- **问答「只翻译」**：
+  - `prompts/capabilities/qa.js` 新增 `TASK_TRANSLATE_ONLY`（直接给译文、最多一句术语/语气说明，
+    不展开讲解/结构梳理/背景知识/例子），`qaSystemBlocks()` 按 `ctx.translateIntent` 插入
+    `{ id:'translate-only' }`，`prepareAsk` 透传；
+  - `app.js` 新增 `translateOnlyAsk(text)`（≤80 字；含 翻译|译成|译为|译一下|中译英|英译中|转成中文|
+    转成英文|translate|translation；若同时含 解释|讲解|分析|为什么|原理|推导|总结|概括|对比|区别|举例|
+    例子 且没有「只/仅/只要…翻译」则不算），`send()` 传 `translateIntent`。
+- **回答下方「重新生成」**：`send()` 成功收尾 `finishEntry(..., retryLabel:'重新生成',
+  onRetry: () => send(pending))`；`restoreSession` 重放完整回答（`status==='complete'` 且
+  `row.retry` 存在、非 translate 块）也带 `onRetry`/`retryLabel`。刷新后恢复的回答同样有。
+- **过程列表精简**：`createAgentProgress` 重写为只显示一行 `正在查阅论文材料…`，完成即移除；
+  不再逐条渲染工具调用摘要（`summarizeToolResult` 的「已加入第 N 页原图」等不再出现）。
+  `prompts/base.js` 的 `BASE_RULES` 追加「不要汇报过程」规则（禁止回答正文写
+  「已加入图片 / 已读取第 N 页 / 我先思考一下 / 我将…」这类过程播报）。
+- **内置「读懂论文」修正（上一轮 m02949/m02965）**：
+  - `prompts/base.js` `TEACH_EXTRA` 追加规则 16：不评价材料类型、不写「这不是论文/这是讲义板书/课件/幻灯片」、
+    不讨论页眉打印页码与材料页码是否一致（引用页码直接用材料里的〔p.N〕）；
+  - `prompts/capabilities/teach.js` `TEACH_PLAN_TASK` 去掉「理论推导/实验系统/综述、材料是否齐全」这类
+    类型判断项，任务段末尾追加同一条禁止评价材料的要求；
+  - `app.js`：`teachingEntryFor` 按 `record.docId === 当前论文` 过滤（跨论文/跨会话不算命中）；
+    `runTeaching` 入口改为「选择卡片模式 → 先 `sessionsLeaveEntryForNewSession()` 再生成；
+    会话内命中且 `focusExistingResult()` 成功 → 定位；否则重新生成」；
+    `initOps` 去掉 `.ops-item.cached` 与「 · 已生成」文案；`style.css` 删除
+    `.ops-item.cached .ops-title` 的 accent 变色与 `::after` 规则。
+
+### 85.4 验证（手动冒烟，未跑 test/ 正式套件）
+
+- 环境：隔离 Node 服务（`PORT=8985`、`PRT_REQUIRE_TOKEN=0`、`PRT_DATA_DIR`/`PRT_PAPERS_DIR` 指向
+  `test/artifacts/translate-text-smoke/{data,papers}`，假 Key）；puppeteer 拦截 `POST /api/chat` 回假 SSE，
+  另用 `chatMode='fail'` 模拟 500。
+- 脚本 `test/artifacts/smoke-translate-text.mjs`：**27/27 全过**。覆盖：文本翻译端到端（请求 system 含
+  翻译提示词、最后一条 user 带原文、译文块结果渲染、`/api/session?...&sid=__translate` 持久化
+  `retry.kind='translate-text'` 与原文 quote、刷新后恢复）；模拟 500 时失败条目重试按钮可见、点重试重新发请求；
+  问答「只翻译」意图进入正式回答的 system 提示词、基础规则含「不要汇报过程」；回答下方「重新生成」
+  按钮存在、点击重新发起请求、刷新恢复后的回答也有；内置功能三种点击语义（无结果→生成、
+  命中→定位不重跑、选择卡片模式→进入会话并生成）；内置菜单无 `.ops-item.cached`、无「已生成」、
+  样式表无变绿规则；全程无 pageerror。
+- 提示词黄金基线：新指令不在 `test/_prompts.mjs` 的固定场景表里 → `test/fixtures/prompts-baseline.json` 无需变更。
+- 未修改用户 `data/`、`papers/`；未打扰用户正在使用的桌面副本。
+
+### 85.5 文档与交付
+
+- `docs/使用说明书.md`：新增 §4.6「文本翻译」；§5 补「点击后的行为」三态；§5.1 去掉材料类型判断表述；
+  §6.3 补「重新生成随时可用」「明显只是要翻译就只翻译」并修订浮动提示段；§16.3 过程列表改为
+  「只显示一条笼统状态」；§16.4 修订 AI 功能记录点击语义；新增 §16.7「翻译能力增强与过程精简」；
+  附录界面速查补「译文栏顶部有『文本翻译』」。
+- exe：`desktop\build.bat` 重建项目根 `论文阅读器.exe`（**11,067,392 B，SHA256 校验通过**）；
+  桌面副本运行中 → 脚本按设计安全跳过，需用户关闭阅读器后重跑 build.bat（或手动复制项目根 exe）才能拿到新版。
+- 完成后显式 `git add` 指定文件并 commit + push（不用 `git add -A`；GitHub 直连失败时用
+  `git -c http.proxy=http://127.0.0.1:10808 push origin main`）。
+
+
+
