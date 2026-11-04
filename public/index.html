@@ -362,6 +362,11 @@
       <label class="field field-switch"><input id="cfgUseWeb" type="checkbox" /><span>联网搜索</span></label>
     </div>
     <div class="modal-note"><span>这两个是问答的默认发送范围，改完立刻生效：<b>整篇论文</b>=每次提问默认把整篇论文放进上下文（AI 自己会翻页读论文时一般不用开）；<b>联网搜索</b>=每次提问默认先联网查一次资料。输入框旁边不再放临时切换按钮。</span></div>
+    <div class="settings-section-title">追问直答</div>
+    <div class="settings-grid settings-core-grid">
+      <label class="field field-switch"><input id="cfgFollowUpDirect" type="checkbox" /><span>连贯追问直接回答</span></label>
+    </div>
+    <div class="modal-note"><span>开着时：明显接着上一轮的短问题（没加选区/截图、没点名看新的页或整篇）直接用前文回答，不再重新翻页、带页图、做多轮工具思考，速度会明显更快；需要重新核对原文的问题照旧走完整阅读流程。关掉后每个问题都会重新读材料（更慢、更稳）。</span></div>
         </section>
         <section class="settings-pane hidden" id="settingsPaneSession" data-pane="session" role="tabpanel" aria-labelledby="settingsNavSession">
           <div class="settings-pane-title">会话</div>

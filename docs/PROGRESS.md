@@ -5020,3 +5020,59 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
   （PID 112884，Responding=True）。
 - 提交：本次实现提交「跨归属方式切换防护：历史实时刷新、当前徽标按归属+论文判定、点击优先原地接上」（2 个源文件），
   随后推送 `origin/main`。
+
+## §94 连贯追问直接回答：跳过重新翻页 / 页图 / 多轮工具思考（2026-11-04，用户 m09466）
+
+### 94.1 用户反馈
+
+- 用户 m09466：「一些明显上下连贯的问题可以直接连着直接输出吗，现在感觉每次都去看图加思考很慢，如何优化」。
+- 现状：`send()` 对每个问题（包括明显承接上文的短追问）都先跑 `runAgentReadPath()`——最多 75 秒预算、
+  多轮非流式工具决策（每轮一次完整 LLM 往返，默认 20 秒/轮），扫描件还会带页图走 vision；
+  即使只是问「那它为什么有效」，也要重新翻页/看图/思考，体感很慢。
+
+### 94.2 设计
+
+- 只对**明显承接上一轮**的问题走捷径：同一段会话已有问答、问题短（≤60 字）、没加选区/截图、
+  没有点名要看新的材料（「第 N 页 / p.N / 整篇 / 全文 / 翻到 / 重新读 / 找一下」等）。
+- 走捷径时：跳过 Agent 工具轮次、跳过整篇全文与页图材料（扫描件若问到图/表/公式/位置则保留页图）、
+  跳过联网（短追问通常不需要）、只带对话历史 + 当前/话题页上下文，发一次流式请求直接回答。
+- 提示词加一条近因指令「【追问直答】这是接着上一轮回答的追问：直接沿用对话里已经讲过的内容继续，
+  不要假装重新读了论文、不要编造页码或原文」；答案依据标成「接着上一段对话（没有重新翻页读论文）」。
+- 需要核对原文的问题照旧走完整阅读流程；设置 →「交互与发送」新增「连贯追问直接回答」开关
+  （`reader.followUpDirect`，默认开），关掉后所有问题恢复完整阅读流程。
+
+### 94.3 实现（2 个源文件）
+
+- `public/js/app.js`：
+  - 新增 `FOLLOW_UP_DIRECT_DEFAULT=true`、`followUpDirectEnabled()`（读 `reader.followUpDirect`）、
+    `FOLLOW_UP_READ_RE`（要看新材料的词）、`FOLLOW_UP_VISUAL_RE`（图表/位置词）与
+    `planFollowUpDirect(pending,{images,scannedDoc})` → `{direct,keepVisual}`。
+  - `send()`：拿到 `scannedDoc` 后先算 `followPlan/followDirect`；`agentAllowed` 增加 `&& !followDirect`；
+    页上下文提取条件增加 `!followDirect`（追问仍带话题页文本，但不预装整篇）；联网搜索在 `followDirect` 时跳过；
+    `buildDocContext` 的扫描件/整篇两条路径在追问直答时跳过（`wantScanImages` 仅扫描件提到图表时保留页图）；
+    `sendScopeText` 的「整篇/扫描」标记同步反映本次实际不带；`messages` 生成后给系统消息追加「【追问直答】」近因指令，
+    `citationMat.basis` 改为「接着上一段对话（没有重新翻页读论文）」。
+  - 设置页：`fillUiSettings()` 回填 `#cfgFollowUpDirect`；`applyUiSettingsFromControls()` 写
+    `reader.followUpDirect`；`initSettings()` 的即时监听列表加入 `cfgFollowUpDirect`；`resetSettings()` 复位为默认开。
+- `public/index.html`：「交互与发送」分类新增「追问直答」小节（`#cfgFollowUpDirect` 勾选框 + 说明）。
+
+### 94.4 验证
+
+- 新增隔离冒烟 `test/artifacts/followup-smoke/smoke.mjs`（隔离数据 `test/artifacts/followup-smoke/{data,papers}`，
+  8986 服务、假配置、Puppeteer headless、拦截 `/api/chat`：带 tools 的 stream:false 记为 Agent 工具决策、
+  stream:true 回 SSE 假回答、其它 stream:false 记为后台任务）：
+  **11/11 全部通过、无 pageerror**。覆盖：首问正常回答且不发工具决策；打开 Agent 后问「那它的核心方法是什么？」
+  只发 1 次流式请求、不发工具决策（追问直答生效）；设置里开关默认开；关掉后同样的追问恢复 Agent 工具决策；
+  重新打开并刷新后开关保持。截图 `test/artifacts/followup-smoke/shots/`（`followup-direct.png`、`settings-followup.png`）。
+- 解析校验：`node --experimental-vm-modules` + `new vm.SourceTextModule(...)` 对 app.js / sessions.js / ai.js /
+  prompts index+background / server.js 全部 PARSE-OK。
+
+### 94.5 文档与交付
+
+- `docs/使用说明书.md`：§6.2 补「连贯追问直接回答」入口与效果；§6.3 新增「连贯追问直接回答（默认开）」条目
+  （哪些问题走捷径、哪些仍走完整流程、关掉后的区别）；§12.3 补设置项说明；§12 分类表「交互与发送」行更新。
+- 构建：`desktop\build.bat` 重建项目根与桌面 `论文阅读器.exe`：11,140,608 B，
+  SHA256 `DDB2FB58B02EE62BD01EC79F930361D75FC7589D456951B099F27F424E4741CB`；桌面副本已覆盖并重启
+  （PID 131988，Responding=True）。
+- 提交：本次实现提交「连贯追问直接回答：明显承接上文的短追问跳过翻页/页图/工具轮次」（4 个文件），
+  随后推送 `origin/main`，并发布新 Release 供直接下载。

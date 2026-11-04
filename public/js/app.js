@@ -8437,6 +8437,39 @@ function agentReadEnabled() {
   return readFlag('reader.agentRead', AGENT_READ_DEFAULT);
 }
 
+/* ------------------------------------------------------------ 追问直答（2026-11-04 用户要求） */
+/* 用户反馈：明显上下连贯的追问没必要每次都重新翻页、看页图、跑多轮工具思考，应该直接接着说。
+   做法：同一段会话里已经有问答、问题很短、没加选区/截图、也没点名要看新的页/整篇时，
+   跳过 Agent 工具轮次、全文与页图材料，直接把对话历史和当前页上下文交给模型流式回答。
+   设置 →「交互与发送」里的「连贯追问直接回答」可关掉（reader.followUpDirect=0）。 */
+const FOLLOW_UP_DIRECT_DEFAULT = true;
+function followUpDirectEnabled() {
+  return readFlag('reader.followUpDirect', FOLLOW_UP_DIRECT_DEFAULT);
+}
+/** 问题点明了要看新的材料：别走直答，照旧完整阅读流程 */
+const FOLLOW_UP_READ_RE = /(第\s*\d+\s*页|p\.?\s*\d+|整篇|全文|全文索引|翻到|翻页|重新读|从头读|再读|读一遍|找一下|查一下|搜一下|看一下|看看)/i;
+/** 扫描件里提到图/表/公式/位置：保留页图，别把影像材料也省掉 */
+const FOLLOW_UP_VISUAL_RE = /(图|表|公式|截图|这块|这里|这页|上面|下面|左边|右边|圈|标出|显示|画出|坐标|曲线)/;
+/**
+ * 「明显承接上文」的追问判定：返回 { direct, keepVisual }。
+ * direct=true 时调用方跳过 Agent 工具轮次、整篇全文与页图材料，只带对话历史 + 当前页上下文直答。
+ * keepVisual=true 仅用于扫描件且问题提到图表：保留页图材料（扫描件没有文本层，不能完全脱离影像）。
+ */
+function planFollowUpDirect(pending, { images = [], scannedDoc = false } = {}) {
+  if (!followUpDirectEnabled()) return { direct: false, keepVisual: false };
+  if (!pending || !pending.docId) return { direct: false, keepVisual: false };
+  const q = String(pending.inputValue || '').trim();
+  if (!q || q.length > 60) return { direct: false, keepVisual: false };
+  if (images?.length) return { direct: false, keepVisual: false };
+  const atts = Array.isArray(pending.attachments) ? pending.attachments : [];
+  if (atts.some((a) => a && (a.kind === 'text' || a.kind === 'image'))) return { direct: false, keepVisual: false };
+  if (pending.quoteText) return { direct: false, keepVisual: false };
+  if (!Array.isArray(pending.history) || pending.history.length === 0) return { direct: false, keepVisual: false };
+  if (FOLLOW_UP_READ_RE.test(q)) return { direct: false, keepVisual: false };
+  const keepVisual = !!scannedDoc && FOLLOW_UP_VISUAL_RE.test(q);
+  return { direct: true, keepVisual };
+}
+
 /** 单次「工具决策」调用（非流式 JSON；不支持 tools 的模型会报错 → 调用方回退） */
 async function agentModelCall({ messages, tools, timeoutMs = 12000, signal = null }) {
   const ctl = new AbortController();
@@ -10500,12 +10533,17 @@ async function send(retryPending = null) {
     if (!readingRequestCurrent(pending)) return;
     const scannedDoc = !!scanProfile?.scanned;
     pending.scanned = scannedDoc;
+    // 追问直答：明显接着上一轮的短问题，不再重新翻页/看页图/跑多轮工具（判定见 planFollowUpDirect）
+    const followPlan = planFollowUpDirect(pending, { images, scannedDoc });
+    const followDirect = followPlan.direct;
+    pending.followUpDirect = followDirect;
+    if (followDirect) setHint('接着上一段直接回答…');
     // 没有选区时也带所在页上下文：
     // · 追问 → 上一轮话题所在页（让模型顺着上下说，而不是被屏幕滚到的页带跑）；
     // · 明说「第 N 页」→ 那一页；· 其它/「这一页/这里」→ 当前屏幕页。扫描件没有文本层，改成带页图。
     const quotes = pending.attachments.filter((a) => a.kind === 'text');
     const anchor = contextAnchorFor(pending.pageRole, reading);
-    const contextParts = scannedDoc ? [] : (pending.useFullText && !shotOnly ? [] : (quotes.length ? await Promise.all(quotes.slice(0, 6).map(async (a) => {
+    const contextParts = scannedDoc ? [] : ((pending.useFullText && !shotOnly && !followDirect) ? [] : (quotes.length ? await Promise.all(quotes.slice(0, 6).map(async (a) => {
       // 右栏划来的文字不是 PDF 原文，定位不到「原文附近」；给所在页整页当语境
       const nearby = await viewer.getContextAround(a.page || pending.firstPage,
         a.from === 'right' ? '' : a.text);
@@ -10518,7 +10556,7 @@ async function send(retryPending = null) {
     if (ctl.signal.aborted) throw new DOMException('已停止', 'AbortError');
     pending.scope = sendScopeText({
       attachments: pending.attachments, history: pending.history,
-      useFullText: pending.useFullText && !shotOnly, useWeb: pending.useWeb,
+      useFullText: pending.useFullText && !shotOnly && !followDirect, useWeb: pending.useWeb,
       query: pending.inputValue, docId: pending.docId, contextIncluded: !!context, scanned: scannedDoc,
       contextHint: scopeContextHintFor(pending),
     });
@@ -10526,7 +10564,8 @@ async function send(retryPending = null) {
     updateSendScope();
 
     // 联网是允许查找材料；短追问先确定对象，纠正消息和纯问号不会拿去检索。
-    if (pending.useWeb && (!images.length || pending.inputValue.trim() || reading.selection)
+    // 追问直答这类短问题也不联网（省一次搜索往返；需要查资料的问题一般会点名要查/最新/出处）。
+    if (pending.useWeb && !followDirect && (!images.length || pending.inputValue.trim() || reading.selection)
       && webQueryFor(pending.question, reading.selection, { reading })) {
       setHint('正在联网搜索…');
       try {
@@ -10543,7 +10582,7 @@ async function send(retryPending = null) {
     // 失败（模型不支持 tools / 超时 / 任何异常）静默回退到下面的 P1.5 预装路径。
     // 用户口径（2026-11-02）：带截图提问时也要能自己继续查页（截图是附加材料，不是禁止工具的理由）；
     // 只有「只发截图没写问题」（shotOnly）才不启用，避免模型把截图当成唯一依据乱翻。
-    const agentAllowed = agentReadEnabled() && !shotOnly
+    const agentAllowed = agentReadEnabled() && !shotOnly && !followDirect
       && !!pending.docId && !!state.doc && !!viewer?.pdf;
     let agentRun = null;
     let agentProgress = null;
@@ -10575,7 +10614,9 @@ async function send(retryPending = null) {
     // 只发截图（没写问题）时不吃「整篇」范围：截图本身就是材料，塞整篇只会让模型顺势扩写整个讲义。
     // Agent 成功时不再预装文本材料（它自己读过的页就是材料）；但扫描件仍带上页图：
     // 页型是扫描件时 Agent 工具可能只读到空文本，保留 P1.5 的页图材料才不至于退步（跨论文读取也照样可用）。
-    if (scannedDoc) {
+    // 追问直答：扫描件如果不涉及图表，也跳过页图材料；普通论文不再预装整篇全文/索引。
+    const wantScanImages = !(followDirect && !followPlan.keepVisual);
+    if (scannedDoc && wantScanImages) {
       try {
         docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text, {
           page: pending.firstPage || reading.page,
@@ -10586,7 +10627,7 @@ async function send(retryPending = null) {
         docCtx = null;
         setHint('读取扫描页失败，这次只带问题本身');
       }
-    } else if (!agentRun && pending.useFullText && !shotOnly && pending.docId) {
+    } else if (!agentRun && !followDirect && pending.useFullText && !shotOnly && pending.docId) {
       try {
         docCtx = await buildDocContext(pending.question, reading.selection || reading.focus.text);
       } catch (e) {
@@ -10598,13 +10639,13 @@ async function send(retryPending = null) {
     pending.scope = sendScopeText({
       attachments: pending.attachments,
       history: pending.history,
-      useFullText: pending.useFullText && !shotOnly,
+      useFullText: pending.useFullText && !shotOnly && !followDirect,
       useWeb: pending.useWeb,
       query: pending.inputValue,
       docId: pending.docId,
-      scanned: scannedDoc,
+      scanned: scannedDoc && wantScanImages,
       scanPageCount: docCtx?.pageImages?.length || 0,
-      fullMode: (pending.useFullText && !shotOnly)
+      fullMode: (pending.useFullText && !shotOnly && !followDirect)
         ? (scannedDoc ? (docCtx?.mode || 'scan') : (docCtx?.mode || 'unavailable'))
         : null,
       contextIncluded: !!context,
@@ -10653,6 +10694,18 @@ async function send(retryPending = null) {
       // 明显「只要翻译」→ 只给译文 + 最多一句说明（见 prompts/capabilities/qa.js）
       translateIntent: translateOnlyAsk(pending.question),
     });
+    // 追问直答：给模型一条近因指令，明确「这是接着上文说」，并说明这次没有重新翻页。
+    if (followDirect) {
+      citationMat.basis = '本次依据：接着上一段对话（没有重新翻页读论文）';
+      const sys = messages[0];
+      if (sys && sys.role === 'system') {
+        sys.content += '\n\n【追问直答】这是接着上一轮回答的追问：直接沿用对话里已经讲过的内容继续，'
+          + '不要假装重新读了论文，不要编造页码或原文；篇幅可以短一些。'
+          + (followPlan.keepVisual
+            ? '这次只附了相关页图；需要核对哪张图时用页面上的图，不要另找别的页。'
+            : '如果确实需要看新的页或图，先说明希望读者翻到哪一页，再等读者接着问。');
+      }
+    }
     // 图片有两种：用户自己加的截图 + 扫描件的页面上下文；同一条 user 消息里一起发。
     // P2.5：Agent 用 read_page_image 要求的页也要附上（视觉模型才看得到）。
     let pageImages = docCtx?.pageImages || [];
@@ -11119,6 +11172,9 @@ function fillUiSettings() {
   if (full) full.checked = uiStyle.useFullText !== false;
   const web = $('#cfgUseWeb');
   if (web) web.checked = uiStyle.useWeb !== false;
+  // 追问直答开关（默认开，存在 localStorage 的独立 flag 里）
+  const follow = $('#cfgFollowUpDirect');
+  if (follow) follow.checked = followUpDirectEnabled();
   updateUiRangeLabels();
 }
 
@@ -11234,8 +11290,10 @@ function applyUiSettingsFromControls() {
   const size = $('#uiFontSize');
   const full = $('#cfgUseFullText');
   const web = $('#cfgUseWeb');
+  const follow = $('#cfgFollowUpDirect');
   const zoom = $('#uiZoomSpeed');
   const wasFullText = state.useFullText;
+  if (follow) writeFlag('reader.followUpDirect', !!follow.checked);
   uiStyle = {
     ...uiStyle,
     ...(theme ? { theme: theme.value } : {}),
@@ -11284,6 +11342,7 @@ function resetPanels() {
     只动「壳」：论文、会话、消息一条都不碰，API Key / 模型名 / 接口地址也不碰。 */
 function resetSettings() {
   uiStyle = { ...DEFAULT_UI_STYLE };
+  writeFlag('reader.followUpDirect', FOLLOW_UP_DIRECT_DEFAULT);
   applyUiStyle();
   viewer?.refreshPaper?.();
   fillUiSettings();
@@ -11388,7 +11447,7 @@ function initSettings() {
   // 设置页里「即时生效」的控件：主题、阅读字号、双指缩放速度，以及两个默认发送范围偏好
   // （输入框旁的临时切换按钮已于 2026-11-04 移除；这里的两个勾就是唯一入口，
   //   勾选走 applyUiSettingsFromControls → syncScopePrefs → updateComposerHint）。
-  ['uiTheme', 'uiFontSize', 'uiZoomSpeed', 'cfgUseFullText', 'cfgUseWeb']
+  ['uiTheme', 'uiFontSize', 'uiZoomSpeed', 'cfgUseFullText', 'cfgUseWeb', 'cfgFollowUpDirect']
     .forEach((id) => document.getElementById(id)?.addEventListener('input', applyUiSettingsFromControls));
   // 「会话」分类：四项都只影响本机行为，切换/勾选立刻生效（和「保存并测试」无关）
   $('#settScopeMode')?.addEventListener('change', () => applySessionScopeMode($('#settScopeMode').value));
