@@ -2593,32 +2593,57 @@ body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
   flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 2px 6px 12px;
   display: flex; flex-direction: column; gap: 1px;
 }
-/* 按文件整理：论文块（论文名 + 路径 + 会话数）；组内会话缩进并加引导线 */
-.sess-fileblock { display: flex; flex-direction: column; margin: 10px 0 4px; }
+/* 按文件整理：文档（论文）是独立卡片式组头，会话缩进挂在下面，两者一眼分开 */
+.sess-fileblock { display: flex; flex-direction: column; margin: 4px 0 0; padding-bottom: 6px; }
 .sess-fileblock:first-child { margin-top: 0; }
-.sess-filegroup { display: flex; align-items: center; gap: 6px; padding: 6px 6px 1px; }
-.sess-filegroup-ic { flex: 0 0 auto; display: inline-flex; color: var(--accent); opacity: .8; }
-.sess-filegroup-ic svg { width: 13px; height: 13px; }
+.sess-fileblock + .sess-fileblock {
+  margin-top: 10px; padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.sess-filegroup {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-sunken);
+}
+.sess-filegroup-ic {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border-radius: 7px;
+  background: var(--bg-elev); color: var(--accent);
+  box-shadow: 0 0 0 1px var(--border);
+}
+.sess-filegroup-ic svg { width: 15px; height: 15px; }
 .sess-filegroup-name {
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: var(--ui-fs); font-weight: 600; color: var(--fg);
+  font-size: var(--ui-fs); font-weight: 700; color: var(--fg);
 }
 .sess-filegroup-count {
-  flex: 0 0 auto; min-width: 18px; height: 16px; padding: 0 5px;
+  flex: 0 0 auto; min-width: 20px; height: 18px; padding: 0 6px;
   display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 999px; background: var(--bg-sunken);
-  color: var(--fg-faint); font-size: var(--ui-fs-2xs);
+  border-radius: 999px; background: var(--bg-elev);
+  color: var(--fg-dim); font-size: var(--ui-fs-2xs); font-weight: 600;
+  box-shadow: 0 0 0 1px var(--border);
 }
 .sess-filegroup-sub {
-  padding: 0 6px 4px 25px;
+  padding: 4px 2px 0 36px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--ui-fs-2xs); color: var(--fg-faint);
 }
 .sess-fileblock-rows {
-  display: flex; flex-direction: column; gap: 1px;
-  margin-left: 9px; padding-left: 6px; border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 2px;
+  margin: 6px 0 0 20px; padding-left: 12px;
+  border-left: 2px solid var(--border);
 }
+/* 会话行挂在文档下面：再缩进一级，行首加小圆点，和上面文档组头区分开 */
+.sess-fileblock-rows .sess-hrow::before {
+  content: ''; flex: 0 0 auto;
+  width: 5px; height: 5px; border-radius: 50%;
+  margin: 0 4px 0 6px; background: var(--border);
+}
+.sess-fileblock-rows .sess-hrow.on::before { background: var(--accent); }
+.sess-fileblock-rows .sess-hrow:hover::before { background: var(--fg-faint); }
+.sess-fileblock-rows .sess-hrow.on:hover::before { background: var(--accent); }
 /* 按时间 / 归档：分组标题 + 数量 */
 .sess-group {
   display: flex; align-items: center; gap: 6px;
