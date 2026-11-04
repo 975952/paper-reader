@@ -171,6 +171,15 @@ function listScopeKey() {
   return st.ctx?.scopeKey?.() || st.folderKey;
 }
 
+/** 历史行里的 fileKey 是服务端规范化后的存储键：全局模式下 app 传的 'default' 会落成
+ *  'default-<hash>'（见 server.js docIdOf）。这里统一判断「是不是当前归属键的副本」。 */
+function isScopeFileKey(fileKey) {
+  const key = String(fileKey || '');
+  if (!key) return false;
+  if (st.ctx?.isScopeFileKey) return !!st.ctx.isScopeFileKey(key);
+  return key === listScopeKey();
+}
+
 async function fetchFolderList() {
   const q = new URLSearchParams({
     doc: listScopeKey(),
@@ -292,7 +301,12 @@ async function refreshList({ force = false } = {}) {
   }
   renderHeader();
   if (st.quickOpen) renderQuickList();
-  if (st.historyOpen) renderHistoryList();
+  if (st.historyOpen) {
+    // 历史面板开着时跨论文/跨归属模式切换：st.list 刷新了，但历史数据源 st.allList
+    // 还是旧的 —— 上一篇论文的旧行会被标成「当前」，点击还会按旧 docIds 跳回旧论文。
+    // 这里把全库列表一起刷新（都是本地文件，代价很小）。
+    await refreshAllList();
+  }
   return st.list;
 }
 
@@ -368,7 +382,12 @@ export async function sessionsOnSessionChanged({ refresh = false } = {}) {
   if (refresh) await refreshList({ force: true });
   renderHeader();
   if (st.quickOpen) renderQuickList();
-  if (st.historyOpen) renderHistoryList();
+  if (st.historyOpen) {
+    // 历史面板开着时，切论文/切归属模式不会经过 openHistory：全库列表必须一起重拉，
+    // 否则旧论文的旧行会被标成「当前」、点击还会按旧 docIds 跳回旧论文。
+    if (!refresh) await refreshAllList();
+    else renderHistoryList();
+  }
 }
 
 function scopeMode() {
@@ -564,9 +583,10 @@ function renderEntryCard(lastRow) {
   renderModeChips(ui.entry.querySelector('#sessEntryModes'));
 }
 
-async function chooseSession(sidOrRow) {
+async function chooseSession(sidOrRow, docIdHint = '') {
   if (!guardBusy('切换会话')) return;
-  // 历史面板的新排列会列出别的文件夹/别的论文的会话：拿到整行才能切文件夹、打开对应论文
+  // 历史面板的新排列会列出别的文件夹/别的论文的会话：拿到整行才能切文件夹、打开对应论文。
+  // docIdHint：按文件排列时用户点的是哪篇论文分组 —— 优先在原论文打开会话，别乱跳。
   const row = typeof sidOrRow === 'string'
     ? (st.allList.find((r) => r.sid === sidOrRow) || st.list.find((r) => r.sid === sidOrRow) || null)
     : (sidOrRow || null);
@@ -575,7 +595,7 @@ async function chooseSession(sidOrRow) {
   closeHistory();
   const force = st.entryVisible;
   hideEntryCard();
-  if (row && st.ctx?.openSessionFromHistory) await st.ctx.openSessionFromHistory(row, { force });
+  if (row && st.ctx?.openSessionFromHistory) await st.ctx.openSessionFromHistory(row, { force, docIdHint });
   else await st.ctx.continueSession(sid, { force });
 }
 
@@ -758,9 +778,8 @@ function historySourceRows() {
  *  · 标题、置顶、归档、摘要等可能只写在某一副本上，合并时取更完整的值；
  *  · 原副本列表挂在 _copies 上，删除时连同所有副本一起删。 */
 function preferRow(a, b) {
-  const scope = listScopeKey();
-  const aCur = !!a.fileKey && a.fileKey === scope;
-  const bCur = !!b.fileKey && b.fileKey === scope;
+  const aCur = isScopeFileKey(a.fileKey);
+  const bCur = isScopeFileKey(b.fileKey);
   if (aCur !== bCur) return aCur;
   const aTitle = !!a.title;
   const bTitle = !!b.title;
@@ -800,6 +819,24 @@ function collapseRows(rows) {
       merged.lastOpenedAt = Math.max(merged.lastOpenedAt || 0, r.lastOpenedAt || 0);
     }
     if (item.length > 1) {
+      // 不同归属键下的副本 docIds 可能各只覆盖一部分论文（切换归属时旧代码只写当前论文），
+      // 合并时必须取并集，否则历史分组、trail、点击目标都会缺论文。
+      const primaryFirst = [primary, ...item.filter((r) => r !== primary)];
+      const seenDoc = new Set();
+      const docIds = [];
+      const docTitles = [];
+      for (const r of primaryFirst) {
+        const ids = Array.isArray(r.docIds) ? r.docIds : [];
+        const titles = Array.isArray(r.docTitles) ? r.docTitles : [];
+        for (let i = 0; i < ids.length; i++) {
+          const id = String(ids[i] || '');
+          if (!id || seenDoc.has(id)) continue;
+          seenDoc.add(id);
+          docIds.push(id);
+          docTitles.push(String(titles[i] || ''));
+        }
+      }
+      if (docIds.length) { merged.docIds = docIds; merged.docTitles = docTitles; }
       merged._copies = item.map((r) => ({ sid: r.sid, fileKey: r.fileKey, folderPath: r.folderPath }));
     } else {
       delete merged._copies;
@@ -1051,7 +1088,17 @@ function historyTrail(row) {
 function historyRow(row, { trail = false, group = null, renameShown = null, currentShown = null } = {}) {
   // 按文件排列时同一会话可能出现在多个论文分组里；「当前」徽标只标第一次，
   // 否则同一个会话会同时有好几行写「当前」，看起来像有好几个当前会话。
+  // 还要防历史数据过期（切换论文/归属模式后旧列表没刷新）：只有这一行确实有当前
+  // 归属键下的副本、且（按文件时）就在当前论文分组里，才允许标「当前」。
+  const scopeKeyNow = listScopeKey();
+  const copies = Array.isArray(row._copies) ? row._copies : [];
+  const hasScopeCopy = !row.fileKey && !copies.length
+    ? true
+    : isScopeFileKey(row.fileKey) || copies.some((c) => isScopeFileKey(c?.fileKey));
+  const docNow = String(st.ctx?.doc?.()?.docId || '');
+  const groupOk = st.histMode !== 'file' || !group?.id || !docNow || String(group.id) === docNow;
   const canMarkCurrent = !st.entryVisible && !!st.currentSid && row.sid === st.currentSid
+    && hasScopeCopy && groupOk
     && !(currentShown && currentShown.has(row.sid));
   const on = canMarkCurrent;
   if (on && currentShown) currentShown.add(row.sid);
@@ -1102,7 +1149,7 @@ function historyRow(row, { trail = false, group = null, renameShown = null, curr
   wrap.append(
     el('button', {
       type: 'button', class: 'sess-hgo', title,
-      onclick: () => chooseSession(row),
+      onclick: () => chooseSession(row, group?.id || ''),
       ondblclick: (e) => { e.preventDefault(); startRename(row.sid); },
     },
     el('span', { class: 'sess-htop' },
@@ -1136,10 +1183,10 @@ async function confirmDeleteRow(row) {
   });
   if (!ok) return;
   try {
-    if (row.sid === st.currentSid && !!st.currentSid && st.ctx?.hasDoc?.() && keyForRow(row) === listScopeKey()) {
+    if (row.sid === st.currentSid && !!st.currentSid && st.ctx?.hasDoc?.() && isScopeFileKey(keyForRow(row))) {
       await st.ctx.deleteSession(row.sid);
       // 当前归属键由 deleteSession 删；其它存储键下的副本要一起清，否则历史里会「复活」
-      const others = (row._copies || []).filter((c) => (c.fileKey || listScopeKey()) !== listScopeKey());
+      const others = (row._copies || []).filter((c) => !isScopeFileKey(c.fileKey || listScopeKey()));
       if (others.length) await deleteRowFile({ ...row, _copies: others });
     } else {
       await deleteRowFile(row);

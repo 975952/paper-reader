@@ -3770,8 +3770,15 @@ async function openDocColdSwitch({ name, url, docId, path }) {
   }
   // 每篇论文独立模式：问答区各论文各一份。热切回时停放的只是这篇的会话状态，
   // 屏幕上的聊天 DOM 可能还是上一篇的 —— 必须按这篇论文自己的会话重放一次。
+  // 目标论文键下可能还没有这段会话（例如刚切到按论文模式）：读不到就清掉错误指针，
+  // 按正常流程重新接上这篇论文自己的会话（新建或恢复）。
   if (hotView && readSessionScopeMode() === 'paper') {
-    await restoreSession(docId, { only: 'chat' });
+    try {
+      await restoreSession(docId, { only: 'chat' });
+    } catch {
+      setActiveSidFor(docId, '');
+      await sessionsOnDocOpened(docId).catch(() => {});
+    }
     sessionsOnSessionChanged({ refresh: false });
     if (superseded()) return;
   }
@@ -5436,6 +5443,23 @@ function sessionScopeKey(docId = '') {
   if (mode === 'paper') return String(docId || state.doc?.docId || '') || currentFolderKey();
   return currentFolderKey();
 }
+/** 服务端保存会话时会把 doc 参数规范成 docId 形式的键（全局 'default' → 'default-<hash>'，
+ *  见 server.js 的 docIdOf）。历史行里的 fileKey 是规范后的键，这里按同一算法判断
+ *  「某个 fileKey 是不是当前归属键」。 */
+function scopeDocIdOf(name) {
+  const s = String(name);
+  if (/^(.{1,64})-([0-9a-f]{6,10})$/.test(s)) return s;
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  const slug = s.replace(/\.[^.]+$/, '').replace(/[^\w\u4e00-\u9fa5-]+/g, '_').slice(0, 48);
+  return `${slug}-${h.toString(16)}`;
+}
+function isScopeFileKey(fileKey) {
+  const key = String(fileKey || '');
+  if (!key) return false;
+  if (key === sessionScopeKey()) return true;
+  return readSessionScopeMode() === 'global' && key === scopeDocIdOf('default');
+}
 /** 「当前会话」指针存哪一格：按文件夹 / 每篇论文 / 全局 */
 function activeSessionSlot(docId) {
   const mode = readSessionScopeMode();
@@ -6307,6 +6331,9 @@ function sessionsContext() {
     folderKey: () => currentFolderKey(),
     scopeKey: () => sessionScopeKey(),
     scopeMode: () => readSessionScopeMode(),
+    // 历史行里的 fileKey 是服务端规范化后的键（全局 default → default-<hash>）：
+    // sessions.js 用它在两种排列下判断「这一行是不是当前归属的副本」
+    isScopeFileKey: (fk) => isScopeFileKey(fk),
     // sessions.js 用：这次打开文档是不是「真正进文件夹」；是不是「用户指定了要打开的会话」
     consumeFolderEntry: () => { const v = folderEntryPending; folderEntryPending = false; return v; },
     consumeSessionOpen: () => { const v = pendingSessionOpen; pendingSessionOpen = false; return v; },
@@ -6527,18 +6554,16 @@ async function switchSession(sid, { force = false } = {}) {
   await sessionsOnSessionChanged({ refresh: !known });
 }
 
-/** 跨「会话归属键」打开旧会话：历史里的会话可能属于别的文件夹键（folder/paper/global 切换后），
- *  切过去前把内容复制到当前归属键，这样对话能完整接上；旧文件保留不动（相当于自动备份，不迁移不删除）。 */
-async function adoptRowIntoScope(row) {
-  const sid = String(row?.sid || '');
-  const fromKey = String(row?.fileKey || '');
-  const toKey = sessionScopeKey();
-  if (!sid || !fromKey || fromKey === toKey) return;
+/** 把某个归属键下的会话完整复制到另一个归属键：entries / history / docIds / docTitles /
+ *  标题 / 摘要全都保留。用于「换论文时对话怎么接」切模式、以及从历史打开别的归属键下的
+ *  旧会话。成功返回 true；源文件不存在或网络失败返回 false（旧文件不动，不会丢数据）。 */
+async function copySessionAcrossScope(fromKey, toKey, sid) {
+  if (!fromKey || !toKey || !sid || fromKey === toKey) return false;
   try {
     const r = await fetch(`/api/session?${new URLSearchParams({ doc: fromKey, sid })}`);
-    if (!r.ok) return;
+    if (!r.ok) return false;
     const data = await r.json().catch(() => ({}));
-    if (!data || typeof data !== 'object' || !Array.isArray(data.entries)) return;
+    if (!data || typeof data !== 'object' || !Array.isArray(data.entries)) return false;
     const body = {
       entries: data.entries,
       history: data.history,
@@ -6560,14 +6585,28 @@ async function adoptRowIntoScope(row) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (w.ok) await loadSessionList();
-  } catch { /* 复制失败就按原样切，最坏是空会话；旧文件仍在，不会丢数据 */ }
+    return w.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 跨「会话归属键」打开旧会话：历史里的会话可能属于别的文件夹键（folder/paper/global 切换后），
+ *  切过去前把内容复制到当前归属键，这样对话能完整接上；旧文件保留不动（相当于自动备份，不迁移不删除）。 */
+async function adoptRowIntoScope(row) {
+  const sid = String(row?.sid || '');
+  const fromKey = String(row?.fileKey || '');
+  const toKey = sessionScopeKey();
+  if (!sid || !fromKey || fromKey === toKey) return;
+  if (await copySessionAcrossScope(fromKey, toKey, sid)) await loadSessionList();
 }
 
 /** 历史面板里点一条会话：它可能属于别的文件夹 / 别的论文。
- *  同文件夹且同一篇论文 → 直接切会话；跨文件夹 → 先切文件夹、打开对应论文再切会话；
+ *  「全部做好防护」原则：只要当前这篇论文能接上这段对话（当前指针就是它 / 当前归属键下
+ *  有副本 / 会话读过当前论文 / 点的是当前论文分组），就原地切换，绝不换论文；
+ *  只有会话确实不涉及当前论文时才按点击的分组或 docIds 打开目标论文。
  *  论文已不在 papers/ 里时给提示（历史行仍保留，不会丢）。 */
-async function openSessionFromHistory(row, { force = false } = {}) {
+async function openSessionFromHistory(row, { force = false, docIdHint = '' } = {}) {
   if (!row || !state.doc) return;
   if (state.busy) {
     toast('正在生成中，先等它跑完或点停止再切换会话', 'err', 3200);
@@ -6577,13 +6616,44 @@ async function openSessionFromHistory(row, { force = false } = {}) {
   const folder = String(row.folderPath || '');
   const ids = Array.isArray(row.docIds) ? row.docIds.map(String).filter(Boolean) : [];
   const currentId = state.doc.docId;
-  const targetId = ids.includes(currentId) ? currentId : (ids[0] || '');
-  const sameFolder = folder === (currentFolderPath() || '');
-  // 全局共用模式：会话本来就不属于某个文件夹，直接切过去，不用先换论文
+  const hintId = String(docIdHint || '');
   const globalScope = readSessionScopeMode() === 'global';
-  if ((sameFolder && (!targetId || targetId === currentId)) || globalScope) {
-    if (sid) await adoptRowIntoScope(row);
-    await switchSession(sid, { force });
+  const scopeKey = sessionScopeKey();
+  const copies = Array.isArray(row._copies) ? row._copies : [];
+  const hasScopeCopy = !!sid && (row.fileKey === scopeKey
+    || copies.some((c) => isScopeFileKey(c?.fileKey)));
+  const onCurrentSid = !!sid && activeSidFor(currentId) === sid;
+
+  /** 原地切到这段会话：当前归属键下没有副本时先从旧键复制 → 对齐指针 → 重放 */
+  const switchHere = async () => {
+    if (!sid) return;
+    if (!hasScopeCopy) await adoptRowIntoScope(row);
+    if (activeSidFor(currentId) !== sid) setActiveSidFor(currentId, sid);
+    try {
+      await switchSession(sid, { force: true });
+    } catch {
+      toast('这段会话读取失败（文件可能已被删除），历史列表已刷新', 'err', 3800);
+      await loadSessionList().catch(() => {});
+    }
+  };
+
+  // 全局共用：所有论文共用一段对话，切换会话不需要换论文。
+  if (globalScope) { await switchHere(); return; }
+
+  // ① 当前论文能接上：当前就是这段会话 / 当前归属键下有副本 / 会话读过这篇论文 /
+  //    用户点的就是当前论文分组。全部原地切换，绝不跳论文。
+  if (sid && (onCurrentSid || hasScopeCopy || ids.includes(currentId) || hintId === currentId)) {
+    await switchHere();
+    return;
+  }
+
+  // ② 会话确实属于别的论文：按点击的分组（若在 docIds 里）或 docIds 顺序选目标论文。
+  let targetId = '';
+  if (hintId && ids.includes(hintId)) targetId = hintId;
+  if (!targetId) targetId = ids[0] || '';
+  if (!targetId) {
+    // 没有论文信息的旧会话：原地接上
+    await switchHere();
     return;
   }
   const paper = (state.papers || []).find((p) => String(p.docId) === targetId);
@@ -6601,11 +6671,19 @@ async function openSessionFromHistory(row, { force = false } = {}) {
     } finally { pendingSessionOpen = false; }
   }
   if (state.doc?.docId !== targetId) return;   // 打开失败：不要再把 sid 切到错误文档上
-  // 会话文件可能还在旧归属键下（例如从「文件夹」切到「每篇论文」后打开旧会话）：先复制到当前键
-  if (sid) await adoptRowIntoScope(row);
+  // 打开论文后归属键变了：重新判断当前键下有没有副本，没有就先把旧会话复制过来
+  const scopeKeyAfter = sessionScopeKey();
+  const hasCopyAfter = sid && (isScopeFileKey(row.fileKey)
+    || copies.some((c) => isScopeFileKey(c?.fileKey)));
+  if (sid && !hasCopyAfter) await adoptRowIntoScope(row);
   // openDoc → sessionsOnDocOpened 可能重新亮出选择卡片；这次用户已经指定了会话，收起来再切
   sessionsHideEntryCard();
-  await switchSession(sid, { force: true });
+  try {
+    await switchSession(sid, { force: true });
+  } catch {
+    toast('这段会话读取失败（文件可能已被删除），历史列表已刷新', 'err', 3800);
+    await loadSessionList().catch(() => {});
+  }
 }
 
 /** 新建一个空会话并切过去；silent=true：进文件夹自动新建（不弹提示）
@@ -11096,12 +11174,19 @@ async function applySessionScopeMode(mode) {
   persistSession.cancel?.();
   // ① 旧归属下先存一次：saveSessionNow 读 scope 键时还是旧模式
   if (docId) { try { await saveSessionNow(); } catch { /* 存不下也继续 */ } }
+  // ② 记下旧归属键，再写新模式。新键下的副本要用「完整复制旧文件」而不是重新保存一次，
+  //    否则 payload 里 docIds 只有当前论文，跨论文会话的「问过哪几篇」会丢。
+  const oldScopeKey = sessionScopeKey();
   const next = writeSessionScopeMode(want);
+  const nextScopeKey = sessionScopeKey();
   updateSessionSettingHints();
-  // ② 把同一个 sid 接到新归属的槽位，按新模式再存一次，下次打开直接接上这段对话
+  // ③ 把同一个 sid 接到新归属的槽位，并完整复制一份到新键（旧文件保留作备份，不迁移不删除）
   if (docId && sid) {
     setActiveSidFor(docId, sid);
-    try { await saveSessionNow(); } catch { /* 同上 */ }
+    let copied = false;
+    if (oldScopeKey !== nextScopeKey) copied = await copySessionAcrossScope(oldScopeKey, nextScopeKey, sid);
+    // 源文件不存在（例如刚启动还没落盘）时才退回按内存内容保存一次
+    if (!copied) { try { await saveSessionNow(); } catch { /* 同上 */ } }
   }
   const label = next === 'global' ? '全局共用（所有论文接同一段对话）'
     : (next === 'paper' ? '按论文（每篇论文各接自己那一段）' : '按文件夹（同文件夹里的论文接同一段）');

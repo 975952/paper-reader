@@ -4950,3 +4950,73 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 - 文档：`docs/使用说明书.md` §16.4「按文件」条目改写，说明文档是独立卡片组头、会话缩进挂在下面（引导线 + 圆点）。
 - 未改 JS，隔离冒烟逻辑断言（行数、当前徽标、论文名 trail）不受影响。
 - 构建与提交见本轮收尾（重建 exe 后同步桌面）。
+
+## §93 跨归属方式 / 跨论文切换防护（2026-11-04，用户 m08734）
+
+### 93.1 用户反馈
+
+- 用户 m08734：「我在文档模式a文档下打开会话，然后调成文件夹模式到b文档问了一个问题，然后又调回文档模式，
+  结果在点b文档的时候，原来那个a文档的这个会话会变绿，但是点击之后就直接调到a文档，这种切换的情况，要全部做好防护」。
+- 复现（`test/artifacts/session-switch-smoke/repro2.mjs`，隔离 8986 + 假模型）：A（按论文）恢复会话 → 打开历史 →
+  历史保持打开切到按文件夹模式 → 打开 B 提问 → 切回按论文 → 点 B：历史仍只显示 A 的旧组、该行标「当前」（绿），
+  点击该行后文档跳回 A，与用户描述完全一致。
+
+### 93.2 根因
+
+- `refreshList()` 只刷新当前归属键的 `st.list`，不刷新历史数据源 `st.allList`；`allList` 只在 `openHistory()` 时拉取。
+  历史面板开着跨论文 / 跨归属方式切换后，历史行仍是旧论文那份副本（`fileKey` / `docIds` 都是旧的）。
+- 「当前」徽标只按 `row.sid === st.currentSid` 判断：切换归属方式后活动会话表里 A、B 多个槽位都指向同一个 sid，
+  于是 A 的旧行也被判成「当前」。
+- 点击走 `chooseSession(row)` → `openSessionFromHistory(row)`，其中 `targetId = 旧 row.docIds[0] = A`，
+  于是 `openDoc(A)` 把用户带回 A。
+- 附带问题：切换归属方式时 `applySessionScopeMode()` 第二步用 `saveSessionNow()` 往新键写副本，
+  写出的 `docIds` 只有当前论文，跨论文会话在副本里丢掉「问过哪几篇」；`collapseRows()` 也不合并多副本的
+  `docIds/docTitles`，使历史分组与点击目标更容易错。
+- 全局模式键名不一致：客户端 scope key 是 `default`，服务端落盘键是 `default-9ce67dce`（`docIdOf('default')`），
+  历史行 fileKey 与当前归属键比较失败 → 全局模式下「当前」徽标缺失。
+
+### 93.3 实现（2 个源文件）
+
+- `public/js/sessions.js`：
+  - 新增 `isScopeFileKey(fileKey)`（优先用 ctx 的判断，回退与 `listScopeKey()` 相等），统一用于 `preferRow()`
+    选当前归属副本、`historyRow()` 的 `hasScopeCopy`、`confirmDeleteRow()` 的当前键判断与副本过滤。
+  - `refreshList()` 末尾：历史面板打开时 `await refreshAllList()`，切换论文 / 归属方式后历史即时刷新。
+  - `sessionsOnSessionChanged()`：历史打开时按 `refresh` 标记补拉或重绘。
+  - `collapseRows()`：多副本按 primary 优先顺序合并 `docIds/docTitles` **并集**（并保留 `_copies`）。
+  - `historyRow()`：`hasScopeCopy`（行或副本属于当前归属键）+ `groupOk`（按文件排列时组 id 必须是当前论文），
+    两者同时满足才标「当前」；点击改 `chooseSession(row, group?.id || '')`。
+  - `chooseSession(sidOrRow, docIdHint = '')`：把点击的论文分组传给 `openSessionFromHistory`。
+- `public/js/app.js`：
+  - 新增 `scopeDocIdOf(name)`（与 server.js docIdOf 同算法）+ `isScopeFileKey(fileKey)`，
+    `sessionsContext()` 暴露 `isScopeFileKey()`。
+  - 新增 `copySessionAcrossScope(fromKey, toKey, sid)`：GET 旧键完整会话 → POST 完整 payload 到新键
+    （entries/history/ops/teaching/docIds/docTitles/title/…），旧文件保留；`adoptRowIntoScope()` 改用它。
+  - `openSessionFromHistory(row, { force, docIdHint })` 重写：全局模式直接切；能「原地接上」时
+    （当前论文的活动会话 / 当前归属键已有副本 / 行记录问过当前论文 / 点击分组就是当前论文）只补副本 + 切会话，
+    **不换文档**；否则才按 `docIdHint` 优先、`docIds[0]` 兜底选目标论文，跨论文打开时用 `pendingSessionOpen`
+    包住 `openDoc()`，打开后重判副本并按需 adopt 再切。
+  - `applySessionScopeMode()`：先记旧 scope key → 写新模式 → 用 `copySessionAcrossScope()` 把同一会话完整复制到新键，
+    失败才回退 `saveSessionNow()`，副本不再丢 docIds。
+  - `openDoc()`：按论文模式热切回 `restoreSession({only:'chat'})` 失败时清指针并回退到 `sessionsOnDocOpened()`，不会空白。
+
+### 93.4 验证
+
+- 复现脚本回归：修复后在 B 时历史出现 A、B 两组、唯一「当前」行在 B 组，点击仍停在 B。
+- 新增正式回归冒烟 `test/artifacts/session-switch-smoke/smoke.mjs`（隔离数据 `test/artifacts/session-switch-smoke/{data,papers}`，
+  8986 服务、假配置、Puppeteer headless、拦截 `/api/chat` 不调用真实模型；播种跨 A/B 主会话 + 仅 A 问过的会话）：
+  **20/20 全部通过、无 pageerror**。覆盖：A 下历史 A 组 → 切文件夹模式仍 A 组 → B 提问后历史 A+B 两组且唯一
+  「当前」在 B 组 → 切回按论文唯一「当前」在 B 组 → 按论文键副本保留 A+B docIds → 在 A/B 间来回不出现旧行变绿 →
+  点当前会话留在 B → 点仅 A 问过的会话正确打开 A 并切到该会话 → 全局模式换论文仍同一段对话、历史仅「共用会话」组
+  且当前徽标正确。截图 `test/artifacts/session-switch-smoke/shots/`（`history-on-b.png`、`global-roundtrip.png`）。
+- 回归旧冒烟：`test/artifacts/session-dup-smoke/smoke.mjs` 18/18、`test/artifacts/session-scope-smoke/smoke.mjs` 43/43。
+- 解析校验：`node --experimental-vm-modules` + `new vm.SourceTextModule(...)` 对 app.js / sessions.js / ai.js / server.js 全部 PARSE-OK。
+
+### 93.5 文档与交付
+
+- `docs/使用说明书.md`：§16.4 新增「跨论文 / 跨归属方式切换时的防护」，说明历史自动刷新、「当前」判定、
+  点击优先原地接上、跨论文才切文档、模式切换副本保留完整论文清单与内容。
+- 构建：`desktop\build.bat` 重建项目根与桌面 `论文阅读器.exe`：11,135,488 B，
+  SHA256 `E0BD42DCB7796EE677ABB06DF9E30814BDFF79C672E37A119B19CFB3015FF845`；桌面副本已覆盖并重启
+  （PID 112884，Responding=True）。
+- 提交：本次实现提交「跨归属方式切换防护：历史实时刷新、当前徽标按归属+论文判定、点击优先原地接上」（2 个源文件），
+  随后推送 `origin/main`。
