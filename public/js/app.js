@@ -8446,18 +8446,28 @@ const FOLLOW_UP_DIRECT_DEFAULT = true;
 function followUpDirectEnabled() {
   return readFlag('reader.followUpDirect', FOLLOW_UP_DIRECT_DEFAULT);
 }
-/** 问题点明了要看新的材料：别走直答，照旧完整阅读流程 */
-const FOLLOW_UP_READ_RE = /(第\s*\d+\s*页|p\.?\s*\d+|整篇|全文|全文索引|翻到|翻页|重新读|从头读|再读|读一遍|找一下|查一下|搜一下|看一下|看看)/i;
+/** 问题点明了要看新的材料 / 要核对 / 要搜索：别走直答，照旧完整阅读流程。
+    2026-11-04 二次修复：用户实测「前几个 PDF 有没有提到 X」「去查啊」「？」都被当成闲聊追问，
+    工具被关掉后模型反过来让用户自己贴页。凡是带核对/翻页/搜索/页码/文档词的问题一律走完整流程。 */
+const FOLLOW_UP_READ_RE = /(第\s*\d+\s*页|p\.?\s*\d+|页码|整篇|全文|全文索引|翻到|翻页|翻一下|翻翻|重新读|从头读|再读|读一遍|找一下|找找|查|搜|核实|验证|确认|看看|看一下|前面几|前几|哪一页|哪页|其他页|别的页|另一页|原文|pdf|论文里|文档里|讲义|课件|到底|真的|是不是|没找到|找不到|重新生成)/i;
+/** 明显在质疑上一轮 / 要求重查的短回应：即使很短也切完整流程（用户实测「去查啊」） */
+const FOLLOW_UP_CHALLENGE_RE = /(去查|查啊|查查|核实|确认|验证|翻一下|翻翻|看看自己|自己看|到底|真的|确定吗|不对|错了|没找到|找不到|重新查|再查)/;
+/** 纯标点/语气词的追问（例如「？」）：只有在上一轮是轻量直答时才切完整流程 */
+const FOLLOW_UP_PURE_PUNCT_RE = /^[？?！!。，,、…\s]+$/;
+/** 上一轮回答是否走了轻量直答（「？」「去查啊」这类回应据此升级为完整阅读流程） */
+let lastChatAnswerDirect = false;
 /** 扫描件里提到图/表/公式/位置：保留页图，别把影像材料也省掉 */
 const FOLLOW_UP_VISUAL_RE = /(图|表|公式|截图|这块|这里|这页|上面|下面|左边|右边|圈|标出|显示|画出|坐标|曲线)/;
 /**
  * 「明显承接上文」的追问判定：返回 { direct, keepVisual }。
  * direct=true 时调用方跳过 Agent 工具轮次、整篇全文与页图材料，只带对话历史 + 当前页上下文直答。
- * keepVisual=true 仅用于扫描件且问题提到图表：保留页图材料（扫描件没有文本层，不能完全脱离影像）。
+ * 但以下情况一律不走直答：点名查页/核对/搜索/文档、带选区截图、上一轮直答后用户只回「？」或质疑、
+ * 「重新生成」（forceFull）——这些都需要真实读材料，否则模型会反过来让用户自己去翻页。
  */
 function planFollowUpDirect(pending, { images = [], scannedDoc = false } = {}) {
   if (!followUpDirectEnabled()) return { direct: false, keepVisual: false };
   if (!pending || !pending.docId) return { direct: false, keepVisual: false };
+  if (pending.forceFull) return { direct: false, keepVisual: false };
   const q = String(pending.inputValue || '').trim();
   if (!q || q.length > 60) return { direct: false, keepVisual: false };
   if (images?.length) return { direct: false, keepVisual: false };
@@ -8466,6 +8476,9 @@ function planFollowUpDirect(pending, { images = [], scannedDoc = false } = {}) {
   if (pending.quoteText) return { direct: false, keepVisual: false };
   if (!Array.isArray(pending.history) || pending.history.length === 0) return { direct: false, keepVisual: false };
   if (FOLLOW_UP_READ_RE.test(q)) return { direct: false, keepVisual: false };
+  if (FOLLOW_UP_CHALLENGE_RE.test(q)) return { direct: false, keepVisual: false };
+  // 上一轮是轻量直答、用户只回「？」：说明答案没对上，别再顺口糊，直接去查
+  if (lastChatAnswerDirect && FOLLOW_UP_PURE_PUNCT_RE.test(q)) return { direct: false, keepVisual: false };
   const keepVisual = !!scannedDoc && FOLLOW_UP_VISUAL_RE.test(q);
   return { direct: true, keepVisual };
 }
@@ -10364,6 +10377,8 @@ async function send(retryPending = null) {
     return;
   }
   let pending = retryPending;
+  // 手动「重新生成」= 这次按完整阅读流程重查，不再用轻量直答（否则会把上一轮的猜测又念一遍）
+  if (pending) pending.forceFull = true;
   if (!pending && state.doc && state.viewerDocId !== state.doc.docId) {
     flashHint('论文正在打开，请稍候');
     return;
@@ -10537,6 +10552,7 @@ async function send(retryPending = null) {
     const followPlan = planFollowUpDirect(pending, { images, scannedDoc });
     const followDirect = followPlan.direct;
     pending.followUpDirect = followDirect;
+    lastChatAnswerDirect = followDirect;
     if (followDirect) setHint('接着上一段直接回答…');
     // 没有选区时也带所在页上下文：
     // · 追问 → 上一轮话题所在页（让模型顺着上下说，而不是被屏幕滚到的页带跑）；
@@ -10699,11 +10715,15 @@ async function send(retryPending = null) {
       citationMat.basis = '本次依据：接着上一段对话（没有重新翻页读论文）';
       const sys = messages[0];
       if (sys && sys.role === 'system') {
-        sys.content += '\n\n【追问直答】这是接着上一轮回答的追问：直接沿用对话里已经讲过的内容继续，'
-          + '不要假装重新读了论文，不要编造页码或原文；篇幅可以短一些。'
+        sys.content += '\n\n【追问直答】这是接着上一轮回答的追问：优先沿用对话里已经讲过的内容继续说，篇幅可以短一些。'
+          + '注意：这一轮没有重新翻页、没有联网；但绝对不要说「我没有联网通道」「我读不了页图」「没有这个功能」——'
+          + '完整阅读模式下你可以自己翻页、读其它页/其它论文、联网检索、看页图。'
+          + '如果读者要求核对原文、翻到别的页、查资料，或者你发现当前上下文不足以确认，就直接说明：'
+          + '「这轮我只依据上文回答；需要我翻页/联网核对的话说一句『查一下』或点『重新生成』，我会用完整阅读流程去查。」'
+          + '不要编造页码或原文，也不要反过来让读者自己去贴材料。'
           + (followPlan.keepVisual
-            ? '这次只附了相关页图；需要核对哪张图时用页面上的图，不要另找别的页。'
-            : '如果确实需要看新的页或图，先说明希望读者翻到哪一页，再等读者接着问。');
+            ? '这次只附了相关页图；需要核对哪张图时用页面上的图。'
+            : '较真核对、找原文一律交给完整阅读流程（读者说「查一下」即触发）。');
       }
     }
     // 图片有两种：用户自己加的截图 + 扫描件的页面上下文；同一条 user 消息里一起发。
