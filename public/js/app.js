@@ -14,7 +14,7 @@ import {
   Settings, streamChat, testConnection, targetLangFor, searchTerms,
   translateMessages, translateShotMessages, askMessages, explainMessages,
   digestMessages, webQueryFor, filterWebResults, opMessages, teachMessages, condenseMessages,
-  scanPageMessages, sessionSummaryMessages,
+  scanPageMessages, sessionSummaryMessages, sessionTitleMessages,
 } from './ai.js';
 import { resolveReadingRequest, resolvePageRole, snapshotReadingRequest, snapshotHistory, readingTurn,
   restoreReadingHistory, citedSources, stripPageLabels } from './reading-context.js';
@@ -25,6 +25,8 @@ import {
   initSessions, sessionsOnFolderEntered, sessionsOnDocOpened, sessionsOnSessionChanged,
   sessionsMigrateFolder, sessionsRefreshHeader, sessionsSetBusy,
   sessionsIsEntryMode, sessionsLeaveEntryForNewSession, sessionsEntryCardEl, sessionsHideEntryCard,
+  sessionsApplyMeta, sessionsGetEnterMode, sessionsSetEnterMode,
+  sessionsGetHistoryMode, sessionsSetHistoryMode,
 } from './sessions.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
@@ -5343,7 +5345,12 @@ const persistSession = debounce(() => {
     toastAction('会话保存失败，当前内容仍保留。', '重试', saveSessionNow, 'err', 12000);
   });
 }, 800);
-function scheduleSessionSave() { if (state.doc) persistSession(); }
+function scheduleSessionSave() {
+  if (!state.doc) return;
+  persistSession();
+  // 会话有了第一轮完整回答后，后台生成一个更清楚的标题（手动改名永远优先）
+  scheduleSessionTitle();
+}
 
 const SESSION_KEY = 'reader.activeSession';
 const CURRENT_FOLDER_KEY = 'reader.currentFolder.v1';
@@ -5384,18 +5391,56 @@ function persistCurrentFolder() {
   try { localStorage.setItem(CURRENT_FOLDER_KEY, currentFolderPath()); } catch { /* 忽略 */ }
 }
 
+/* 会话归属方式（设置 → 会话，2026-11-04）：让不同使用习惯的人自己选会话「属于谁」。
+   - folder（默认，现状）：会话属于文件夹，同一文件夹的多篇论文可以接着同一段会话问；
+   - paper：每篇论文各自一套当前会话，换论文自动接上那篇自己的会话；
+   - global：所有论文共用一个会话空间，换论文也不丢上下文。
+   存储：folder/paper 仍按文件夹存（sid 不同自然分文件）；global 统一存到 doc=default。 */
+const SESSION_SCOPE_MODE_KEY = 'reader.session.scopeMode';
+const AI_TITLE_KEY = 'reader.session.aiTitle';
+function readSessionScopeMode() {
+  try {
+    const v = localStorage.getItem(SESSION_SCOPE_MODE_KEY);
+    return v === 'paper' || v === 'global' ? v : 'folder';
+  } catch { return 'folder'; }
+}
+function writeSessionScopeMode(mode) {
+  const next = mode === 'paper' || mode === 'global' ? mode : 'folder';
+  try { localStorage.setItem(SESSION_SCOPE_MODE_KEY, next); } catch { /* 忽略 */ }
+  return next;
+}
+/** 问答会话存到哪个 doc 键：global 统一 default，其余沿用文件夹键 */
+function sessionScopeKey() {
+  return readSessionScopeMode() === 'global' ? 'default' : currentFolderKey();
+}
+/** 「当前会话」指针存哪一格：按文件夹 / 每篇论文 / 全局 */
+function activeSessionSlot(docId) {
+  const mode = readSessionScopeMode();
+  if (mode === 'global') return 'global';
+  if (mode === 'paper') return `doc:${String(docId || state.doc?.docId || '')}`;
+  return currentFolderKey();
+}
+/** AI 自动标题开关（默认开；关闭后沿用服务端「首条问题」自动标题） */
+function aiTitleEnabled() {
+  try { return localStorage.getItem(AI_TITLE_KEY) !== '0'; } catch { return true; }
+}
+function setAiTitleEnabled(on) {
+  try { localStorage.setItem(AI_TITLE_KEY, on ? '1' : '0'); } catch { /* 忽略 */ }
+}
+
+
 function readActiveSessions() {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY) || '{}') || {}; } catch { return {}; }
 }
-/** 活动会话 sid：**按文件夹**记一份（问答会话属于文件夹，不属于某一篇文档） */
-function activeSidFor(_docId) {
+/** 活动会话 sid：跟着「会话归属方式」记一格（文件夹 / 每篇论文 / 全局） */
+function activeSidFor(docId) {
   const map = readActiveSessions();
-  const key = currentFolderKey();
+  const key = activeSessionSlot(docId);
   return typeof map[key] === 'string' ? map[key] : '';
 }
-function setActiveSidFor(_docId, sid) {
+function setActiveSidFor(docId, sid) {
   const map = readActiveSessions();
-  const key = currentFolderKey();
+  const key = activeSessionSlot(docId);
   if (sid) map[key] = sid; else delete map[key];
   try { localStorage.setItem(SESSION_KEY, JSON.stringify(map)); } catch { /* 忽略 */ }
 }
@@ -5593,7 +5638,7 @@ async function saveSessionNow() {
   const sid = activeSidFor(docId);
   const headers = { 'Content-Type': 'application/json' };
   const [chatRes, translateRes] = await Promise.all([
-    fetch(`/api/session?${sessionQuery(currentFolderKey(), sid)}`, { method: 'POST', headers, body: both.chat }),
+    fetch(`/api/session?${sessionQuery(sessionScopeKey(), sid)}`, { method: 'POST', headers, body: both.chat }),
     fetch(`/api/session?${sessionQuery(docId, TRANSLATE_SID)}`, { method: 'POST', headers, body: both.translate }),
   ]);
   if (!chatRes.ok) throw new Error(`HTTP ${chatRes.status}`);
@@ -6065,7 +6110,7 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     const openSeq = state.openSeq;
     // 当前文件夹的问答会话 + 本文档译文伪会话（文档级）
     const [chatRes, translateRes] = await Promise.all([
-      fetch(`/api/session?${sessionQuery(currentFolderKey(), sid)}`),
+      fetch(`/api/session?${sessionQuery(sessionScopeKey(), sid)}`),
       fetch(`/api/session?${sessionQuery(docId, TRANSLATE_SID)}`),
     ]);
     if (!chatRes.ok) throw new Error(`HTTP ${chatRes.status}`);
@@ -6195,6 +6240,8 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     }
     // 问答 DOM 已与磁盘上的全局会话对齐，记下指纹：下次切论文时不需要再重放
     if (replayChat) chatDomSig = sig;
+    // AI 自动标题：只有「服务端自动标题」（首条问题）才升级；手动改名（user）绝不覆盖
+    if (String(savedChat.titleSource || 'auto') === 'auto') scheduleSessionTitle();
   } catch (e) { toast(`读取当前论文会话失败：${e.message}`, 'err', 5000); }
 }
 
@@ -6214,6 +6261,7 @@ function sessionsContext() {
     currentSid: () => (state.doc ? activeSidFor(state.doc.docId) : ''),
     folderPath: () => currentFolderPath(),
     folderKey: () => currentFolderKey(),
+    scopeKey: () => sessionScopeKey(),
     folderKeyOf: (path) => folderKeyOf(path),
     folderDisplayName: (path) => folderDisplayName(path),
     papers: () => state.papers || [],
@@ -6227,6 +6275,8 @@ function sessionsContext() {
     deleteSession: (sid) => deleteSession(sid, { confirm: false }),
     clearCurrentSession: () => clearCurrentSession({ confirm: false }),
     saveNow: () => saveSessionNow(),
+    // 会话头/历史面板里的「会话设置」按钮：直接打开设置里的「会话」分类
+    openSessionSettings: () => { openSettings(); showSettingsPane('session'); },
     paperMemoryOff: () => isPaperMemoryOff(state.doc?.docId || ''),
     togglePaperMemory: () => togglePaperMemory(),
     restoreChatOnly: () => restoreChatOnly(),
@@ -6261,7 +6311,7 @@ async function clearCurrentSession({ confirm: askConfirm = true } = {}) {
   globalChatSig = '';
   try {
     // 只清全局问答会话；本文档译文（__translate）不动
-    const r = await fetch(`/api/session?${sessionQuery(currentFolderKey(), activeSidFor(state.doc.docId))}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries: [], history: [], ops: [], teaching: null, summary: '', summaryCovered: 0, updatedAt: Date.now() }) });
+    const r = await fetch(`/api/session?${sessionQuery(sessionScopeKey(), activeSidFor(state.doc.docId))}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries: [], history: [], ops: [], teaching: null, summary: '', summaryCovered: 0, updatedAt: Date.now() }) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     toast('当前论文会话已清空', 'ok');
     loadPaperMemory();
@@ -6284,12 +6334,20 @@ function closeSessionMenu() {
 async function loadSessionList() {
   if (!state.doc) return [];
   try {
-    // 会话属于文件夹：只列当前文件夹里开过的会话
-    const r = await fetch(`/api/sessions?doc=${encodeURIComponent(currentFolderKey())}`);
+    // 会话属于「会话归属方式」决定的空间：默认文件夹；全局共用时统一 default
+    const r = await fetch(`/api/sessions?doc=${encodeURIComponent(sessionScopeKey())}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     sessionStore.list = (await r.json()).sessions || [];
   } catch { sessionStore.list = []; }
   return sessionStore.list;
+}
+
+/** 会话菜单标题：按「会话归属方式」说清楚这段会话属于谁 */
+function sessionListHeadText() {
+  const mode = readSessionScopeMode();
+  if (mode === 'global') return '全部论文共用的会话';
+  if (mode === 'paper') return `「${state.doc?.name || ''}」的会话`;
+  return `「${folderDisplayName(currentFolderPath())}」的会话`;
 }
 
 /** 画会话菜单：一行一个会话（标题 + 条数 + 时间），底部是「新建会话」 */
@@ -6325,7 +6383,7 @@ function renderSessionMenu() {
   });
   if (!rows.length) rows.push(el('div', { class: 'sess-empty', text: '还没有会话' }));
   menu.replaceChildren(
-    el('div', { class: 'sess-head', text: `「${folderDisplayName(currentFolderPath())}」的会话` }),
+    el('div', { class: 'sess-head', text: sessionListHeadText() }),
     ...rows,
     el('button', {
       type: 'button', class: 'sess-mem',
@@ -6406,6 +6464,43 @@ async function switchSession(sid, { force = false } = {}) {
   sessionsOnSessionChanged({ refresh: false });
 }
 
+/** 全局共用模式：历史里的旧会话属于某个文件夹的键，切过去前把内容复制到当前归属键，
+ *  这样对话能完整接上；旧文件保留不动（相当于自动备份，不迁移不删除）。 */
+async function adoptRowIntoScope(row) {
+  const sid = String(row?.sid || '');
+  const fromKey = String(row?.fileKey || '');
+  const toKey = sessionScopeKey();
+  if (!sid || !fromKey || fromKey === toKey) return;
+  try {
+    const r = await fetch(`/api/session?${new URLSearchParams({ doc: fromKey, sid })}`);
+    if (!r.ok) return;
+    const data = await r.json().catch(() => ({}));
+    if (!data || typeof data !== 'object' || !Array.isArray(data.entries)) return;
+    const body = {
+      entries: data.entries,
+      history: data.history,
+      ops: data.ops,
+      teaching: data.teaching,
+      createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
+      folderPath: currentFolderPath(),
+      docIds: data.docIds,
+      docTitles: data.docTitles,
+      title: data.title || '',
+      titleSource: data.titleSource === 'user' ? 'user' : (data.titleSource === 'ai' ? 'ai' : 'auto'),
+      summary: data.summary,
+      summaryCovered: data.summaryCovered,
+      summaryPrompt: data.summaryPrompt,
+    };
+    const w = await fetch(`/api/session?${new URLSearchParams({ doc: toKey, sid })}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (w.ok) await loadSessionList();
+  } catch { /* 复制失败就按原样切，最坏是空会话；旧文件仍在，不会丢数据 */ }
+}
+
 /** 历史面板里点一条会话：它可能属于别的文件夹 / 别的论文。
  *  同文件夹且同一篇论文 → 直接切会话；跨文件夹 → 先切文件夹、打开对应论文再切会话；
  *  论文已不在 papers/ 里时给提示（历史行仍保留，不会丢）。 */
@@ -6421,7 +6516,10 @@ async function openSessionFromHistory(row, { force = false } = {}) {
   const currentId = state.doc.docId;
   const targetId = ids.includes(currentId) ? currentId : (ids[0] || '');
   const sameFolder = folder === (currentFolderPath() || '');
-  if (sameFolder && (!targetId || targetId === currentId)) {
+  // 全局共用模式：会话本来就不属于某个文件夹，直接切过去，不用先换论文
+  const globalScope = readSessionScopeMode() === 'global';
+  if ((sameFolder && (!targetId || targetId === currentId)) || globalScope) {
+    if (globalScope && sid) await adoptRowIntoScope(row);
     await switchSession(sid, { force });
     return;
   }
@@ -6488,7 +6586,7 @@ async function deleteSession(sid, { confirm: askConfirm = true } = {}) {
   const docId = state.doc.docId;
   if (askConfirm && !confirm('删除这个会话？论文和笔记不受影响。')) return;
   try {
-    const r = await fetch(`/api/session?${sessionQuery(currentFolderKey(), sid)}`, { method: 'DELETE' });
+    const r = await fetch(`/api/session?${sessionQuery(sessionScopeKey(), sid)}`, { method: 'DELETE' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
   } catch (e) { toast(`删除失败：${e.message}`, 'err', 4000); return; }
   if (activeSidFor(docId) === (sid || '')) {
@@ -6864,7 +6962,7 @@ async function loadPaperMemory() {
       .slice(0, 2);
     const parts = [];
     for (const s of candidates) {
-      const r = await fetch(`/api/session?doc=${encodeURIComponent(currentFolderKey())}&sid=${encodeURIComponent(s.sid || '')}`);
+      const r = await fetch(`/api/session?doc=${encodeURIComponent(sessionScopeKey())}&sid=${encodeURIComponent(s.sid || '')}`);
       if (!r.ok) continue;
       const data = await r.json();
       const summary = String(data?.summary || '').trim();
@@ -6913,6 +7011,101 @@ function scheduleSessionSummary() {
     } catch { /* 摘要失败静默：下一次轮次还会再试 */ }
     finally { sessionSummaryBusy = false; }
   })();
+}
+
+/* ── AI 自动标题 ────────────────────────────────────────────────
+   会话标题默认由服务端取首条问题（最多 28 字）；这里在后台让模型总结一个
+   干净、简短、能区分不同会话的标题。规则：
+   · 手动改名（titleSource='user'）永远优先，不再覆盖；
+   · 每个会话只生成一次（内存里记 done），失败最多试 2 次；
+   · 结果不合格（太长/只有论文名/不像标题）就保留服务端自动标题；
+   · 生成过程中用户换了会话/论文，结果直接丢弃。 */
+const sessionTitleState = new Map();  // `${scopeKey}::${sid}` → { attempts, done, inflight, hash }
+let sessionTitleTimer = null;
+
+function scheduleSessionTitle() {
+  if (!aiTitleEnabled() || !Settings.ready) return;
+  if (sessionTitleTimer) return;
+  sessionTitleTimer = setTimeout(() => {
+    sessionTitleTimer = null;
+    runSessionTitle();
+  }, 1600);
+}
+
+function runSessionTitle() {
+  if (state.busy || !state.doc) return;
+  const docId = state.doc.docId;
+  const sid = activeSidFor(docId);
+  if (!sid) return;                       // 老的无 sid 默认文件不改名，避免和历史默认会话抢名字
+  const entries = Array.isArray(state.sessionEntries) ? state.sessionEntries : [];
+  const firstUser = entries.find((e) => e && (e.block || 'chat') === 'chat'
+    && e.kind === 'user' && String(e.text || '').trim());
+  const firstAnswer = entries.find((e) => e && (e.block || 'chat') === 'chat'
+    && e.kind === 'assistant' && e.status === 'complete' && String(e.text || '').trim());
+  if (!firstUser || !firstAnswer) return;
+  const key = `${sessionScopeKey()}::${sid}`;
+  let st = sessionTitleState.get(key);
+  if (!st) { st = { attempts: 0, done: false, inflight: false, hash: '' }; sessionTitleState.set(key, st); }
+  if (st.done || st.inflight) return;
+  const hash = `${String(firstUser.text).slice(0, 200)}|${String(firstAnswer.text).slice(0, 200)}`;
+  if (st.attempts >= 2 || st.hash === hash) return;
+  st.attempts += 1;
+  st.hash = hash;
+  st.inflight = true;
+  const question = String(firstUser.text || '').replace(/\s+/g, ' ').slice(0, 400);
+  const answer = String(firstAnswer.text || '').replace(/\s+/g, ' ').slice(0, 900);
+  const paper = state.doc?.name || '';
+  (async () => {
+    try {
+      // 先看磁盘上的 meta：手动标题或已生成过的 AI 标题不再重复请求模型
+      const head = await fetch(`/api/session?${sessionQuery(sessionScopeKey(), sid)}`);
+      if (!head.ok) return;
+      const headData = await head.json().catch(() => ({}));
+      const src = String(headData?.titleSource || 'auto');
+      if (src === 'user' || src === 'ai') { st.done = true; return; }
+      if (state.doc?.docId !== docId || activeSidFor(docId) !== sid) return;
+      const raw = await chat({
+        messages: sessionTitleMessages({ paper, question, answer }),
+        stream: false,
+        temperature: 0,
+        signal: state.abort?.signal,
+        idleMs: 25000,
+      });
+      // 生成期间换了会话/论文：这个结果不属于当前会话，丢弃
+      if (state.doc?.docId !== docId || activeSidFor(docId) !== sid) return;
+      const title = cleanSessionTitle(raw, paper);
+      if (!title) return;
+      const r = await fetch(`/api/session?${sessionQuery(sessionScopeKey(), sid)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, titleSource: 'ai' }),
+      });
+      if (!r.ok) return;
+      const j = await r.json().catch(() => ({}));
+      st.done = true;
+      sessionsApplyMeta(sid, { title: String(j?.session?.title || title), titleSource: 'ai' });
+      renderSessionBar();
+    } catch { /* 标题生成失败静默：保留首问自动标题，下次有新内容再试 */ }
+    finally { st.inflight = false; }
+  })();
+}
+
+/** 把模型输出收拾成像标题的一行：去引号/书名号/前缀、去标点尾巴、限长 */
+function cleanSessionTitle(raw, paperName = '') {
+  let s = String(raw || '').split(/\r?\n/)[0] || '';
+  s = s.replace(/^(会话标题|标题|题目)\s*[:：]\s*/, '').replace(/\s+/g, ' ').trim();
+  // 模型偶尔套好几层：如 「《标题》。」——括号和尾部标点交替剥，最多剥 4 轮
+  for (let i = 0; i < 4; i += 1) {
+    s = s.replace(/^[\s"'“”‘’《「『【\[（(]+/, '').replace(/[\s"'“”‘’》」』】\]）)]+$/, '');
+    s = s.replace(/^[。．.!！?？:：;；,，、]+/, '').replace(/[。．.!！?？:：;；,，、]+$/, '');
+    s = s.trim();
+    if (!s) return '';
+  }
+  if (s.length > 28) s = s.slice(0, 28).replace(/[。．.!！?？:：;；,，、\s]+$/, '').trim();
+  const bare = (v) => String(v || '').replace(/\.pdf$/i, '').replace(/[《》\s]/g, '');
+  if (paperName && bare(s) === bare(paperName)) return '';   // 只复述论文名没有信息量
+  if (!/[\u4e00-\u9fa5a-zA-Z0-9]/.test(s)) return '';
+  return s;
 }
 
 
@@ -10847,6 +11040,7 @@ function fillSettings() {
   $('#cfgApiKey').placeholder = d.hasApiKey ? '已保存，留空则不改' : 'sk-…';
   updateEndpointNote();
   fillUiSettings();
+  fillSessionSettings();
 }
 
 function fillUiSettings() {
@@ -10862,6 +11056,43 @@ function fillUiSettings() {
   const web = $('#cfgUseWeb');
   if (web) web.checked = uiStyle.useWeb !== false;
   updateUiRangeLabels();
+}
+
+/* 会话设置（设置 → 会话）：这些只影响本机的会话行为，切换/勾选就生效，
+   不需要走「保存并测试」。 */
+function fillSessionSettings() {
+  const scope = $('#settScopeMode');
+  if (scope) scope.value = readSessionScopeMode();
+  const title = $('#settAiTitle');
+  if (title) title.checked = aiTitleEnabled();
+  const enter = $('#settOnEnter');
+  if (enter) enter.value = sessionsGetEnterMode();
+  const hist = $('#settHistoryMode');
+  if (hist) hist.value = sessionsGetHistoryMode();
+}
+
+/** 切换会话归属方式：当前会话先按旧归属存盘，再把同一个 sid 接到新归属方式下继续
+ *  （并把内容复制一份到新位置，旧文件保留作备份，不迁移不删除，避免任何数据丢失）。 */
+async function applySessionScopeMode(mode) {
+  const docId = state.doc?.docId || '';
+  const sid = docId ? activeSidFor(docId) : '';
+  const prev = readSessionScopeMode();
+  const next = writeSessionScopeMode(mode);
+  if (docId) {
+    persistSession.cancel?.();
+    // ① 旧归属下存一次（切之前在旧槽位读到的是旧 sid）
+    if (prev !== next) { try { await saveSessionNow(); } catch { /* 存不下也继续 */ } }
+    if (sid) setActiveSidFor(docId, sid);
+    // ② 新归属下再存一次：内容跟着 sid 复制过去，下次打开就是这段对话
+    if (prev !== next) { try { await saveSessionNow(); } catch { /* 同上 */ } }
+  }
+  const label = next === 'global' ? '所有论文共用会话' : (next === 'paper' ? '每篇论文各自独立' : '会话属于文件夹');
+  toast(`会话归属：${label}`, 'ok', 2600);
+  loadSessionList().then(() => {
+    renderSessionMenu();
+    renderSessionBar();
+    sessionsOnSessionChanged({ refresh: true });
+  });
 }
 
 function updateUiRangeLabels() {
@@ -10964,7 +11195,7 @@ function updateEndpointNote() {
 }
 
 const SETTINGS_PANE_KEY = 'reader.settings.pane';
-const SETTINGS_PANES = ['model', 'appearance', 'behavior', 'memory'];
+const SETTINGS_PANES = ['model', 'appearance', 'behavior', 'session', 'memory'];
 
 /**
  * 设置弹窗两栏切换：左列竖排分类，右侧只显示对应面板。
@@ -11056,6 +11287,16 @@ function initSettings() {
   //   所以勾选也走 applyUiSettingsFromControls → syncScopePrefs → renderScopeRange）。
   ['uiTheme', 'uiFontSize', 'uiZoomSpeed', 'cfgUseFullText', 'cfgUseWeb']
     .forEach((id) => document.getElementById(id)?.addEventListener('input', applyUiSettingsFromControls));
+  // 「会话」分类：四项都只影响本机行为，切换/勾选立刻生效（和「保存并测试」无关）
+  $('#settScopeMode')?.addEventListener('change', () => applySessionScopeMode($('#settScopeMode').value));
+  $('#settAiTitle')?.addEventListener('change', () => {
+    const on = !!$('#settAiTitle').checked;
+    setAiTitleEnabled(on);
+    if (on) scheduleSessionTitle();
+    toast(on ? '已开启 AI 自动标题' : '已关闭 AI 自动标题，标题沿用首条问题', 'ok', 2400);
+  });
+  $('#settOnEnter')?.addEventListener('change', () => sessionsSetEnterMode($('#settOnEnter').value));
+  $('#settHistoryMode')?.addEventListener('change', () => sessionsSetHistoryMode($('#settHistoryMode').value));
   $('#resetSettings').onclick = () => resetSettings();
 
   $('#saveSettings').onclick = async () => {
@@ -11244,7 +11485,7 @@ window.addEventListener('beforeunload', () => {
       // B 线 P3：unload 时分别保存全局问答与本文档译文（都走 keepalive）
       const both = buildSessionPayload();
       if (both) {
-        saveOnUnload(`/api/session?${sessionQuery(currentFolderKey(), activeSidFor(state.doc.docId))}`, both.chat);
+        saveOnUnload(`/api/session?${sessionQuery(sessionScopeKey(), activeSidFor(state.doc.docId))}`, both.chat);
         saveOnUnload(`/api/session?${sessionQuery(state.doc.docId, TRANSLATE_SID)}`, both.translate);
       }
     } catch { /* unload fallback */ }

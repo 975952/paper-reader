@@ -45,7 +45,7 @@ export {
 } from './capabilities/teach.js';
 export { opMessages, OPS, ADVANCED_OPS, opById } from './capabilities/ops.js';
 export {
-  digestMessages, sessionSummaryMessages, scanPageMessages,
+  digestMessages, sessionSummaryMessages, sessionTitleMessages, scanPageMessages,
   memoryExtractMessages, MEMORY_EXTRACT_SYS,
 } from './capabilities/background.js';
 export { SCREENSHOT_TASK } from './capabilities/qa.js';

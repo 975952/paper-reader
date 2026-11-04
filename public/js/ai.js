@@ -294,7 +294,7 @@ export async function testConnection() {
 
 export {
   translateMessages, translateShotMessages, askMessages, explainMessages,
-  digestMessages, opMessages, teachMessages, sessionSummaryMessages,
+  digestMessages, opMessages, teachMessages, sessionSummaryMessages, sessionTitleMessages,
   scanPageMessages, condenseMessages,
 } from './prompts/index.js';
 

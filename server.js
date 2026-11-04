@@ -1832,7 +1832,15 @@ function prepareSessionRecord(payload, oldData, now) {
   const createdAt = sessionTs(old?.createdAt) || sessionTs(payload?.createdAt) || now;
   const updatedAt = changed ? (sessionTs(payload?.updatedAt) || now) : (sessionTs(old?.updatedAt) || now);
   const title = collapsWs(payload?.title || old?.title).slice(0, SESSION_TITLE_MAX);
-  const titleSource = (payload?.titleSource === 'user' || old?.titleSource === 'user') ? 'user' : 'auto';
+  // 标题来源优先级：user（手动改名）> ai（自动生成）> auto（首问派生）。
+  // 普通内容保存不带 titleSource，沿用旧来源；手动改名永远优先，不能被自动标题覆盖。
+  const oldSource = old?.titleSource === 'user' ? 'user' : (old?.titleSource === 'ai' ? 'ai' : 'auto');
+  let titleSource;
+  if (oldSource === 'user') titleSource = 'user';
+  else if (payload?.titleSource === 'user') titleSource = 'user';
+  else if (payload?.titleSource === 'ai') titleSource = 'ai';
+  else if (payload?.titleSource === 'auto') titleSource = 'auto';
+  else titleSource = oldSource;
   return {
     ...payload,
     v: 4,
@@ -2150,10 +2158,11 @@ async function handle(req, res) {
       const next = { ...cur };
       if (Object.prototype.hasOwnProperty.call(patch, 'title')) {
         const t = collapsWs(patch.title).slice(0, SESSION_TITLE_MAX);
-        if (t) { next.title = t; next.titleSource = 'user'; }
+        // 带 titleSource='ai' 的是自动标题；普通改名保持 user（手动最优先）
+        if (t) { next.title = t; next.titleSource = patch.titleSource === 'ai' ? 'ai' : 'user'; }
         else { delete next.title; next.titleSource = 'auto'; }
       }
-      if (Object.prototype.hasOwnProperty.call(patch, 'titleSource')) {
+      if (Object.prototype.hasOwnProperty.call(patch, 'titleSource') && patch.titleSource !== 'ai') {
         next.titleSource = patch.titleSource === 'user' ? 'user' : 'auto';
         if (!next.title && next.titleSource === 'user') next.titleSource = 'auto';
       }
@@ -2181,7 +2190,7 @@ async function handle(req, res) {
         session: {
           sid,
           title: sessionTitleOf(next),
-          titleSource: next.titleSource === 'user' ? 'user' : 'auto',
+          titleSource: next.titleSource === 'user' ? 'user' : (next.titleSource === 'ai' && next.title ? 'ai' : 'auto'),
           pinned: next.pinned === true,
           pinnedAt: sessionTs(next.pinnedAt),
           archived: next.archived === true,
@@ -2286,11 +2295,16 @@ async function handle(req, res) {
       const mtime = stat ? Math.round(stat.mtimeMs) : 0;
       const createdFallback = stat && stat.birthtimeMs ? Math.round(stat.birthtimeMs) : 0;
       const updatedAt = sessionTs(data.updatedAt) || mtime;
+      // fileKey：这一行实际存在的 doc key（历史面板要能对任意文件夹/归属模式的行做
+      // 置顶/改名/归档/删除；全局共用模式下旧会话仍留在原文件夹的键上）
+      const stem = fileName.replace(/^session-/, '').replace(/\.json$/, '');
+      const fileKey = (sid && stem.endsWith(`-${sid}`)) ? stem.slice(0, -(sid.length + 1)) : stem;
       out.push({
         sid,
+        fileKey,
         folderPath: (typeof data.folderPath === 'string' && data.folderPath) ? data.folderPath : (folderPathHint || ''),
         title: sessionTitleOf(data),
-        titleSource: data.titleSource === 'user' ? 'user' : 'auto',
+        titleSource: data.titleSource === 'user' ? 'user' : (data.titleSource === 'ai' && collapsWs(data.title) ? 'ai' : 'auto'),
         preview: collapsWs(sessionLastEntryText(data)).slice(0, 80),
         count: sessionEntries(data).length,
         createdAt: sessionTs(data.createdAt) || createdFallback || updatedAt,

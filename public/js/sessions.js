@@ -82,6 +82,8 @@ function relTime(ts) {
 function normalizeRows(raw) {
   return (Array.isArray(raw) ? raw : []).map((r) => ({
     sid: String(r?.sid || ''),
+    // 这一行实际所在的 doc key（/api/sessions 给出；旧服务端可能没有）
+    fileKey: String(r?.fileKey || ''),
     title: String(r?.title || ''),
     titleSource: String(r?.titleSource || 'auto'),
     preview: String(r?.preview || ''),
@@ -110,7 +112,6 @@ function readOnEnter() {
 function setOnEnter(mode) {
   try { localStorage.setItem(ON_ENTER_KEY, mode); } catch { /* ignore */ }
   renderModeChips(st.ui?.entry?.querySelector('#sessEntryModes'));
-  renderModeChips(st.ui?.history?.querySelector('#sessHistModes'));
 }
 
 /** 历史面板排列方式：按文件整理（默认）/ 按时间顺序 */
@@ -165,9 +166,14 @@ function sessButton(icon, title, cls, onclick, extra = {}) {
 
 /* ───────────────────────────── 接口 ───────────────────────────── */
 
+/** 列表/元数据请求用的 doc key：全局共用模式由 app 给出（'default'），其余情况就是当前文件夹 */
+function listScopeKey() {
+  return st.ctx?.scopeKey?.() || st.folderKey;
+}
+
 async function fetchFolderList() {
   const q = new URLSearchParams({
-    doc: st.folderKey,
+    doc: listScopeKey(),
     folderPath: st.folderPath,
     scope: 'folder',
     archived: 'all',
@@ -181,7 +187,7 @@ async function fetchFolderList() {
 
 async function fetchAllList() {
   const q = new URLSearchParams({
-    doc: st.folderKey,
+    doc: listScopeKey(),
     folderPath: st.folderPath,
     scope: 'all',
     archived: 'all',
@@ -193,10 +199,13 @@ async function fetchAllList() {
   return normalizeRows(j.sessions);
 }
 
-/** 行所属文件夹的 session key：当前文件夹优先用 app 的事实（folderKeyOf），
- *  跨文件夹的行用它自己的 folderPath 现算。历史面板统一展示全部文件夹，所以永远按行算。 */
+/** 行所属文件夹的 session key：优先用服务端给的 fileKey（任意归属模式/旧文件夹的行都能
+ *  正确置顶、改名、归档、删除）；没有时按 folderPath 现算。 */
 function keyForRow(row) {
+  if (row?.fileKey) return row.fileKey;
   if (!st.ctx) return st.folderKey;
+  const scope = st.ctx.scopeKey?.();
+  if (scope && scope !== st.ctx.folderKey?.()) return scope;
   if ((row.folderPath || '') === (st.folderPath || '')) return st.folderKey;
   return st.ctx.folderKeyOf(row.folderPath || '');
 }
@@ -625,13 +634,13 @@ function buildHistory() {
         arrangeChip('file', '按文件', 'doc', '同一篇论文的会话归在一起：问过它的每个会话都在该论文下显示一次'),
         arrangeChip('time', '按时间', 'clock', '全部会话按时间排列，并标出按顺序问过哪些论文')),
       el('span', { class: 'sess-hist-summary', id: 'sessHistSummary' })),
+    el('div', { class: 'sess-hist-modehint', id: 'sessHistModeHint' }),
     el('div', { class: 'sess-hist-list', id: 'sessHistList' }),
     el('div', { class: 'sess-hist-foot' },
       el('button', { type: 'button', class: 'sess-foot-btn', id: 'sessHistMemory', onclick: () => st.ctx.togglePaperMemory?.() }),
-      el('button', { type: 'button', class: 'sess-foot-btn', text: '清空当前会话', onclick: clearCurrent }),
-      el('div', { class: 'sess-hist-modes', id: 'sessHistModes' })),
+      el('button', { type: 'button', class: 'sess-foot-btn', text: '会话设置', title: '会话归属、进入方式与标题策略', onclick: () => st.ctx.openSessionSettings?.() }),
+      el('button', { type: 'button', class: 'sess-foot-btn', text: '清空当前会话', onclick: clearCurrent })),
   );
-  renderModeChips(box.querySelector('#sessHistModes'));
   renderHistoryList();
   renderMemoryBtn();
 }
@@ -769,6 +778,19 @@ function bucketOf(ts) {
   return 3;
 }
 
+/** 时间模式/归档的分组标题：左侧主标题 + 右侧数量，避免和会话行抢视觉重心 */
+function groupHead(label, count, { button = false, onclick = null } = {}) {
+  const kids = [
+    el('span', { class: 'sess-group-label', text: label }),
+    count ? el('span', { class: 'sess-group-count', text: String(count) }) : null,
+  ];
+  if (button) {
+    return el('button', { type: 'button', class: 'sess-group sess-group-btn', onclick },
+      ...kids.filter(Boolean));
+  }
+  return el('div', { class: 'sess-group' }, ...kids.filter(Boolean));
+}
+
 function renderHistoryList() {
   const box = st.ui?.history?.querySelector('.sess-hist-list');
   if (!box) return;
@@ -776,6 +798,15 @@ function renderHistoryList() {
   const summary = st.ui?.history?.querySelector('#sessHistSummary');
   if (summary) {
     summary.textContent = rows.length ? `${rows.length} 个会话 · 全部文件夹` : '';
+  }
+  const hint = st.ui?.history?.querySelector('#sessHistModeHint');
+  const globalScope = !!(st.ctx?.scopeKey && st.ctx.scopeKey() !== st.ctx.folderKey?.());
+  if (hint) {
+    hint.textContent = st.histMode === 'file'
+      ? (globalScope
+        ? '所有论文共用一个会话列表，下面标出每个会话按顺序读过哪些论文'
+        : '同一会话问过多篇论文时，会在每篇论文下各显示一次')
+      : '全部会话按最近活动排序，下面标出按顺序读过哪些论文';
   }
   if (st.allLoading && !st.allList.length) {
     box.replaceChildren(el('div', { class: 'sess-empty', text: '正在读取全部会话…' }));
@@ -788,21 +819,36 @@ function renderHistoryList() {
   const renameShown = new Set();
 
   if (st.histMode === 'file') {
-    const groups = fileGroups(active);
-    for (const g of groups) {
-      nodes.push(el('div', { class: 'sess-filegroup' },
-        el('span', { class: 'sess-filegroup-ic', html: ICONS.doc }),
-        el('span', { class: 'sess-filegroup-name', text: g.name, title: g.name }),
-        el('span', {
-          class: 'sess-filegroup-meta',
-          text: [g.folder ? `papers / ${g.folder.replace(/\//g, ' / ')}` : 'papers/', `${g.rows.length} 个会话`].join(' · '),
-        })));
-      for (const r of g.rows) nodes.push(historyRow(r, { trail: false, group: g, renameShown }));
+    if (globalScope) {
+      // 全局共用：所有会话都属于同一段跨论文对话，只分一组，论文顺序用 trail 标出
+      nodes.push(el('div', { class: 'sess-fileblock' },
+        el('div', { class: 'sess-filegroup' },
+          el('span', { class: 'sess-filegroup-ic', html: ICONS.doc }),
+          el('span', { class: 'sess-filegroup-name', text: '共用会话' }),
+          el('span', { class: 'sess-filegroup-count', text: String(active.length) })),
+        el('div', { class: 'sess-filegroup-sub', text: '所有论文 · 下面标出每个会话按顺序读过哪些论文' })));
+      const rowsBox = el('div', { class: 'sess-fileblock-rows' });
+      for (const r of active) rowsBox.append(historyRow(r, { trail: true, renameShown }));
+      nodes.push(rowsBox);
+    } else {
+      const groups = fileGroups(active);
+      for (const g of groups) {
+        const pathText = g.folder ? `papers / ${g.folder.replace(/\//g, ' / ')}` : 'papers/';
+        nodes.push(el('div', { class: 'sess-fileblock' },
+          el('div', { class: 'sess-filegroup' },
+            el('span', { class: 'sess-filegroup-ic', html: ICONS.doc }),
+            el('span', { class: 'sess-filegroup-name', text: g.name, title: g.name }),
+            el('span', { class: 'sess-filegroup-count', text: String(g.rows.length) })),
+          el('div', { class: 'sess-filegroup-sub', text: pathText })));
+        const rowsBox = el('div', { class: 'sess-fileblock-rows' });
+        for (const r of g.rows) rowsBox.append(historyRow(r, { trail: false, group: g, renameShown }));
+        nodes.push(rowsBox);
+      }
     }
   } else {
     const pinned = active.filter((r) => r.pinned).sort((a, b) => (b.pinnedAt || 0) - (a.pinnedAt || 0));
     if (pinned.length) {
-      nodes.push(el('div', { class: 'sess-group', text: '置顶' }));
+      nodes.push(groupHead('置顶', pinned.length));
       nodes.push(...pinned.map((r) => historyRow(r, { trail: true, renameShown })));
     }
     const rest = active.filter((r) => !r.pinned);
@@ -811,15 +857,13 @@ function renderHistoryList() {
     const labels = ['今天', '昨天', '最近 7 天', '更早'];
     for (let i = 0; i < buckets.length; i++) {
       if (!buckets[i].length) continue;
-      nodes.push(el('div', { class: 'sess-group', text: labels[i] }));
+      nodes.push(groupHead(labels[i], buckets[i].length));
       for (const r of buckets[i]) nodes.push(historyRow(r, { trail: true, renameShown }));
     }
   }
   if (archived.length) {
-    nodes.push(el('button', {
-      type: 'button',
-      class: 'sess-group sess-group-btn',
-      text: `${st.showArchived ? '▾' : '▸'} 已归档（${archived.length}）`,
+    nodes.push(groupHead(`${st.showArchived ? '▾' : '▸'} 已归档`, archived.length, {
+      button: true,
       onclick: () => { st.showArchived = !st.showArchived; renderHistoryList(); },
     }));
     if (st.showArchived) {
@@ -846,10 +890,11 @@ function historyTrail(row) {
   const index = docNameIndex([row]);
   const names = ids.map((id) => docLabel(row, id, index));
   const MAX = 3;
-  const chips = [];
+  const chips = [el('span', { class: 'sess-htrail-label', text: '读过' })];
   names.slice(0, MAX).forEach((name, i) => {
-    if (i) chips.push(el('span', { class: 'sess-htrail-arrow', text: '→' }));
-    chips.push(el('span', { class: 'sess-htrail-doc', text: name, title: `第 ${i + 1} 篇：${name}` }));
+    chips.push(el('span', { class: 'sess-htrail-doc', title: `第 ${i + 1} 篇：${name}` },
+      el('span', { class: 'sess-htrail-n', text: String(i + 1) }),
+      el('span', { class: 'sess-htrail-name', text: name })));
   });
   if (names.length > MAX) chips.push(el('span', { class: 'sess-htrail-more', text: `+${names.length - MAX}` }));
   return el('span', { class: 'sess-htrail', title: `按提问顺序：${names.join(' → ')}` }, ...chips);
@@ -865,12 +910,24 @@ function historyRow(row, { trail = false, group = null, renameShown = null } = {
   ];
   if (st.histMode === 'time') {
     metaParts.push(row.folderPath ? `📁 papers / ${row.folderPath.replace(/\//g, ' / ')}` : '📁 papers/');
-  } else if (docCount > 1) {
-    metaParts.push(`涉及 ${docCount} 篇论文`);
   } else if (group?.folder && row.folderPath && group.folder !== row.folderPath) {
     metaParts.push(`📁 ${row.folderPath.replace(/\//g, ' / ')}`);
   }
   const meta = metaParts.filter(Boolean).join(' · ');
+
+  const badges = [];
+  if (on) badges.push(el('span', { class: 'sess-badge on', text: '当前' }));
+  if (st.histMode === 'time' && row.pinned) badges.push(el('span', { class: 'sess-badge', text: '置顶' }));
+  if (st.histMode === 'file' && docCount > 1) {
+    const ids = Array.from(new Set((row.docIds || []).map(String).filter(Boolean)));
+    const index = docNameIndex([row]);
+    const names = ids.map((id) => docLabel(row, id, index));
+    badges.push(el('span', {
+      class: 'sess-badge',
+      text: `还读过 ${docCount - 1} 篇`,
+      title: `这篇论文之外，还在：${names.join(' → ')}`,
+    }));
+  }
 
   const wrap = el('div', { class: `sess-hrow${on ? ' on' : ''}${row.archived ? ' archived' : ''}`, dataset: { sid: row.sid } });
 
@@ -905,7 +962,9 @@ function historyRow(row, { trail = false, group = null, renameShown = null } = {
       onclick: () => chooseSession(row),
       ondblclick: (e) => { e.preventDefault(); startRename(row.sid); },
     },
-    el('span', { class: 'sess-htitle', text: title }),
+    el('span', { class: 'sess-htop' },
+      el('span', { class: 'sess-htitle', text: title }),
+      ...badges),
     el('span', { class: 'sess-hmeta', text: meta }),
     trailEl),
     el('span', { class: 'sess-hacts' },
@@ -934,7 +993,7 @@ async function confirmDeleteRow(row) {
   });
   if (!ok) return;
   try {
-    if (row.sid === st.currentSid && !!st.currentSid && st.ctx?.hasDoc?.() && keyForRow(row) === st.folderKey) {
+    if (row.sid === st.currentSid && !!st.currentSid && st.ctx?.hasDoc?.() && keyForRow(row) === listScopeKey()) {
       await st.ctx.deleteSession(row.sid);
     } else {
       await deleteRowFile(row);
@@ -1169,6 +1228,36 @@ export async function sessionsLeaveEntryForNewSession() {
   hideEntryCard();
   await st.ctx.startNewSession({ silent: true, fromEntry: true });
   return true;
+}
+
+/** 设置页「会话」分类用：进入文件夹默认方式 / 历史默认排列 */
+export function sessionsGetEnterMode() { return readOnEnter(); }
+export function sessionsSetEnterMode(mode) {
+  setOnEnter(mode === 'resume' || mode === 'new' ? mode : 'choose');
+}
+export function sessionsGetHistoryMode() { return readHistMode(); }
+export function sessionsSetHistoryMode(mode) {
+  const next = mode === 'time' ? 'time' : 'file';
+  st.histMode = next;
+  try { localStorage.setItem(HIST_MODE_KEY, next); } catch { /* ignore */ }
+  if (!st.historyOpen) return;
+  st.ui?.history?.querySelectorAll('.sess-arrange-chip').forEach((b) => {
+    const on = b.dataset.mode === next;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+  renderHistoryList();
+}
+
+/** AI 自动标题完成后由 app.js 调用：就地更新头部/快切/历史行，不重新拉网络 */
+export function sessionsApplyMeta(sid, patch) {
+  if (!sid || !patch) return;
+  for (const arr of [st.list, st.allList]) {
+    for (const row of arr) if (row.sid === sid) Object.assign(row, patch);
+  }
+  if (st.ctx?.hasDoc?.()) renderHeader();
+  if (st.quickOpen) renderQuickList();
+  if (st.historyOpen) renderHistoryList();
 }
 
 /** 给 app.js 用：当前文件夹的会话列表（loadPaperMemory 等复用） */

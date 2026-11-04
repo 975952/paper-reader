@@ -4732,3 +4732,46 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 - 构建：`desktop\build.bat` 成功重建项目根 `论文阅读器.exe`：11,091,456 B，SHA256 `188C7543F3E03F2FD99EE14FC6CC1E7C2B516A38D1D8B334C899455485AE9F4F`；桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 正被用户运行（PID 120464）占用，脚本按设计安全跳过，未关闭用户进程——重启后重跑 `desktop\build.bat` 即可同步桌面副本。
 - 提交：实现提交 `fdc09bb`「会话历史支持按文件/按时间两种排列，设置改为左侧分类两栏」（6 文件，+530/−114），并已连同此前积压的 `1510bb0`、`48b0c07` 一起推送到 `origin/main`（`4854513..fdc09bb`）；工作树与远端一致。
 
+## §90 会话历史层次重做、AI 自动标题与「会话」设置（2026-11-04，用户 m06244）
+
+### 90.1 用户要求
+
+用户 m06244：「现在两种方式都层次不清看不清楚，很杂乱，而且会话的标题赶快做成自动生成清晰简单的标题。然后根据不同人的使用习惯，再设计一下会话系统的运作方式。比如有的人喜欢会话属于文件，有人喜欢一个会话读多个文件等等，应该新添设置页，专门调节这些东西，仔细设计一下。一条一条完成」。
+
+约束：不跑 `test/` 正式套件；不改用户 `data/`、`papers/`；不关闭 / 覆盖正在运行的桌面阅读器；改 `public/` 后重建 exe；显式 `git add`（不用 `git add -A`）。
+
+### 90.2 实现
+
+- **历史面板层次重做**（`public/js/sessions.js`、`public/style.css`）：
+  - 面板顶部排列切换下加一行模式说明（按文件：同一会话问过多篇论文会在每篇下各出现一次；按时间：全部按最近活动排序并标出读过哪些论文）。
+  - 按文件：组头改成两层——论文名 + 会话数胶囊 + `papers/路径` 副行，组内会话缩进并用左侧 1px 引导线连接；会话标题改用界面字号（`--ui-fs`），当前会话加 `inset 2px` 强调条与「当前」胶囊；跨论文会话在行内标「还读过 N 篇」（悬停看完整顺序），不再在 meta 里堆「涉及 N 篇论文」。
+  - 按时间：分组标题（置顶 / 今天 / 昨天 / 最近 7 天 / 更早 / 已归档）右侧加会话数；论文 trail 改成「读过」标签 + 编号圆点（1/2/3，最多 3 个）；置顶会话加「置顶」胶囊。
+  - 面板底部去掉三档进入方式 chips，改成「会话设置」按钮直达设置里的「会话」分类，并保留本篇对话记忆开关与清空当前会话；归档折叠改用统一的 `.sess-group-btn`。
+- **AI 自动标题**（`public/js/prompts/capabilities/background.js`、`public/js/app.js`、`server.js`、`desktop/src/api.rs`）：
+  - 新增后台提示词 `bg.sessionTitle`（`sessionTitleMessages({paper,question,answer})`）：只输出标题本身，中文 ≤14 汉字、专有名词保留原文，不用书名号 / 引号 / 句号 / 序号 /「标题：」，不评价不提问，只读不出主题时用「论文名+话题」。
+  - 客户端 `scheduleSessionTitle()`：会话保存去抖 800ms 后另有 1600ms 去抖；每会话最多尝试 2 次、内容 hash 未变不重复；只取首条用户问题 + 首条已完成回答；`chat({stream:false,temperature:0,idleMs:25000})`；调用前先 GET 会话 meta——`titleSource` 已是 `user` 或 `ai` 就跳过；模型结果经 `cleanSessionTitle()` 清洗（取首行、循环剥引号书名号与首尾标点、去「标题：」前缀、折叠空白、>28 截断、与论文名相同或无需字母数字则丢弃）；PATCH `{title, titleSource:'ai'}`，成功后同步历史 / 会话头 / 快速切换。
+  - 「AI 自动生成标题」默认开启（`reader.session.aiTitle`），设置里可关；手动改名（`titleSource:'user'`）永远优先、不会被覆盖。`restoreSession` 遇到 `titleSource==='auto'` 的旧会话也会补一次自动标题。
+  - 服务端与 Rust 同步支持 `titleSource` 三档优先级 `user > ai > auto`（`prepareSessionRecord` 保留旧来源、PATCH 显式 `titleSource:'ai'` 才写 ai，普通改名仍为 user）；`/api/sessions` 每行新增 `fileKey`，历史面板才能对任意归属键的行置顶 / 改名 / 归档 / 删除。
+- **「会话」设置分类与三种归属方式**（`public/index.html`、`public/js/app.js`、`public/js/sessions.js`）：
+  - 设置左列新增第 5 项「会话」（`#settingsNavSession` / `#settingsPaneSession`），四项即时生效（不随「保存」按钮）：
+    - **会话属于**：`文件夹`（默认）/ `每篇论文各自独立` / `所有论文共用一个会话`（`reader.session.scopeMode`）；
+    - **AI 自动生成标题** 开关（`reader.session.aiTitle`）；
+    - **进入文件夹时**：选择卡片 / 继续上次 / 总是新开（`reader.session.onEnter`，与历史面板、选择卡片同一设置）；
+    - **历史面板默认排列**：按文件 / 按时间（`reader.session.historyMode`，与面板顶部切换同一设置）。
+  - 归属模式实现：问答会话的存储键从「当前文件夹」改为 `sessionScopeKey()`——folder 用 `folder-<fnv1a8>`、global 用 `default-*`；「当前会话」指针改用 `activeSessionSlot(docId)`——folder 用文件夹键、paper 用 `doc:<docId>`、global 用 `global`。因此 paper 模式换论文接上那篇自己的会话，global 模式换论文 / 换文件夹也能接着问；译文仍按论文 docId 保存。切换归属时先把当前会话存到旧 key、再把同一 sid 接到新槽位并复制内容，旧文件保留（不迁移、不删除、不丢会话）；global 模式下从历史打开别的论文会话时先把行按 fileKey GET 出来、复制到 global 键再切换，不强制打开那篇论文。
+  - 历史面板按 `ctx.scopeKey()` 拉列表、`keyForRow()` 优先新接口返回的 `fileKey`；global 模式的历史「按文件」视图只显示一个「共用会话」组，并提示按顺序读过哪些论文。
+- **规则兜底修复**：`cleanSessionTitle()` 循环剥离（修复「《标题》。」在服务端留下 `》`）；`runSessionTitle()` 提前 GET 跳过已有人工 / AI 标题（修复切到手动标题会话时多打一次无用请求）。
+
+### 90.3 验证
+
+- 仅运行隔离手动冒烟 `test/artifacts/session-title-smoke/smoke.mjs`（隔离数据 `test/artifacts/session-title-smoke/{data,papers}`，播种 7 个假会话、两篇 106,456 B 测试 PDF、假配置；Node 服务 8986；Puppeteer headless 拦截 `/api/chat` 返回假标题 / 假 SSE，不调用真实模型）：**51/51 全部通过**，无 pageerror。
+- 覆盖：按文件层次（论文组头、会话数、路径、缩进引导线、跨论文「还读过」）、按时间层次（置顶 / 今天 / 昨天 / 更早、分组数量、「读过」编号）、设置「会话」四项即时持久化与 reload 保留、AI 标题生成 / 清洗 / 历史同步、手动标题不被覆盖、关闭开关、global 模式共用列表、paper 模式按论文持久化。
+- 关键排障：测试脚本最初用错了 `fnv1a8` 哈希（客户端是 FNV-1a 32 位；服务端 `docIdOf` 才是 5381），写错会话 key 导致 PATCH 找不到文件；修正键算法后通过。截图在 `test/artifacts/session-title-smoke/shots/`（`history-file.png`、`history-time.png`、`settings-session.png`、`title-applied.png`、`scope-global.png`）。
+- 未运行 `test/` 正式套件；未改用户 `data/`、`papers/`；桌面阅读器 PID 120464 未关闭或覆盖。
+
+### 90.4 文档与交付
+
+- `docs/使用说明书.md`：§6.2（☰ 历史面板加会话设置入口、归属三种方式提示）、§12 分类表加「会话」、新增 §12.5「会话」四项说明与 localStorage 键、§16.4 重写归属模式 / AI 自动标题 / 历史两种排列的新层次。
+- 构建：`desktop\build.bat` 成功重建项目根 `论文阅读器.exe`：11,117,056 B，SHA256 `33D5E7744852831EA4CA8AFD9D67BF23EE3AAD0F0C399FA6BDAB1D9464B12C02`（11:13:42）；桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 正被用户运行（PID 120464）占用，脚本按设计安全跳过、未关闭用户进程——关掉旧窗口后重跑 `desktop\build.bat`（或直接用项目根新 exe）即可用上新界面。
+- 提交：待填。
+

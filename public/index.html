@@ -307,6 +307,7 @@
         <button type="button" class="settings-nav-item on" id="settingsNavModel" data-pane="model" role="tab" aria-selected="true" aria-controls="settingsPaneModel">模型与接口</button>
         <button type="button" class="settings-nav-item" id="settingsNavAppearance" data-pane="appearance" role="tab" aria-selected="false" aria-controls="settingsPaneAppearance">外观与字号</button>
         <button type="button" class="settings-nav-item" id="settingsNavBehavior" data-pane="behavior" role="tab" aria-selected="false" aria-controls="settingsPaneBehavior">交互与发送</button>
+        <button type="button" class="settings-nav-item" id="settingsNavSession" data-pane="session" role="tab" aria-selected="false" aria-controls="settingsPaneSession">会话</button>
         <button type="button" class="settings-nav-item" id="settingsNavMemory" data-pane="memory" role="tab" aria-selected="false" aria-controls="settingsPaneMemory">长期记忆</button>
       </nav>
       <div class="settings-panes">
@@ -363,6 +364,37 @@
       <label class="field field-switch"><input id="cfgUseWeb" type="checkbox" /><span>联网搜索</span></label>
     </div>
     <div class="modal-note"><span>这两个是发送框里的默认值；问答输入框旁仍可临时调整，改完立刻生效。</span></div>
+        </section>
+        <section class="settings-pane hidden" id="settingsPaneSession" data-pane="session" role="tabpanel" aria-labelledby="settingsNavSession">
+          <div class="settings-pane-title">会话</div>
+          <div class="settings-pane-sub">按自己的使用习惯决定会话「属于谁」、进来时怎么恢复、历史怎么排。改完立刻生效，已有会话不会被删改。</div>
+    <div class="settings-section-title">会话归属</div>
+    <div class="settings-grid settings-core-grid">
+      <label class="field"><span>会话属于</span><select id="settScopeMode">
+        <option value="folder">文件夹（同文件夹的多篇论文接着问）</option>
+        <option value="paper">每篇论文各自独立</option>
+        <option value="global">所有论文共用一个会话</option>
+      </select></label>
+      <label class="field field-switch"><input id="settAiTitle" type="checkbox" /><span>AI 自动生成标题</span></label>
+    </div>
+    <div class="modal-note"><span>「文件夹」把同一文件夹里的会话放在一起，适合边读边问多篇；「每篇论文各自独立」换论文就接上那篇自己的会话；「所有论文共用」换论文也能接着上一句问。旧的当前会话留在历史里，不迁移也不删除。</span></div>
+    <div class="settings-section-title">进入文件夹时</div>
+    <div class="settings-grid settings-core-grid">
+      <label class="field"><span>默认动作</span><select id="settOnEnter">
+        <option value="choose">先让我选择会话</option>
+        <option value="resume">继续上次的会话</option>
+        <option value="new">总是新开会话</option>
+      </select></label>
+    </div>
+    <div class="modal-note"><span>和会话头左侧那三个按钮（选择卡片 / 继续上次 / 新会话）是同一个设置。</span></div>
+    <div class="settings-section-title">历史面板</div>
+    <div class="settings-grid settings-core-grid">
+      <label class="field"><span>默认排列</span><select id="settHistoryMode">
+        <option value="file">按文件（每篇论文下列出问过它的会话）</option>
+        <option value="time">按时间（最近活动在前）</option>
+      </select></label>
+    </div>
+    <div class="modal-note"><span>AI 自动标题在会话有了第一轮完整回答后生成一次（最多 28 字），手动改名永远优先；关闭后标题沿用首条问题。</span></div>
         </section>
         <section class="settings-pane hidden" id="settingsPaneMemory" data-pane="memory" role="tabpanel" aria-labelledby="settingsNavMemory">
           <div class="settings-pane-title">长期记忆</div>

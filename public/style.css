@@ -2643,59 +2643,105 @@ body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
   font-size: var(--ui-fs-2xs); color: var(--fg-faint);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.sess-hist-list { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 0 6px 10px; }
-/* 按文件整理：文件组头（论文名 + 所在文件夹 + 会话数） */
-.sess-filegroup {
-  display: flex; align-items: baseline; gap: 6px;
-  padding: 11px 6px 4px; margin-top: 3px;
-  border-top: 1px solid var(--border);
+.sess-hist-modehint {
+  flex: 0 0 auto; padding: 0 10px 8px;
+  font-size: var(--ui-fs-2xs); color: var(--fg-faint); line-height: 1.45; opacity: .9;
 }
-.sess-filegroup:first-child { border-top: 0; margin-top: 0; padding-top: 4px; }
-.sess-filegroup-ic { flex: 0 0 auto; align-self: center; display: inline-flex; color: var(--fg-faint); }
+.sess-hist-list {
+  flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 2px 6px 12px;
+  display: flex; flex-direction: column; gap: 1px;
+}
+/* 按文件整理：论文块（论文名 + 路径 + 会话数）；组内会话缩进并加引导线 */
+.sess-fileblock { display: flex; flex-direction: column; margin: 10px 0 4px; }
+.sess-fileblock:first-child { margin-top: 0; }
+.sess-filegroup { display: flex; align-items: center; gap: 6px; padding: 6px 6px 1px; }
+.sess-filegroup-ic { flex: 0 0 auto; display: inline-flex; color: var(--accent); opacity: .8; }
+.sess-filegroup-ic svg { width: 13px; height: 13px; }
 .sess-filegroup-name {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: var(--ui-fs-xs); font-weight: 600; color: var(--fg-dim);
-}
-.sess-filegroup-meta {
-  flex: 1 1 auto; min-width: 0; text-align: right;
+  flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: var(--ui-fs-2xs); color: var(--fg-faint); opacity: .85;
+  font-size: var(--ui-fs); font-weight: 600; color: var(--fg);
 }
-/* 按时间顺序：每行下面的「按先后顺序问过哪些论文」 */
-.sess-htrail { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 2px; }
-.sess-htrail-doc {
-  max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 0 6px; border: 1px solid var(--border); border-radius: 999px;
-  background: var(--bg-elev); color: var(--fg-faint); font-size: var(--ui-fs-2xs); line-height: 1.7;
+.sess-filegroup-count {
+  flex: 0 0 auto; min-width: 18px; height: 16px; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px; background: var(--bg-sunken);
+  color: var(--fg-faint); font-size: var(--ui-fs-2xs);
 }
-.sess-htrail-arrow { font-size: var(--ui-fs-2xs); color: var(--fg-faint); opacity: .7; }
-.sess-htrail-more { font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+.sess-filegroup-sub {
+  padding: 0 6px 4px 25px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--ui-fs-2xs); color: var(--fg-faint);
+}
+.sess-fileblock-rows {
+  display: flex; flex-direction: column; gap: 1px;
+  margin-left: 9px; padding-left: 6px; border-left: 1px solid var(--border);
+}
+/* 按时间 / 归档：分组标题 + 数量 */
 .sess-group {
-  padding: 10px 6px 3px;
-  font-size: var(--ui-fs-2xs); color: var(--fg-faint); font-weight: 600;
-  letter-spacing: .02em;
+  display: flex; align-items: center; gap: 6px;
+  padding: 10px 8px 3px; border: 0; background: none; text-align: left; font: inherit;
 }
-.sess-group-btn {
-  display: block; width: 100%; border: 0; background: none; cursor: pointer;
-  text-align: left; font: inherit; font-size: var(--ui-fs-2xs); color: var(--fg-faint); font-weight: 600;
-  border-radius: 6px;
+.sess-group-label {
+  font-size: var(--ui-fs-2xs); font-weight: 600; color: var(--fg-dim);
+  letter-spacing: .04em;
 }
-.sess-group-btn:hover { color: var(--accent); background: var(--bg-sunken); }
+.sess-group-count {
+  min-width: 16px; height: 15px; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px; background: var(--bg-sunken);
+  color: var(--fg-faint); font-size: 10px;
+}
+.sess-group-btn { display: flex; width: 100%; cursor: pointer; border-radius: 6px; }
+.sess-group-btn:hover { background: var(--bg-sunken); }
+.sess-group-btn:hover .sess-group-label { color: var(--accent); }
+/* 时间模式：每行下面的「按顺序读过哪些论文」 */
+.sess-htrail { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 1px; }
+.sess-htrail-label { font-size: var(--ui-fs-2xs); color: var(--fg-faint); opacity: .8; }
+.sess-htrail-doc {
+  display: inline-flex; align-items: center; gap: 3px;
+  max-width: 150px; padding: 0 6px 0 2px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-elev); color: var(--fg-dim);
+  font-size: var(--ui-fs-2xs); line-height: 17px;
+}
+.sess-htrail-n {
+  flex: 0 0 auto; width: 13px; height: 13px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--bg-sunken); color: var(--fg-faint); font-size: 9px;
+}
+.sess-htrail-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-htrail-more { font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+/* 会话行 */
 .sess-hrow {
   display: flex; align-items: center; gap: 2px;
-  padding: 1px 2px; border-radius: 8px;
+  padding: 2px; border-radius: 8px;
 }
 .sess-hrow:hover { background: var(--bg-sunken); }
-.sess-hrow.on { background: var(--accent-soft); }
+.sess-hrow.on { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
 .sess-hrow.archived { opacity: .68; }
 .sess-hgo {
-  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px;
-  padding: 5px 7px; border: 0; background: none; cursor: pointer; text-align: left;
-  color: var(--fg); font: inherit; font-size: var(--ui-fs-xs);
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 8px; border: 0; background: none; cursor: pointer; text-align: left;
+  color: var(--fg); font: inherit;
 }
-.sess-htitle { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-htop { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sess-htitle {
+  flex: 0 1 auto; min-width: 0; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--ui-fs); line-height: 1.35;
+}
 .sess-hrow.on .sess-htitle { color: var(--accent); font-weight: 600; }
-.sess-hmeta { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
+.sess-badge {
+  flex: 0 0 auto; padding: 0 5px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--fg-faint);
+  font-size: 10px; line-height: 16px; font-weight: 500;
+}
+.sess-badge.on { border-color: transparent; background: var(--accent); color: var(--bg); font-weight: 600; }
+.sess-hmeta {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--ui-fs-2xs); color: var(--fg-faint);
+}
 .sess-rename-input { padding: 3px 6px; }
 .sess-hacts { flex: 0 0 auto; display: flex; align-items: center; gap: 1px; opacity: 0; transition: opacity .12s; }
 .sess-hrow:hover .sess-hacts, .sess-hrow:focus-within .sess-hacts { opacity: 1; }
@@ -2718,7 +2764,6 @@ body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
   text-align: left;
 }
 .sess-foot-btn:hover { background: var(--bg-sunken); color: var(--accent); }
-.sess-hist-modes { width: 100%; padding-top: 2px; }
 
 /* 默认进入方式三档（选择卡片 / 自动恢复 / 总是新会话） */
 .sess-mode-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }

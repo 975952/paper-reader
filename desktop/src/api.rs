@@ -1379,12 +1379,24 @@ fn prepare_session_record(payload: &Value, old: Option<&Value>) -> Value {
         .filter(|s| !collaps_ws(s).is_empty())
         .or_else(|| old.and_then(|o| o.get("title").and_then(Value::as_str)));
     let title = utf16_clip(&collaps_ws(title_raw.unwrap_or("")), SESSION_TITLE_MAX);
-    let title_source = if payload.get("titleSource").and_then(Value::as_str) == Some("user")
-        || old.and_then(|o| o.get("titleSource")).and_then(Value::as_str) == Some("user")
-    {
+    let old_source = match old.and_then(|o| o.get("titleSource")).and_then(Value::as_str) {
+        Some("user") => "user",
+        Some("ai") => "ai",
+        _ => "auto",
+    };
+    let in_source = payload.get("titleSource").and_then(Value::as_str);
+    // 标题来源优先级：user（手动改名）> ai（自动生成）> auto（首问派生）。
+    // 普通内容保存不带 titleSource，沿用旧来源；手动改名永远优先，不能被自动标题覆盖。
+    let title_source = if old_source == "user" {
         "user"
-    } else {
+    } else if in_source == Some("user") {
+        "user"
+    } else if in_source == Some("ai") {
+        "ai"
+    } else if in_source == Some("auto") {
         "auto"
+    } else {
+        old_source
     };
     let folder_path = payload
         .get("folderPath")
@@ -1492,11 +1504,27 @@ fn describe_session(name: &str, sid: &str, folder_hint: &str) -> Option<Value> {
         .map(|s| s.to_string())
         .unwrap_or_else(|| folder_hint.to_string());
     let last_opened = session_ts(data.get("lastOpenedAt"));
+    // fileKey：这一行实际存在的 doc key（历史面板要能对任意文件夹/归属模式的行做
+    // 置顶/改名/归档/删除；全局共用模式下旧会话仍留在原文件夹的键上）
+    let stem = name
+        .strip_prefix("session-")
+        .and_then(|s| s.strip_suffix(".json"))
+        .unwrap_or(name);
+    let file_key = if !sid.is_empty() && stem.ends_with(&format!("-{sid}")) {
+        stem[..stem.len() - sid.len() - 1].to_string()
+    } else {
+        stem.to_string()
+    };
     Some(json!({
         "sid": sid,
+        "fileKey": file_key,
         "folderPath": folder,
         "title": session_title_of(&data),
-        "titleSource": if data.get("titleSource").and_then(Value::as_str) == Some("user") { "user" } else { "auto" },
+        "titleSource": match data.get("titleSource").and_then(Value::as_str) {
+            Some("user") => "user",
+            Some("ai") if !collaps_ws(data.get("title").and_then(Value::as_str).unwrap_or("")).is_empty() => "ai",
+            _ => "auto",
+        },
         "preview": utf16_clip(&collaps_ws(&session_last_entry_text(&data)), 80),
         "count": session_entries(&data).len(),
         "createdAt": created,
@@ -1772,11 +1800,19 @@ pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
                     next.remove("title");
                     next.insert("titleSource".to_string(), json!("auto"));
                 } else {
+                    // 带 titleSource='ai' 的是自动标题；普通改名保持 user（手动最优先）
+                    let source = if patch.get("titleSource").and_then(Value::as_str) == Some("ai") {
+                        "ai"
+                    } else {
+                        "user"
+                    };
                     next.insert("title".to_string(), json!(t));
-                    next.insert("titleSource".to_string(), json!("user"));
+                    next.insert("titleSource".to_string(), json!(source));
                 }
             }
-            if json_has_key(&patch, "titleSource") {
+            if json_has_key(&patch, "titleSource")
+                && patch.get("titleSource").and_then(Value::as_str) != Some("ai")
+            {
                 let keep_user = patch.get("titleSource").and_then(Value::as_str) == Some("user")
                     && next.get("title").and_then(Value::as_str).map(|s| !s.is_empty()).unwrap_or(false);
                 next.insert(
@@ -1826,6 +1862,10 @@ pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
             }
             let title_source = if next.get("titleSource").and_then(Value::as_str) == Some("user") {
                 "user"
+            } else if next.get("titleSource").and_then(Value::as_str) == Some("ai")
+                && next.get("title").and_then(Value::as_str).map(|s| !s.is_empty()).unwrap_or(false)
+            {
+                "ai"
             } else {
                 "auto"
             };

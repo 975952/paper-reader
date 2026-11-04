@@ -61,6 +61,37 @@ export function sessionSummaryMessages({ previous = '', turns = '' }) {
   return messages;
 }
 
+/* ---------------------------------------------------------------- bg.sessionTitle */
+
+const SESSION_TITLE_SYS = [
+  '你在为论文阅读器的问答会话起标题，只输出标题本身，不回答问题、不解释、不加引号。',
+  '要求：',
+  '1. 概括这个会话里读者在这篇论文上真正想弄清/解决的问题，用中文；专有名词、模型名、实验名保留原文；',
+  '2. 简短：不超过 14 个汉字（英文单词按 2 个汉字估算），不要书名号、句号、序号、冒号或「标题：」前缀；',
+  '3. 不要只复述论文名；读者问的是论文里的具体机制/公式/实验时要点出主题；',
+  '4. 不要评价、不要提问、不要写成一句话问答；读不出明确主题时用「论文名 + 话题」概括；',
+  '5. 只依据给出的论文名、首问和回答，不编造材料里没有的内容。',
+].join('\n');
+
+export const bgSessionTitle = definePrompt({
+  id: 'bg.sessionTitle',
+  version: '1.0.0',
+  kind: 'background',
+  identity: SESSION_TITLE_SYS,
+  system: [{ id: 'session-title', text: SESSION_TITLE_SYS }],
+  user: (ctx) => `【论文】${ctx.paper || '未命名'}\n【首问】\n${ctx.question || '（无）'}\n【本轮回答摘录】\n${ctx.answer || '（无）'}`,
+  materials: ['doc', 'question', 'answer'],
+  memory: [],
+  historyMax: 0,
+  notes: '会话标题自动生成；手动改名（titleSource=user）后不再覆盖。',
+});
+
+export function sessionTitleMessages({ paper = '', question = '', answer = '' } = {}) {
+  const { messages, debug } = renderPrompt('bg.sessionTitle', { paper, question, answer });
+  noteDebug(debug);
+  return messages;
+}
+
 /* ---------------------------------------------------------------- bg.scan.transcribe */
 
 const SCAN_TRANSCRIBE_SYS = [
