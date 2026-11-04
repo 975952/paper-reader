@@ -300,8 +300,19 @@
 
 <!-- 设置 -->
 <div class="modal hidden" id="settingsModal">
-  <div class="modal-box">
+  <div class="modal-box settings-box" role="dialog" aria-label="设置">
     <div class="modal-head">设置<button class="tbtn" id="closeSettings" title="关闭设置" aria-label="关闭设置"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6.4 6.4 17.6 17.6"/><path d="M17.6 6.4 6.4 17.6"/></svg></button></div>
+    <div class="settings-body">
+      <nav class="settings-nav" role="tablist" aria-label="设置分类" aria-orientation="vertical">
+        <button type="button" class="settings-nav-item on" id="settingsNavModel" data-pane="model" role="tab" aria-selected="true" aria-controls="settingsPaneModel">模型与接口</button>
+        <button type="button" class="settings-nav-item" id="settingsNavAppearance" data-pane="appearance" role="tab" aria-selected="false" aria-controls="settingsPaneAppearance">外观与字号</button>
+        <button type="button" class="settings-nav-item" id="settingsNavBehavior" data-pane="behavior" role="tab" aria-selected="false" aria-controls="settingsPaneBehavior">交互与发送</button>
+        <button type="button" class="settings-nav-item" id="settingsNavMemory" data-pane="memory" role="tab" aria-selected="false" aria-controls="settingsPaneMemory">长期记忆</button>
+      </nav>
+      <div class="settings-panes">
+        <section class="settings-pane" id="settingsPaneModel" data-pane="model" role="tabpanel" aria-labelledby="settingsNavModel">
+          <div class="settings-pane-title">模型与接口</div>
+          <div class="settings-pane-sub">API Key 只写在本机 data/config.json；换模型、换接口都在这里。</div>
     <label class="field">
       <span>已保存的模型配置</span>
       <select id="cfgProfile" aria-label="已保存的模型配置"></select>
@@ -326,14 +337,20 @@
       <span id="endpointNote"></span>
       <a class="link" id="toggleEndpoint" href="javascript:void(0)">改接口地址</a>
     </div>
-    <div class="settings-divider"></div>
+        </section>
+        <section class="settings-pane hidden" id="settingsPaneAppearance" data-pane="appearance" role="tabpanel" aria-labelledby="settingsNavAppearance">
+          <div class="settings-pane-title">外观与字号</div>
+          <div class="settings-pane-sub">主题与阅读字号立即生效；Ctrl/⌘ + = / - 也能随时调阅读字号。</div>
     <div class="settings-section-title">阅读助手样式</div>
     <div class="settings-grid settings-core-grid">
       <label class="field"><span>主题</span><select id="uiTheme"><option value="system">跟随系统</option><option value="light">暖白</option><option value="mist">纯白</option><option value="dark">暖灰深色</option><option value="graphite">石墨灰</option><option value="black">纯黑（OLED）</option></select></label>
       <label class="field"><span>阅读字号 <output class="range-value" id="uiFontSizeValue"></output></span><input id="uiFontSize" type="range" min="12" max="30" step="1" /></label>
     </div>
-    <div class="settings-divider"></div>
-    <div class="settings-section-title">双指缩放</div>
+        </section>
+        <section class="settings-pane hidden" id="settingsPaneBehavior" data-pane="behavior" role="tabpanel" aria-labelledby="settingsNavBehavior">
+          <div class="settings-pane-title">交互与发送</div>
+          <div class="settings-pane-sub">触摸屏缩放手感，以及发送框里两个范围的默认值。</div>
+          <div class="settings-section-title">双指缩放</div>
     <div class="settings-grid settings-core-grid">
       <!-- 缩放速度：触摸屏捏合与触摸板捏合都乘这个倍率（1 = 默认手感，见 pdfview.js 的 clampZoomSpeed）。
            min/max 必须与 pdfview.js 的 ZOOM_SPEED_MIN/MAX 一致（那边是权威，这里只是滑杆行程）。 -->
@@ -345,8 +362,11 @@
       <label class="field field-switch"><input id="cfgUseFullText" type="checkbox" /><span>整篇论文</span></label>
       <label class="field field-switch"><input id="cfgUseWeb" type="checkbox" /><span>联网搜索</span></label>
     </div>
-    <div class="settings-divider"></div>
-    <div class="settings-section-title">长期记忆</div>
+    <div class="modal-note"><span>这两个是发送框里的默认值；问答输入框旁仍可临时调整，改完立刻生效。</span></div>
+        </section>
+        <section class="settings-pane hidden" id="settingsPaneMemory" data-pane="memory" role="tabpanel" aria-labelledby="settingsNavMemory">
+          <div class="settings-pane-title">长期记忆</div>
+          <div class="settings-pane-sub">写给 AI 的长期背景与要求，只存本机 data/config.json。</div>
     <label class="field">
       <span>写给 AI 的长期背景与要求（≤4000 字）</span>
       <textarea id="cfgLongTermMemory" rows="4" placeholder="例如：我在读多模态方向，解释术语时保留英文原词；先给直觉再给公式……" spellcheck="false"></textarea>
@@ -357,12 +377,15 @@
          代码大小 / 结果最大宽度 / 结果透明度 / PDF 纸张 / 三个显示开关）全部下架：
          它们是视觉实验用的旋钮，不该出现在成品里。DEFAULT_UI_STYLE 里这些字段仍然保留，
          老存档读回来照旧生效，只是没有界面入口了（不会偷偷改用户的外观）。 -->
-    <div class="settings-reset">
-      <button type="button" id="resetSettings">恢复默认设置</button>
+        </section>
+      </div>
     </div>
-    <div class="modal-actions">
-      <button class="primary" id="saveSettings">保存</button>
+    <div class="modal-foot">
+      <div class="settings-reset">
+        <button type="button" id="resetSettings">恢复默认设置</button>
+      </div>
       <span class="test-result" id="testResult"></span>
+      <button class="primary" id="saveSettings">保存</button>
     </div>
   </div>
 </div>

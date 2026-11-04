@@ -4698,7 +4698,37 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 
 - `docs/使用说明书.md` §4.2（译文栏有常驻输入框）、§4.5（截图后进输入框再 Enter）、§4.6（字号跟随问答 / 结果沿用问答排版 / 框选截图进输入框）、§7 引用块、§16.6、§16.7 与附录速查同步更新。
 - 构建：`desktop\build.bat` 重建项目根 `论文阅读器.exe`：11,070,976 B，SHA256 `95764B198DD95CF29FDC1919C4FC6C6911ABF8F7540633E750BA106E49C7EB73`（22:54:45）；桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 正被用户运行（PID 129192）占用，脚本按设计安全跳过，未关闭用户进程——重启后重跑 `desktop\build.bat` 即可同步桌面副本。
-- 提交 `095ec66`（`译文输入与结果完全对齐问答：字号跟随问答、截图先入框、去掉专属卡片`）；本轮推送时 GitHub 直连与本地代理 `127.0.0.1:10808` 均不可达（`Connection was reset` / `Could not connect`），本地 `main` 领先 `origin/main` **2 个提交**（上一轮 `1510bb0` + 本轮 `095ec66`），网络恢复后执行 `git push origin main` 即可。
+- 提交 `48b0c07`（`译文输入与结果完全对齐问答：字号跟随问答、截图先入框、去掉专属卡片`）；本轮推送时 GitHub 直连与本地代理 `127.0.0.1:10808` 均不可达（`Connection was reset` / `Could not connect`），本地 `main` 领先 `origin/main` **2 个提交**（上一轮 `1510bb0` + 本轮 `48b0c07`），网络恢复后执行 `git push origin main` 即可。
 - 桌面预览副本：另存为 `C:\Users\Wang Wenbo\Desktop\论文阅读器-译文对齐.exe`（11,070,976 B，同项目根 exe），用户正在运行的旧桌面副本未被关闭或覆盖。
 
+## §89 会话历史两种排列与设置两栏（2026-11-04，用户 m05640）
+
+### 89.1 用户要求
+
+用户 m05640：先把当前版本提交到 GitHub；会话主界面支持两种排列——**按文件整理**（在这个文件里问过问题的会话就在该文件下显示一次）、**按时间顺序**（全部显示，且每个会话要标明按顺序在哪些文件中问过）；设置界面改成正式的左侧一列竖排选项、右侧每个选项对应具体界面的布局。
+
+约束：不跑 `test/` 正式套件；不改用户 `data/`、`papers/`；不关闭 / 覆盖正在运行的桌面阅读器；改 `public/` 后重建 exe；显式 `git add`（不用 `git add -A`）。
+
+### 89.2 实现
+
+- 会话历史（`public/js/sessions.js`）：
+  - 去掉「本文件夹 / 全部文件夹」切换，历史面板统一用 `scope=all` 拉全部会话；新增**按文件 / 按时间**两个排列 chip（`#sessHistArrange`），选择存 `localStorage reader.session.historyMode`（默认按文件）。
+  - 按文件：`fileGroups()` 根据会话的 `docIds/docTitles` 把会话归到它问过的每篇论文组，同一会话在每组各出现一次；组名用磁盘 papers 名（`docNameIndex` 优先 papers、docTitles 兜底）并附 `papers/路径`，组按最近活动倒序；无 docId 的会话收在末尾「未关联论文」。
+  - 按时间：全部会话按 updatedAt 倒序，保留置顶 / 今天 / 昨天 / 最近 7 天 / 更早 / 已归档分组；每行新增**按提问顺序的论文 trail**（`.sess-htrail`，按 `docIds` 顺序，最多 3 个 + `+N`，`title` 给完整顺序），meta 显示所属文件夹。
+  - 搜索同时匹配标题 / 预览 / 论文名；置顶、归档、改名、删除、归档折叠、进入方式 chips 全部保留。
+- 跨文件夹打开历史会话（`public/js/app.js` `openSessionFromHistory` + `public/js/sessions.js` `chooseSession(row)`）：历史面板现在跨文件夹，点开别的文件夹里的会话时自动 `openDoc()` 打开该会话对应的论文（`openDocColdSwitch` 内部 `ensureFolderForDoc` 切文件夹），收起选择卡片，再 `switchSession(sid, force)`；论文已不在书架时给出 toast，不丢会话。为此 sessions.js 新增导出 `sessionsHideEntryCard()`，`sessionsContext()` 增加 `papers()` 与 `openSessionFromHistory`。
+- 设置两栏（`public/index.html` + `public/js/app.js` + `public/style.css`）：`.modal-box` 改为 `.settings-box`，内部 `.settings-body`（左 `.settings-nav` 竖排四个分类：模型与接口 / 外观与字号 / 交互与发送 / 长期记忆；右 `.settings-panes` 四个 `section.settings-pane`），字段沿用原 ID；`showSettingsPane()` 切 pane、同步 nav 的 on/aria-selected/tabIndex 并写 `localStorage reader.settings.pane`，下次打开回到上次分类；`initSettings` 加 nav 点击委托与 ↑↓←→ / Home / End 键盘循环；底部改统一 `.modal-foot`（左「恢复默认设置」、中 `#testResult`、右「保存」）；`@media(max-width:640px)` 回退为纵向。
+- 顺手把 `docs/使用说明书.md` §12 的陈旧描述（「更多样式」等已下架旋钮）改为按当前界面的四个分类。
+
+### 89.3 验证
+
+- 仅运行隔离手动冒烟 `test/artifacts/smoke-session-settings.mjs`（隔离数据 `test/artifacts/session-ui-smoke/{data,papers}`，播种 6 个假会话、两篇 106,456 B 测试 PDF、假配置；Node 服务 8985，puppeteer headless 1440×900；不调用真实模型）：**51/51 全部通过**。
+- 覆盖：按文件分组（每篇论文组、跨文件会话在两组各一次、「涉及 2 篇论文」、未关联论文组、归档折叠、路径）、按时间分组与论文 trail（含 tooltip）、搜索按论文名过滤、跨文件夹打开会话（切文件夹 + 打开论文 + 收起选择卡片 + 恢复内容）、设置四分类切换 / 页签持久化 / 方向键与 Home / 弹窗在视口内无横向溢出 / 统一底栏 / reload 后排列与页签保留、无 pageerror。截图在 `test/artifacts/session-ui-smoke/shots/`。
+- 未运行 `test/` 正式套件；未改用户 `data/`、`papers/`；桌面阅读器 PID 120464 未关闭或覆盖。
+
+### 89.4 文档与交付
+
+- `docs/使用说明书.md` §6.2（会话头）、§12（设置两栏与四个分类说明）、§16.4（历史面板两种排列与跨文件夹打开）、附录速查同步更新。
+- 构建：`desktop\build.bat` 成功重建项目根 `论文阅读器.exe`：11,091,456 B，SHA256 `188C7543F3E03F2FD99EE14FC6CC1E7C2B516A38D1D8B334C899455485AE9F4F`；桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 正被用户运行（PID 120464）占用，脚本按设计安全跳过，未关闭用户进程——重启后重跑 `desktop\build.bat` 即可同步桌面副本。
+- 提交：实现提交「会话历史支持按文件/按时间两种排列，设置改为左侧分类两栏」（6 文件，+530/−114）；提交哈希与推送结果见紧随其后的交付记录。
 

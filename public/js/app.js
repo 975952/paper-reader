@@ -24,7 +24,7 @@ import { lastPromptDebug as __promptDebug } from './prompts/index.js';
 import {
   initSessions, sessionsOnFolderEntered, sessionsOnDocOpened, sessionsOnSessionChanged,
   sessionsMigrateFolder, sessionsRefreshHeader, sessionsSetBusy,
-  sessionsIsEntryMode, sessionsLeaveEntryForNewSession, sessionsEntryCardEl,
+  sessionsIsEntryMode, sessionsLeaveEntryForNewSession, sessionsEntryCardEl, sessionsHideEntryCard,
 } from './sessions.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
@@ -6216,11 +6216,13 @@ function sessionsContext() {
     folderKey: () => currentFolderKey(),
     folderKeyOf: (path) => folderKeyOf(path),
     folderDisplayName: (path) => folderDisplayName(path),
+    papers: () => state.papers || [],
     toast,
     adoptList: (rows) => { sessionStore.list = rows; },
     showChatAndRender: () => { showAiBlock('chat'); renderAiArea(); },
     renderAi: () => renderAiArea(),
     continueSession: (sid, opts) => switchSession(sid, opts || {}),
+    openSessionFromHistory: (row, opts) => openSessionFromHistory(row, opts || {}),
     startNewSession: (opts) => newSession(opts || {}),
     deleteSession: (sid) => deleteSession(sid, { confirm: false }),
     clearCurrentSession: () => clearCurrentSession({ confirm: false }),
@@ -6402,6 +6404,41 @@ async function switchSession(sid, { force = false } = {}) {
   updateSendScope();
   toast('已切换会话', 'ok', 1600);
   sessionsOnSessionChanged({ refresh: false });
+}
+
+/** 历史面板里点一条会话：它可能属于别的文件夹 / 别的论文。
+ *  同文件夹且同一篇论文 → 直接切会话；跨文件夹 → 先切文件夹、打开对应论文再切会话；
+ *  论文已不在 papers/ 里时给提示（历史行仍保留，不会丢）。 */
+async function openSessionFromHistory(row, { force = false } = {}) {
+  if (!row || !state.doc) return;
+  if (state.busy) {
+    toast('正在生成中，先等它跑完或点停止再切换会话', 'err', 3200);
+    return;
+  }
+  const sid = String(row.sid || '');
+  const folder = String(row.folderPath || '');
+  const ids = Array.isArray(row.docIds) ? row.docIds.map(String).filter(Boolean) : [];
+  const currentId = state.doc.docId;
+  const targetId = ids.includes(currentId) ? currentId : (ids[0] || '');
+  const sameFolder = folder === (currentFolderPath() || '');
+  if (sameFolder && (!targetId || targetId === currentId)) {
+    await switchSession(sid, { force });
+    return;
+  }
+  const paper = (state.papers || []).find((p) => String(p.docId) === targetId);
+  if (!paper) {
+    const where = `papers/${folder ? `${folder}/` : ''}`;
+    toast(`这个会话属于 ${where}，论文已不在书架上，无法直接打开；会话记录仍保留`, 'err', 4600);
+    return;
+  }
+  // 打开论文会顺带切换文件夹（ensureFolderForDoc）并按「进入方式」决定是否显示选择卡片
+  if (state.doc?.docId !== targetId) {
+    await openDoc({ name: paper.name, url: paper.url, docId: paper.docId, path: paper.path });
+  }
+  if (state.doc?.docId !== targetId) return;   // 打开失败：不要再把 sid 切到错误文档上
+  // openDoc → sessionsOnDocOpened 会重新亮出选择卡片；这次用户已经指定了会话，收起来再切
+  sessionsHideEntryCard();
+  await switchSession(sid, { force: true });
 }
 
 /** 新建一个空会话并切过去；silent=true：进文件夹自动新建（不弹提示）
@@ -10926,12 +10963,43 @@ function updateEndpointNote() {
   $('#endpointNote').textContent = `接口：${ENDPOINT_SHORT[url] || url}`;
 }
 
+const SETTINGS_PANE_KEY = 'reader.settings.pane';
+const SETTINGS_PANES = ['model', 'appearance', 'behavior', 'memory'];
+
+/**
+ * 设置弹窗两栏切换：左列竖排分类，右侧只显示对应面板。
+ * 分类名同时写在两端 id 里（settingsNavModel / settingsPaneModel），
+ * 这里按 data-pane 匹配，新增分类不用改这段逻辑。
+ */
+function showSettingsPane(name) {
+  const pane = SETTINGS_PANES.includes(name) ? name : 'model';
+  document.querySelectorAll('.settings-nav-item').forEach((item) => {
+    const on = item.dataset.pane === pane;
+    item.classList.toggle('on', on);
+    item.setAttribute('aria-selected', on ? 'true' : 'false');
+    item.tabIndex = on ? 0 : -1;
+  });
+  document.querySelectorAll('.settings-pane').forEach((el) => {
+    el.classList.toggle('hidden', el.dataset.pane !== pane);
+  });
+  const box = document.querySelector('.settings-box');
+  if (box) box.dataset.settingsPane = pane;
+  try { localStorage.setItem(SETTINGS_PANE_KEY, pane); } catch (e) { /* 隐私模式写不了，忽略 */ }
+}
+
 function openSettings(hint) {
   const modal = $('#settingsModal');
   modal.classList.remove('hidden');
   fillSettings();
+  let pane = 'model';
+  try { pane = localStorage.getItem(SETTINGS_PANE_KEY) || 'model'; } catch (e) { pane = 'model'; }
+  showSettingsPane(pane);
   if (hint) { $('#testResult').className = 'test-result err'; $('#testResult').textContent = hint; }
-  setTimeout(() => $('#cfgApiKey').focus(), 50);
+  // 只在「模型与接口」时自动聚焦 Key 输入框；其他面板聚焦左列当前分类，别把焦点塞进看不见的面板
+  setTimeout(() => {
+    if (pane === 'model') $('#cfgApiKey')?.focus();
+    else document.querySelector(`.settings-nav-item[data-pane="${pane}"]`)?.focus();
+  }, 50);
 }
 
 function closeSettings() {
@@ -10957,6 +11025,25 @@ function initSettings() {
     } finally { select.disabled = false; $('#saveSettings').disabled = false; }
   };
   $('#settingsBtn').onclick = () => openSettings();
+  // 左列分类：点击切换；键盘 ↑/↓/Home/End 也能在分类间走动（panel 内部 Tab 正常）
+  const settingsNav = document.querySelector('.settings-nav');
+  settingsNav?.addEventListener('click', (e) => {
+    const item = e.target.closest?.('.settings-nav-item');
+    if (item) showSettingsPane(item.dataset.pane);
+  });
+  settingsNav?.addEventListener('keydown', (e) => {
+    const items = [...settingsNav.querySelectorAll('.settings-nav-item')];
+    const at = items.indexOf(document.activeElement);
+    let next = -1;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') next = (at + 1) % items.length;
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') next = (at - 1 + items.length) % items.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = items.length - 1;
+    if (next < 0) return;
+    e.preventDefault();
+    showSettingsPane(items[next].dataset.pane);
+    items[next].focus();
+  });
   $('#closeSettings').onclick = closeSettings;
   $('#settingsModal').addEventListener('mousedown', (e) => { if (e.target.id === 'settingsModal') closeSettings(); });
   $('#toggleEndpoint').onclick = () => {

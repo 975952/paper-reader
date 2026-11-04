@@ -1635,6 +1635,54 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
 .test-result.ok { color: var(--ok-text); }
 .test-result.err { color: var(--err-text); }
 
+/* 设置：左列竖排分类 + 右侧对应面板（替代原来一长条滚动的字段表）。
+   窄窗口自动变成「上排分类横滑 + 下面内容」。 */
+.settings-box { display: flex; flex-direction: column; width: min(760px, 94vw); overflow: hidden; padding-bottom: 12px; }
+.settings-box .modal-head { flex: 0 0 auto; }
+.settings-body { display: flex; align-items: stretch; min-height: 300px; max-height: min(64vh, 520px); }
+.settings-nav {
+  flex: 0 0 140px; display: flex; flex-direction: column; gap: 2px;
+  padding: 1px 10px 12px 0; border-right: 1px solid var(--border);
+}
+.settings-nav-item {
+  display: flex; align-items: center; width: 100%; text-align: left;
+  padding: 7px 10px; border: 1px solid transparent; border-radius: 8px;
+  background: transparent; color: var(--fg-dim); cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-sm); line-height: 1.4;
+}
+.settings-nav-item:hover { background: var(--accent-soft); color: var(--accent); }
+.settings-nav-item.on { background: var(--accent-soft); border-color: var(--border); color: var(--accent); font-weight: 600; }
+.settings-nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.settings-panes { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 2px 2px 16px 16px; }
+.settings-pane-title { color: var(--fg); font-size: var(--ui-fs-md); font-weight: 650; margin-bottom: 3px; }
+.settings-pane-sub { color: var(--fg-faint); font-size: var(--ui-fs-xs); line-height: 1.55; margin-bottom: 13px; }
+.settings-pane > .field { margin-bottom: 13px; }
+.settings-pane > .field:last-child { margin-bottom: 0; }
+.settings-pane .settings-section-title { margin-top: 4px; }
+.settings-pane .modal-note { margin: 6px 0 14px; }
+.settings-pane .settings-grid { margin-bottom: 12px; }
+.modal-foot {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  margin-top: 12px; padding: 12px 2px 0; border-top: 1px solid var(--border);
+}
+.modal-foot .settings-reset { margin-top: 0; flex: 0 0 auto; }
+.modal-foot .test-result { min-width: 0; }
+.modal-foot .primary {
+  flex: 0 0 auto; background: var(--btn); color: var(--btn-fg); border: 1px solid var(--btn);
+  border-radius: 7px; padding: calc(8px * var(--ctl-scale)) calc(20px * var(--ctl-scale));
+  font-size: calc(12.5px * var(--ctl-scale)); font-weight: 600;
+}
+@media (max-width: 640px) {
+  .settings-body { flex-direction: column; min-height: 0; max-height: none; }
+  .settings-nav {
+    flex-direction: row; overflow-x: auto; gap: 4px;
+    padding: 0 0 8px; margin-bottom: 10px;
+    border-right: 0; border-bottom: 1px solid var(--border);
+  }
+  .settings-nav-item { width: auto; white-space: nowrap; }
+  .settings-panes { padding: 0 0 12px; overflow: visible; }
+}
+
 
 .bubble {
   position: fixed; z-index: 60; display: flex; gap: 2px;
@@ -2571,15 +2619,57 @@ body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
 }
 .sess-hist-new:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .sess-hist-searchrow { flex: 0 0 auto; padding: 0 8px 6px; }
-.sess-hist-scope { flex: 0 0 auto; display: flex; gap: 4px; padding: 0 8px 6px; }
-.sess-scope-chip {
-  padding: 3px 9px;
-  border: 1px solid var(--border); border-radius: 999px;
-  background: transparent; color: var(--fg-faint); cursor: pointer;
-  font: inherit; font-size: var(--ui-fs-2xs);
+/* 排列方式：按文件整理 / 按时间顺序（历史面板统一展示全部文件夹的会话） */
+.sess-hist-arrange { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 0 8px 7px; }
+.sess-arrange-chips {
+  flex: 0 0 auto; display: flex; gap: 2px; padding: 2px;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--bg-sunken);
 }
-.sess-scope-chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.sess-arrange-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 9px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--fg-faint); cursor: pointer;
+  font: inherit; font-size: var(--ui-fs-2xs); line-height: 1.4;
+}
+.sess-arrange-ic { display: inline-flex; }
+.sess-arrange-ic svg { width: 12px; height: 12px; }
+.sess-arrange-chip:hover { color: var(--accent); }
+.sess-arrange-chip.on {
+  background: var(--bg-elev); color: var(--accent); font-weight: 600;
+  box-shadow: 0 0 0 1px var(--border);
+}
+.sess-hist-summary {
+  flex: 1 1 auto; min-width: 0; text-align: right;
+  font-size: var(--ui-fs-2xs); color: var(--fg-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .sess-hist-list { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 0 6px 10px; }
+/* 按文件整理：文件组头（论文名 + 所在文件夹 + 会话数） */
+.sess-filegroup {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 11px 6px 4px; margin-top: 3px;
+  border-top: 1px solid var(--border);
+}
+.sess-filegroup:first-child { border-top: 0; margin-top: 0; padding-top: 4px; }
+.sess-filegroup-ic { flex: 0 0 auto; align-self: center; display: inline-flex; color: var(--fg-faint); }
+.sess-filegroup-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--ui-fs-xs); font-weight: 600; color: var(--fg-dim);
+}
+.sess-filegroup-meta {
+  flex: 1 1 auto; min-width: 0; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--ui-fs-2xs); color: var(--fg-faint); opacity: .85;
+}
+/* 按时间顺序：每行下面的「按先后顺序问过哪些论文」 */
+.sess-htrail { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 2px; }
+.sess-htrail-doc {
+  max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0 6px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-elev); color: var(--fg-faint); font-size: var(--ui-fs-2xs); line-height: 1.7;
+}
+.sess-htrail-arrow { font-size: var(--ui-fs-2xs); color: var(--fg-faint); opacity: .7; }
+.sess-htrail-more { font-size: var(--ui-fs-2xs); color: var(--fg-faint); }
 .sess-group {
   padding: 10px 6px 3px;
   font-size: var(--ui-fs-2xs); color: var(--fg-faint); font-weight: 600;
