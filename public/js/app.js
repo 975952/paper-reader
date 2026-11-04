@@ -1831,8 +1831,8 @@ function initViewer() {
     get citationPlan() { return activeCitationPlan ? [...activeCitationPlan.values()] : []; },
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
     renderAttachments, refreshReturnButton,
-    // 发送范围四选项：让自动化直接验「范围 → 本次发送带什么」
-    setScopeRange, toggleScopePanel, SCOPE_RANGES, rangeOverview, currentRange,
+    // 发送范围（脚本接口；输入框旁的芯片已移除，默认值在设置页「交互与发送」）
+    setScopeRange, SCOPE_RANGES, rangeOverview, currentRange,
     get scopeRange() { return currentRange(); },
     // 结果区排布 / 滚动：译文块是 column-reverse（最近的在最上面）
     scrollToNewest, markReversedBodies,
@@ -9165,17 +9165,13 @@ function setBusy(on, hint = '') {
   const regionTop = $('#regionBtn');
   if (regionTop) regionTop.disabled = on;
   $$('#attachRow .at-x').forEach((button) => { button.disabled = on; });
-  const scopeBtn = $('#optScope');
-  if (scopeBtn) scopeBtn.disabled = on;
-  if (on) closeScopePanel();
-  else renderScopeMenu();
   const clearBtn = $('#clearSession');
   if (clearBtn) clearBtn.disabled = on;
   updateSendScope();
   sessionsSetBusy(on);
 }
 
-/** 输入框旁边那句范围提示（`#sendScope`）：只讲这次会发什么，不再讲带了几轮历史。 */
+/** 输入框旁边那句范围提示（`#composerHint`）：只讲这次会发什么，不再讲带了几轮历史。 */
 function sendScopeText({ attachments, history, useFullText, useWeb, query, docId, fullMode, contextIncluded, contextHint = '', scanned = false, scanPageCount = 0 } = {}) {
   const rows = attachments || [];
   const quotes = rows.filter((a) => a.kind === 'text');
@@ -9207,20 +9203,15 @@ function sendScopeText({ attachments, history, useFullText, useWeb, query, docId
 }
 
 function updateSendScope() {
-  const node = $('#sendScope');
-  if (!node) return;
-  // 范围上拉栏现在真的有用了：内容由 renderScopeRange() 填，
-  // 收起态由 .hidden 控制。这里只保证「不忙的时候两处状态一致」。
-  renderScopeRange();
+  updateComposerHint();
 }
 
 function syncScopePrefs() {
   state.useFullText = uiStyle.useFullText !== false;
   state.useWeb = uiStyle.useWeb !== false;
-  // 设置页的「默认发送范围」= 初始值：偏好一变，发送框的范围跟着变（之后用户可临时改）
+  // 设置页的两个勾 = 每次问答的默认范围；输入框旁的临时切换按钮已于 2026-11-04 移除。
   state.scopeRange = rangeFromPrefs();
-  renderScopeRange();
-  updateSendScope();
+  updateComposerHint();
 }
 
 function revealPanel(id) {
@@ -9679,24 +9670,9 @@ function initComposer() {
   if (clearBtn) clearBtn.onclick = clearCurrentSession;
   renderAttachments();
 
-  $('#composer')?.addEventListener('click', (e) => {
-    if (e.target.closest('#composerScope')) { e.preventDefault(); toggleScopePanel(); return; }
-    const opt = e.target.closest('#sendScope .scope-opt');
-    if (opt && !opt.disabled) {
-      e.preventDefault();
-      setScopeRange(opt.dataset.range);
-      toast(`发送范围：${SCOPE_RANGES[opt.dataset.range].short}`, '', 1200);
-    }
-  });
-  // 面板里点到空白不要冒泡成提交
-  $('#sendScope')?.addEventListener('click', (e) => { if (!e.target.closest('.scope-opt')) e.preventDefault(); });
-  renderScopeMenu();
-  renderScopeRange();
-
   const ta = $('#chatInput');
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-    if (e.key === 'Escape') closeScopePanel();
   });
   ta.addEventListener('input', () => {
     ta.style.height = 'auto';
@@ -9709,8 +9685,6 @@ function initComposer() {
 /** 整篇论文此刻能不能开：要有一篇真的装好的论文 */
 const fullScopeAvailable = () => !!state.doc && !!viewer?.pdf && state.viewerDocId === state.doc?.docId;
 
-function renderScopeMenu() { renderScopeRange(); }
-
 
 const SCOPE_RANGES = {
   current: { key: 'current', short: '当前内容', icon: 'region', full: false, web: false,
@@ -9722,7 +9696,6 @@ const SCOPE_RANGES = {
   'paper-web': { key: 'paper-web', short: '论文 + 联网', icon: 'book', full: true, web: true,
     desc: '发送整篇论文，并先联网查一次资料' },
 };
-const SCOPE_RANGE_ORDER = ['current', 'paper', 'web', 'paper-web'];
 
 /** 设置页两个偏好 → 初始范围（沿用老存档语义，不改变既有默认「整篇 + 联网」）
  *  ⚠️ 只读 uiStyle（偏好本身），不要读 state.useFullText：那是「当次发送」的运行时值，
@@ -9738,12 +9711,6 @@ function rangeFromPrefs() {
 
 function currentRange() {
   return SCOPE_RANGES[state.scopeRange] ? state.scopeRange : 'paper-web';
-}
-
-/** 「整篇论文」此刻能不能用：要有一篇真的装好的论文 */
-function rangeAvailable(key) {
-  if (key === 'paper' || key === 'paper-web') return fullScopeAvailable();
-  return true;
 }
 
 /** 按给定范围开关 state 的两个标记（发送前 / 换论文后调用；同一套推导，不重复实现） */
@@ -9770,74 +9737,18 @@ function updateComposerHint() {
   setHint(rangeOverview());
 }
 
-/** 发送框上的范围芯片 + 上拉栏里的选中态（两处必须同步） */
-function renderScopeRange() {
-  const key = currentRange();
-  const r = SCOPE_RANGES[key];
-  const chip = $('#composerScope');
-  if (chip) {
-    chip.dataset.range = key;
-    // ⚠️ 必须是 iconHTML（返回字符串）：iconEl 返回节点，拼进模板字符串会变成
-    //    "[object SVGSVGElement]" —— 界面上表现为芯片里出现一行鬼话。
-    chip.innerHTML = `${iconHTML(r.icon, { size: 14 })}<span>${r.short}</span>`;
-    chip.title = `发送范围：${r.short} —— ${r.desc}`;
-    chip.setAttribute('aria-label', `发送范围：${r.desc}。点击可改。`);
-  }
-  const panel = $('#sendScope');
-  if (panel) {
-    panel.innerHTML = SCOPE_RANGE_ORDER.map((k) => {
-      const item = SCOPE_RANGES[k];
-      const on = k === key;
-      const ok = rangeAvailable(k);
-      return `<button type="button" class="scope-opt${on ? ' is-on' : ''}" role="radio"
-        aria-checked="${on ? 'true' : 'false'}" data-range="${k}" ${ok ? '' : 'disabled'}
-        title="${item.desc}${ok ? '' : '（先打开一篇论文）'}">
-        <span class="scope-dot" aria-hidden="true"></span>
-        <span class="scope-ico">${iconHTML(item.icon, { size: 14 })}</span>
-        <span class="scope-txt">${item.desc}</span>
-      </button>`;
-    }).join('');
-  }
+/** 兼容旧调用点：发送范围芯片移除后，这里只刷新输入框旁边那句提示。 */
+function renderScopeMenu() {
   updateComposerHint();
 }
 
-/** 点范围面板 / 芯片之外的地方 → 收起（一次性自摘） */
-function scopeAway(e) {
-  if (e.target.closest && (e.target.closest('#sendScope') || e.target.closest('#composerScope'))) return;
-  closeScopePanel();
-}
-
-function closeScopePanel() {
-  const panel = $('#sendScope');
-  document.removeEventListener('pointerdown', scopeAway, true);
-  if (!panel || panel.classList.contains('hidden')) return;
-  panel.classList.add('hidden');
-  $('#composerScope')?.setAttribute('aria-expanded', 'false');
-}
-
-function toggleScopePanel() {
-  const panel = $('#sendScope');
-  if (!panel) return;
-  if (panel.classList.contains('hidden')) {
-    renderScopeRange();
-    panel.classList.remove('hidden');
-    $('#composerScope')?.setAttribute('aria-expanded', 'true');
-    // 点面板外面就收起。监听挂在 document 捕获阶段，且每次打开重新挂
-    // （不用 setTimeout 延迟挂 —— 那会和「点完立刻点别处」的竞态撞车）。
-    document.addEventListener('pointerdown', scopeAway, true);
-  } else {
-    closeScopePanel();
-  }
-}
-
+/** 脚本/自动化可直接改这一次发送的范围（输入框旁的芯片已于 2026-11-04 移除，
+ *  界面上只保留设置页「交互与发送」里的两个默认值）。 */
 function setScopeRange(key) {
   if (!SCOPE_RANGES[key]) return;
   state.scopeRange = key;
-  renderScopeRange();
-  closeScopePanel();
-  // ⚠️ 这里不写 uiStyle 的两个偏好：范围是「本次发送」的，
-  // 设置页的默认范围才是长期意图。state 的两个标记跟着当前范围走（发送时同源）。
   applyRangeForSend(key);
+  updateComposerHint();
 }
 
 /** 输入框下面那行小字，用于显示进度；传空字符串清掉 */
@@ -11390,8 +11301,8 @@ function initSettings() {
   };
   $('#cfgBaseURL').addEventListener('input', updateEndpointNote);
   // 设置页里「即时生效」的控件：主题、阅读字号、双指缩放速度，以及两个默认发送范围偏好
-  // （第 2 步起范围回到发送框，设置页这两个勾 = 默认值；两个入口必须同一套语义，
-  //   所以勾选也走 applyUiSettingsFromControls → syncScopePrefs → renderScopeRange）。
+  // （输入框旁的临时切换按钮已于 2026-11-04 移除；这里的两个勾就是唯一入口，
+  //   勾选走 applyUiSettingsFromControls → syncScopePrefs → updateComposerHint）。
   ['uiTheme', 'uiFontSize', 'uiZoomSpeed', 'cfgUseFullText', 'cfgUseWeb']
     .forEach((id) => document.getElementById(id)?.addEventListener('input', applyUiSettingsFromControls));
   // 「会话」分类：四项都只影响本机行为，切换/勾选立刻生效（和「保存并测试」无关）

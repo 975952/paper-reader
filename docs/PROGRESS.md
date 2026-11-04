@@ -4856,3 +4856,82 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
   桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 正被用户运行（PID 105352）占用，脚本按设计安全跳过、
   未关闭用户进程——关掉旧窗口后重跑 `desktop\build.bat`（或直接用项目根新 exe）即可用上新行为。
 - 提交：实现提交 `37388a2`「会话设置逐项体验重做：按论文真正独立、打开文件夹时才生效」（6 文件，+371/−95），随后推送 `origin/main`。
+
+## §92 历史面板同会话去重与「发送范围」控件移除（2026-11-04，用户 m08214 / m08297）
+
+### 92.1 用户反馈
+
+- 用户 m08214：「而且现在输入框的那个发送选项的功能是不是没用了，应该去掉」。
+- 用户 m08297：「不是删除后还有四个对话，是为什么同一个会话会显示三遍，而且为什么显示共用对话，
+  而且你那个显示还赌了几篇论文的东西根本看不到是哪几篇论文。完全是一坨」。
+- 背景：用户 m08159 要求「把现有的会话全部删除」，删除并重启后，用户随手发了「1」「2」两条测试问题，
+  随后在设置里切换「换论文时对话怎么接」，历史面板出现同一个会话 3 行、3 行都标「当前」、
+  归到「共用会话」组、多论文只提示「读过 N 篇」却看不到论文名。
+
+### 92.2 根因
+
+- 「同一个会话显示三遍」：切换「换论文时对话怎么接」时，`applySessionScopeMode()` 会先按旧模式存盘、
+  再把同一 sid 复制到新模式的存储键（设计上保留旧文件作为备份）；历史面板原先直接按文件罗列、
+  未按 sid 去重，于是一段对话出现 3 行。`「当前」`徽标按 `row.sid === currentSid` 逐行判断，
+  三份副本的 sid 都等于当前会话 sid，所以三行都标「当前」。
+- 「为什么显示共用会话」：当时设置就是「全局共用」模式；并且旧 `globalScope` 判断用的是
+  `scopeKey() !== folderKey()`，在「按论文」模式下（docId ≠ folderKey）会被误判为全局，
+  文件视图错误地收成一个「共用会话」组。标题行也没写当前是哪种模式，用户看不出原因。
+- 「读了几篇论文看不到是哪几篇」：`historyTrail()` 原先只在「按时间」排列渲染，
+  「按文件」排列下多论文会话只显示一个「还读过 N 篇」胶囊、论文名只放在 tooltip 里。
+- 「发送选项没用了」：AI 现在会自己翻页读论文（agent read path），「整篇论文」开关主要影响
+  非 agent 回退路径与扫描件；「联网搜索」仍有效但设置页已有默认值开关，输入框旁的临时芯片
+  容易让人误以为它在控制整篇上下文。
+
+### 92.3 实现（4 个源文件）
+
+- `public/js/sessions.js`：
+  - 新增 `preferRow(a, b)`（当前归属键 > 有标题 > pinned > archived > updatedAt）与
+    `collapseRows(rows)`：按 sid 分组、合并 title/titleSource/preview/summary/pinned/archived/count/updatedAt，
+    多副本时挂 `_copies = [{ sid, fileKey, folderPath }]`；`rowsForGroups()` 过滤后统一走 `collapseRows()`，
+    历史「N 个会话」计数与两种排列都按去重后的行渲染。
+  - `globalScope = scopeMode() === 'global'`（修正 paper 模式误判；顺带修正 file 模式分组与提示文案）。
+  - `historyRow()` 增加 `currentShown` 集合：「当前」徽标每个 sid 只标第一处，
+    同一会话在多个论文分组下不再重复标「当前」。
+  - `historyTrail()` 去掉「仅按时间排列才渲染」的限制，两种排列都显示「读过 ①论文名 ②论文名」；
+    多论文会话不再用 tooltip 胶囊，论文名直接可见。
+  - `renderHistoryList()` 标题行改为「N 个会话 · 按论文/按文件夹/全局共用 · 全部文件夹」，
+    直接说明当前模式；全局「共用会话」组头副标题改为「所有论文共用一段对话 · 读过 N 篇：论文名…」，
+    完整顺序放 title。
+  - `deleteRowFile(row)` / `confirmDeleteRow(row)`：删除同一 sid 的**所有存储键副本**
+    （按 `_copies` 逐份 DELETE，404 忽略；删除当前会话后再清非当前键副本），
+    避免「删掉一行、其余副本又冒出来」。
+- `public/js/app.js`：移除输入框发送范围控件相关逻辑——`setBusy` 不再管理 `#optScope`；
+  `updateSendScope()` / `syncScopePrefs()` 只刷新 `#composerHint`；`initComposer` 删除芯片/面板的点击、
+  空白点击与 Escape 处理；删除 `renderScopeRange` / `scopeAway` / `closeScopePanel` / `toggleScopePanel` /
+  `rangeAvailable` / `SCOPE_RANGE_ORDER`，新增兼容壳 `renderScopeMenu() { updateComposerHint(); }`；
+  `setScopeRange()` 保留为脚本接口；`window.__ctx` 去掉 `toggleScopePanel` 导出。
+- `public/index.html`：composer 的 `.composer-opts` 只留 `#composerHint` + 译成目标语言；
+  设置页「交互与发送」的说明改为「这两个是问答的默认发送范围……输入框旁边不再放临时切换按钮」。
+- `public/style.css`：删除 `.scope-chip / .scope-panel / .scope-opt / .scope-dot / .send-scope` 与
+  `scopeIn / scopeFadeIn` 动画；译文面板隐藏规则只剩 `#composerHint`。
+
+### 92.4 验证
+
+- 隔离手动冒烟 `test/artifacts/session-dup-smoke/smoke.mjs`（隔离数据 `test/artifacts/session-dup-smoke/{data,papers}`，
+  复制 4 个 106,456 B 测试 PDF、假配置；Node 服务 8986；Puppeteer headless；拦截 `/api/chat` 不调用真实模型）：
+  播种「同一 sid 在翻译示例 docId / 第二篇 docId / 根文件夹键各一份」+ 另一会话，
+  验证 **18/18 全部通过、无 pageerror**：按论文文件视图 3 行/2 个 sid、只有 1 个「当前」徽标、
+  多论文行直接显示「翻译示例」「第二篇」、summary 标「按论文」、删除当前会话后 3 个副本全部删除且另一会话保留；
+  全局模式 summary 标「全局共用」、组名「共用会话」、组头写出读过 2 篇及论文名；
+  输入框无 `#composerScope`/`#sendScope`、设置页新文案在。截图在
+  `test/artifacts/session-dup-smoke/shots/`（`settings-behavior.png`、`history-dedupe.png`、`history-global.png`）。
+- 解析校验：`node --experimental-vm-modules` + `new vm.SourceTextModule(...)` 对
+  `public/js/app.js`、`public/js/sessions.js`、`public/js/ai.js`、`server.js` 全部 PARSE-OK。
+- 用户桌面 `data/` 中那 2 段测试对话保留（共 4 个文件：2 份是切换归属方式复制出的备份副本），
+  历史面板现在按 sid 合并成 2 行；不删除用户文件。未运行 `test/` 正式套件；未改用户 `papers/`、译文文件。
+
+### 92.5 文档与交付
+
+- `docs/使用说明书.md`：§6.2 重写为「发送范围（设置里的默认值）」（输入框旁芯片已移除，只留设置页两个默认勾）；
+  §6.3 / §12.3 同步；§12.5「历史面板默认排列」行补「同一会话多副本合并一行、只标一个当前、行内直接列论文名」；
+  §16.4 新增「同一会话的多份副本在历史里只显示一行」并改写按文件/按时间两种排列的说明。
+- 构建：`desktop\build.bat` 成功重建项目根与桌面 `论文阅读器.exe`：11,127,296 B，
+  SHA256 `CC76F97F4C5D0265E84301492A3638401B74E74C7E554A11D49412E32B7F2C92`（13:05）；
+  桌面副本已覆盖并重启（PID 103264，Responding=True）。
+- 提交：本次实现提交「历史面板按会话去重、共用会话可读性与发送范围控件移除」（6 文件，+247/−228），随后推送 `origin/main`。

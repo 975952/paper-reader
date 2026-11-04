@@ -1507,57 +1507,9 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
 .modal-box { cursor: default; }
 
 .composer-opts { display: flex; align-items: center; gap: calc(var(--ctl-gap) + 3px); padding: 3px 2px 0; min-height: 22px; position: relative; }
-.send-scope { color: var(--fg-faint); font-size: var(--ui-fs-2xs); line-height: 1.4; padding: 0 3px; overflow-wrap: anywhere; }
-.send-scope:not(.hidden) { min-height: 14px; }
 
-/* ── 发送范围芯片 + 四选项上拉栏（2026-10 第 2 步） ─────────────────────────
-   口径：当前范围必须一眼看见（不能让用户猜），所以芯片上写极短标签；
-   完整含义放 title 与面板里。面板是绝对定位浮层，不占布局高度 —— 打开时输入框不会跳。 */
-.scope-chip {
-  display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
-  height: calc(20px * var(--ctl-scale));
-  padding: 0 calc(6px * var(--ctl-scale)) 0 calc(5px * var(--ctl-scale));
-  border: 1px solid var(--border); border-radius: 999px;
-  background: var(--bg-elev); color: var(--fg-dim);
-  font: inherit; font-size: var(--ui-fs-2xs); line-height: 1;
-  cursor: pointer; white-space: nowrap;
-}
-.scope-chip:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
-.scope-chip > svg { flex: 0 0 auto; }
-.scope-chip[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
-
-.scope-panel {
-  position: absolute; left: 0; right: 0; bottom: calc(100% + 4px); z-index: 20;
-  display: flex; flex-direction: column; gap: 1px;
-  padding: 4px;
-  border: 1px solid var(--border-strong); border-radius: 9px;
-  background: var(--bg-elev);
-  box-shadow: var(--shadow);
-  animation: scopeIn .14s ease-out;
-}
-@keyframes scopeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-.scope-opt {
-  display: flex; align-items: center; gap: 7px;
-  width: 100%; min-height: calc(26px * var(--ctl-scale));
-  padding: calc(3px * var(--ctl-scale)) calc(7px * var(--ctl-scale));
-  border: 0; border-radius: 6px;
-  background: transparent; color: var(--fg-dim);
-  font: inherit; font-size: var(--ui-fs-xs); line-height: 1.35; text-align: left;
-  cursor: pointer;
-}
-.scope-opt:hover:not(:disabled) { background: var(--bg-sunken); color: var(--fg); }
-.scope-opt.is-on { background: var(--accent-soft); color: var(--accent); }
-.scope-opt:disabled { color: var(--fg-faint); opacity: .55; cursor: not-allowed; }
-.scope-ico { display: inline-flex; flex: 0 0 auto; color: inherit; opacity: .85; }
-.scope-txt { flex: 1 1 auto; min-width: 0; }
-.scope-dot {
-  flex: 0 0 auto; width: 11px; height: 11px; border-radius: 50%;
-  border: 1px solid var(--border-strong); position: relative;
-}
-.scope-opt.is-on .scope-dot { border-color: var(--accent); }
-.scope-opt.is-on .scope-dot::after {
-  content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--accent);
-}
+/* ── 输入框旁只留一行范围提示（原来的「发送范围」芯片 + 四选项面板已于 2026-11-04 移除，
+      范围默认值只保留在设置页「交互与发送」里） ───────────────────────── */
 .opt-chip {
   flex: 0 0 auto; display: inline-flex; align-items: center; gap: calc(5px * var(--ctl-scale));
   font: inherit; font-size: calc(10.5px * var(--ctl-scale)); line-height: 1.2;
@@ -1887,16 +1839,8 @@ body[data-density="comfortable"] {
 .composer .stop:hover {
   filter: none;
 }
-.scope-panel {
-  animation: scopeFadeIn .1s ease-out;
-}
-@keyframes scopeFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
 @media (prefers-reduced-motion: reduce) {
-  .composer-row,
-  .scope-panel { transition: none; animation: none; }
+  .composer-row { transition: none; }
 }
 
 @media print { .topbar, .side, .rail, .statusbar, .bubble, .searchbar, .splitter { display: none !important; } }
@@ -2032,7 +1976,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .ai-hint,
 .ai-body .empty,
 .composer-hint,
-.send-scope,
 .search-count {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -2133,9 +2076,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 
 .side.right:not([data-active-panel="chat"]):not([data-active-panel="translate"]) > .composer { display: none; }
-.side.right[data-active-panel="translate"] #composerScope,
-.side.right[data-active-panel="translate"] #composerHint,
-.side.right[data-active-panel="translate"] #sendScope { display: none !important; }
+.side.right[data-active-panel="translate"] #composerHint { display: none !important; }
 .translate-target-label,
 .translate-target { display: none; }
 .side.right[data-active-panel="translate"] .translate-target-label,
@@ -2328,16 +2269,8 @@ body.window-maximized .win-resize { display: none; }
 .composer .stop:hover {
   filter: none;
 }
-.scope-panel {
-  animation: scopeFadeIn .1s ease-out;
-}
-@keyframes scopeFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
 @media (prefers-reduced-motion: reduce) {
-  .composer-row,
-  .scope-panel { transition: none; animation: none; }
+  .composer-row { transition: none; }
 }
 
 /* 输入框不显示任何焦点框：焦点仍保留给键盘，但视觉上不画绿色描边。 */

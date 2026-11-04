@@ -203,15 +203,13 @@
         <button class="send" id="sendBtn" type="submit" title="发送"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.6 3.4 3.6 10.2l6.6 2.8 2.8 6.6z"/><path d="m10.2 13 10.4-9.6"/></svg></button>
       </div>
       <div class="composer-opts">
-        <button type="button" class="scope-chip" id="composerScope" aria-haspopup="true" aria-expanded="false"
-                title="发送范围。点击可改：当前内容 / 整篇论文 / 联网搜索 / 整篇论文 + 联网搜索"></button>
+        <!-- 发送范围不再放输入框旁：AI 会自己翻页读论文，范围只保留设置页里的两个默认值开关。 -->
         <span class="composer-hint" id="composerHint"></span>
         <label class="translate-target-label" for="translateTargetLang">译成</label>
         <select id="translateTargetLang" class="translate-target" aria-label="翻译目标语言">
           <option value="中文">中文</option>
           <option value="English">English</option>
         </select>
-        <div class="scope-panel hidden" id="sendScope" role="radiogroup" aria-label="发送范围"></div>
       </div>
     </form>
   </aside>
@@ -350,7 +348,7 @@
         </section>
         <section class="settings-pane hidden" id="settingsPaneBehavior" data-pane="behavior" role="tabpanel" aria-labelledby="settingsNavBehavior">
           <div class="settings-pane-title">交互与发送</div>
-          <div class="settings-pane-sub">触摸屏缩放手感，以及发送框里两个范围的默认值。</div>
+          <div class="settings-pane-sub">触摸屏缩放手感，以及问答默认发送范围的偏好。</div>
           <div class="settings-section-title">双指缩放</div>
     <div class="settings-grid settings-core-grid">
       <!-- 缩放速度：触摸屏捏合与触摸板捏合都乘这个倍率（1 = 默认手感，见 pdfview.js 的 clampZoomSpeed）。
@@ -363,14 +361,14 @@
       <label class="field field-switch"><input id="cfgUseFullText" type="checkbox" /><span>整篇论文</span></label>
       <label class="field field-switch"><input id="cfgUseWeb" type="checkbox" /><span>联网搜索</span></label>
     </div>
-    <div class="modal-note"><span>这两个是发送框里的默认值；问答输入框旁仍可临时调整，改完立刻生效。</span></div>
+    <div class="modal-note"><span>这两个是问答的默认发送范围，改完立刻生效：<b>整篇论文</b>=每次提问默认把整篇论文放进上下文（AI 自己会翻页读论文时一般不用开）；<b>联网搜索</b>=每次提问默认先联网查一次资料。输入框旁边不再放临时切换按钮。</span></div>
         </section>
         <section class="settings-pane hidden" id="settingsPaneSession" data-pane="session" role="tabpanel" aria-labelledby="settingsNavSession">
           <div class="settings-pane-title">会话</div>
           <div class="settings-pane-sub">决定换论文时自动接上哪一段对话、打开文件夹时怎么接、历史怎么排、标题怎么来。会话记录永远保留在历史面板里，改这些设置不会迁移或删除它们。</div>
     <div class="settings-section-title">换论文时对话怎么接</div>
     <div class="settings-grid settings-core-grid">
-      <label class="field"><span>一段对话属于</span><select id="settScopeMode">
+      <label class="field"><span>换论文时接哪段</span><select id="settScopeMode">
         <option value="folder">按文件夹：同一文件夹里的论文接着同一段</option>
         <option value="paper">按论文：每篇论文各接自己那一段</option>
         <option value="global">全局共用：所有论文接同一段</option>

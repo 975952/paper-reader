@@ -248,11 +248,24 @@ function cacheTouched(row) {
   }
 }
 
+/** 删除会话在所有存储键下的副本：切换「换论文时对话怎么接」会复制同一 sid，
+ *  只删当前归属键那份的话，其余副本会在历史里「复活」。 */
 async function deleteRowFile(row) {
-  const q = new URLSearchParams({ doc: keyForRow(row), sid: row.sid });
-  const r = await fetch(`/api/session?${q}`, { method: 'DELETE' });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(errorOf(j, r));
+  const scope = listScopeKey();
+  const copies = Array.isArray(row?._copies) && row._copies.length
+    ? row._copies
+    : [{ sid: row.sid, fileKey: keyForRow(row) }];
+  let lastErr = null;
+  for (const c of copies) {
+    const doc = c.fileKey || scope;
+    if (!doc) continue;
+    const q = new URLSearchParams({ doc, sid: row.sid });
+    const r = await fetch(`/api/session?${q}`, { method: 'DELETE' });
+    if (r.ok || r.status === 404) continue;
+    const j = await r.json().catch(() => ({}));
+    lastErr = new Error(errorOf(j, r));
+  }
+  if (lastErr) throw lastErr;
 }
 
 /* ───────────────────────────── 列表刷新 ───────────────────────────── */
@@ -738,9 +751,76 @@ function historySourceRows() {
   return st.allList;
 }
 
+/** 同一个会话可能因为切换「换论文时对话怎么接」而在多个存储键下留下副本
+ *  （切换时会先按旧方式存盘、再把同一段对话复制到新方式）。历史面板是全库列表，
+ *  如果不去重，同一段对话会重复出现好几行、每行都标「当前」。这里按 sid 合并成一行：
+ *  · 优先当前归属键下那份，其次有标题、置顶/归档的，最后取最近更新的；
+ *  · 标题、置顶、归档、摘要等可能只写在某一副本上，合并时取更完整的值；
+ *  · 原副本列表挂在 _copies 上，删除时连同所有副本一起删。 */
+function preferRow(a, b) {
+  const scope = listScopeKey();
+  const aCur = !!a.fileKey && a.fileKey === scope;
+  const bCur = !!b.fileKey && b.fileKey === scope;
+  if (aCur !== bCur) return aCur;
+  const aTitle = !!a.title;
+  const bTitle = !!b.title;
+  if (aTitle !== bTitle) return aTitle;
+  if (!!a.pinned !== !!b.pinned) return !!a.pinned;
+  if (!!a.archived !== !!b.archived) return !!a.archived;
+  return (b.updatedAt || 0) > (a.updatedAt || 0);
+}
+
+function collapseRows(rows) {
+  const groups = new Map();
+  const order = [];
+  for (const row of rows) {
+    const sid = String(row?.sid || '');
+    if (!sid) { order.push(row); continue; }   // 没有 sid 的旧行原样保留
+    let g = groups.get(sid);
+    if (!g) { g = []; groups.set(sid, g); order.push(g); }
+    g.push(row);
+  }
+  return order.map((item) => {
+    if (!Array.isArray(item)) return item;
+    let primary = item[0];
+    for (const r of item) if (preferRow(r, primary)) primary = r;
+    const merged = { ...primary };
+    for (const r of item) {
+      if (!merged.title && r.title) { merged.title = r.title; merged.titleSource = r.titleSource; }
+      if (!merged.preview && r.preview) merged.preview = r.preview;
+      if (!merged.summary && r.summary) { merged.summary = r.summary; merged.summaryCovered = r.summaryCovered; }
+      if (r.pinned) {
+        migratedPinned(merged, r);
+      }
+      if (r.archived) {
+        migratedArchived(merged, r);
+      }
+      merged.count = Math.max(merged.count || 0, r.count || 0);
+      merged.updatedAt = Math.max(merged.updatedAt || 0, r.updatedAt || 0);
+      merged.lastOpenedAt = Math.max(merged.lastOpenedAt || 0, r.lastOpenedAt || 0);
+    }
+    if (item.length > 1) {
+      merged._copies = item.map((r) => ({ sid: r.sid, fileKey: r.fileKey, folderPath: r.folderPath }));
+    } else {
+      delete merged._copies;
+    }
+    return merged;
+  });
+}
+
+function migratedPinned(target, row) {
+  target.pinned = true;
+  target.pinnedAt = Math.max(target.pinnedAt || 0, row.pinnedAt || 0);
+}
+
+function migratedArchived(target, row) {
+  target.archived = true;
+  target.archivedAt = Math.max(target.archivedAt || 0, row.archivedAt || 0);
+}
+
 function rowsForGroups() {
   const q = st.histQuery.trim().toLowerCase();
-  return historySourceRows()
+  const filtered = historySourceRows()
     .filter((r) => !q
       || (r.title || '').toLowerCase().includes(q)
       || (r.preview || '').toLowerCase().includes(q)
@@ -748,6 +828,7 @@ function rowsForGroups() {
       || (r.docTitles || []).some((t) => String(t || '').toLowerCase().includes(q)))
     // 空会话（没发过任何消息、也没被命名/置顶/归档）没有可恢复内容，不占历史列表
     .filter((r) => (r.count || 0) > 0 || r.pinned || r.archived || !!r.title);
+  return collapseRows(filtered);
 }
 
 /* ── 「按文件整理」：会话 → 问过的论文 ─────────────────────────────────── */
@@ -850,12 +931,14 @@ function renderHistoryList() {
   const box = st.ui?.history?.querySelector('.sess-hist-list');
   if (!box) return;
   const rows = rowsForGroups();
+  const globalScope = scopeMode() === 'global';
   const summary = st.ui?.history?.querySelector('#sessHistSummary');
   if (summary) {
-    summary.textContent = rows.length ? `${rows.length} 个会话 · 全部文件夹` : '';
+    // 标明当前「换论文时对话怎么接」，避免把「共用会话」误当成 bug
+    const modeText = globalScope ? '全局共用' : (scopeMode() === 'paper' ? '按论文' : '按文件夹');
+    summary.textContent = rows.length ? `${rows.length} 个会话 · ${modeText} · 全部文件夹` : '';
   }
   const hint = st.ui?.history?.querySelector('#sessHistModeHint');
-  const globalScope = !!(st.ctx?.scopeKey && st.ctx.scopeKey() !== st.ctx.folderKey?.());
   if (hint) {
     hint.textContent = st.histMode === 'file'
       ? (globalScope
@@ -870,20 +953,28 @@ function renderHistoryList() {
   const active = rows.filter((r) => !r.archived);
   const archived = rows.filter((r) => r.archived);
   const nodes = [];
-  // 按文件模式下同一会话会出现在多个文件组：行内改名只在第一次出现的那行渲染输入框
+  // 按文件模式下同一会话会出现在多个文件组：行内改名只在第一次出现的那行渲染输入框，
+  // 「当前」徽标也只标第一次出现的那行
   const renameShown = new Set();
+  const currentShown = new Set();
 
   if (st.histMode === 'file') {
     if (globalScope) {
       // 全局共用：所有会话都属于同一段跨论文对话，只分一组，论文顺序用 trail 标出
+      const gids = Array.from(new Set(active.flatMap((r) => (r.docIds || []).map(String).filter(Boolean))));
+      const gindex = docNameIndex(active);
+      const gnames = gids.map((id) => gindex.get(id)?.name || '未知论文');
+      const subText = gnames.length
+        ? `所有论文共用一段对话 · 读过 ${gnames.length} 篇：${gnames.slice(0, 3).join('、')}${gnames.length > 3 ? ' 等' : ''}`
+        : '所有论文共用一段对话';
       nodes.push(el('div', { class: 'sess-fileblock' },
         el('div', { class: 'sess-filegroup' },
           el('span', { class: 'sess-filegroup-ic', html: ICONS.doc }),
           el('span', { class: 'sess-filegroup-name', text: '共用会话' }),
           el('span', { class: 'sess-filegroup-count', text: String(active.length) })),
-        el('div', { class: 'sess-filegroup-sub', text: '所有论文 · 下面标出每个会话按顺序读过哪些论文' })));
+        el('div', { class: 'sess-filegroup-sub', text: subText, title: gnames.join(' → ') })));
       const rowsBox = el('div', { class: 'sess-fileblock-rows' });
-      for (const r of active) rowsBox.append(historyRow(r, { trail: true, renameShown }));
+      for (const r of active) rowsBox.append(historyRow(r, { trail: true, renameShown, currentShown }));
       nodes.push(rowsBox);
     } else {
       const groups = fileGroups(active);
@@ -896,7 +987,7 @@ function renderHistoryList() {
             el('span', { class: 'sess-filegroup-count', text: String(g.rows.length) })),
           el('div', { class: 'sess-filegroup-sub', text: pathText })));
         const rowsBox = el('div', { class: 'sess-fileblock-rows' });
-        for (const r of g.rows) rowsBox.append(historyRow(r, { trail: false, group: g, renameShown }));
+        for (const r of g.rows) rowsBox.append(historyRow(r, { trail: false, group: g, renameShown, currentShown }));
         nodes.push(rowsBox);
       }
     }
@@ -904,7 +995,7 @@ function renderHistoryList() {
     const pinned = active.filter((r) => r.pinned).sort((a, b) => (b.pinnedAt || 0) - (a.pinnedAt || 0));
     if (pinned.length) {
       nodes.push(groupHead('置顶', pinned.length));
-      nodes.push(...pinned.map((r) => historyRow(r, { trail: true, renameShown })));
+      nodes.push(...pinned.map((r) => historyRow(r, { trail: true, renameShown, currentShown })));
     }
     const rest = active.filter((r) => !r.pinned);
     const buckets = [[], [], [], []];
@@ -913,7 +1004,7 @@ function renderHistoryList() {
     for (let i = 0; i < buckets.length; i++) {
       if (!buckets[i].length) continue;
       nodes.push(groupHead(labels[i], buckets[i].length));
-      for (const r of buckets[i]) nodes.push(historyRow(r, { trail: true, renameShown }));
+      for (const r of buckets[i]) nodes.push(historyRow(r, { trail: true, renameShown, currentShown }));
     }
   }
   if (archived.length) {
@@ -922,7 +1013,7 @@ function renderHistoryList() {
       onclick: () => { st.showArchived = !st.showArchived; renderHistoryList(); },
     }));
     if (st.showArchived) {
-      for (const r of archived) nodes.push(historyRow(r, { trail: st.histMode === 'time', renameShown }));
+      for (const r of archived) nodes.push(historyRow(r, { trail: st.histMode === 'time', renameShown, currentShown }));
     }
   }
   if (!nodes.length) {
@@ -938,10 +1029,12 @@ function renderHistoryList() {
   box.replaceChildren(...nodes);
 }
 
-/** 按时间模式里每行下面的「按顺序问过哪些论文」（最多 3 个，其余 +N） */
+/** 每行下面的「按顺序读过哪些论文」（最多 3 个，其余 +N）。
+ *  两种排列都显示：按时间排时它是补充信息；按文件排时它负责讲清
+ *  「这段对话除了当前这篇，还问过哪几篇、先后顺序是什么」。 */
 function historyTrail(row) {
   const ids = Array.from(new Set((row.docIds || []).map(String).filter(Boolean)));
-  if (!ids.length || st.histMode !== 'time') return null;
+  if (!ids.length) return null;
   const index = docNameIndex([row]);
   const names = ids.map((id) => docLabel(row, id, index));
   const MAX = 3;
@@ -955,8 +1048,13 @@ function historyTrail(row) {
   return el('span', { class: 'sess-htrail', title: `按提问顺序：${names.join(' → ')}` }, ...chips);
 }
 
-function historyRow(row, { trail = false, group = null, renameShown = null } = {}) {
-  const on = !st.entryVisible && !!st.currentSid && row.sid === st.currentSid;
+function historyRow(row, { trail = false, group = null, renameShown = null, currentShown = null } = {}) {
+  // 按文件排列时同一会话可能出现在多个论文分组里；「当前」徽标只标第一次，
+  // 否则同一个会话会同时有好几行写「当前」，看起来像有好几个当前会话。
+  const canMarkCurrent = !st.entryVisible && !!st.currentSid && row.sid === st.currentSid
+    && !(currentShown && currentShown.has(row.sid));
+  const on = canMarkCurrent;
+  if (on && currentShown) currentShown.add(row.sid);
   const title = row.title || (row.count ? '（无标题会话）' : '新会话');
   const docCount = Array.from(new Set((row.docIds || []).map(String).filter(Boolean))).length;
   const metaParts = [
@@ -973,16 +1071,6 @@ function historyRow(row, { trail = false, group = null, renameShown = null } = {
   const badges = [];
   if (on) badges.push(el('span', { class: 'sess-badge on', text: '当前' }));
   if (st.histMode === 'time' && row.pinned) badges.push(el('span', { class: 'sess-badge', text: '置顶' }));
-  if (st.histMode === 'file' && docCount > 1) {
-    const ids = Array.from(new Set((row.docIds || []).map(String).filter(Boolean)));
-    const index = docNameIndex([row]);
-    const names = ids.map((id) => docLabel(row, id, index));
-    badges.push(el('span', {
-      class: 'sess-badge',
-      text: `还读过 ${docCount - 1} 篇`,
-      title: `这篇论文之外，还在：${names.join(' → ')}`,
-    }));
-  }
 
   const wrap = el('div', { class: `sess-hrow${on ? ' on' : ''}${row.archived ? ' archived' : ''}`, dataset: { sid: row.sid } });
 
@@ -1010,7 +1098,7 @@ function historyRow(row, { trail = false, group = null, renameShown = null } = {
     return wrap;
   }
 
-  const trailEl = trail ? historyTrail(row) : null;
+  const trailEl = (trail || docCount > 1) ? historyTrail(row) : null;
   wrap.append(
     el('button', {
       type: 'button', class: 'sess-hgo', title,
@@ -1050,12 +1138,16 @@ async function confirmDeleteRow(row) {
   try {
     if (row.sid === st.currentSid && !!st.currentSid && st.ctx?.hasDoc?.() && keyForRow(row) === listScopeKey()) {
       await st.ctx.deleteSession(row.sid);
+      // 当前归属键由 deleteSession 删；其它存储键下的副本要一起清，否则历史里会「复活」
+      const others = (row._copies || []).filter((c) => (c.fileKey || listScopeKey()) !== listScopeKey());
+      if (others.length) await deleteRowFile({ ...row, _copies: others });
     } else {
       await deleteRowFile(row);
-      st.list = st.list.filter((r) => r !== row && !(r.sid === row.sid && (r.folderPath || '') === (row.folderPath || '')));
-      st.allList = st.allList.filter((r) => r !== row);
-      await refreshList({ force: true });
     }
+    st.list = st.list.filter((r) => r.sid !== row.sid);
+    st.allList = st.allList.filter((r) => r.sid !== row.sid);
+    await refreshList({ force: true });
+    if (st.historyOpen) await refreshAllList();
     if (st.entryVisible) renderEntryCard(activeRows()[0] || null);
     if (st.historyOpen) renderHistoryList();
     if (st.quickOpen) renderQuickList();
