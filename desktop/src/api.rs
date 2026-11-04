@@ -2131,16 +2131,39 @@ pub fn upload(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
 
     let final_name = unique_pdf_name_in_dir(&abs_dir, &name, body.len() as u64);
     let abs = abs_dir.join(&final_name);
-    if let Err(e) = std::fs::write(&abs, body) {
-        return send_json(rq, 500, &err_json(&format!("写入 papers/ 失败：{}", e)));
+    // 拖进来的文件很多是「同一份 PDF 重复拖入」：unique_pdf_name_in_dir 已经把
+    // 同名同大小视为同一份并复用文件名，这里就不要再原地重写一遍。以前无脑
+    // fs::write 会在 19MB 文件上反复「截断→重写」，正好在打开这篇论文时就会让
+    // PDF.js 的 Range 请求读到写了一半的文件，报 `Unexpected server response`
+    // （这个报错是「服务端返回了非 200/206」，不是 PDF 损坏）。
+    let already_same = std::fs::metadata(&abs)
+        .map(|m| m.len() == body.len() as u64)
+        .unwrap_or(false);
+    if !already_same {
+        // 先写同目录临时文件再原子替换：正在阅读这篇论文的窗口要么读旧文件、
+        // 要么读完整的新文件，不会读到写了一半的内容。
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = abs.with_extension(format!("upload-tmp-{}-{}", std::process::id(), stamp));
+        if let Err(e) = std::fs::write(&tmp, body) {
+            return send_json(rq, 500, &err_json(&format!("写入 papers/ 失败：{}", e)));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &abs) {
+            let _ = std::fs::remove_file(&tmp);
+            return send_json(rq, 500, &err_json(&format!("写入 papers/ 失败：{}", e)));
+        }
     }
+    // 同一份文件重复拖入：文件名和大小都没变，上面已经跳过重写（见注释）。
     let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(body.len() as u64);
     let rel = if folder_rel.is_empty() {
         final_name.clone()
     } else {
         format!("{}/{}", folder_rel, final_name)
     };
-    store::log_line(&format!("[upload] {} ({}KB)", rel, body.len() / 1024));
+    let note = if already_same { "，已存在且大小一致，跳过重写" } else { "" };
+    store::log_line(&format!("[upload] {} ({}KB){}", rel, body.len() / 1024, note));
 
     send_json(
         rq,

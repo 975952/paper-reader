@@ -3687,13 +3687,31 @@ async function openDocColdSwitch({ name, url, docId, path }) {
         }
       } catch { /* 挂起失败就退回冷加载 */ }
     }
-    const cachedHandle = pdfHandles.get(docId) || null;
+    let cachedHandle = pdfHandles.get(docId) || null;
     hotSwitch = !!cachedHandle;
     const tAttach = performance.now();
     // 把文件大小传给 viewer：几十/上百 MB 的 PDF 走「只取需要的字节范围」策略
     const paperMeta = (state.papers || []).find((p) => p && p.docId === docId);
     const paperSize = Number(paperMeta?.size) || 0;
-    const r = hotSwitch ? await viewer.attach(cachedHandle) : await viewer.load(url, name, { size: paperSize });
+    let r;
+    try {
+      r = hotSwitch ? await viewer.attach(cachedHandle) : await viewer.load(url, name, { size: paperSize });
+    } catch (e) {
+      // 本地文件服务偶发返回非 200/206（PDF.js 会抛 `Unexpected server response (NNN)`）：
+      // 实测多由「同时开了两个阅读器窗口、共用同一份 data」引起（第二个窗口抢 WebView2
+      // 用户数据目录，本地服务也可能读到正在被重写的文件）。冷加载重试一次；热切换失败
+      // 则退回完整冷加载，不把一次偶发失败直接甩给用户。
+      if (superseded() || isAbortish(e)) throw e;
+      const status = /Unexpected server response \((\d+)\)/.exec(String(e?.message || e))?.[1] || '';
+      console.warn('[openDoc] PDF 首次加载失败，准备重试', { docId, status, err: e });
+      if (cachedHandle) {
+        pdfHandles.delete(docId);
+        cachedHandle = null;
+      }
+      hotSwitch = false;
+      await new Promise((res) => setTimeout(res, 300));
+      r = await viewer.load(url, name, { size: paperSize });
+    }
     hotMark('attach', tAttach);
     if (cachedHandle) {
       pdfHandles.delete(docId);
@@ -3705,7 +3723,15 @@ async function openDocColdSwitch({ name, url, docId, path }) {
     // 被后一次打开顶替了、或者这次加载本来就被中断 → 一律不动界面（加载提示由新的那次打开接管）
     if (superseded() || isAbortish(e)) return;
     hideDocLoading();
-    toast(`打开失败：${e.message}`, 'err', 6000);
+    const msg = String(e?.message || e);
+    const code = /Unexpected server response \((\d+)\)/.exec(msg)?.[1] || '';
+    // 给一句可执行的解释：这是本地文件服务没返回 200/206，而不是论文损坏 /
+    // 网络问题（如果同时开着两个阅读器窗口，它们会抢同一份 data，关掉多余的再试）。
+    const hint = code
+      ? `：本地文件服务返回 ${code}。如果同时开着两个阅读器窗口，请先关掉多余的那个再重试（两个窗口会抢同一份 data）`
+      : '';
+    toast(`打开失败：${msg}${hint}`, 'err', code ? 9000 : 6000);
+    console.warn('[openDoc] 打开失败', { docId, err: e });
     state.doc = null;
     state.viewerDocId = null;
     document.title = '论文阅读器';

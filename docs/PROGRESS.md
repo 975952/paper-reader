@@ -5173,3 +5173,75 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
   SHA256 `8550444CA39599AA50A29A22A270AD2A90C91F470ACB87AAE9868BF96D146F81`；桌面副本已覆盖并重启
   （PID 77048，Responding=True）。
 - 提交：本次实现提交「截图问答不再输出『截图是什么』式开场白」，随后推送 `origin/main` 并发布新 Release。
+
+## 97. 打开文档报「Unexpected server response」的根因与防护（2026-11-05）
+
+### 97.1 用户反馈
+
+- m09734：「为什么现在开文档显示 unexpected server response」。
+
+### 97.2 排查与根因
+
+- 报错字符串只出现在 PDF.js 打包代码：`createResponseError()` 生成
+  `Unexpected server response (NNN) while retrieving PDF "..."`，由 `ensureResponseStatus()` 在 fetch 状态非 200/206 时抛出。
+  含义是**本地文件服务 `/api/pdf` 返回了非 200/206**（不是论文损坏、不是外网问题）。
+- 当前用户实例（8787）服务端实测完全正常：HEAD 200、`Range` 206、无 token 401；用户 papers 里
+  `期中复习资料.pdf`（19,247,475 B，%PDF-1.7）与其它论文都能正常取到。
+- `data/paper-reader.log` 显示报错时段是一个**已关闭的第二实例**（`[boot] http://127.0.0.1:8788/`），
+  其末尾连续 6 条 `[upload] 期中复习资料.pdf (18796KB)`——用户把同一份 19MB PDF 连续拖入 6 次；
+  日志里没有 `[pdf] 打开失败`（说明不是 404）。
+- 代码侧两个真实风险：
+  1. `desktop/src/api.rs upload()`：`unique_pdf_name_in_dir()` 对「同名同大小」判定为同一份并复用文件名，
+     但随后**仍无条件 `std::fs::write()` 原地截断重写**。正在打开的窗口的 PDF.js 会持续发 Range 请求，
+     重复拖入时正好读到「被截断 / 写了一半」的文件 → 偶发非正常响应；
+  2. 两个实例同时运行时共用 `data/webview2`（WebView2 用户数据目录）和同一份 data/state——
+     WebView2 不支持同一用户数据目录多进程，属于会互相踩的状态。
+- 隔离复现（`test/artifacts/pdf-open-repro/`：隔离 data/papers + 桌面 exe + Puppeteer）：
+  单实例打开 19MB PDF、连续 6 次上传后打开、同 data 目录第二实例打开——都没能稳定复现。
+  结论：这是**竞态 / 多实例**类问题，不能靠稳定复现修，只能从机制上堵住（上传原子写 + 单实例守卫 + 打开重试）。
+
+### 97.3 实现
+
+1. **单实例守卫**（`desktop/src/main.rs`）
+   - 按 `data` 目录路径哈希生成 Windows 命名互斥体（`Local\PaperReader-<hash>`，raw `CreateMutexW` /
+     `GetLastError`，`ERROR_ALREADY_EXISTS=183`）：同一个 data 目录只允许一个实例；不同 data 目录
+     （隔离测试、多套数据）互不影响；进程退出（含崩溃）系统自动释放，无需清理。
+   - 已有实例时：`FindWindowW("论文阅读器")` + `ShowWindow(SW_RESTORE)` + `SetForegroundWindow`
+     把已有窗口提到前台，再用 `MessageBoxW` 说明；`--background` / `--console` 模式不弹框，只写日志退出。
+   - 自动化需要第二实例时用 `PRT_ALLOW_MULTI_INSTANCE=1` 显式放开。
+2. **上传写入防竞态**（`desktop/src/api.rs upload()`）
+   - 「同名同大小」视为同一份文件：**跳过重写**（日志标注「已存在且大小一致，跳过重写」）；
+   - 需要写入时先写同目录临时文件 `<name>.upload-tmp-<pid>-<nanos>`，再 `std::fs::rename` 原子替换——
+     正在阅读的窗口只会看到完整的旧文件或完整的新文件，不会读到半截；
+   - 空文件 / 非 `%PDF-` 头校验保持不变。
+3. **打开失败兜底**（`public/js/app.js` openDoc）
+   - PDF 加载（或热切换附着）首次失败且不是被取消 / 顶替时：等 300ms 重试一次冷加载
+     （热切换失败也退回完整冷加载），不把一次偶发失败直接甩给用户；
+   - 仍失败时错误提示带上状态码与可执行解释（「如果同时开着两个阅读器窗口，请先关掉多余的那个再重试」），
+     同时 `console.warn` 记录 docId / 错误，方便排查。
+
+### 97.4 验证
+
+- `cargo build --release`（desktop）成功、无 warning。
+- 单实例守卫隔离验证（新 exe + `--background --port`，data 目录在 `test/artifacts/instance-guard/`）：
+  - 第一实例 8792 正常启动并加载窗口；
+  - 同 data 目录的第二实例退出码 0，日志出现 `[boot] 同一个 data 目录已有实例在运行，本次启动退出`（后台模式不弹框）；
+  - `PRT_ALLOW_MULTI_INSTANCE=1` 时第二实例正常启动（8793）；换成另一个 data 目录也正常启动（8794）；
+  - 测试进程已全部清理。
+- 上传防护隔离验证（新 exe 8790 + curl）：已存在的 19MB `期中复习资料.pdf` 再上传 → 日志「跳过重写」、文件不变；
+  新文件 `upload-test.pdf` 首次上传成功（临时文件 + rename），第二次上传跳过重写；两次 SHA256 一致，
+  papers 目录没有残留 `.upload-tmp`。
+- 打开回归（`test/artifacts/pdf-open-repro/repro.mjs`）：新 exe 打开 19MB `期中复习资料.pdf` 正常，
+  141 页，`/api/pdf` 响应 1×200 + 2×206，无 badStatuses、无 pageerror。
+- JS 解析：`node --experimental-vm-modules` + `vm.SourceTextModule` 解析 app.js / sessions.js / ai.js /
+  prompts（index/base/materials/qa）/ server.js 全部 PARSE-OK。
+
+### 97.5 文档与交付
+
+- `docs/使用说明书.md`：§1 增加「同一个数据目录只允许开一个窗口」提示；
+  §15 常见问题新增「打开文档弹 Unexpected server response」条目（两条原因 + 新版防护 + 处理办法）。
+- 构建：`desktop\build.bat` 重建项目根与桌面 `论文阅读器.exe`：**11,156,480 B**，
+  SHA256 `3F62C1E92E8171A3D1F3F405DE76D8ACB62EBF43A239586E8188E2BDCFD00C1A`；
+  优雅关闭旧实例（PID 117036）后覆盖桌面副本并重启（PID 114376，Responding=True）。
+- 提交：本次实现提交（hash 见 git log），推送 `origin/main` 并发布新 Release `release-2026-11-05`。
+- 清理：隔离实例与后台测试进程已清理；`test/artifacts/instance-guard/` 等只在 gitignore 的 test/artifacts 内。

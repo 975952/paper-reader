@@ -59,6 +59,105 @@ fn attach_console() {
 #[cfg(not(windows))]
 fn attach_console() {}
 
+/// 单实例守卫：同一个 data 目录只允许一个阅读器窗口。
+///
+/// 为什么需要：桌面壳把 WebView2 的用户数据目录固定放在 `data/webview2`。两个实例
+/// 同时跑时会共用同一个用户数据目录（WebView2 不支持同 UDF 多进程），本地服务也会
+/// 抢同一份 data/state，实测出现过「打开文档显示 Unexpected server response」这类
+/// 偶发失败。用命名互斥体做守卫：进程退出（含崩溃）时系统自动释放，不需要清理。
+#[cfg(windows)]
+fn single_instance_allowed(data_dir: &std::path::Path) -> bool {
+    use std::ffi::c_void;
+    use std::hash::{Hash, Hasher};
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateMutexW(lpMutexAttributes: *mut c_void, bInitialOwner: i32, lpName: *const u16) -> *mut c_void;
+        fn GetLastError() -> u32;
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> *mut c_void;
+        fn ShowWindow(hWnd: *mut c_void, nCmdShow: i32) -> i32;
+        fn SetForegroundWindow(hWnd: *mut c_void) -> i32;
+    }
+
+    // 自动化验收需要开第二实例时用这个环境变量显式放开。
+    let allow_multi = std::env::var("PRT_ALLOW_MULTI_INSTANCE")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false);
+    if allow_multi {
+        return true;
+    }
+
+    // 互斥体名字跟 data 目录一一对应：隔离测试 / 多套数据目录互不影响。
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data_dir.to_string_lossy().to_lowercase().hash(&mut hasher);
+    let mut name: Vec<u16> = format!("Local\\PaperReader-{:016x}", hasher.finish())
+        .encode_utf16()
+        .collect();
+    name.push(0);
+
+    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        // 拿不到互斥体不该拦用户：记一笔，照常启动。
+        log_line("[boot] 单实例互斥体创建失败，按普通模式继续");
+        return true;
+    }
+    if unsafe { GetLastError() } != 183 {
+        // ERROR_ALREADY_EXISTS = 183；句柄故意不关，跟进程一起活到退出。
+        let _ = handle;
+        return true;
+    }
+
+    // 已有实例：尽量把它的窗口提到前台（失败也无所谓）。
+    unsafe {
+        let title: Vec<u16> = "论文阅读器".encode_utf16().chain(std::iter::once(0)).collect();
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, 9); // SW_RESTORE
+            SetForegroundWindow(hwnd);
+        }
+    }
+    log_line("[boot] 同一个 data 目录已有实例在运行，本次启动退出");
+    false
+}
+
+#[cfg(not(windows))]
+fn single_instance_allowed(_data_dir: &std::path::Path) -> bool {
+    true
+}
+
+/// 第二个实例启动时给用户一句人话提示（后台 / 控制台模式不弹框）。
+#[cfg(windows)]
+fn notify_already_running() {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(hWnd: *mut c_void, lpText: *const u16, lpCaption: *const u16, uType: u32) -> i32;
+    }
+    let text: Vec<u16> = concat!(
+        "论文阅读器已经在运行了。\n\n",
+        "同一个数据目录只允许开一个窗口。请切换到已经打开的窗口；",
+        "如果找不到它，先关掉它（任务管理器里结束「论文阅读器」），再重新启动。\n\n",
+        "同时开两个窗口会抢同一份 data 和 WebView2 缓存，可能出现打开文档失败、",
+        "会话记录互相覆盖等问题。"
+    )
+    .encode_utf16()
+    .chain(std::iter::once(0))
+    .collect();
+    let caption: Vec<u16> = "论文阅读器".encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x0000_0040);
+    }
+}
+
+#[cfg(not(windows))]
+fn notify_already_running() {}
+
 fn parse_port(args: &[String]) -> Option<u16> {
     for (i, a) in args.iter().enumerate() {
         if let Some(v) = a.strip_prefix("--port=") {
@@ -128,6 +227,15 @@ fn main() {
         log_line("      --background  后台启动：不显示窗口、不抢焦点、不占任务栏（自动化验收用）");
         log_line("      --port N      从这个端口开始试（默认 8787，被占用就往后找）");
         log_line("");
+        return;
+    }
+
+    // 单实例守卫：同一个 data 目录只允许一个窗口。第二个实例直接退出，
+    // 免得两个进程抢同一份 data / WebView2 用户数据目录。
+    if !single_instance_allowed(dirs.data.as_path()) {
+        if !background && !console {
+            notify_already_running();
+        }
         return;
     }
 
