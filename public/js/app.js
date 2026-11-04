@@ -26,7 +26,7 @@ import {
   sessionsMigrateFolder, sessionsRefreshHeader, sessionsSetBusy,
   sessionsIsEntryMode, sessionsLeaveEntryForNewSession, sessionsEntryCardEl, sessionsHideEntryCard,
   sessionsApplyMeta, sessionsGetEnterMode, sessionsSetEnterMode,
-  sessionsGetHistoryMode, sessionsSetHistoryMode,
+  sessionsGetHistoryMode, sessionsSetHistoryMode, sessionsGetList,
 } from './sessions.js';
 
 /** 两个布尔开关存在 localStorage 里，重启/换论文都保留 */
@@ -3768,6 +3768,25 @@ async function openDocColdSwitch({ name, url, docId, path }) {
     hotMark('session', tStage);
     if (superseded()) return;
   }
+  // 每篇论文独立模式：问答区各论文各一份。热切回时停放的只是这篇的会话状态，
+  // 屏幕上的聊天 DOM 可能还是上一篇的 —— 必须按这篇论文自己的会话重放一次。
+  if (hotView && readSessionScopeMode() === 'paper') {
+    await restoreSession(docId, { only: 'chat' });
+    sessionsOnSessionChanged({ refresh: false });
+    if (superseded()) return;
+  }
+  // 热切回不会走 sessionsOnDocOpened，入口标记必须在打开结束时清掉，别让下一次冷开误判。
+  // 极端情况（文件夹切换后第一篇正好命中热切回）仍要补一次「打开文件夹时」的策略执行。
+  if (hotView) {
+    const wasFolderEntry = folderEntryPending;
+    folderEntryPending = false;
+    pendingSessionOpen = false;
+    if (wasFolderEntry) {
+      folderEntryPending = true;
+      await sessionsOnDocOpened(docId);
+      if (superseded()) return;
+    }
+  }
   // 换论文了：会话条要跟着换成这一篇的当前会话名（热切回直接用停放区的列表，不再请求）
   tStage = performance.now();
   if (!hotView) await loadSessionList();
@@ -5392,10 +5411,10 @@ function persistCurrentFolder() {
 }
 
 /* 会话归属方式（设置 → 会话，2026-11-04）：让不同使用习惯的人自己选会话「属于谁」。
-   - folder（默认，现状）：会话属于文件夹，同一文件夹的多篇论文可以接着同一段会话问；
-   - paper：每篇论文各自一套当前会话，换论文自动接上那篇自己的会话；
-   - global：所有论文共用一个会话空间，换论文也不丢上下文。
-   存储：folder/paper 仍按文件夹存（sid 不同自然分文件）；global 统一存到 doc=default。 */
+   - folder（默认）：会话属于文件夹，同一文件夹的多篇论文可以接着同一段会话问；
+   - paper：每篇论文一份自己的会话清单，换论文自动接上那篇自己的对话，不串上下文；
+   - global：所有论文共用一个会话空间，换论文、换文件夹也不丢上下文。（文档级译文不受影响。）
+   存储：folder 按文件夹键；paper 按论文 docId；global 统一存到 doc=default。 */
 const SESSION_SCOPE_MODE_KEY = 'reader.session.scopeMode';
 const AI_TITLE_KEY = 'reader.session.aiTitle';
 function readSessionScopeMode() {
@@ -5409,9 +5428,13 @@ function writeSessionScopeMode(mode) {
   try { localStorage.setItem(SESSION_SCOPE_MODE_KEY, next); } catch { /* 忽略 */ }
   return next;
 }
-/** 问答会话存到哪个 doc 键：global 统一 default，其余沿用文件夹键 */
-function sessionScopeKey() {
-  return readSessionScopeMode() === 'global' ? 'default' : currentFolderKey();
+/** 问答会话存到哪个 doc 键：folder 按文件夹；paper 真正按论文（docId）；global 统一 default。
+ *  传 docId 时按那篇论文算（切换文档过程中 state.doc 可能已经换过，但旧的会话仍要写回旧 scope）。 */
+function sessionScopeKey(docId = '') {
+  const mode = readSessionScopeMode();
+  if (mode === 'global') return 'default';
+  if (mode === 'paper') return String(docId || state.doc?.docId || '') || currentFolderKey();
+  return currentFolderKey();
 }
 /** 「当前会话」指针存哪一格：按文件夹 / 每篇论文 / 全局 */
 function activeSessionSlot(docId) {
@@ -5427,6 +5450,15 @@ function aiTitleEnabled() {
 function setAiTitleEnabled(on) {
   try { localStorage.setItem(AI_TITLE_KEY, on ? '1' : '0'); } catch { /* 忽略 */ }
 }
+
+/* 「打开文件夹时」策略（选择卡片 / 自动恢复 / 总是新会话）只应该在**真正进文件夹**的那一刻生效：
+   - 切文件夹、从首页进入、完全关闭后再打开、重启后首次打开文档 → beginFolderEntry() 置标记；
+   - 同一文件夹里切换论文是「换论文」不是「换文件夹」：不弹卡片、不新建会话，
+     由「会话归属」决定接上哪个会话（文件夹会话 / 这篇论文自己的 / 全局共用的）。
+   没有这个标记时，sessionsOnDocOpened 一律按「自动接上」处理。 */
+let folderEntryPending = false;
+/* 历史面板 / 选择卡片指定了要打开的会话：打开文档过程中别再弹选择卡片或另开新会话 */
+let pendingSessionOpen = false;
 
 
 function readActiveSessions() {
@@ -5793,7 +5825,10 @@ function sessionOnEnterMode() {
 
 /** 进入文件夹：按默认策略处理 activeSid；具体「恢复/卡片/新会话」由 sessions.js 在文档打开后决定 */
 function beginFolderEntry() {
-  if (sessionOnEnterMode() === 'new') setActiveSidFor(null, newSid());
+  folderEntryPending = true;         // 这一次才是真正的「打开文件夹」，onEnter 策略只在这里生效
+  // 「按论文」模式下会话指针挂在每篇论文自己的槽位上，进文件夹时没法预置：
+  // 具体接哪一篇/新建哪一个由 sessionsOnDocOpened 拿到 docId 后再决定。
+  if (sessionOnEnterMode() === 'new' && readSessionScopeMode() !== 'paper') setActiveSidFor(null, newSid());
   resetSessionViewState();
   sessionsOnFolderEntered(currentFolderPath());
 }
@@ -6102,7 +6137,7 @@ function restoreRetryCallback(row, entry, priorUser) {
   };
 }
 
-async function restoreSession(docId, { only = 'all' } = {}) {
+async function restoreSession(docId, { only = 'all', skipReplayIfSame = false } = {}) {
   try {
     // B 线 P3：首次打开旧数据 → 懒迁移（旧按文档会话 → 全局问答 + 文档译文，复制不删）
     await migrateLegacySession(docId);
@@ -6121,13 +6156,22 @@ async function restoreSession(docId, { only = 'all' } = {}) {
     const translateEntries = Array.isArray(savedTranslate.entries) ? savedTranslate.entries : [];
     /* 会话内容变过（换过会话 / 迁移）→ 让所有停放视图失效，否则热切回会挂回旧 DOM。 */
     const sig = chatSigOf(sid, chatEntries);
-    if (only === 'chat' || (globalChatSig && sig !== globalChatSig)) chatVersion += 1;
+    /* 同一段会话、聊天 DOM 也已经是它（同一文件夹/全局共用换论文）：完全不用重放，
+       连 chatVersion 都不动 —— 否则每切一次标签就把所有热切换停放视图作废，右栏全量重渲染。 */
+    const sameLoaded = !!globalChatSig && sig === globalChatSig;
+    const sameDom = !!chatDomSig && chatDomSig === sig;
+    const replayChat = only === 'chat'
+      ? !(skipReplayIfSame && sameLoaded && sameDom)
+      : (only !== 'translate' && chatDomSig !== sig);
+    const bumpChatVersion = only === 'chat'
+      ? !(skipReplayIfSame && sameLoaded && sameDom)
+      : !!globalChatSig && sig !== globalChatSig;
+    if (bumpChatVersion) chatVersion += 1;
     globalChatSig = sig;
     /* 问答块是全局共用的：切换论文时**不重绘**它。只有两种情况才重放问答：
        ① 换会话（only='chat'）：会话内容换了；② 聊天 DOM 和磁盘上的全局会话对不上（首次打开/迁移过）。
        译文块永远是按文档的：换论文时清空后重放，换会话时原样保留。 */
     // P0 会话选择卡片：only='translate' 时只恢复文档级译文，问答留到用户选了会话/开始新会话再重放
-    const replayChat = only === 'chat' || (only !== 'translate' && chatDomSig !== sig);
     if (replayChat) clearChatBlock();
     if (only !== 'chat') clearTranslateBlock();
     // 换会话（only='chat'）只重放问答：译文 DOM 没被清，不能再插一遍（下面重放循环按 only 过滤）。
@@ -6262,6 +6306,10 @@ function sessionsContext() {
     folderPath: () => currentFolderPath(),
     folderKey: () => currentFolderKey(),
     scopeKey: () => sessionScopeKey(),
+    scopeMode: () => readSessionScopeMode(),
+    // sessions.js 用：这次打开文档是不是「真正进文件夹」；是不是「用户指定了要打开的会话」
+    consumeFolderEntry: () => { const v = folderEntryPending; folderEntryPending = false; return v; },
+    consumeSessionOpen: () => { const v = pendingSessionOpen; pendingSessionOpen = false; return v; },
     folderKeyOf: (path) => folderKeyOf(path),
     folderDisplayName: (path) => folderDisplayName(path),
     papers: () => state.papers || [],
@@ -6280,6 +6328,9 @@ function sessionsContext() {
     paperMemoryOff: () => isPaperMemoryOff(state.doc?.docId || ''),
     togglePaperMemory: () => togglePaperMemory(),
     restoreChatOnly: () => restoreChatOnly(),
+    // 同一段会话跟着换论文（folder / global 模式）：聊天 DOM 已一致时不重放，
+    // 避免 chatVersion 失效丢掉其它论文的停放视图（右栏每次切标签都整块重渲染）。
+    followCurrentSession: () => followCurrentSession(),
   };
 }
 
@@ -6287,6 +6338,15 @@ function sessionsContext() {
 async function restoreChatOnly() {
   if (!state.doc) return;
   await restoreSession(state.doc.docId, { only: 'chat' });
+  renderSessionBar();
+  updateSendScope();
+  loadPaperMemory();
+}
+
+/** 换论文但归属模式决定「还是同一段会话」时调用：内容一致就只对齐内存，不动 DOM/聊天版本 */
+async function followCurrentSession() {
+  if (!state.doc) return;
+  await restoreSession(state.doc.docId, { only: 'chat', skipReplayIfSame: true });
   renderSessionBar();
   updateSendScope();
   loadPaperMemory();
@@ -6461,11 +6521,14 @@ async function switchSession(sid, { force = false } = {}) {
   renderSessionBar();
   updateSendScope();
   toast('已切换会话', 'ok', 1600);
-  sessionsOnSessionChanged({ refresh: false });
+  // 从历史里打开的会话可能刚被 adopt 到当前归属键，当前列表里还没有它：刷新一次，
+  // 会话头 / 快速切换才能显示正确标题（否则会短暂显示「（无标题会话）」）。
+  const known = !sid || (sessionsGetList() || []).some((r) => r.sid === sid);
+  await sessionsOnSessionChanged({ refresh: !known });
 }
 
-/** 全局共用模式：历史里的旧会话属于某个文件夹的键，切过去前把内容复制到当前归属键，
- *  这样对话能完整接上；旧文件保留不动（相当于自动备份，不迁移不删除）。 */
+/** 跨「会话归属键」打开旧会话：历史里的会话可能属于别的文件夹键（folder/paper/global 切换后），
+ *  切过去前把内容复制到当前归属键，这样对话能完整接上；旧文件保留不动（相当于自动备份，不迁移不删除）。 */
 async function adoptRowIntoScope(row) {
   const sid = String(row?.sid || '');
   const fromKey = String(row?.fileKey || '');
@@ -6519,7 +6582,7 @@ async function openSessionFromHistory(row, { force = false } = {}) {
   // 全局共用模式：会话本来就不属于某个文件夹，直接切过去，不用先换论文
   const globalScope = readSessionScopeMode() === 'global';
   if ((sameFolder && (!targetId || targetId === currentId)) || globalScope) {
-    if (globalScope && sid) await adoptRowIntoScope(row);
+    if (sid) await adoptRowIntoScope(row);
     await switchSession(sid, { force });
     return;
   }
@@ -6529,12 +6592,18 @@ async function openSessionFromHistory(row, { force = false } = {}) {
     toast(`这个会话属于 ${where}，论文已不在书架上，无法直接打开；会话记录仍保留`, 'err', 4600);
     return;
   }
-  // 打开论文会顺带切换文件夹（ensureFolderForDoc）并按「进入方式」决定是否显示选择卡片
+  // 打开论文会顺带切换文件夹（ensureFolderForDoc）。这里已明确指定了要打开的会话，
+  // 过程中不要再按「打开文件夹时」策略弹选择卡片 / 新建会话，打开后直接切到目标会话。
   if (state.doc?.docId !== targetId) {
-    await openDoc({ name: paper.name, url: paper.url, docId: paper.docId, path: paper.path });
+    pendingSessionOpen = true;
+    try {
+      await openDoc({ name: paper.name, url: paper.url, docId: paper.docId, path: paper.path });
+    } finally { pendingSessionOpen = false; }
   }
   if (state.doc?.docId !== targetId) return;   // 打开失败：不要再把 sid 切到错误文档上
-  // openDoc → sessionsOnDocOpened 会重新亮出选择卡片；这次用户已经指定了会话，收起来再切
+  // 会话文件可能还在旧归属键下（例如从「文件夹」切到「每篇论文」后打开旧会话）：先复制到当前键
+  if (sid) await adoptRowIntoScope(row);
+  // openDoc → sessionsOnDocOpened 可能重新亮出选择卡片；这次用户已经指定了会话，收起来再切
   sessionsHideEntryCard();
   await switchSession(sid, { force: true });
 }
@@ -6956,7 +7025,11 @@ async function loadPaperMemory() {
   try {
     const list = sessionStore.list.length ? sessionStore.list : await loadSessionList();
     const current = activeSidFor(docId);
-    const candidates = list
+    // 「本篇之前的讨论」优先用真的读过这篇论文的会话；没有时再退回当前归属范围内的最近会话
+    const touchesDoc = (s) => Array.isArray(s.docIds) && s.docIds.map(String).includes(String(docId));
+    const scoped = list.filter(touchesDoc);
+    const pool = scoped.length ? scoped : list;
+    const candidates = pool
       .filter((s) => (s.sid || '') !== current && (s.count || 0) > 0)
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
       .slice(0, 2);
@@ -7043,7 +7116,9 @@ function runSessionTitle() {
   const firstAnswer = entries.find((e) => e && (e.block || 'chat') === 'chat'
     && e.kind === 'assistant' && e.status === 'complete' && String(e.text || '').trim());
   if (!firstUser || !firstAnswer) return;
-  const key = `${sessionScopeKey()}::${sid}`;
+  // 归属键在发起时定下：生成期间换论文/换归属方式，不能把标题写到别的会话文件里
+  const scopeKey = sessionScopeKey();
+  const key = `${scopeKey}::${sid}`;
   let st = sessionTitleState.get(key);
   if (!st) { st = { attempts: 0, done: false, inflight: false, hash: '' }; sessionTitleState.set(key, st); }
   if (st.done || st.inflight) return;
@@ -7058,12 +7133,12 @@ function runSessionTitle() {
   (async () => {
     try {
       // 先看磁盘上的 meta：手动标题或已生成过的 AI 标题不再重复请求模型
-      const head = await fetch(`/api/session?${sessionQuery(sessionScopeKey(), sid)}`);
+      const head = await fetch(`/api/session?${sessionQuery(scopeKey, sid)}`);
       if (!head.ok) return;
       const headData = await head.json().catch(() => ({}));
       const src = String(headData?.titleSource || 'auto');
       if (src === 'user' || src === 'ai') { st.done = true; return; }
-      if (state.doc?.docId !== docId || activeSidFor(docId) !== sid) return;
+      if (sessionScopeKey() !== scopeKey || state.doc?.docId !== docId || activeSidFor(docId) !== sid) return;
       const raw = await chat({
         messages: sessionTitleMessages({ paper, question, answer }),
         stream: false,
@@ -7071,11 +7146,11 @@ function runSessionTitle() {
         signal: state.abort?.signal,
         idleMs: 25000,
       });
-      // 生成期间换了会话/论文：这个结果不属于当前会话，丢弃
-      if (state.doc?.docId !== docId || activeSidFor(docId) !== sid) return;
+      // 生成期间换了会话/论文/归属方式：这个结果不属于当前会话，丢弃
+      if (state.doc?.docId !== docId || activeSidFor(docId) !== sid || sessionScopeKey() !== scopeKey) return;
       const title = cleanSessionTitle(raw, paper);
       if (!title) return;
-      const r = await fetch(`/api/session?${sessionQuery(sessionScopeKey(), sid)}`, {
+      const r = await fetch(`/api/session?${sessionQuery(scopeKey, sid)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, titleSource: 'ai' }),
@@ -11069,25 +11144,57 @@ function fillSessionSettings() {
   if (enter) enter.value = sessionsGetEnterMode();
   const hist = $('#settHistoryMode');
   if (hist) hist.value = sessionsGetHistoryMode();
+  updateSessionSettingHints();
 }
 
-/** 切换会话归属方式：当前会话先按旧归属存盘，再把同一个 sid 接到新归属方式下继续
- *  （并把内容复制一份到新位置，旧文件保留作备份，不迁移不删除，避免任何数据丢失）。 */
+/** 每个选项下面那行「选了之后实际会怎样」：跟着 select/checkbox 即时更新，
+ *  把「换论文时是否重来」「打开文件夹才生效」这些容易误解的点直接写出来。 */
+function updateSessionSettingHints() {
+  const set = (id, text) => {
+    const span = document.querySelector(`#${id} span`);
+    if (span) span.textContent = text;
+  };
+  const mode = readSessionScopeMode();
+  set('settScopeHint', mode === 'paper'
+    ? '每篇论文各接自己那一段对话：换论文会自动恢复那篇论文上次的对话，不会把上一篇的问答带过去，会话头显示这篇论文的会话。想比较几篇论文、让助手带着前文跨论文追问时，临时把这里切到「全局共用」即可。会话记录始终在历史面板里。'
+    : mode === 'global'
+      ? '所有论文接同一段对话：换论文、换文件夹都能接着上一句问，助手始终带着同一段前文。适合把整个书库当成一段连贯的阅读笔记；想每篇论文互不干扰时切到「按论文」。会话记录始终在历史面板里。'
+      : '同一文件夹里的论文接着同一段对话：在这个文件夹里换论文，问的是同一段对话（继续追问、助手能看到前文）。只有打开另一个文件夹时，才按下面「打开文件夹时」执行。适合把一个课题的多篇论文放在一个文件夹、当成一段长讨论。会话记录始终在历史面板里。');
+  set('settTitleHint', aiTitleEnabled()
+    ? '会话有第一轮完整回答后自动生成一次清晰标题（≤28 字）；手动改名永远优先，已生成过的会话不会再请求模型，断网也不会一直重试。'
+    : '不生成 AI 标题：会话头沿用首条问题的摘要，随时可以手动改名（手动改过的标题在任何模式下都优先）。');
+  const enter = sessionsGetEnterMode();
+  set('settEnterHint', enter === 'resume'
+    ? '打开文件夹时自动接上最近一段有内容的会话；超过 7 天或 60 条消息仍会弹选择卡片，避免误开太旧的对话。同一文件夹里换论文不受这里影响，按上面的「换论文时对话怎么接」处理。'
+    : enter === 'new'
+      ? '每次打开文件夹都新建一个空会话，旧会话留在历史里。同一文件夹里换论文不受这里影响，按上面的「换论文时对话怎么接」接上对应会话。'
+      : '打开一个文件夹（或启动应用）时显示选择卡片，由你挑一段继续。同一文件夹里换论文不会重新弹卡片，按上面的「换论文时对话怎么接」自动接上。');
+  set('settHistoryHint', sessionsGetHistoryMode() === 'time'
+    ? '全部会话按最近活动排成一个列表（今天 / 昨天 / 最近 7 天 / 更早），每个会话后面标出按顺序读过哪些论文。'
+    : '按文件夹分组：组头是论文名、路径和会话数，组内是这个文件夹的会话；一个会话读过几篇论文时会标注「还读过 N 篇」。');
+}
+
+/** 切换「换论文时对话怎么接」：当前这段对话先按旧归属存盘，再把同一个 sid 接到新归属方式下，
+ *  内容复制一份到新位置，旧文件保留作备份，不迁移不删除，避免任何数据丢失。 */
 async function applySessionScopeMode(mode) {
   const docId = state.doc?.docId || '';
   const sid = docId ? activeSidFor(docId) : '';
   const prev = readSessionScopeMode();
-  const next = writeSessionScopeMode(mode);
-  if (docId) {
-    persistSession.cancel?.();
-    // ① 旧归属下存一次（切之前在旧槽位读到的是旧 sid）
-    if (prev !== next) { try { await saveSessionNow(); } catch { /* 存不下也继续 */ } }
-    if (sid) setActiveSidFor(docId, sid);
-    // ② 新归属下再存一次：内容跟着 sid 复制过去，下次打开就是这段对话
-    if (prev !== next) { try { await saveSessionNow(); } catch { /* 同上 */ } }
+  const want = mode === 'paper' || mode === 'global' ? mode : 'folder';
+  if (prev === want) { updateSessionSettingHints(); return; }
+  persistSession.cancel?.();
+  // ① 旧归属下先存一次：saveSessionNow 读 scope 键时还是旧模式
+  if (docId) { try { await saveSessionNow(); } catch { /* 存不下也继续 */ } }
+  const next = writeSessionScopeMode(want);
+  updateSessionSettingHints();
+  // ② 把同一个 sid 接到新归属的槽位，按新模式再存一次，下次打开直接接上这段对话
+  if (docId && sid) {
+    setActiveSidFor(docId, sid);
+    try { await saveSessionNow(); } catch { /* 同上 */ }
   }
-  const label = next === 'global' ? '所有论文共用会话' : (next === 'paper' ? '每篇论文各自独立' : '会话属于文件夹');
-  toast(`会话归属：${label}`, 'ok', 2600);
+  const label = next === 'global' ? '全局共用（所有论文接同一段对话）'
+    : (next === 'paper' ? '按论文（每篇论文各接自己那一段）' : '按文件夹（同文件夹里的论文接同一段）');
+  toast(`换论文时对话怎么接：${label}`, 'ok', 2600);
   loadSessionList().then(() => {
     renderSessionMenu();
     renderSessionBar();
@@ -11292,11 +11399,18 @@ function initSettings() {
   $('#settAiTitle')?.addEventListener('change', () => {
     const on = !!$('#settAiTitle').checked;
     setAiTitleEnabled(on);
+    updateSessionSettingHints();
     if (on) scheduleSessionTitle();
     toast(on ? '已开启 AI 自动标题' : '已关闭 AI 自动标题，标题沿用首条问题', 'ok', 2400);
   });
-  $('#settOnEnter')?.addEventListener('change', () => sessionsSetEnterMode($('#settOnEnter').value));
-  $('#settHistoryMode')?.addEventListener('change', () => sessionsSetHistoryMode($('#settHistoryMode').value));
+  $('#settOnEnter')?.addEventListener('change', () => {
+    sessionsSetEnterMode($('#settOnEnter').value);
+    updateSessionSettingHints();
+  });
+  $('#settHistoryMode')?.addEventListener('change', () => {
+    sessionsSetHistoryMode($('#settHistoryMode').value);
+    updateSessionSettingHints();
+  });
   $('#resetSettings').onclick = () => resetSettings();
 
   $('#saveSettings').onclick = async () => {

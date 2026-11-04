@@ -358,7 +358,11 @@ export async function sessionsOnSessionChanged({ refresh = false } = {}) {
   if (st.historyOpen) renderHistoryList();
 }
 
-/** app.js 刚打开一篇文档：决定「恢复上次 / 直接新建 / 显示选择卡片」 */
+function scopeMode() {
+  return st.ctx?.scopeMode?.() || 'folder';
+}
+
+/** app.js 刚打开一篇文档：决定「接上哪段对话」或「按打开文件夹时的策略执行」 */
 export async function sessionsOnDocOpened(docId) {
   st.docId = String(docId || '');
   st.currentSid = st.ctx?.currentSid?.() || '';
@@ -370,19 +374,47 @@ export async function sessionsOnDocOpened(docId) {
   await refreshList({ force: true });
   if (!st.ctx?.hasDoc?.() || (st.ctx.doc()?.docId || '') !== st.docId) return;
 
-  const mode = readOnEnter();
+  st.currentSid = st.ctx?.currentSid?.() || '';
+  // 历史面板/选择卡片已经指定了要打开的会话：打开文档只是顺路加载论文，
+  // 不要再按「打开文件夹时」策略弹卡片或另开新会话（否则会冲掉刚指定的会话）。
+  if (st.ctx?.consumeSessionOpen?.()) {
+    st.ctx?.consumeFolderEntry?.();   // 这次只算「打开论文」，不算按策略进入文件夹
+    st.ctx?.showChatAndRender?.();
+    return;
+  }
+
+  // openDoc 每次冷开论文都会走到这里，但「打开文件夹时」的三档只应该在一个文件夹
+  // 真正被打开时生效（换文件夹、启动、文件夹从关闭状态恢复）。同一文件夹里切到
+  // 另一篇论文时按「会话归属」静默接上 —— 不弹卡片、不新建。
+  if (!st.ctx?.consumeFolderEntry?.()) {
+    st.ctx?.showChatAndRender?.();
+    const cur = st.currentSid ? (st.list.find((r) => r.sid === st.currentSid) || null) : null;
+    if (cur) { await (st.ctx.followCurrentSession || st.ctx.restoreChatOnly)?.(); return; }   // 当前会话就是这里的：同一段对话跟着，内容一致就不重放 DOM
+    if (st.currentSid) {
+      // 指针指向一个还没落盘的空会话：保持空白，但要把上一篇残留在 DOM 里的消息清掉
+      await st.ctx.startNewSession?.({ silent: true, fromEntry: true });
+      return;
+    }
+    const actives = activeRows().filter((r) => (r.count || 0) > 0 && !isStale(r));
+    if (actives.length) await st.ctx.continueSession?.(actives[0].sid, { force: true });
+    else await st.ctx.startNewSession?.({ silent: true, fromEntry: true });
+    return;
+  }
+
+  // 真正打开一个文件夹：按「打开文件夹时」的三档执行
+  const onEnter = readOnEnter();
   // 「继续上次」只认有内容的会话：新建后没发过消息的空会话不该抢这个位置
   const actives = activeRows().filter((r) => (r.count || 0) > 0);
   const curRow = st.currentSid ? actives.find((r) => r.sid === st.currentSid) || null : null;
   const last = curRow || actives[0] || null;
 
-  if (mode === 'new') {
+  if (onEnter === 'new') {
     // 默认「总是新会话」：旧行为 —— 直接开一个新会话，并让问答面板可见
     st.ctx?.showChatAndRender?.();
     await st.ctx.startNewSession({ silent: true, fromEntry: true });
     return;
   }
-  if (mode === 'resume' && last && !isStale(last)) {
+  if (onEnter === 'resume' && last && !isStale(last)) {
     // 默认「自动恢复上次」：让问答面板可见，再恢复/切换
     st.ctx?.showChatAndRender?.();
     if (last.sid === st.currentSid) await st.ctx.restoreChatOnly?.();
@@ -412,17 +444,17 @@ function renderModeChips(box) {
   if (!box) return;
   const mode = readOnEnter();
   box.replaceChildren(
-    el('span', { class: 'sess-mode-label', text: '进文件夹默认：' }),
+    el('span', { class: 'sess-mode-label', text: '打开文件夹默认：' }),
     ...['choose', 'resume', 'new'].map((m) => el('button', {
       type: 'button',
       class: `sess-mode-chip${m === mode ? ' on' : ''}`,
       text: modeLabel(m),
       title: m === 'choose'
-        ? '显示这张选择卡片，不自动恢复（默认，推荐）'
+        ? '打开文件夹时显示这张选择卡片，不自动恢复（默认，推荐）'
         : m === 'resume'
-          ? '自动回到上次会话（超过 7 天或 60 条消息仍会显示选择卡片）'
-          : '每次进文件夹都新建一个空会话',
-      onclick: () => { setOnEnter(m); toast(`之后进文件夹：${modeLabel(m)}`, 'err', 1800); },
+          ? '打开文件夹时自动回到上次会话（超过 7 天或 60 条消息仍会显示选择卡片）'
+          : '每次打开文件夹都新建一个空会话',
+      onclick: () => { setOnEnter(m); toast(`之后打开文件夹：${modeLabel(m)}`, 'err', 1800); },
     })),
   );
 }
@@ -469,6 +501,17 @@ function renderEntryCard(lastRow) {
       el('span', { class: 'entry-recent-meta', text: [r.count ? `${r.count} 条` : '', relTime(r.updatedAt)].filter(Boolean).join(' · ') }))))
     : null;
 
+  const mode = scopeMode();
+  const docName = st.ctx?.doc?.()?.name || '这篇论文';
+  const emptyHint = mode === 'paper' ? '这篇论文还没有会话。'
+    : mode === 'global' ? '还没有共用会话。'
+      : '这个文件夹还没有会话。';
+  const emptySub = mode === 'paper'
+    ? '发第一条消息后会创建这篇论文自己的会话，之后可以在这里切换。'
+    : mode === 'global'
+      ? '发第一条消息后会开始所有论文共用的对话，之后可以在这里切换。'
+      : '发第一条消息后会创建这个文件夹的会话，之后可以在这里切换。';
+
   const primary = lastRow
     ? el('button', {
       type: 'button',
@@ -477,21 +520,33 @@ function renderEntryCard(lastRow) {
     },
     el('span', { class: 'entry-primary-main', text: `继续上次「${lastRow.title || (lastRow.count ? '无标题会话' : '新会话')}」` }),
     el('span', { class: 'entry-primary-meta', text: [lastRow.count ? `${lastRow.count} 条消息` : '还没有消息', relTime(lastRow.updatedAt)].filter(Boolean).join(' · ') }))
-    : el('div', { class: 'entry-empty-hint', text: '这个文件夹还没有会话。' });
+    : el('div', { class: 'entry-empty-hint', text: emptyHint });
+  const title = lastRow
+    ? (mode === 'paper' ? '继续这篇论文的对话？' : mode === 'global' ? '继续所有论文共用的对话？' : '继续这个文件夹的对话？')
+    : '开始新的对话';
+  const sub = lastRow
+    ? (mode === 'paper'
+      ? `「${docName}」有 ${actives.length} 个会话（只列这篇论文的）。默认不自动恢复，挑一个继续，或者新建一个。`
+      : mode === 'global'
+        ? `所有论文共用 ${actives.length} 个会话。可以接着上一段继续，也可以新建一段。`
+        : `这个文件夹里有 ${actives.length} 个会话。默认不自动恢复，挑一个继续，或者新建一个。`)
+    : emptySub;
 
   ui.entry.replaceChildren(
     el('div', { class: 'entry-big-ic', html: ICONS.dot }),
-    el('div', { class: 'entry-title', text: lastRow ? '继续这个文件夹的对话？' : '开始新的对话' }),
-    el('div', { class: 'entry-sub', text: lastRow
-      ? `这个文件夹里有 ${actives.length} 个会话。默认不自动恢复，挑一个继续，或者新建一个。`
-      : '发第一条消息后会创建这个文件夹的会话，之后可以在这里切换。' }),
+    el('div', { class: 'entry-title', text: title }),
+    el('div', { class: 'entry-sub', text: sub }),
     primary,
     el('button', { type: 'button', class: 'entry-new', text: '＋ 新建会话', onclick: doNewSession }),
     // 注意：replaceChildren 会把 null 参数按 DOMString 转成字面「null」文本，
     // 最近会话为空时必须展开成空数组，不能直接传 null。
     ...(recent ? [recent] : []),
     el('div', { class: 'entry-modes', id: 'sessEntryModes' }),
-    el('div', { class: 'entry-hint', text: '选择卡片只影响「进文件夹时」；会话内容、AI 功能记录都各自独立保存。' }),
+    el('div', { class: 'entry-hint', text: mode === 'paper'
+      ? '选择卡片只在打开文件夹时出现；同一文件夹里换论文会接上那篇论文自己的对话，不重新弹卡片。'
+      : mode === 'global'
+        ? '选择卡片只在打开文件夹时出现；同一文件夹里换论文会接着同一段对话，不重新弹卡片。'
+        : '选择卡片只在打开文件夹时出现；同一文件夹里换论文会接着同一段对话，不重新弹卡片。' }),
   );
   renderModeChips(ui.entry.querySelector('#sessEntryModes'));
 }

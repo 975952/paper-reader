@@ -1659,7 +1659,16 @@ body.text-edge-dragging { user-select: none; -webkit-user-select: none; }
 .settings-pane > .field { margin-bottom: 13px; }
 .settings-pane > .field:last-child { margin-bottom: 0; }
 .settings-pane .settings-section-title { margin-top: 4px; }
+.settings-pane .settings-section-title:not(:first-child) { margin-top: 16px; }
 .settings-pane .modal-note { margin: 6px 0 14px; }
+/* 「会话」设置每项下面那行后果说明：不是一句笼统提示，而是「选了之后实际会怎样」，
+   切换选项即时改变；用左侧细线和小一号字，和上面的控件拉开层次。 */
+.settings-pane .modal-note.session-effect {
+  display: block; margin: 0 0 4px; padding: 6px 9px 6px 10px;
+  border-left: 2px solid var(--border); background: var(--accent-soft-weak, rgba(140, 120, 60, .06));
+  border-radius: 0 6px 6px 0; line-height: 1.6;
+}
+.settings-pane .modal-note.session-effect > span { display: block; }
 .settings-pane .settings-grid { margin-bottom: 12px; }
 .modal-foot {
   flex: 0 0 auto; display: flex; align-items: center; gap: 10px;

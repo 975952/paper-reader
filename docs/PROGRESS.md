@@ -4775,3 +4775,84 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 - 构建：`desktop\build.bat` 成功重建项目根 `论文阅读器.exe`：11,117,056 B，SHA256 `33D5E7744852831EA4CA8AFD9D67BF23EE3AAD0F0C399FA6BDAB1D9464B12C02`（11:13:42）；桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 正被用户运行（PID 120464）占用，脚本按设计安全跳过、未关闭用户进程——关掉旧窗口后重跑 `desktop\build.bat`（或直接用项目根新 exe）即可用上新界面。
 - 提交：实现提交 `a26857e`「会话历史层次重做、AI 自动标题与「会话」设置（文件夹/论文/全局三种归属）」（11 文件，+672/−112）；随后提交本记录并推送 `origin/main`。
 
+## §91 「会话」设置逐项体验重新设计：按论文真正独立、打开文件夹才生效（2026-11-04，用户 m06936）
+
+### 91.1 用户要求
+
+用户 m06936：「绘画设置里面的每种情况都要设计清楚啊，选每个会话独立，在用的时候到底是什么体验，是否应该这样设计，搞清楚仔细研究」。
+
+理解为：⚙ → 设置 →「会话」里的每个选项（换论文时对话怎么接、打开文件夹时、历史排列、AI 自动标题）都要说清楚
+选中之后的**真实使用体验**，尤其「按论文」到底怎样用、是否应该这样设计；先仔细研究再改。
+
+约束：不跑 `test/` 正式套件；不改用户 `data/`、`papers/`；不关闭 / 覆盖正在运行的桌面阅读器；
+改 `public/` 后重建 exe；显式 `git add`（不用 `git add -A`）。
+
+### 91.2 现状缺陷与竞品调研
+
+- 复读旧实现后确认三个「名不副实」的缺陷：
+  - 「按论文」只把**当前会话指针**按 `doc:<docId>` 分开，**存储键仍是文件夹**——会话列表、选择卡片、会话菜单、历史都是文件夹级，
+    没有指针时「继续上次」会取到同文件夹别的论文的会话；`loadPaperMemory()` 还会把别的论文的摘要当成「本篇之前的讨论」。
+  - 「打开文件夹时」三档实际上挂在 `sessionsOnDocOpened` 上，而它在**每次冷开论文**（含同文件夹切标签）都会执行，
+    导致同文件夹换论文也重新弹卡片 / 反而在 global 模式把共用会话换掉。
+  - 跨归属方式的历史会话（folder→paper/global 后旧文件还在旧键下）只能用 global 的 adopt 打开，其它模式点开是空会话。
+- 竞品调研（ChatGPT Projects、Claude Projects、NotebookLM、Cursor、Perplexity Spaces、Copilot Notebooks、Notion Agent、Zotero 插件）：
+  - 项目 / 笔记本「拥有」会话带来一系列移动与删除问题：移动会话会改变上下文、线程不能跨项目移动、
+    删来源时用户以为历史也被删；Claude Projects 甚至同项目的兄弟会话也不共享对话上下文，用户要手写交接。
+  - 用户同时要「专注」与「回忆」：可靠做法是**全局会话索引 + 作用域筛选视图**，而不是把会话锁死在文件夹 / 论文里。
+- 设计结论：本 App 每次提问的上下文由发送框的范围（整篇 / 选区 / 页图）单独决定，会话本身不绑论文上下文，
+  因此**不引入「会话所有权 + 论文来源快照」的大改**；把设置从「会话归属」重述为**「换论文时对话怎么接」（连续性）**：
+  保留三种连续性模式，历史面板永远是全库索引（可跨归属键打开并自动复制），每项下面写清「选了之后实际会怎样」，
+  「打开文件夹时」只在真正打开文件夹时生效。
+
+### 91.3 实现（4 个源文件）
+
+- `public/js/app.js`：
+  - `sessionScopeKey(docId = '')`：folder → 文件夹键；**paper → 该论文 docId（真正按论文存）**；global → `default`。
+  - 新增模块标记 `folderEntryPending`（`beginFolderEntry()` 第一行置位）与 `pendingSessionOpen`（从历史打开别的论文的会话时置位），
+    `sessionsContext()` 暴露 `scopeMode()` / `consumeFolderEntry()` / `consumeSessionOpen()`；
+    `beginFolderEntry()` 在 `new` 档且非 paper 模式时预置新会话、paper 模式交由 `sessionsOnDocOpened` 拿到 docId 再决定。
+  - `sessionsOnDocOpened` 重写（`public/js/sessions.js`）：先消费 `pendingSessionOpen`（只显示聊天、不弹卡不新建）；
+    若 `folderEntryPending` 才按 `打开文件夹时` 三档执行；否则**静默接上**——folder/global 跟随当前会话、paper 取该论文自己的会话
+    （有则恢复、无则新开），不再每次冷开论文都弹卡片。为此新增 `followCurrentSession()`（`restoreSession(...,{only:'chat',skipReplayIfSame:true})`），
+    给 `restoreSession(docId,{only,skipReplayIfSame})` 加「同一会话且 DOM 已一致时不重放、不递增 chatVersion」的选项，
+    避免切标签时把右栏停放的视图全部作废。
+  - `openSessionFromHistory()` 所有分支先 `adoptRowIntoScope(row)`（按 `row.fileKey` GET 旧会话→复制到当前归属键，旧文件保留）；
+    跨论文分支在 `openDoc()` 期间置 `pendingSessionOpen`，避免打开过程被「打开文件夹时」拦截。
+  - `applySessionScopeMode()` 修顺序 bug：先在**旧模式**下 `saveSessionNow()`，再写新模式、把同一 sid 接到新槽位并再存一次（复制内容），最后 toast + 刷新列表/会话头/历史；
+    切换时中断 pending 保存，确保旧键内容不丢。
+  - `loadPaperMemory()` 按 `docIds` 过滤出「问过当前论文」的会话（paper 模式不再掺别的论文摘要）。
+  - `runSessionTitle()` 捕获发送时的 `scopeKey`，GET/PATCH 都用它，并加 `sessionScopeKey() !== scopeKey` 守卫（生成期间换论文 / 换归属不会写错文件）。
+  - `switchSession()` 末尾改为：adopt 进来、列表里还没有的新行 → `sessionsOnSessionChanged({refresh:true})`，修复会话头短暂显示「（无标题会话）」。
+- `public/js/sessions.js`：`sessionsOnDocOpened()` 重写（见上）；选择卡片标题 / 副标题 / 空态 / entry-hint 按 folder/paper/global 三种归属区分
+  （如 paper：「继续这篇论文的对话？」「『论文名』有 N 个会话（只列这篇论文的）」「这篇论文还没有会话。」）；chips 文案「打开文件夹默认：」。
+- `public/index.html` + `public/style.css`：设置「会话」分类文案改成连续性口径——
+  「换论文时对话怎么接」+ 三选项（按文件夹 / 按论文 / 全局共用）、「会话标题」、「打开文件夹时」、「历史面板」，
+  每项下新增 `div.modal-note.session-effect` 动态说明（`#settScopeHint/#settTitleHint/#settEnterHint/#settHistoryHint`），
+  设置值变化即时更新；新增 `.settings-section-title` 段间距与说明块样式。`public/js/app.js` 的 `updateSessionSettingHints()` 负责写这些说明。
+
+### 91.4 验证
+
+- 隔离手动冒烟 `test/artifacts/session-scope-smoke/smoke.mjs`（隔离数据 `test/artifacts/session-scope-smoke/{data,papers}`，
+  根下三篇 + `子文件夹/演示论文.pdf` 共 4 个 106,456 B 测试 PDF、假配置；Node 服务 8986；Puppeteer headless 1440×900，
+  拦截 `/api/chat` 返回假 SSE / 假标题，不调用真实模型；用 `sessionStorage` 协议给每个阶段注入 localStorage 开关）：
+  **43/43 全部通过**，无 pageerror。
+- 覆盖：folder 模式启动弹卡片 → 恢复后切同文件夹论文不弹卡、对话延续 → 换文件夹再按策略弹卡片；
+  paper 模式各论文各接自己的会话、不串上下文、切回恢复、新论文自动新会话、会话头显示该论文；
+  从历史打开 folder 模式旧会话时跨键 adopt 成功；global 模式换论文共用同一段对话；
+  设置四项动态说明随选择即时变化 + reload 后保留。截图在 `test/artifacts/session-scope-smoke/shots/`
+  （`folder-entry.png`、`folder-same-folder-switch.png`、`folder-subfolder-entry.png`、`paper-a.png`、`paper-b.png`、
+  `global-entry.png`、`global-shared.png`、`settings-session.png`）。
+- 解析校验：`node --check` 对 ESM 会漏报（`restoreSession` 里重复声明 `const replayChat` 曾不报错），改用
+  `node --experimental-vm-modules -e "new vm.SourceTextModule(fs.readFileSync(f,'utf8'),…)"` 逐个模块解析，全部 PARSE-OK。
+- 未运行 `test/` 正式套件；未改用户 `data/`、`papers/`；桌面阅读器未关闭或覆盖。
+
+### 91.5 文档与交付
+
+- `docs/使用说明书.md`：§6.2（会话设置入口与三种连续方式提示）、§6.4（记忆归属随「换论文时对话怎么接」变化）、
+  §12 分类表「会话」行、§12.5「会话」整节重写（四行「实际体验」表 + 动态说明 + localStorage 键 + 一句话选法）、
+  §16.4 重写（按论文真正按论文存、切换复制不丢、历史全库索引、打开文件夹时只对四种真正入口生效）。
+- 构建：`desktop\build.bat` 成功重建项目根 `论文阅读器.exe`：11,129,344 B，
+  SHA256 `0F285DDA0454DAC0490DFB72F035B950F1412FB80B73555983B43587BB165720`（11:52:43）；
+  桌面副本 `C:\Users\Wang Wenbo\Desktop\论文阅读器.exe` 正被用户运行（PID 105352）占用，脚本按设计安全跳过、
+  未关闭用户进程——关掉旧窗口后重跑 `desktop\build.bat`（或直接用项目根新 exe）即可用上新行为。
+- 提交：实现提交 `48a05f1`「会话设置逐项体验重做：按论文真正独立、打开文件夹时才生效」（6 文件，+371/−95），随后推送 `origin/main`。

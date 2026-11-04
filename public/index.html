@@ -367,18 +367,22 @@
         </section>
         <section class="settings-pane hidden" id="settingsPaneSession" data-pane="session" role="tabpanel" aria-labelledby="settingsNavSession">
           <div class="settings-pane-title">会话</div>
-          <div class="settings-pane-sub">按自己的使用习惯决定会话「属于谁」、进来时怎么恢复、历史怎么排。改完立刻生效，已有会话不会被删改。</div>
-    <div class="settings-section-title">会话归属</div>
+          <div class="settings-pane-sub">决定换论文时自动接上哪一段对话、打开文件夹时怎么接、历史怎么排、标题怎么来。会话记录永远保留在历史面板里，改这些设置不会迁移或删除它们。</div>
+    <div class="settings-section-title">换论文时对话怎么接</div>
     <div class="settings-grid settings-core-grid">
-      <label class="field"><span>会话属于</span><select id="settScopeMode">
-        <option value="folder">文件夹（同文件夹的多篇论文接着问）</option>
-        <option value="paper">每篇论文各自独立</option>
-        <option value="global">所有论文共用一个会话</option>
+      <label class="field"><span>一段对话属于</span><select id="settScopeMode">
+        <option value="folder">按文件夹：同一文件夹里的论文接着同一段</option>
+        <option value="paper">按论文：每篇论文各接自己那一段</option>
+        <option value="global">全局共用：所有论文接同一段</option>
       </select></label>
+    </div>
+    <div class="modal-note session-effect" id="settScopeHint"><span></span></div>
+    <div class="settings-section-title">会话标题</div>
+    <div class="settings-grid settings-core-grid">
       <label class="field field-switch"><input id="settAiTitle" type="checkbox" /><span>AI 自动生成标题</span></label>
     </div>
-    <div class="modal-note"><span>「文件夹」把同一文件夹里的会话放在一起，适合边读边问多篇；「每篇论文各自独立」换论文就接上那篇自己的会话；「所有论文共用」换论文也能接着上一句问。旧的当前会话留在历史里，不迁移也不删除。</span></div>
-    <div class="settings-section-title">进入文件夹时</div>
+    <div class="modal-note session-effect" id="settTitleHint"><span></span></div>
+    <div class="settings-section-title">打开文件夹时</div>
     <div class="settings-grid settings-core-grid">
       <label class="field"><span>默认动作</span><select id="settOnEnter">
         <option value="choose">先让我选择会话</option>
@@ -386,7 +390,7 @@
         <option value="new">总是新开会话</option>
       </select></label>
     </div>
-    <div class="modal-note"><span>和会话头左侧那三个按钮（选择卡片 / 继续上次 / 新会话）是同一个设置。</span></div>
+    <div class="modal-note session-effect" id="settEnterHint"><span></span></div>
     <div class="settings-section-title">历史面板</div>
     <div class="settings-grid settings-core-grid">
       <label class="field"><span>默认排列</span><select id="settHistoryMode">
@@ -394,7 +398,7 @@
         <option value="time">按时间（最近活动在前）</option>
       </select></label>
     </div>
-    <div class="modal-note"><span>AI 自动标题在会话有了第一轮完整回答后生成一次（最多 28 字），手动改名永远优先；关闭后标题沿用首条问题。</span></div>
+    <div class="modal-note session-effect" id="settHistoryHint"><span></span></div>
         </section>
         <section class="settings-pane hidden" id="settingsPaneMemory" data-pane="memory" role="tabpanel" aria-labelledby="settingsNavMemory">
           <div class="settings-pane-title">长期记忆</div>
