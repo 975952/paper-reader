@@ -194,7 +194,7 @@ pub fn handle(rq: Request, body: &[u8], _ctx: &Ctx) {
     let mut req = agent
         .post(&url)
         .set("Content-Type", "application/json")
-        .set("User-Agent", "paper-reader/1.0");
+        .set("User-Agent", "prt/1.0");
     if truthy(&api_key) {
         req = req.set("Authorization", &format!("Bearer {}", js_string(&api_key)));
     }

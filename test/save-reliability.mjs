@@ -7,7 +7,7 @@ import puppeteer from 'puppeteer-core';
 import { assertIsolatedDataDir } from './_env.mjs';
 
 const ROOT = path.join(import.meta.dirname, '..');
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'paper-reader-save-'));
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'prt-save-'));
 const DATA = path.join(scratch, 'data');
 const PAPERS = path.join(scratch, 'papers');
 fs.mkdirSync(DATA); fs.mkdirSync(PAPERS);

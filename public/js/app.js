@@ -3194,7 +3194,7 @@ function closeDeletedDoc() {
   abortStream('paper-deleted');
   state.doc = null;
   state.viewerDocId = null;
-  document.title = '论文阅读器';
+  document.title = 'prt';
   const nameEl = $('#docName');
   if (nameEl) { nameEl.textContent = '未打开文档'; nameEl.title = ''; }
   const page = $('#pageInput');
@@ -3475,7 +3475,7 @@ async function goWelcome({ skipSave = false } = {}) {
   setView('home');
   $('#docName').textContent = '未打开文档';
   $('#docName').title = '';
-  document.title = '论文阅读器';
+  document.title = 'prt';
   refreshReturnButton();
   renderScopeMenu();
   checkConfigWarning();
@@ -3613,7 +3613,7 @@ async function openDocColdSwitch({ name, url, docId, path }) {
   // 面板布局不再按论文分叉（阶段 2.2a）：换论文不重载 state.panels
   state.viewerDocId = null;
   refreshReturnButton();
-  document.title = `${name} · 论文阅读器`;
+  document.title = `${name} · prt`;
   $('#docName').textContent = name;
   $('#docName').title = name;
   // 注意：这里不切视图。真正切到阅读态是在 viewer.load() 成功之后 ——
@@ -3734,7 +3734,7 @@ async function openDocColdSwitch({ name, url, docId, path }) {
     console.warn('[openDoc] 打开失败', { docId, err: e });
     state.doc = null;
     state.viewerDocId = null;
-    document.title = '论文阅读器';
+    document.title = 'prt';
     $('#docName').textContent = '未打开文档';
     $('#docName').title = '';
     // 打开失败退回首页（不再是一个既不像欢迎页、又不像错误页的模糊容器）

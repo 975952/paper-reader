@@ -8,7 +8,7 @@
  *  - killSandboxInstances()：只清理 test/artifacts 里遗留的副本进程（用户的实例在 Desktop/papers
  *    目录之外，绝不会被它命中）。
  *
- * 用户正在用的应用（例如桌面上的 `论文阅读器.exe`）与测试互不影响：
+ * 用户正在用的应用（例如桌面上的 `prt.exe`）与测试互不影响：
  * 它继续占着自己的 8787 端口，测试副本会自动往后找空闲端口。
  */
 import { execFileSync, spawn } from 'node:child_process';
@@ -21,7 +21,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** 交付物路径（可用 EXE=… 覆盖，方便测 target/release 里的构建产物） */
 export function deliverableExe() {
-  return process.env.EXE || path.join(ROOT, '论文阅读器.exe');
+  return process.env.EXE || path.join(ROOT, 'prt.exe');
 }
 
 /**

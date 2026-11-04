@@ -2248,7 +2248,7 @@ fn http_agent_with(connect_secs: u64, read_secs: u64) -> ureq::Agent {
 fn fetch_text(agent: &ureq::Agent, url: &str) -> Option<String> {
     match agent
         .get(url)
-        .set("User-Agent", "paper-reader/1.0 (local; reference lookup)")
+        .set("User-Agent", "prt/1.0 (local; reference lookup)")
         .call()
     {
         Ok(r) => r.into_string().ok(),

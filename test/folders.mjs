@@ -1,7 +1,7 @@
 /**
  * 文件夹管理 API 冒烟测试（直接打 HTTP，不起浏览器）
  *   cd test && node folders.mjs          # 测 Node 版 server.js
- *   cd test && RUST_EXE=..\desktop\target\debug\paper-reader.exe node folders.mjs   # 测 Rust 版
+ *   cd test && RUST_EXE=..\desktop\target\debug\prt.exe node folders.mjs   # 测 Rust 版
  * 用临时隔离目录（PRT_PAPERS_DIR / PRT_DATA_DIR），不碰真实 papers/ 与 data/。
  */
 import { spawn } from 'node:child_process';

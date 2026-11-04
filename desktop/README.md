@@ -1,6 +1,6 @@
-# 论文阅读器 · Windows 桌面壳（Rust）
+# prt · Windows 桌面壳（Rust）
 
-把原来「Node 服务 + 浏览器」的论文阅读器，做成**双击即用的单个 exe**：
+把原来「Node 服务 + 浏览器」的prt，做成**双击即用的单个 exe**：
 
 * 自己的原生窗口（tao + wry / WebView2），不再开浏览器
 * 前端资源（`../public/` 全部 271 个文件）用 `rust-embed` 编进 exe，运行时不依赖外部文件夹
@@ -18,13 +18,13 @@ build.bat
 ```
 
 `build.bat` 做两件事：`cargo build --release` → 把产物复制到项目根目录
-`..\论文阅读器.exe`。
+`..\prt.exe`。
 
 也可以手动来：
 
 ```bat
 cargo build --release
-copy target\release\paper-reader.exe "..\论文阅读器.exe"
+copy target\release\prt.exe "..\prt.exe"
 ```
 
 依赖（首次构建需要联网拉 crates）：
@@ -41,16 +41,16 @@ copy target\release\paper-reader.exe "..\论文阅读器.exe"
 
 ## 2. 使用
 
-双击 `论文阅读器.exe` 即可。窗口标题「论文阅读器」，初始 1400×900，可最大化；
+双击 `prt.exe` 即可。窗口标题「prt」，初始 1400×900，可最大化；
 窗口大小记在 `data/window.json`，下次打开还原。关掉窗口 = 退出进程。
 
 命令行参数（可选）：
 
 ```
-论文阅读器.exe                 正常启动（无控制台黑框）
-论文阅读器.exe --console       挂上控制台并打印日志（调试用）
-论文阅读器.exe --port 8899     从这个端口开始找（默认从 8787 开始，被占用就往后退）
-论文阅读器.exe --help          看用法
+prt.exe                 正常启动（无控制台黑框）
+prt.exe --console       挂上控制台并打印日志（调试用）
+prt.exe --port 8899     从这个端口开始找（默认从 8787 开始，被占用就往后退）
+prt.exe --help          看用法
 ```
 
 > 如果你同时开着 Node 版（`node server.js`，占 8787），桌面版会自动用到 8788，
@@ -59,7 +59,7 @@ copy target\release\paper-reader.exe "..\论文阅读器.exe"
 ### 目录约定（都相对于 exe 所在目录）
 
 ```
-论文阅读器.exe
+prt.exe
 papers/          放 PDF（不存在会自动创建；/api/papers 只列这里的 .pdf）
 data/config.json    设置（API Key 只存在这里，不回传前端）
 data/state.json     阅读进度 / 上次打开的文件
@@ -67,7 +67,7 @@ data/notes-*.json   按文档存的高亮笔记
 data/papers-order.json  左栏文件列表的手工排序（`{"order":["b.pdf","a.pdf"]}`；不改 papers/ 里的文件名）
 data/window.json    窗口大小
 data/webview2/      WebView2 的用户数据目录（浏览器缓存，删了会自动重建）
-data/paper-reader.log  运行日志（超过 512KB 就不再追加）
+data/prt.log  运行日志（超过 512KB 就不再追加）
 ```
 
 `papers/` 和 `data/` 里已有的东西（Node 版写下的置顶进度、笔记）**可以直接接着用**，
@@ -123,7 +123,7 @@ data/paper-reader.log  运行日志（超过 512KB 就不再追加）
 * 目标地址：baseURL 去掉尾部 `/`，已以 `/chat/completions` 结尾就直接用，否则拼 `/chat/completions`；
   非 `http(s)://` 开头 → 400。
 * 转发头：`Authorization: Bearer <key>`（key 为空则不带）、`Content-Type: application/json`、
-  `User-Agent: paper-reader/1.0`。
+  `User-Agent: prt/1.0`。
 * **流式**：上游来多少转发多少，响应 `Content-Type: text/event-stream; charset=utf-8`、
   `Cache-Control: no-cache, no-transform`、`Connection: keep-alive`，
   HTTP/1.1 下用 chunked 且**每个片段单独 flush**。
@@ -213,8 +213,8 @@ node tools\check-stream.js 8788 8899                          :: 验证 /api/cha
 
 | 现象 | 处理 |
 | --- | --- |
-| 窗口白屏 | `论文阅读器.exe --console` 看日志；确认 `data/paper-reader.log` 里有 `[window] 已加载` |
+| 窗口白屏 | `prt.exe --console` 看日志；确认 `data/prt.log` 里有 `[window] 已加载` |
 | 提示 WebView2 初始化失败 | 装一下 Microsoft Edge WebView2 Runtime（Win10 老版本可能没有） |
 | 端口被占 | 正常现象，会自动往后找；`--console` 会打印实际端口 |
 | 改了前端没生效 | 前端是内嵌的，重新跑 `build.bat` |
-| 想看真实报错 | `data/paper-reader.log`，或 `--console` 前台跑 |
+| 想看真实报错 | `data/prt.log`，或 `--console` 前台跑 |

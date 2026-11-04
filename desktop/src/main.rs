@@ -1,4 +1,4 @@
-// 论文阅读器 —— 独立 Windows 桌面壳
+// prt —— 独立 Windows 桌面壳
 //
 // 一个进程里同时跑：
 //   * 后台线程里的本地 HTTP 服务（tiny_http，只监听 127.0.0.1）
@@ -29,8 +29,8 @@ pub fn log_line(msg: &str) {
     let _ = writeln!(err, "{}", msg);
     let _ = err.flush();
 
-    // 顺手落一份到 data/paper-reader.log，GUI 模式下也有据可查
-    let p = util::dirs().data.join("paper-reader.log");
+    // 顺手落一份到 data/prt.log，GUI 模式下也有据可查
+    let p = util::dirs().data.join("prt.log");
     if let Ok(md) = std::fs::metadata(&p) {
         if md.len() > 512 * 1024 {
             return;
@@ -96,7 +96,7 @@ fn single_instance_allowed(data_dir: &std::path::Path) -> bool {
     // 互斥体名字跟 data 目录一一对应：隔离测试 / 多套数据目录互不影响。
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     data_dir.to_string_lossy().to_lowercase().hash(&mut hasher);
-    let mut name: Vec<u16> = format!("Local\\PaperReader-{:016x}", hasher.finish())
+    let mut name: Vec<u16> = format!("Local\\prt-{:016x}", hasher.finish())
         .encode_utf16()
         .collect();
     name.push(0);
@@ -115,7 +115,7 @@ fn single_instance_allowed(data_dir: &std::path::Path) -> bool {
 
     // 已有实例：尽量把它的窗口提到前台（失败也无所谓）。
     unsafe {
-        let title: Vec<u16> = "论文阅读器".encode_utf16().chain(std::iter::once(0)).collect();
+        let title: Vec<u16> = "prt".encode_utf16().chain(std::iter::once(0)).collect();
         let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
         if !hwnd.is_null() {
             ShowWindow(hwnd, 9); // SW_RESTORE
@@ -140,16 +140,16 @@ fn notify_already_running() {
         fn MessageBoxW(hWnd: *mut c_void, lpText: *const u16, lpCaption: *const u16, uType: u32) -> i32;
     }
     let text: Vec<u16> = concat!(
-        "论文阅读器已经在运行了。\n\n",
+        "prt 已经在运行了。\n\n",
         "同一个数据目录只允许开一个窗口。请切换到已经打开的窗口；",
-        "如果找不到它，先关掉它（任务管理器里结束「论文阅读器」），再重新启动。\n\n",
+        "如果找不到它，先关掉它（任务管理器里结束「prt」），再重新启动。\n\n",
         "同时开两个窗口会抢同一份 data 和 WebView2 缓存，可能出现打开文档失败、",
         "会话记录互相覆盖等问题。"
     )
     .encode_utf16()
     .chain(std::iter::once(0))
     .collect();
-    let caption: Vec<u16> = "论文阅读器".encode_utf16().chain(std::iter::once(0)).collect();
+    let caption: Vec<u16> = "prt".encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x0000_0040);
     }
@@ -204,7 +204,7 @@ fn main() {
 
     if console {
         log_line("");
-        log_line("  📖  论文阅读器（桌面版）");
+        log_line("  📖  prt（桌面版）");
         log_line(&format!("      exe    : {}", dirs.exe.display()));
         log_line(&format!("      papers : {}", dirs.papers.display()));
         log_line(&format!("      data   : {}", dirs.data.display()));
@@ -222,7 +222,7 @@ fn main() {
 
     if want_help {
         log_line("");
-        log_line("  用法: 论文阅读器.exe [--console] [--background] [--port N]");
+        log_line("  用法: prt.exe [--console] [--background] [--port N]");
         log_line("      --console     挂上控制台并打印日志（不弹黑框是默认行为）");
         log_line("      --background  后台启动：不显示窗口、不抢焦点、不占任务栏（自动化验收用）");
         log_line("      --port N      从这个端口开始试（默认 8787，被占用就往后找）");

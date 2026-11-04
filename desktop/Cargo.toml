@@ -1,13 +1,13 @@
 [package]
-name = "paper-reader"
+name = "prt"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.77"
-description = "论文阅读器 —— 本地桌面壳（wry + tao + 内置 HTTP 服务，前端资源内嵌）"
+description = "prt —— 本地桌面壳（wry + tao + 内置 HTTP 服务，前端资源内嵌）"
 publish = false
 
 [[bin]]
-name = "paper-reader"
+name = "prt"
 path = "src/main.rs"
 
 [dependencies]

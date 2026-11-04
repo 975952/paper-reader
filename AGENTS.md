@@ -1,11 +1,11 @@
 
 ## 项目简介
 
-论文阅读器：本地 PDF 阅读器 + AI 辅助（划词翻译/解释、整篇论文问答、联网搜索、
+prt：本地 PDF 阅读器 + AI 辅助（划词翻译/解释、整篇论文问答、联网搜索、
 论文操作目录、文献关系整理、公式与表格渲染）。
 - 前端：`public/`（零依赖原生 ES module，无打包）
 - 后端两套：`server.js`（Node，零依赖）与 `desktop/`（Rust：wry + tao + tiny_http + ureq + rust-embed）
-- 交付物：`论文阅读器.exe`（单文件绿色版，免安装；`papers/` 与 `data/` 相对 exe 所在目录解析）
+- 交付物：`prt.exe`（单文件绿色版，免安装；`papers/` 与 `data/` 相对 exe 所在目录解析）
 - 构建：`desktop\build.bat`
 - 测试：`cd test && node <套件>.mjs`（先 `node desktop.mjs` 起服务）
 
@@ -21,7 +21,7 @@
    默认按 ANSI(936) 解析再写回，会把整个文件的 UTF-8 中文变成乱码
    （踩过一次：`public/js/app.js` 全文乱码）。改文件用编辑工具；必须用脚本时显式指定编码：
    `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))`。
-7. **大改动之前先备份**：仓库**有 git**（`origin = https://github.com/975952/paper-reader.git`，
+7. **大改动之前先备份**：仓库**有 git**（`origin = https://github.com/975952/prt.git`，
    交付物 `.exe` 被 `.gitignore` 排除，改动只在源码里），所以正确的做法是
    **改之前先 `git commit` 一次**，改坏了 `git checkout` 就能回退；
    `test/pack.mjs` 打的源码 zip 是第二道保险（2026-10-06 修好了它漏掉 `security.js` 的白名单）。

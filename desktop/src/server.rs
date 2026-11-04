@@ -77,7 +77,7 @@ pub fn spawn(preferred: u16) -> std::io::Result<(u16, Arc<Ctx>)> {
 
     let ctx_bg = ctx.clone();
     thread::Builder::new()
-        .name("paper-reader-http".to_string())
+        .name("prt-http".to_string())
         .spawn(move || accept_loop(server, ctx_bg))?;
 
     Ok((port, ctx))
@@ -92,7 +92,7 @@ fn accept_loop(server: Server, ctx: Arc<Ctx>) {
                 let ctx = ctx.clone();
                 // 每个请求一个线程：chat 的 SSE 会长期占住线程，不能串行
                 let spawned = thread::Builder::new()
-                    .name("paper-reader-req".to_string())
+                    .name("prt-req".to_string())
                     .spawn(move || {
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             handle(rq, &ctx)

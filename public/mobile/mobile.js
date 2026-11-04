@@ -458,7 +458,7 @@ async function openUrl(url, name) {
     $('#mWelcome')?.classList.add('hidden');
     await viewer.load(url, name || '');
     setPager(1, viewer.numPages);
-    document.title = `${name || '论文阅读器'}`;
+    document.title = `${name || 'prt'}`;
     $('#mName').textContent = name || '未命名';
     tip('已打开');
   } catch (e) {

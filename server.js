@@ -904,7 +904,7 @@ async function handleChat(req, res) {
 
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  headers['User-Agent'] = 'paper-reader/1.0';
+  headers['User-Agent'] = 'prt/1.0';
 
   const controller = new AbortController();
   const onAbort = () => controller.abort();
@@ -1008,7 +1008,7 @@ async function handleChat(req, res) {
 
 const FETCH_TIMEOUT = 9000;
 
-async function getText(url, accept = '*/*', ua = 'paper-reader/1.0 (local; reference lookup)', timeoutMs = FETCH_TIMEOUT) {
+async function getText(url, accept = '*/*', ua = 'prt/1.0 (local; reference lookup)', timeoutMs = FETCH_TIMEOUT) {
   const r = await fetch(url, {
     headers: { 'User-Agent': ua, Accept: accept, 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
     signal: AbortSignal.timeout(timeoutMs),
@@ -2519,7 +2519,7 @@ async function main() {
   server.listen(PORT, HOST, () => {
     const url = `http://${HOST}:${PORT}`;
     console.log('');
-    console.log('  📖  论文阅读器已启动');
+    console.log('  📖  prt 已启动');
     console.log(`      打开： ${url}`);
     console.log(`      论文目录： ${PAPERS_DIR}`);
     console.log(`      配置文件： ${path.join(DATA_DIR, 'config.json')}`);

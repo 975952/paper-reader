@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Paper Reader
+title prt
 cd /d "%~dp0"
 
 where node >nul 2>nul
@@ -13,7 +13,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo   Starting paper reader...
+echo   Starting prt...
 node server.js
 
 echo.

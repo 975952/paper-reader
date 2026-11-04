@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="论文阅读器">
-  <title>论文阅读器</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="prt">
+  <title>prt</title>
   <!--
     一个正常的「P」：竖笔 → 起笔横 → 右半圆碗 → 收笔横，一条描边的路径。
     用 stroke + round linecap 出来的是圆头笔画，和字体里的 P 是一个样子；

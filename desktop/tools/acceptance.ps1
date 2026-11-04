@@ -1,4 +1,4 @@
-﻿# 论文阅读器桌面壳 —— 一键验收脚本
+# prt 桌面壳 —— 一键验收脚本
 #
 #   powershell -NoProfile -File tools\acceptance.ps1            # 起一个干净的测试实例跑全套
 #   powershell -NoProfile -File tools\acceptance.ps1 -NoStart -Port 8788   # 测已经跑着的实例
@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Continue'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $desktop = Split-Path -Parent $here
 $rel = Join-Path $desktop 'target\release'
-$exe = Join-Path $rel 'paper-reader.exe'
+$exe = Join-Path $rel 'prt.exe'
 $papersDir = Join-Path $rel 'papers'
 $dataDir = Join-Path $rel 'data'
 $tmp = Join-Path $env:TEMP 'prt-accept'

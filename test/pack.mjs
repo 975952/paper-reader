@@ -5,7 +5,7 @@ import { execFileSync, spawn } from 'node:child_process';
 const ROOT = path.join(import.meta.dirname, '..');
 const STAGE = path.join(import.meta.dirname, 'artifacts', 'pkg');
 const STAGE_ROOT = path.join(import.meta.dirname, 'artifacts');
-const ZIP = path.join(import.meta.dirname, 'artifacts', 'paper-reader-src.zip');
+const ZIP = path.join(import.meta.dirname, 'artifacts', 'prt-src.zip');
 
 /** 要发布的顶层文件 / 目录（相对 ROOT） */
 const INCLUDE = [

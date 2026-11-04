@@ -232,7 +232,7 @@ pub fn run(url: String, background: bool) -> ! {
        验证脚本通过 HTTP / CDP 操作页面，用户屏幕上不会弹出任何东西。
        正常双击启动完全不受影响。 */
     let mut builder = WindowBuilder::new()
-        .with_title("论文阅读器")
+        .with_title("prt")
         .with_window_icon(app_icon(64))
         .with_inner_size(LogicalSize::new(w, h))
         .with_min_inner_size(LogicalSize::new(MIN_W, MIN_H))

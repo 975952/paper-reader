@@ -8,7 +8,7 @@ const root = path.resolve(import.meta.dirname, '..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prt-reopen-'));
 for (const dir of ['data', 'papers']) fs.mkdirSync(path.join(tmp, dir));
 const exe = path.join(tmp, 'reader.exe');
-fs.copyFileSync(path.join(root, '论文阅读器.exe'), exe);
+fs.copyFileSync(path.join(root, 'prt.exe'), exe);
 const dataDir = path.join(tmp, 'data');
 const papersDir = path.join(tmp, 'papers');
 // 自己的服务靠「papers 里这篇独有命名的论文」识别（Rust 版 /api/papers 不返回 dir 字段）；

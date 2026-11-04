@@ -5245,3 +5245,52 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
   优雅关闭旧实例（PID 117036）后覆盖桌面副本并重启（PID 114376，Responding=True）。
 - 提交：本次实现提交（hash 见 git log），推送 `origin/main` 并发布新 Release `release-2026-11-05`。
 - 清理：隔离实例与后台测试进程已清理；`test/artifacts/instance-guard/` 等只在 gitignore 的 test/artifacts 内。
+
+## 98. 应用更名为 prt（2026-11-05）
+
+### 98.1 用户要求
+
+- m10089：「把所有的应用名字都改成prt，包括github上的」。
+- 口径：显示名与 exe 用全小写 **prt**（用户原话）；功能与数据目录结构不变；历史文档与历史
+  PROGRESS 记录保留原名（避免篡改历史），当前代码/当前文档/GitHub 全部改成 prt。
+
+### 98.2 改名范围
+
+- 显示层面：窗口标题、首页 `<h1>`、浏览器标题、图标 aria/label，以及提示词里的应用自称
+  （`prompts/base.js`、`capabilities/{background,qa,teach}.js`，`test/fixtures/prompts-baseline.json`
+  同步更新）→ `prt`。
+- 桌面壳（`desktop/`）：Cargo package / bin name = `prt`；winres FileDescription、ProductName = `prt`；
+  `window.rs` 标题 = `prt`；日志文件 `data/paper-reader.log` → `data/prt.log`；console banner = `prt（桌面版）`；
+  单实例互斥体 `Local\prt-<hash>`；`FindWindowW` 标题 = `prt`；MessageBox 文案改用 `prt`；
+  HTTP 线程名 `prt-http` / `prt-req`；User-Agent `prt/1.0`；`build.bat` 产物改为根与桌面 `prt.exe`
+  （纯 ASCII、运行实例跳过、SHA256 校验、10s 重试）；`tools/acceptance.ps1` 与 `desktop/README.md` 同步。
+- Node 服务端：启动 banner `📖  prt 已启动`，User-Agent `prt/1.0`。
+- 前端：`public/index.html`（title/brand/logo/h1）、`public/js/app.js`（document.title ×3、带论文名的标题）、
+  `public/icon.svg`、`public/mobile/{index.html,mobile.js}`。
+- 测试：`_exe.mjs` 交付物名、`desktop.mjs` 窗口标题/页面断言、`sidebar-reopen.mjs` /
+  `translation-layout.mjs` 复制 `prt.exe`、`folders.mjs` 注释、`pack.mjs` 源码 zip 名 `prt-src.zip`、
+  `save-reliability.mjs` 临时前缀 `prt-save-`。
+- 文档：`README.md`（标题、下载区块、release 说明）、`docs/使用说明书.md`（标题/基线/exe 名/APK 名）、
+  `AGENTS.md`（项目简介、交付物、origin URL）、`.gitignore` 注释；`docs/archive/`、`design/` 设计稿与
+  历史 PROGRESS 记录保留原名。
+
+### 98.3 GitHub 仓库与 Release
+
+- 仓库 `975952/paper-reader` → `975952/prt`（GitHub API PATCH `/repos/975952/paper-reader`，`name=prt`），
+  更新 description；本地 `git remote set-url origin https://github.com/975952/prt.git`。
+- 历史 Release 资产 `paper-reader-*.exe` → `prt-*.exe`（逐个 rename）；最新
+  `release-2026-11-05` 的资产替换为新构建 `prt-2026-11-05.exe`（删除旧名资产再上传），说明同步更新。
+  旧链接随仓库改名由 GitHub 301 重定向到新地址。
+- 验证：用 `git credential fill` 缓存的 token 走本地代理（127.0.0.1:10808）调用 API，
+  `curl -sIL` 检查 release 资产下载 302→200 与 Content-Length。
+
+### 98.4 验证与交付
+
+- JS 解析：`node --experimental-vm-modules` + `vm.SourceTextModule` 解析 app.js / sessions.js / ai.js /
+  prompts（index/base/materials/qa）/ server.js 全部 PARSE-OK。
+- `cargo build --release` 无 warning；`desktop\build.bat` 产出项目根与桌面 `prt.exe`。
+- 优雅关闭旧实例后删除旧 `论文阅读器.exe`，启动 `prt.exe`：进程名 `prt.exe`、窗口标题 prt、
+  首页 h1 prt，打开论文与会话正常。
+- 显式 `git add` 改名相关文件（不 `git add -A`）→ commit → 走代理推送 `origin/main`；
+  发布新 Release 资产 `prt-2026-11-05.exe` 并验证下载链接。
+

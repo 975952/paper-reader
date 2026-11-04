@@ -1,14 +1,11 @@
 @echo off
 rem ============================================================
-rem  Paper Reader - desktop shell, one-click release build.
+rem  prt - desktop shell, one-click release build.
 rem
 rem  NOTE: this file is deliberately 100%% ASCII. cmd.exe parses
 rem  .bat files with the OEM code page (936 on zh-CN), so any
 rem  UTF-8 comment here would be decoded as garbage and executed
-rem  (or worse: silently swallow the next line). The Chinese
-rem  output filename is therefore built from its Unicode code
-rem  points at run time:
-rem      U+8BBA U+6587 U+9605 U+8BFB U+5668  =  "LunWenYueDuQi"
+rem  (or worse: silently swallow the next line).
 rem
 rem  Why the steps are shaped like this:
 rem  1) touch src\assets.rs before cargo build. The frontend is
@@ -17,7 +14,7 @@ rem     tracks files it saw during the PREVIOUS compile, so a NEW
 rem     file under public/ does not trigger a rebuild and silently
 rem     never reaches the exe.
 rem  2) never kill a running reader. This script used to close every
-rem     process named "LunWenYueDuQi" so the copy could overwrite a
+rem     process named after the app so the copy could overwrite a
 rem     running exe - which also closed the copy the user was
 rem     reading. Now it kills nothing: the project-root copy is
 rem     required (retry for 10s, then report how to free it), and
@@ -43,13 +40,12 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/3] copy exe to project root and the Desktop ^(running instances are left alone^)
+echo [2/3] copy prt.exe to project root and the Desktop ^(running instances are left alone^)
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$n = -join ([char]0x8BBA,[char]0x6587,[char]0x9605,[char]0x8BFB,[char]0x5668);" ^
-  "$src = (Resolve-Path 'target\release\paper-reader.exe').Path;" ^
+  "$src = (Resolve-Path 'target\release\prt.exe').Path;" ^
   "$root = (Resolve-Path '..').Path;" ^
   "$desktop = [Environment]::GetFolderPath('Desktop');" ^
-  "$dst = @((Join-Path $root ($n + '.exe')), (Join-Path $desktop ($n + '.exe')));" ^
+  "$dst = @((Join-Path $root 'prt.exe'), (Join-Path $desktop 'prt.exe'));" ^
   "$latest = (Get-ChildItem '..\public' -Recurse -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime;" ^
   "$sha = [Security.Cryptography.SHA256]::Create();" ^
   "$want = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($src))).Replace('-', '');" ^
@@ -76,5 +72,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/3] done - double click the exe to start
+echo [3/3] done - double click prt.exe to start
 exit /b 0

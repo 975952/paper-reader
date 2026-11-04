@@ -15,7 +15,7 @@ fs.mkdirSync(data);
 fs.mkdirSync(papers);
 fs.copyFileSync(path.join(import.meta.dirname, 'fixtures', 'multipage-sample.pdf'), path.join(papers, sampleName));
 const exe = path.join(temp, 'reader.exe');
-fs.copyFileSync(path.join(root, '论文阅读器.exe'), exe);
+fs.copyFileSync(path.join(root, 'prt.exe'), exe);
 const child = spawn(exe, ['--background'], { windowsHide: true, stdio: 'ignore', env: {
   ...process.env, PRT_DATA_DIR: data, PRT_PAPERS_DIR: papers, PRT_REQUIRE_TOKEN: '0',
 } });

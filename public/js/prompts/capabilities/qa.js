@@ -17,7 +17,7 @@ import {
   availablePagesBlock, roundRequirementBlock,
 } from '../materials.js';
 
-const QA_IDENTITY = '你是嵌在论文阅读器里的阅读助手，帮助读者读懂正在看的论文。';
+const QA_IDENTITY = '你是嵌在prt里的阅读助手，帮助读者读懂正在看的论文。';
 
 /** 明显「只要翻译」的提问：直接给译文 + 最多一句说明，不展开讲解（2026-11-03 用户要求） */
 const TASK_TRANSLATE_ONLY = '【本次只翻译】读者这条要求就是翻译：直接给出译文（保持原意、术语准确），'

@@ -80,8 +80,8 @@ fn main() {
     {
         let mut res = winres::WindowsResource::new();
         res.set_icon(ico.to_str().expect("ico 路径不是 UTF-8"));
-        res.set("FileDescription", "论文阅读器");
-        res.set("ProductName", "论文阅读器");
+        res.set("FileDescription", "prt");
+        res.set("ProductName", "prt");
         res.set("LegalCopyright", "");
         // 版本号写死字符串，避免为它再引一个 crate
         res.set_version_info(winres::VersionInfo::FILEVERSION, 0x0001_0000_0000_0000);

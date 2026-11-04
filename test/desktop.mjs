@@ -135,7 +135,7 @@ try {
     encoding: 'utf8', env: { ...process.env, PRT_PID: String(child.pid) },
   }).trim();
   const [title, visibility] = out.split('|');
-  check('原生窗口已创建且标题正确', title === '论文阅读器', `pid=${child.pid} title="${title}"`);
+  check('原生窗口已创建且标题正确', title === 'prt', `pid=${child.pid} title="${title}"`);
   check('后台模式窗口不可见（不抢焦点、不占任务栏）', visibility === 'hidden', `window=${visibility}`);
 } catch (e) {
   check('原生窗口已创建且标题正确', false, String(e.message).slice(0, 80));
@@ -279,7 +279,7 @@ check('/api/state 读写', st.probe === 1, JSON.stringify(st).slice(0, 60));
 console.log('\n▶ 静态资源与安全…');
 const index = await fetch(`${base}/`);
 const html = await index.text();
-check('/ 返回前端页面', index.status === 200 && html.includes('论文阅读器'), `${index.status} ${html.length}B`);
+check('/ 返回前端页面', index.status === 200 && html.includes('prt'), `${index.status} ${html.length}B`);
 check('首页 MIME 正确', (index.headers.get('content-type') || '').includes('text/html'), index.headers.get('content-type'));
 
 const appjs = await fetch(`${base}/js/app.js`);
@@ -375,7 +375,7 @@ for (const [label, url] of [
   const body = await r.text();
   // 允许 400/404，也允许无扩展名路径回落成首页外壳；但绝不允许泄露 public 之外的文件内容
   const leaked = /PAPERS_DIR|createServer|fn main|use wry|std::net/.test(body);
-  const okFallback = r.status === 200 && body.includes('论文阅读器');
+  const okFallback = r.status === 200 && body.includes('prt');
   check(`${label} 被挡住或只是回落首页`, !leaked && (r.status === 400 || r.status === 404 || okFallback),
     `${r.status} ${body.length}B${leaked ? ' ← 泄露!' : ''}`);
 }

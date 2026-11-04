@@ -25,7 +25,7 @@ test/profile-*/
 Thumbs.db
 .DS_Store
 
-# 与本项目无关的本地脚本（DSH 相关，不属于论文阅读器）
+# 与本项目无关的本地脚本（DSH 相关，不属于 prt）
 .dsh-probe/
 dsh-phone-bridge.mjs
 check_python_env.py
