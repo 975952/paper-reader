@@ -5133,3 +5133,43 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
   SHA256 `FACC1B08DAFD7576FB37D30A1EAE859555A2592AD00A502C777DCA1C05E036E0`；桌面副本已覆盖并重启
   （PID 113376，Responding=True）。
 - 提交：本次实现提交「追问直答该核对时自动切回完整阅读」，随后推送 `origin/main` 并发布新 Release。
+
+## §96 截图问答不再输出「截图是什么」式开场白（2026-11-04，用户 m10163 后续反馈）
+
+### 96.1 用户反馈
+
+- 用户贴出应用内回答：开头一整段「截图是什么：手写提纲式的清单……这一小块位于第 3 页底部、RK4 公式之后……」，
+  并明确说「上面这段描述的部分完全没有必要出现」——问的是内容，不需要 AI 先描述截图/版面/位置。
+
+### 96.2 根因
+
+- 只发截图（或带截图提问）时，提示词把「判断截图是什么」写成了输出步骤：
+  - `public/js/app.js` send() 无文字截图模板：「先判断截图里实际是什么（插图 / 表格 / 公式 / 算法 / 正文文字 / 手写等），
+    再判断读者此刻最需要什么——…」；
+  - `public/js/prompts/materials.js` `screenshotRule`：「先判断截图里实际是什么、读者此刻最需要什么，再决定怎么回答…」；
+  - `public/js/prompts/capabilities/qa.js` `SCREENSHOT_TASK` 同款（P1 未接线，保持同步）。
+- `BASE_RULES` 只有「不要汇报操作过程」，没覆盖「不要先描述材料本身」这类开场白。
+
+### 96.3 实现（4 个源文件）
+
+- `public/js/app.js`：无文字截图问题模板改为「先在心里判断…然后直接给出最有用的回答」，并明确
+  「不要用『截图是什么』『图片里是…』『这一小块位于第 N 页…』这类开场白描述截图本身、版面或位置（判断是内部步骤），
+  除非读者问的就是『这是什么』；直接进入内容」。
+- `public/js/prompts/materials.js` `screenshotRule`：同样改为「在心里判断 + 直接给回答」，并禁止开场白描述。
+- `public/js/prompts/capabilities/qa.js`：`SCREENSHOT_TASK` 同步同一口径。
+- `public/js/prompts/base.js`：【不要汇报过程】新增 F 条——不要先描述读者提供的截图 / 图片 / 材料本身
+  （「截图是什么」「图片里是…」「这块位于第 N 页…」），除非读者问的就是那是什么；判断材料内容是内部步骤，直接回答问题。
+
+### 96.4 验证
+
+- `test/artifacts/prompt-check/check.mjs`（临时校验）：渲染 `qa.chat`（`screenshotCount=1`）后 system 文本中
+  旧指令「先判断截图里实际是什么、」已消失；新「不要用『截图是什么』」、base 规则 F、截图规则、base 规则 E 均在；**ALL PASS**。
+- `node --experimental-vm-modules` + `SourceTextModule` 解析 app.js / materials.js / base.js / qa.js / prompts/index.js 全部 PARSE-OK。
+
+### 96.5 文档与交付
+
+- `docs/使用说明书.md` §7 第 5 条改写：内部判断、不输出「截图是什么」开场白（除非用户问的就是「这是什么 / 在哪一页」）。
+- 构建：`desktop\build.bat` 重建项目根与桌面 `论文阅读器.exe`：11,144,704 B，
+  SHA256 `8550444CA39599AA50A29A22A270AD2A90C91F470ACB87AAE9868BF96D146F81`；桌面副本已覆盖并重启
+  （PID 77048，Responding=True）。
+- 提交：本次实现提交「截图问答不再输出『截图是什么』式开场白」，随后推送 `origin/main` 并发布新 Release。
