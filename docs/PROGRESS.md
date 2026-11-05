@@ -5461,7 +5461,10 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 - 提交：显式 `git add public/js/app.js public/js/sessions.js docs/使用说明书.md docs/PROGRESS.md`
   （不 `git add -A`）→「译文里划词解释先打开最近会话再输出」；
   走代理 `git -c http.proxy=http://127.0.0.1:10808 push origin main` 推送。
-- Release：走代理 + `git credential fill` 缓存 token 发布 **`release-2026-11-05d`**，
-  资产 **`prt-2026-11-05d.exe`**（11,164,160 B），说明用 UTF-8 JSON 文件发；
-  `curl -sIL -x http://127.0.0.1:10808` 验证下载 302 → 200、Content-Length 与本地一致。
+- Release：走代理 + `git credential fill` 缓存 token 发布 **`release-2026-11-05d`**
+  （release id 435309752，tag 指向提交 `c931423`），资产 **`prt-2026-11-05d.exe`**
+  （11,164,160 B，asset id 713690910，state=uploaded），说明用 UTF-8 JSON 文件发；
+  资产经 API（`Accept: application/octet-stream`）验证可下载：302 → 206、
+  `Content-Range: bytes 0-1023/11164160` 与本地一致
+  （release 页直链在代理网络下偶发 504，稍后重试或换网络即可）。
 
