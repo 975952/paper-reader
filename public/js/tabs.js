@@ -1,3 +1,4 @@
+import { windowStorage as localStorage } from './window-storage.js';
 /**
  * 多标签工作区（B 线 P0/P1 骨架）：工作区存储 + 标签条 + Welcome 语义。
  *
@@ -107,7 +108,7 @@ const escapeHtml = (s) => String(s || '').replace(/[&<>"']/g, (c) => ({
  * @param {(docId:string, index:number)=>void} opts.onReorder 拖拽排序完成
  * @param {()=>Array<{docId,name,url,path,folder}>} [opts.listFolderDocs] 溢出菜单里的「当前文件夹文档」
  */
-export function createTabBar({ mount, onActivate, onClose, onOpenDoc, onReorder, listFolderDocs } = {}) {
+export function createTabBar({ mount, onActivate, onClose, onOpenDoc, onReorder, onNewWindow, listFolderDocs } = {}) {
   const root = document.createElement('div');
   root.className = 'tab-bar';
   root.id = 'tabBar';
@@ -160,6 +161,29 @@ export function createTabBar({ mount, onActivate, onClose, onOpenDoc, onReorder,
       close.onclick = (e) => { e.stopPropagation(); onClose?.(tab.docId); };
       el.append(title, close);
       el.addEventListener('click', () => onActivate?.(tab.docId));
+      const showContext = (x, y) => {
+        menu.replaceChildren();
+        for (const [label, action] of [
+          ['在新窗口打开', () => onNewWindow?.(tab.docId, false)],
+          ['移到新窗口', () => onNewWindow?.(tab.docId, true)],
+          ['关闭标签', () => onClose?.(tab.docId)],
+        ]) {
+          const button = document.createElement('button'); button.type = 'button';
+          button.className = 'tab-menu-item'; button.textContent = label;
+          button.onclick = () => { closeMenu(); action(); }; menu.append(button);
+        }
+        menu.style.left = `${Math.max(8, Math.min(innerWidth - 280, x))}px`;
+        menu.style.top = `${Math.max(8, Math.min(innerHeight - 140, y))}px`;
+        menu.classList.remove('hidden'); menuOpen = true;
+        menu.querySelector('button')?.focus();
+      };
+      el.tabIndex = tab.docId === activeId ? 0 : -1;
+      el.addEventListener('contextmenu', (e) => { e.preventDefault(); showContext(e.clientX, e.clientY); });
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+          e.preventDefault(); const r = el.getBoundingClientRect(); showContext(r.left, r.bottom);
+        }
+      });
       el.addEventListener('auxclick', (e) => { if (e.button === 1) { e.preventDefault(); onClose?.(tab.docId); } });
       el.addEventListener('pointerdown', (e) => startDrag(e, tab, el));
       strip.append(el);

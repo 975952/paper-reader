@@ -5468,3 +5468,58 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
   `Content-Range: bytes 0-1023/11164160` 与本地一致
   （release 页直链在代理网络下偶发 504，稍后重试或换网络即可）。
 
+## 102. 多文档多窗口阅读（2026-11-06，用户 m00001 需求）
+
+### 102.1 用户口径
+
+- 多篇论文分别在**独立桌面窗口**打开，可自由摆放、缩放、最大化、移到其他显示器；每窗口保留标签与阅读/AI 功能，
+  页码、缩放、搜索、选区、提问上下文互相独立；每窗口分别记住标签/阅读位置/布局。
+- 并发保护：新窗口默认新建对话；同一会话只允许一个窗口编辑，其他窗口显示「前往编辑窗口」；
+  译文、笔记也不能被另一窗口覆盖。
+- 标签右键交互自行决定（不必只做「右移」）；验收用低额度小模型的子智能体做。
+- 收尾（用户原话）：「快点，没额度了」「借着这个完成收尾工作，codex额度用完了」→ 不再扩功能，跑通验收即交付。
+
+### 102.2 实现
+
+- `desktop/src/window.rs`：单进程单服务、多 WebView 窗口管理器（`HashMap<WindowId, ReaderWindow>`）。
+  IPC `WindowAction`：`window-open` / `open-result` / `window-ready` / `windows-list` / `window-focus` /
+  `windows-tile` / `window-place` / `windows-quit` / `close-request` / `close-commit` / `close-cancel`。
+  `data/reader-windows.json` 记录每窗口 key / 位置 / 尺寸 / 是否最大化，启动恢复最多 **10** 个窗口；
+  平铺用网格（>3 时列数 `ceil(sqrt(n))`），平铺前前端先记当前页、`placed` 后恢复页码；
+  关窗先让前端保存（`close-request` → `close-commit`；保存失败回 `close-cancel` 保留窗口）；
+  「保存窗口布局并退出」先写盘再逐个关闭，最后窗退出进程。
+- `public/js/window-storage.js`（新）：非主窗口的 localStorage 键统一加前缀 `reader.window.<id>.`
+  （workspace / ui / panels / activeSession / currentFolder / session.scope / session.scopeMode），
+  主窗口继续用原键兼容旧数据。
+- `public/js/windows.js`（新）：包装 `fetch` 做跨窗口单写者 —— `navigator.locks` 的
+  `prt.edit.<resource>`（`/api/session`、`/api/notes` 非 GET 无锁时返回 409 JSON），
+  只读窗口显示 `#windowEditNotice`（「前往编辑窗口」「重新载入」）；`/api/state` 进度在
+  `prt.save.progress` 锁下按 `ts` 合并，避免旧快照抹掉另一篇论文的进度；
+  新窗口复制外观与目标论文当前阅读位置、不接管对话；`openReaderWindow` 等目标 `window-ready`，
+  「移到新窗口」在目标成功后关原标签并释放编辑权；窗口菜单（当前论文开新窗/平铺/切换/保存布局退出）。
+- `public/js/app.js`、`tabs.js`、`sessions.js`、`ai.js`：标签右键「在新窗口打开 / 移到新窗口 / 关闭标签」
+  （含键盘 `ContextMenu` / `Shift+F10`）、书架文档右键「在新窗口打开」；启动参数 `?document=`；
+  `saveSessionNow` 只在可写时提交；AI/译文/笔记入口加 `allowEdit` 守卫；关标签前保存、失败回滚。
+- 样式 `public/tabs.css`；说明文档 `docs/多窗口阅读.md`；测试 `test/multiwindow.mjs`（新）。
+
+### 102.3 验收
+
+- 新增 `test/multiwindow.mjs`（真实 EXE 隔离副本 + 合成 PDF + WebView2 CDP，不碰用户数据）：
+  **23/23 PASS** —— 窗口独立身份与文档、滚动互不影响、外观隔离、共享会话单写者（409）、
+  并发进度保存都保留、同论文阅读位置、笔记并发拒绝、移动成功后才关原标签、
+  平铺后三窗仍可翻页、失败目标清理、重启恢复窗口身份与各窗独立页码、关主窗口不影响副窗口、
+  最后窗口关闭退出码 0、无 pageerror。
+- 既有回归：`tabs` **49/49**、`save-reliability` **10/10**、`fullscreen` **14/14**、`theme` **13/13**；
+  `global-session` 28/42 为 §73.4 已记录的过期套件（仍断言旧「全局会话」语义），与本次改动无关。
+- 教训：重启用例最初每次启动都换随机 `httpPort`，而 localStorage 按 origin 隔离，
+  导致恢复「假失败」；测试已改为重启复用同一 httpPort（生产 EXE 本就固定起始端口 8787）。
+
+### 102.4 交付
+
+- 构建：`desktop\build.bat` → 项目根 `prt.exe` **11,212,288 B**，
+  SHA256 `13B4BD1AC8A67C2437278EECDE97526138B5F748C3C967FCF06F47AB525BF2D4`；
+  桌面副本仍是旧版（11,164,160 B，SHA256 `5F8B91A9…`），因用户实例（PID 12004）运行中未覆盖，
+  需关闭后重跑 `desktop\build.bat` 或复制项目根 exe。
+- 文档：新增 `docs/多窗口阅读.md`；`docs/README.md` 设计记录加行；`docs/使用说明书.md` §16.1 补多窗口入口。
+- 提交：显式 `git add` 本次多窗口源码/测试/文档（不 `git add -A`），提交「多文档多窗口阅读：独立窗口、平铺与恢复、会话与笔记单写者保护」。
+

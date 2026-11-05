@@ -1,3 +1,4 @@
+import { windowStorage as localStorage } from './window-storage.js';
 /* 会话系统 P0（2026-11，用户拍板 B：进文件夹默认显示空态选择卡片）
  *
  * 这个模块只做「会话管理」这一件事：

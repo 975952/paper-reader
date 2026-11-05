@@ -1,3 +1,4 @@
+import { windowStorage as localStorage, storageKey, windowId, startWindows, finishWindowBoot, windowReady, openReaderWindow, canWrite, allowEdit, isWindowClosed, releaseDocument } from './windows.js';
 import { $, $$, el, appendAll, toast, toastAction, cleanText, renderMarkdown, escapeHtml, debounce, throttle, clamp, fmtSize } from './util.js';
 import { iconEl, iconHTML, hasIcon } from './icons.js';
 import { PdfViewer, clampZoomSpeed, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX, readPdfPages, renderPdfPageImage } from './pdfview.js';
@@ -290,7 +291,7 @@ function applyPanelPatch(id, raw) {
 
 function initPanelSync() {
   window.addEventListener('storage', (e) => {
-    if (e.key !== 'reader.panels' || !e.newValue) return;
+    if (e.key !== storageKey('reader.panels') || !e.newValue) return;
     try {
       const panels = JSON.parse(e.newValue);
       if (panels && typeof panels === 'object') for (const id of PANEL_IDS) applyPanelPatch(id, panels[id]);
@@ -780,6 +781,36 @@ let serverState = {};
   syncScopePrefs();
   initPanels();
   initTopbar();
+  startWindows({
+    page: () => viewer?.pdf ? viewer.current : null,
+    restorePage: (page) => viewer?.goToPage(page),
+    current: () => (!tabsFeatureEnabled() || tabsStore.tabs.length) ? state.doc : null,
+    closeTab,
+    hasTab: (docId) => tabsStore.tabs.some((t) => t.docId === docId),
+    notify: (message) => toast(message, 'err', 6500),
+    resources: () => state.doc && (!tabsFeatureEnabled() || tabsStore.tabs.length) ? {
+      '问答': `/api/session?${sessionQuery(sessionScopeKey(), activeSidFor(state.doc.docId))}`,
+      '译文': `/api/session?${sessionQuery(state.doc.docId, TRANSLATE_SID)}`,
+      '笔记': `/api/notes?doc=${encodeURIComponent(state.doc.docId)}`,
+    } : {},
+    save: async () => {
+      if (!state.doc) return;
+      if (state.busy) throw new Error('请先停止生成，再打开新窗口');
+      persistSession.cancel?.();
+      if (sessionSaveInFlight) await sessionSaveInFlight;
+      await saveSessionNow();
+      await saveProgressNow({ silent: true });
+      tabsPersist();
+    },
+    close: async () => {
+      abortStream('window-close');
+      persistSession.cancel?.(); saveProgress.cancel?.();
+      if (sessionSaveInFlight) await sessionSaveInFlight;
+      await saveSessionNow();
+      await saveProgressNow({ silent: true });
+      tabsPersist();
+    },
+  });
   initWindowChrome();     // 应用内标题栏：窗口按钮 / 拖动 / 八向缩放（无 IPC 时整块隐藏）
   initPanelSync();
   initViewer();
@@ -818,6 +849,7 @@ let serverState = {};
   initTabs();
   if (tabsFeatureEnabled()) await bootTabWorkspace();
   else await maybeReopenLast();
+  finishWindowBoot();
   checkConfigWarning();
 })();
 
@@ -947,6 +979,7 @@ function syncHomeBtnVisibility() {
 }
 
 function tabsSyncBar() {
+  windowReady();
   if (tabsStore.bar) tabsStore.bar.render(tabsStore.tabs, tabsStore.active);
   syncHomeBtnVisibility();
 }
@@ -1814,7 +1847,7 @@ function initViewer() {
     get chatVersion() { return chatVersion; },
     get translateSid() { return TRANSLATE_SID; },
     get lastHotTrace() { return window.__lastHotTrace || null; },
-    openDoc, closeTab, activateTab, moveTab, reopenClosedTab, goWelcome,
+    openDoc, closeTab, activateTab, moveTab, reopenClosedTab, goWelcome, openReaderWindow, windowId,
     newSession, switchSession, deleteSession, clearCurrentSession, loadSessionList, switchFolder,
     // P2.5 Agent 读取：开关（写 localStorage）、默认值、最近一次运行统计
     get agentRead() { return agentReadEnabled(); },
@@ -2027,15 +2060,15 @@ const saveProgress = debounce(async () => {
   }
 }, 500);
 
-async function saveProgressNow() {
-  if (!state.doc || !viewer) return;
+async function saveProgressNow({ silent = false } = {}) {
+  if (!state.doc || !viewer?.pdf) return;
   const docs = { ...(serverState.docs || {}) };
   docs[state.doc.docId] = { page: viewer.current, scale: Number(viewer.scale.toFixed(3)), fit: !!viewer._fitMode, ts: Date.now(), name: state.doc.name };
   const payload = { ...serverState, docs, lastDoc: state.doc.docId, lastUrl: state.doc.url, lastName: state.doc.name };
   const r = await fetch('/api/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   serverState = payload;
-  toast('阅读进度已保存', 'ok');
+  if (!silent) toast('阅读进度已保存', 'ok');
 }
 
 function setView(view) {
@@ -2997,6 +3030,7 @@ function showFileCtx(x, y, target) {
     menu.append(item('删除文件夹', () => deleteFolder(target.path, target.name), true));
     menu.append(item('移动到…', () => showMoveTargets(menu, target)));
   } else {
+    menu.append(item('在新窗口打开', () => openReaderWindow((state.papers || []).find((p) => (p.path || p.name) === target.path))));
     menu.append(item('移动到…', () => showMoveTargets(menu, target)));
     menu.append(item('删除', () => {
       const p = (state.papers || []).find((pp) => (pp.path || pp.name) === target.path);
@@ -3401,6 +3435,16 @@ async function closeTab(docId) {
   const id = String(docId || '');
   const idx = tabsStore.tabs.findIndex((t) => t.docId === id);
   if (idx < 0) return;
+  if (state.doc?.docId === id) {
+    abortStream('tab-close');
+    persistSession.cancel?.(); saveProgress.cancel?.();
+    try {
+      if (sessionSaveInFlight) await sessionSaveInFlight;
+      await saveSessionNow(); await saveProgressNow({ silent: true });
+    } catch {
+      toast('保存失败，标签已保留，请重试', 'err', 5000); return;
+    }
+  }
   const [tab] = tabsStore.tabs.splice(idx, 1);
   pushClosedTab(tab);
   dropPdfHandle(tab.docId);   // B 线 P2：关掉的标签不再保留 PDF 句柄
@@ -3409,21 +3453,27 @@ async function closeTab(docId) {
   const wasActive = state.doc?.docId === id;
   if (!tabsStore.tabs.length) {
     await goWelcome();
+    dropDocView(id); dropPdfHandle(id); releaseDocument(id);
     return;
   }
   const next = tabsStore.tabs[Math.min(idx, tabsStore.tabs.length - 1)];
   if (wasActive) {
     tabsStore.active = next.docId;
     await openDocColdSwitch({ name: next.name, url: next.url, docId: next.docId, path: next.path });
+    if (state.doc?.docId === id) {
+      tabsStore.tabs.splice(idx, 0, tab); tabsStore.active = id; tabsSyncBar(); tabsPersist(); return;
+    }
     if (state.doc?.docId !== next.docId) tabsStore.tabs = tabsStore.tabs.filter((t) => t.docId !== next.docId);
   }
   if (!tabsStore.tabs.length) {
     await goWelcome();
+    dropDocView(id); dropPdfHandle(id); releaseDocument(id);
     return;
   }
   if (!tabsStore.tabs.some((t) => t.docId === state.doc?.docId)) tabsStore.active = tabsStore.tabs[0].docId;
   tabsSyncBar();
   tabsPersist();
+  dropDocView(id); dropPdfHandle(id); releaseDocument(id);
 }
 
 /** 激活标签（与 openDoc 同一条路：已打开就只激活，切文档走冷切换） */
@@ -3498,6 +3548,7 @@ function initTabs() {
     onActivate: (docId) => activateTab(docId),
     onClose: (docId) => closeTab(docId),
     onReorder: (docId, index) => moveTab(docId, index),
+    onNewWindow: (docId, move) => openReaderWindow(tabsStore.tabs.find((t) => t.docId === docId), { move }),
     onOpenDoc: (doc) => openDoc({ name: doc.name, url: doc.url, docId: doc.docId, path: doc.path }),
     listFolderDocs: () => (state.papers || []).map((paper) => ({
       ...paper,
@@ -3547,11 +3598,13 @@ async function bootTabWorkspace() {
   const ws = loadWorkspace();
   const url = new URL(location.href);
   const openName = url.searchParams.get('open');
+  const openId = url.searchParams.get('document');
   const papers = state.papers || [];
   const byId = new Map(papers.map((paper) => [paper.docId, paper]));
-  const named = openName
+  const named = openId ? papers.find((paper) => paper.docId === openId) || null : openName
     ? papers.find((paper) => paper.name === openName || paper.name.replace(/\.pdf$/i, '') === openName) || null
     : null;
+  if (openId && !named) toast('未找到指定文档，可能已经移动或删除', 'err', 4500);
   if (openName && !named) toast('papers/ 里没有找到 ' + openName, 'err', 4000);
 
   // ① 先恢复上次的工作区（文件还在的标签才恢复；打开顺序不变）
@@ -3731,7 +3784,7 @@ async function openDocColdSwitch({ name, url, docId, path }) {
     // 给一句可执行的解释：这是本地文件服务没返回 200/206，而不是论文损坏 /
     // 网络问题（如果同时开着两个阅读器窗口，它们会抢同一份 data，关掉多余的再试）。
     const hint = code
-      ? `：本地文件服务返回 ${code}。如果同时开着两个阅读器窗口，请先关掉多余的那个再重试（两个窗口会抢同一份 data）`
+      ? `：本地文件服务返回 ${code}，请确认文件仍在书架中后重试`
       : '';
     toast(`打开失败：${msg}${hint}`, 'err', code ? 9000 : 6000);
     console.warn('[openDoc] 打开失败', { docId, err: e });
@@ -3926,6 +3979,7 @@ async function saveNotes() {
 }
 
 async function addHighlight(sel, note = '') {
+  if (!await allowEdit('笔记')) return;
   if (!sel) return;
   const text = sel.cleanText || cleanText(sel.text || '');
   const groups = sel.rectsByPage && Object.keys(sel.rectsByPage).length
@@ -4013,6 +4067,7 @@ function closeAnswerNoteEditor(entry) {
 
 /** 状态 3/4：写进 notes 存储 → 按钮变已保存 → 左栏列表同步增加一项 */
 async function confirmAnswerNote(entry) {
+  if (!await allowEdit('笔记')) return;
   const root = entry.root;
   const row = root.__noteEditor;
   if (!row) return;
@@ -4317,6 +4372,7 @@ function closeNoteBox() {
 }
 
 async function saveNoteBox() {
+  if (!await allowEdit('笔记')) return;
   const id = state.editingId;
   if (!id) { closeNoteBox(); return; }
   const item = state.highlights.find((x) => x.id === id);
@@ -4338,12 +4394,14 @@ async function saveNoteBox() {
 }
 
 async function deleteNoteBox() {
+  if (!await allowEdit('笔记')) return;
   const id = state.editingId;
   closeNoteBox();
   if (id) await deleteNoteItem(id);
 }
 
 async function deleteNoteItem(id) {
+  if (!await allowEdit('笔记')) return;
   const previous = state.highlights;
   state.highlights = state.highlights.filter((x) => x.id !== id);
   viewer?.setHighlights(state.highlights);
@@ -5535,6 +5593,10 @@ function readActiveSessions() {
 function activeSidFor(docId) {
   const map = readActiveSessions();
   const key = activeSessionSlot(docId);
+  if (windowId !== 'main' && typeof map[key] !== 'string') {
+    map[key] = newSid();
+    localStorage.setItem(SESSION_KEY, JSON.stringify(map));
+  }
   return typeof map[key] === 'string' ? map[key] : '';
 }
 function setActiveSidFor(docId, sid) {
@@ -5736,9 +5798,11 @@ async function saveSessionNow() {
   const docId = state.doc.docId;
   const sid = activeSidFor(docId);
   const headers = { 'Content-Type': 'application/json' };
+  const chatURL = `/api/session?${sessionQuery(sessionScopeKey(), sid)}`;
+  const translateURL = `/api/session?${sessionQuery(docId, TRANSLATE_SID)}`;
   const [chatRes, translateRes] = await Promise.all([
-    fetch(`/api/session?${sessionQuery(sessionScopeKey(), sid)}`, { method: 'POST', headers, body: both.chat }),
-    fetch(`/api/session?${sessionQuery(docId, TRANSLATE_SID)}`, { method: 'POST', headers, body: both.translate }),
+    !sessionsIsEntryMode() && (await canWrite(chatURL)) ? fetch(chatURL, { method: 'POST', headers, body: both.chat }) : { ok: true },
+    (await canWrite(translateURL)) ? fetch(translateURL, { method: 'POST', headers, body: both.translate }) : { ok: true },
   ]);
   if (!chatRes.ok) throw new Error(`HTTP ${chatRes.status}`);
   if (!translateRes.ok) throw new Error(`译文保存失败 HTTP ${translateRes.status}`);
@@ -5840,6 +5904,7 @@ function closeTabsNotInFolder(path) {
     if (keep.has(tab.docId)) continue;
     dropPdfHandle(tab.docId);
     dropDocView(tab.docId);
+    releaseDocument(tab.docId);
   }
   tabsStore.tabs = tabsStore.tabs.filter((t) => keep.has(t.docId));
   if (tabsStore.tabs.length) {
@@ -6423,6 +6488,7 @@ async function followCurrentSession() {
 }
 
 async function clearCurrentSession({ confirm: askConfirm = true } = {}) {
+  if (!await allowEdit('问答')) return;
   if (!state.doc) return;
   if (askConfirm && !confirm(`清空「${state.doc.name}」的对话和 AI 结果？`)) return;
   closeSessionMenu();
@@ -6799,6 +6865,7 @@ async function deleteSession(sid, { confirm: askConfirm = true } = {}) {
 }
 
 function renderSessionBar() {
+  windowReady();
   const bar = $('#sessBar');
   if (!bar) return;
   // 会话头只在问答块开着的时候出现（译文页不该挂着会话信息）
@@ -7348,6 +7415,7 @@ async function runTeaching(opId, {
   force = false, retryEntry = null, extraUser = '', ask = '', history = [],
   tag = '', teaching = null,
 } = {}) {
+  if (!await allowEdit('问答')) return;
   const op = teachingOpById(opId);
   if (!op) return null;
   if (!state.doc || !viewer?.pdf) { toast('先打开一篇论文', 'err', 3000); return null; }
@@ -7638,6 +7706,7 @@ async function condenseEntry(entry) {
  * 三类操作共用一条续讲链路，只有 system 与用户指令不同；「继续」才推进 step。
  */
 async function continueWalk(kind, entry) {
+  if (!await allowEdit('问答')) return;
   if (!state.doc || state.busy) return;
   const walk = activeWalk();
   if (!walk) { toast('教学进度已失效，请重新点「带我一步步读」', 'err', 3200); return; }
@@ -7846,6 +7915,7 @@ function restoreTeachingEntry(entry, row) {
  * 操作不需要各自再实现一遍。
  */
 async function runOperation(opId, { force = false, block = 'chat', retryEntry = null } = {}) {
+  if (!await allowEdit(block === 'translate' ? '译文' : '问答')) return;
   const op = opById(opId);
   if (!op) return null;
   if (!state.doc || !viewer?.pdf) { toast('先打开一篇论文', 'err', 3000); return null; }
@@ -9399,6 +9469,7 @@ function revealTranslatePanel() { revealPanel('translate'); }
  * 与划词/截图翻译共用 translateMessages 与同一条流式管线，结果仍按时间堆在译文面板。
  */
 async function doTranslateText({ text, targetLang = '' } = {}) {
+  if (!await allowEdit('译文')) return;
   const raw = String(text || '').replace(/\r\n?/g, '\n').trim();
   if (!raw || state.busy) return;
   if (!ensureReady()) return;
@@ -9463,6 +9534,7 @@ async function doTranslateText({ text, targetLang = '' } = {}) {
 }
 
 async function doTranslate(sel, { targetLang = '' } = {}) {
+  if (!await allowEdit('译文')) return;
   if (state.busy) return;
   const text = sel.cleanText || cleanText(sel.text);
   if (!text || !ensureReady()) return;
@@ -9553,6 +9625,7 @@ function translateShotRetryPayload({ docId, sid, page, label, refId = '', target
  * 目标语言跟随输入框旁「译成」的选择（用户 m10802：之前写死中文，切 English 也出中文）。
  */
 async function doTranslateShot({ shot, page = null, label = '截图', refId = '', sid = '', docId = '', targetLang = '' } = {}) {
+  if (!await allowEdit('译文')) return;
   const dataUrl = String(shot?.dataUrl || '');
   if (!dataUrl || state.busy) return;
   const curDocId = state.doc?.docId || null;
@@ -9651,6 +9724,7 @@ function retryTranslateShot(payload) {
 }
 
 async function doExplain(sel) {
+  if (!await allowEdit('问答')) return;
   if (state.busy) return;
   const text = sel.cleanText || cleanText(sel.text);
   if (!text || !ensureReady()) return;
@@ -10405,6 +10479,7 @@ function translateOnlyAsk(text) {
 }
 
 async function send(retryPending = null) {
+  if (!await allowEdit('问答')) return;
   const ta = $('#chatInput');
   if (state.busy) return;
   if (!retryPending && composerMode() === 'translate') {
@@ -11791,6 +11866,7 @@ function saveOnUnload(url, text) {
 }
 
 window.addEventListener('beforeunload', () => {
+  if (isWindowClosed()) return;
   // 不能只是 cancel：那样刚翻的那页进度就丢了。用 keepalive fetch 保证送达。
   saveProgress.cancel?.();
   persistSession.flush?.();

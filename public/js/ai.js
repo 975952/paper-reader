@@ -1,3 +1,4 @@
+import { windowStorage as localStorage } from './window-storage.js';
 import { resolveReadingRequest, historyMessages, stripPageLabels } from './reading-context.js';
 import { nowContext, buildProfileBlock } from './profile.js';
 import { CONDENSE_SYS } from './teaching.js';

@@ -7,14 +7,15 @@
 //!
 //! 窗口尺寸记在 data/window.json；关闭窗口直接结束进程（tao 的 run() 不会返回）。
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tao::{
-    dpi::LogicalSize,
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
-    window::{Fullscreen, ResizeDirection, WindowBuilder},
+    event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget},
+    window::{Fullscreen, ResizeDirection, WindowBuilder, WindowId, Window},
 };
 #[cfg(windows)]
 use tao::platform::windows::WindowBuilderExtWindows;
@@ -34,7 +35,7 @@ const MIN_H: f64 = 400.0;
 /// 应用内标题栏发来的动作。页面侧构造：`{type:"minimize"|"maximize"|"close"|"drag"}`、
 /// `{type:"resize", dir:"n"|"s"|"w"|"e"|"nw"|"ne"|"sw"|"se"}`、
 /// `{type:"fullscreen", on?:boolean}`（不传 on 就切换；Esc 由页面发 on=false）。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum WindowAction {
     Drag,
     Resize(ResizeDirection),
@@ -42,6 +43,23 @@ enum WindowAction {
     Maximize,
     Fullscreen(Option<bool>),
     Close,
+    CommitClose,
+    CancelClose,
+    Open { key: String, doc: String, request: String },
+    CancelOpen(String),
+    Ready { doc: String, title: String },
+    Focus(String),
+    Tile,
+    Place { x: i32, y: i32, width: u32, height: u32 },
+    List,
+    Quit,
+}
+
+#[derive(Debug, Clone)]
+struct WindowMessage { source: WindowId, action: WindowAction }
+
+fn valid_key(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 80 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 fn parse_action(msg: &str) -> Option<WindowAction> {
@@ -52,6 +70,30 @@ fn parse_action(msg: &str) -> Option<WindowAction> {
         "maximize" => Some(WindowAction::Maximize),
         "fullscreen" => Some(WindowAction::Fullscreen(v.get("on").and_then(|x| x.as_bool()))),
         "close" => Some(WindowAction::Close),
+        "close-commit" => Some(WindowAction::CommitClose),
+        "close-cancel" => Some(WindowAction::CancelClose),
+        "windows-list" => Some(WindowAction::List),
+        "windows-tile" => Some(WindowAction::Tile),
+        "window-place" => Some(WindowAction::Place {
+            x: i32::try_from(v.get("x")?.as_i64()?).ok()?,
+            y: i32::try_from(v.get("y")?.as_i64()?).ok()?,
+            width: u32::try_from(v.get("width")?.as_u64()?).ok()?.clamp(400, 20000),
+            height: u32::try_from(v.get("height")?.as_u64()?).ok()?.clamp(300, 20000),
+        }),
+        "windows-quit" => Some(WindowAction::Quit),
+        "window-open-cancel" => Some(WindowAction::CancelOpen(v.get("request")?.as_str()?.to_string())),
+        "window-focus" => Some(WindowAction::Focus(v.get("key")?.as_str()?.to_string())),
+        "window-ready" => Some(WindowAction::Ready {
+            doc: v.get("doc").and_then(|x| x.as_str()).unwrap_or("").chars().take(1000).collect(),
+            title: v.get("title").and_then(|x| x.as_str()).unwrap_or("prt").chars().take(300).collect(),
+        }),
+        "window-open" => {
+            let key = v.get("key")?.as_str()?;
+            let doc = v.get("doc")?.as_str()?;
+            let request = v.get("request")?.as_str()?;
+            if !valid_key(key) || doc.is_empty() || doc.len() > 4000 || !valid_key(request) { return None; }
+            Some(WindowAction::Open { key: key.into(), doc: doc.into(), request: request.into() })
+        },
         "resize" => {
             let dir = v.get("dir").and_then(|x| x.as_str())?;
             Some(WindowAction::Resize(match dir {
@@ -114,12 +156,6 @@ fn load_size() -> (f64, f64) {
     )
 }
 
-fn save_size(width: f64, height: f64) {
-    let w = width.round().max(MIN_W) as u64;
-    let h = height.round().max(MIN_H) as u64;
-    store::write_json("window.json", &json!({ "width": w, "height": h }));
-}
-
 fn is_local_target(origin: &str, target: &str) -> bool {
     let lower = target.to_ascii_lowercase();
     lower == origin
@@ -144,7 +180,8 @@ fn is_panel_target(origin: &str, target: &str) -> bool {
 fn decorate_builder<'a>(
     builder: WebViewBuilder<'a>,
     origin: &str,
-    proxy: EventLoopProxy<WindowAction>,
+    proxy: EventLoopProxy<WindowMessage>,
+    source: WindowId,
 ) -> WebViewBuilder<'a> {
     let origin_for_nav = origin.to_string();
     let origin_for_new = origin.to_string();
@@ -165,7 +202,7 @@ fn decorate_builder<'a>(
             match parse_action(msg) {
                 Some(action) => {
                     // 必须回到事件循环线程再动窗口（tao 的窗口不是 Send）
-                    if proxy.send_event(action).is_err() {
+                    if proxy.send_event(WindowMessage { source, action }).is_err() {
                         crate::log_line("[window] 事件循环已关闭，窗口动作被丢弃");
                     }
                 }
@@ -213,181 +250,236 @@ fn app_icon(size: u32) -> Option<tao::window::Icon> {
     tao::window::Icon::from_rgba(icon_geometry::render_icon_rgba(size), size, size).ok()
 }
 
-pub fn run(url: String, background: bool) -> ! {
-    let event_loop = EventLoopBuilder::<WindowAction>::with_user_event()
-        .build();
-    // 页面（WebView 里的 JS）不能直接碰窗口：它把动作 post 进事件循环，由这里执行。
-    let proxy = event_loop.create_proxy();
+// Each webview owns its JS state; the service and authentication stay in one process.
+struct ReaderWindow {
+    webview: wry::WebView,
+    window: Window,
+    key: String,
+    doc: String,
+    title: String,
+    closing: bool,
+    restore_max: bool,
+    pending: Option<(WindowId, String, String)>,
+}
+
+fn emit(reader: &ReaderWindow, value: serde_json::Value) {
+    let _ = reader.webview.evaluate_script(&format!(
+        "window.dispatchEvent(new CustomEvent('prt-desktop', {{detail:{value}}}));"
+    ));
+}
+
+fn create_reader(
+    target: &EventLoopWindowTarget<WindowMessage>, context: &mut WebContext,
+    proxy: EventLoopProxy<WindowMessage>, base: &str, origin: &str,
+    key: &str, doc: &str, geometry: &serde_json::Value, background: bool,
+) -> Result<ReaderWindow, String> {
     let (w, h) = load_size();
-
-    // 本机服务的前缀，如 "http://127.0.0.1:8787"。只有以它开头的导航才算「应用自己」，
-    // 其余一律当成外链丢给系统浏览器 —— 免得应用窗口被外站顶掉、又退不回来。
-    let origin = url
-        .split_once("://")
-        .and_then(|(scheme, rest)| rest.find('/').map(|i| format!("{}://{}", scheme, &rest[..i])))
-        .unwrap_or_else(|| url.clone())
-        .to_ascii_lowercase();
-
-    /* --background：自动化验收专用。窗口创建为隐藏、不抢焦点、不占任务栏，
-       验证脚本通过 HTTP / CDP 操作页面，用户屏幕上不会弹出任何东西。
-       正常双击启动完全不受影响。 */
-    let mut builder = WindowBuilder::new()
-        .with_title("prt")
+    let mut builder = WindowBuilder::new().with_title("prt")
         .with_window_icon(app_icon(64))
-        .with_inner_size(LogicalSize::new(w, h))
+        .with_inner_size(LogicalSize::new(
+            sane(geometry.get("width").and_then(|x| x.as_f64()), w),
+            sane(geometry.get("height").and_then(|x| x.as_f64()), h)))
         .with_min_inner_size(LogicalSize::new(MIN_W, MIN_H))
-        .with_decorations(false)
-        .with_resizable(true)
-        .with_maximizable(true);
+        .with_decorations(false).with_resizable(true).with_maximizable(true);
     if background {
         builder = builder.with_visible(false).with_focused(false);
-        #[cfg(windows)]
-        {
-            builder = builder.with_skip_taskbar(true);
-        }
+        #[cfg(windows)] { builder = builder.with_skip_taskbar(true); }
     }
-    let window = match builder.build(&event_loop) {
-        Ok(win) => win,
-        Err(e) => {
-            crate::log_line(&format!("[fatal] 创建窗口失败: {}", e));
-            std::process::exit(3);
-        }
-    };
+    let window = builder.build(target).map_err(|e| e.to_string())?;
+    if let (Some(x), Some(y)) = (geometry["x"].as_i64(), geometry["y"].as_i64()) {
+        // A disconnected monitor must never strand a restored window off-screen.
+        if window.available_monitors().any(|m| {
+            let p = m.position(); let s = m.size();
+            x >= p.x as i64 && y >= p.y as i64
+                && x + 100 < p.x as i64 + s.width as i64 && y + 80 < p.y as i64 + s.height as i64
+        }) { window.set_outer_position(PhysicalPosition::new(x as i32, y as i32)); }
+    }
+    let mut url = url::Url::parse(base).map_err(|e| e.to_string())?;
+    if !doc.is_empty() { url.query_pairs_mut().append_pair("document", doc); }
+    let init = format!("window.__PRT_WINDOW_ID = {};", json!(key));
+    let webview = decorate_builder(
+        WebViewBuilder::new_with_web_context(context).with_hotkeys_zoom(true)
+            .with_url(url.as_str()).with_initialization_script(&init),
+        origin, proxy, window.id(),
+    ).build(&window).map_err(|e| e.to_string())?;
+    if geometry["maximized"].as_bool() == Some(true) { window.set_maximized(true); }
+    Ok(ReaderWindow { webview, window, key: key.into(), doc: doc.into(), title: "prt".into(),
+        closing: false, restore_max: false, pending: None })
+}
 
-    // WebView2 的用户数据放在 data/webview2，保证"整个应用只用一个目录"
+fn save_windows(windows: &HashMap<WindowId, ReaderWindow>) {
+    let mut rows: Vec<_> = windows.values().map(|r| {
+        let size = r.window.inner_size().to_logical::<f64>(r.window.scale_factor());
+        let pos = r.window.outer_position().unwrap_or(PhysicalPosition::new(0, 0));
+        let normal = !r.window.is_maximized() && !is_fullscreen(&r.window);
+        json!({"key":r.key, "x":pos.x, "y":pos.y,
+            "width":if normal {size.width} else {DEFAULT_W},
+            "height":if normal {size.height} else {DEFAULT_H},
+            "maximized":r.window.is_maximized()})
+    }).collect();
+    rows.sort_by_key(|r| r["key"].as_str().unwrap_or("").to_string());
+    store::write_json("reader-windows.json", &json!({"windows":rows}));
+}
+
+fn request_close(reader: &mut ReaderWindow) {
+    if reader.closing { return; }
+    reader.closing = true;
+    emit(reader, json!({"type":"close-request"}));
+}
+
+pub fn run(url: String, background: bool) -> ! {
+    let event_loop = EventLoopBuilder::<WindowMessage>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+    let origin = url::Url::parse(&url).expect("local service URL").origin().ascii_serialization().to_ascii_lowercase();
     let webview_dir = util::dirs().data.join("webview2");
     let _ = std::fs::create_dir_all(&webview_dir);
-    let mut web_context = WebContext::new(Some(webview_dir));
-
-    // 页面里的外链交给系统浏览器；面板 URL 由前端应用内卡片处理，不创建新的顶层窗口。
-    let webview = decorate_builder(
-        WebViewBuilder::new_with_web_context(&mut web_context)
-            .with_hotkeys_zoom(true)
-            .with_url(url.clone()),
-        &origin,
-        proxy,
-    )
-    .build(&window);
-
-    let main_webview = match webview {
-        Ok(v) => v,
-        Err(e) => {
-            crate::log_line(&format!("[fatal] WebView2 初始化失败: {}", e));
-            crate::log_line("       请确认已安装 WebView2 运行时（Win10/11 一般自带）");
-            std::process::exit(4);
+    let mut context = WebContext::new(Some(webview_dir));
+    let saved = store::read_json("reader-windows.json", json!({}));
+    let mut rows = saved["windows"].as_array().cloned().unwrap_or_default();
+    rows.retain(|r| r["key"].as_str().map(valid_key).unwrap_or(false));
+    rows.truncate(10);
+    if rows.is_empty() { rows.push(json!({"key":"main"})); }
+    let mut windows = HashMap::new();
+    for row in rows {
+        let key = row["key"].as_str().unwrap_or("main");
+        if windows.values().any(|r: &ReaderWindow| r.key == key) { continue; }
+        match create_reader(&event_loop, &mut context, proxy.clone(), &url, &origin, key, "", &row, background) {
+            Ok(r) => { windows.insert(r.window.id(), r); },
+            Err(e) => crate::log_line(&format!("[window] 创建窗口失败: {e}")),
         }
-    };
-
-    crate::log_line(&format!("[window] 已加载 {}", url));
-
-    let main_id = window.id();
-    let mut last_save = Instant::now()
-        .checked_sub(Duration::from_secs(60))
-        .unwrap_or_else(Instant::now);
-    let mut last_max = window.is_maximized();
-    let mut last_full = is_fullscreen(&window);
-    // 从「最大化」直接进全屏时，Windows 会留下任务栏位置的黑条 / 一圈白边；
-    // 先进全屏前先还原窗口，退出全屏后再恢复最大化（用户实测的修复方式）。
-    let mut fs_restore_max = false;
-
-    event_loop.run(move |event, _event_loop, control_flow| {
+    }
+    if windows.is_empty() { std::process::exit(4); }
+    let mut last_save = Instant::now();
+    let mut quitting = false;
+    event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
-
         match event {
-            /* 应用内标题栏发来的窗口动作 */
-            Event::UserEvent(action) => {
+            Event::UserEvent(WindowMessage { source, action }) => {
+                if !windows.contains_key(&source) { return; }
                 match action {
-                    WindowAction::Drag => {
-                        // 进入系统拖动循环（内部是 WM_NCLBUTTONDOWN/HTCAPTION），
-                        // 按下的那一刻发过来最顺；失败只记日志，不影响别的事。
-                        if let Err(e) = window.drag_window() {
-                            crate::log_line(&format!("[window] 拖动窗口失败: {}", e));
+                    WindowAction::CancelOpen(request) => {
+                        windows.retain(|_, r| !r.pending.as_ref().map(|(parent, req, _)| *parent == source && *req == request).unwrap_or(false));
+                        save_windows(&windows);
+                    },
+                    WindowAction::Open { key, doc, request } => {
+                        let result = if windows.len() >= 10 {
+                            Err("最多同时打开 10 个窗口".to_string())
+                        } else if windows.values().any(|r| r.key == key) {
+                            Err("窗口标识重复，请重试".to_string())
+                        } else {
+                            create_reader(target, &mut context, proxy.clone(), &url, &origin, &key, &doc, &json!({}), background)
+                        };
+                        match result {
+                            Ok(mut r) => {
+                                r.pending = Some((source, request, doc));
+                                windows.insert(r.window.id(), r);
+                                save_windows(&windows);
+                            },
+                            Err(error) => emit(&windows[&source], json!({"type":"open-result","request":request,"ok":false,"error":error})),
                         }
-                    }
-                    WindowAction::Resize(dir) => {
-                        if let Err(e) = window.drag_resize_window(dir) {
-                            crate::log_line(&format!("[window] 缩放窗口失败: {}", e));
-                        }
-                    }
-                    WindowAction::Minimize => window.set_minimized(true),
-                    WindowAction::Maximize => window.set_maximized(!window.is_maximized()),
-                    // 全屏：页面传 on 就按它执行（Esc 退出走这条），不传就切换。
-                    WindowAction::Fullscreen(on) => {
-                        let want = on.unwrap_or_else(|| !is_fullscreen(&window));
-                        if want && !is_fullscreen(&window) {
-                            fs_restore_max = window.is_maximized();
-                            if fs_restore_max {
-                                window.set_maximized(false);
+                    },
+                    WindowAction::Ready { doc, title } => {
+                        let r = windows.get_mut(&source).unwrap();
+                        r.doc = doc.clone(); r.title = title;
+                        r.window.set_title(&format!("{} · prt", r.title));
+                        let mut failed = false;
+                        if let Some((parent, request, wanted)) = r.pending.take() {
+                            failed = doc != wanted;
+                            if let Some(p) = windows.get(&parent) {
+                                emit(p, json!({"type":"open-result","request":request,"ok":doc == wanted,
+                                    "error":"文档未能加载，原标签已保留"}));
                             }
-                            set_fullscreen(&window, true);
-                        } else if !want && is_fullscreen(&window) {
-                            set_fullscreen(&window, false);
-                            if fs_restore_max {
-                                window.set_maximized(true);
-                                fs_restore_max = false;
+                        }
+                        if failed { windows.remove(&source); save_windows(&windows); }
+                        let rows: Vec<_> = windows.values().map(|r| json!({"key":r.key,"title":r.title})).collect();
+                        for r in windows.values() { emit(r, json!({"type":"windows","windows":rows})); }
+                    },
+                    WindowAction::List => {
+                        let rows: Vec<_> = windows.values().map(|r| json!({"key":r.key,"title":r.title})).collect();
+                        emit(&windows[&source], json!({"type":"windows","windows":rows}));
+                    },
+                    WindowAction::Focus(key) => {
+                        if let Some(r) = windows.values().find(|r| r.key == key) {
+                            if !background { r.window.set_minimized(false); r.window.set_focus(); }
+                        }
+                    },
+                    WindowAction::Place { x, y, width, height } => {
+                        let r = &windows[&source];
+                        set_fullscreen(&r.window, false); r.window.set_maximized(false);
+                        if !background { r.window.set_minimized(false); }
+                        r.window.set_outer_position(PhysicalPosition::new(x, y));
+                        r.window.set_inner_size(PhysicalSize::new(width, height));
+                        emit(r, json!({"type":"placed"}));
+                    },
+                    WindowAction::Tile => {
+                        if let Some(m) = windows[&source].window.current_monitor() {
+                            let p = m.position(); let s = m.size();
+                            let count = windows.len() as u32;
+                            let cols = if count <= 3 { count } else { (count as f64).sqrt().ceil() as u32 };
+                            let rows = (count + cols - 1) / cols;
+                            let mut ordered: Vec<_> = windows.values().collect();
+                            ordered.sort_by_key(|r| &r.key);
+                            for (i, r) in ordered.iter().enumerate() {
+                                let w = s.width / cols; let h = s.height.saturating_sub(48) / rows;
+                                emit(r, json!({"type":"place", "x":p.x + (i as u32 % cols * w) as i32,
+                                    "y":p.y + (i as u32 / cols * h) as i32, "width":w, "height":h}));
                             }
+                            save_windows(&windows);
                         }
-                    }
-                    WindowAction::Close => {
-                        let logical = window.inner_size().to_logical::<f64>(window.scale_factor());
-                        // 全屏时的尺寸是屏幕尺寸，不能覆盖用户平时的窗口大小
-                        if !is_fullscreen(&window) {
-                            save_size(logical.width, logical.height);
+                    },
+                    WindowAction::Quit => {
+                        save_windows(&windows); quitting = true;
+                        for r in windows.values_mut() { request_close(r); }
+                    },
+                    WindowAction::CommitClose => {
+                        if !windows[&source].closing { return; }
+                        if windows.len() == 1 && !quitting { save_windows(&windows); }
+                        windows.remove(&source);
+                        if windows.is_empty() { *control_flow = ControlFlow::Exit; }
+                        else if !quitting { save_windows(&windows); }
+                    },
+                    WindowAction::CancelClose => {
+                        windows.get_mut(&source).unwrap().closing = false; quitting = false;
+                    },
+                    other => {
+                        let r = windows.get_mut(&source).unwrap();
+                        match other {
+                            WindowAction::Drag => { let _ = r.window.drag_window(); },
+                            WindowAction::Resize(dir) => { let _ = r.window.drag_resize_window(dir); },
+                            WindowAction::Minimize => r.window.set_minimized(true),
+                            WindowAction::Maximize => r.window.set_maximized(!r.window.is_maximized()),
+                            WindowAction::Close => request_close(r),
+                            WindowAction::Fullscreen(on) => {
+                                let want = on.unwrap_or_else(|| !is_fullscreen(&r.window));
+                                if want && !is_fullscreen(&r.window) {
+                                    r.restore_max = r.window.is_maximized();
+                                    if r.restore_max { r.window.set_maximized(false); }
+                                    set_fullscreen(&r.window, true);
+                                } else if !want && is_fullscreen(&r.window) {
+                                    set_fullscreen(&r.window, false);
+                                    if r.restore_max { r.window.set_maximized(true); r.restore_max = false; }
+                                }
+                            },
+                            _ => {},
                         }
-                        *control_flow = ControlFlow::Exit;
-                        return;
-                    }
+                        push_window_state(&r.webview, r.window.is_maximized(), is_fullscreen(&r.window));
+                    },
                 }
-                // 动作可能改了最大化 / 全屏状态 → 回推给页面切图标与沉浸式布局
-                let now_max = window.is_maximized();
-                let now_full = is_fullscreen(&window);
-                if now_max != last_max || now_full != last_full {
-                    last_max = now_max;
-                    last_full = now_full;
-                    push_window_state(&main_webview, now_max, now_full);
+            },
+            Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. } => {
+                if let Some(r) = windows.get_mut(&window_id) { request_close(r); }
+            },
+            Event::WindowEvent { window_id, event: WindowEvent::Resized(_), .. }
+            | Event::WindowEvent { window_id, event: WindowEvent::Moved(_), .. } => {
+                if let Some(r) = windows.get(&window_id) {
+                    push_window_state(&r.webview, r.window.is_maximized(), is_fullscreen(&r.window));
                 }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(size),
-                window_id,
-                ..
-            } => {
-                // 拖动过程中会疯狂触发，节流一下；全屏时别把屏幕尺寸写进 window.json
-                if window_id == main_id && !is_fullscreen(&window) && last_save.elapsed() >= Duration::from_millis(700) {
-                    last_save = Instant::now();
-                    let logical = size.to_logical::<f64>(window.scale_factor());
-                    save_size(logical.width, logical.height);
+                if !quitting && last_save.elapsed() > Duration::from_millis(700) {
+                    save_windows(&windows); last_save = Instant::now();
                 }
-                // 最大化 / 还原 / 全屏（含双击标题栏、Win+↑、系统菜单）也会走到这里
-                if window_id == main_id {
-                    let now_max = window.is_maximized();
-                    let now_full = is_fullscreen(&window);
-                    if now_max != last_max || now_full != last_full {
-                        last_max = now_max;
-                        last_full = now_full;
-                        push_window_state(&main_webview, now_max, now_full);
-                    }
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                window_id,
-                ..
-            } => {
-                if window_id == main_id {
-                    if !is_fullscreen(&window) {
-                        let logical = window.inner_size().to_logical::<f64>(window.scale_factor());
-                        save_size(logical.width, logical.height);
-                    }
-                    *control_flow = ControlFlow::Exit;
-                }
-            }
-            _ => {}
+            },
+            _ => {},
         }
-
-        // 这两者必须活到进程结束（run() 不会返回，这里只是显式保活）
-        let _ = &main_webview;
-        let _ = &web_context;
     });
 }
 
