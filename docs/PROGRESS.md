@@ -5415,3 +5415,53 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
   资产 **`prt-2026-11-05c.exe`**（11,162,112 B），说明用 UTF-8 JSON 文件发（避免中文乱码）；
   `curl -sIL -x http://127.0.0.1:10808` 验证下载 302 → 200、Content-Length 与本地一致。
 
+## 101. 译文里划词「解释」先打开最近会话再输出（2026-11-05，用户 m11103）
+
+### 101.1 用户反馈
+
+> m11103：「译文里面选词解释应该直接打开最近的会话之后再输出结果」
+
+### 101.2 根因
+
+- `doExplain()` 固定把解释写进问答面板，但**不检查问答面板是否还停在「选择会话」卡片上**。
+  用户只在译文面板里操作（没点过会话）时，问答面板处于 entry 模式、没有活动会话：
+  解释条目加进隐藏的问答 DOM，`sid` 也还是空指针 / 旧指针；之后一旦选会话，
+  `restoreSession()` 会整段覆盖聊天区 —— 解释就这么丢了，表现是「点了解释什么都没出现」。
+- 入口模式下 `addEntry({block:'chat'})` + `revealPanel('chat')` 会被选择卡片挡住，
+  用户看不到流式输出。
+
+### 101.3 实现
+
+- `public/js/sessions.js` 新增导出 `sessionsOpenLatestForOutput()`：
+  - 只在 `st.entryVisible`（选择卡片模式）时动作：先 `refreshList({force:true})`，按 `updatedAt`
+    找最近一段有内容的会话（优先读过当前论文的），`hideEntryCard()` 后
+    `openSessionFromHistory(row,{force:true})`；
+  - 一个会话都没有 → `startNewSession({silent:true,fromEntry:true})`；
+  - 返回 true 表示已经可以写入；生成中 / 没有文档返回 false。
+- `public/js/app.js`：`doExplain()` 在 `ensureReady()` 之后、取 `sid`/`history` 之前调用
+  `if (sessionsIsEntryMode()) { const ok = await sessionsOpenLatestForOutput(); if (!ok) return; }`
+  —— 先打开最近的会话，再解释；解释接在那段对话后面，历史与上文也就对上了。
+
+### 101.4 验证
+
+- 隔离冒烟 `test/artifacts/explain-open-session/smoke.mjs`（8986 Node 服务 + attention.pdf +
+  mock `/api/chat`）：阶段 1 造一段有内容的最近会话；阶段 2 重新打开文档停在选择卡片 →
+  译文面板翻译 → 在译文里划词 → 气泡点「解释」：卡片收起、会话头变成那段会话、
+  解释出现在问答面板、活动 sid 就是最近会话、自动保存后服务端文件里含该解释条目；
+  **14 passed / 0 failed**，无 pageerror。
+- 解析：`node --experimental-vm-modules` + `vm.SourceTextModule` 校验 `public/js/app.js`、
+  `public/js/sessions.js` 均 PARSE-OK。
+
+### 101.5 交付
+
+- 文档：`docs/使用说明书.md` §4.4 补「解释会先打开最近的会话再输出」。
+- 构建：优雅关闭桌面 `prt.exe`（PID 22868）→ `desktop\build.bat` → 项目根与桌面 `prt.exe`
+  **11,164,160 B**，SHA256 `5F8B91A9E1321BECCB5232471F328179414ACD7108C41291AC4AC7F5FF04E69B`；
+  启动新实例 PID 21624（Responding=True，8787），`/` 返回 200 且 `<title>prt</title>`。
+- 提交：显式 `git add public/js/app.js public/js/sessions.js docs/使用说明书.md docs/PROGRESS.md`
+  （不 `git add -A`）→「译文里划词解释先打开最近会话再输出」；
+  走代理 `git -c http.proxy=http://127.0.0.1:10808 push origin main` 推送。
+- Release：走代理 + `git credential fill` 缓存 token 发布 **`release-2026-11-05d`**，
+  资产 **`prt-2026-11-05d.exe`**（11,164,160 B），说明用 UTF-8 JSON 文件发；
+  `curl -sIL -x http://127.0.0.1:10808` 验证下载 302 → 200、Content-Length 与本地一致。
+

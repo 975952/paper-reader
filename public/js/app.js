@@ -25,6 +25,7 @@ import {
   initSessions, sessionsOnFolderEntered, sessionsOnDocOpened, sessionsOnSessionChanged,
   sessionsMigrateFolder, sessionsRefreshHeader, sessionsSetBusy,
   sessionsIsEntryMode, sessionsLeaveEntryForNewSession, sessionsEntryCardEl, sessionsHideEntryCard,
+  sessionsOpenLatestForOutput,
   sessionsApplyMeta, sessionsGetEnterMode, sessionsSetEnterMode,
   sessionsGetHistoryMode, sessionsSetHistoryMode, sessionsGetList,
 } from './sessions.js';
@@ -9653,6 +9654,13 @@ async function doExplain(sel) {
   if (state.busy) return;
   const text = sel.cleanText || cleanText(sel.text);
   if (!text || !ensureReady()) return;
+  /* 解释结果写在问答面板里。如果问答那边还停在「选择会话」卡片上（比如用户只在译文面板
+     里划词，从没点过会话），直接输出会写进看不见的空会话、事后选会话时又整段丢掉。
+     先把最近的会话打开（没有就新建），再继续解释 —— 结果会接在那段对话后面。 */
+  if (sessionsIsEntryMode()) {
+    const ok = await sessionsOpenLatestForOutput();
+    if (!ok) return;
+  }
   const docId = state.doc?.docId || null;
   const openSeq = state.openSeq;
   const sid = activeSidFor(docId);

@@ -1424,6 +1424,27 @@ export async function sessionsLeaveEntryForNewSession() {
   return true;
 }
 
+/** app.js 在「解释」这类旁路输出前调用：当前还停在选择会话卡片上（没有活动会话）时，
+ *  先打开最近的会话，再让调用方把结果写进那段对话。一个会话都没有就静默新建一个空会话。
+ *  返回 true 表示已经有一个可以写入的活动会话。 */
+export async function sessionsOpenLatestForOutput() {
+  if (!st.entryVisible) return true;
+  if (st.busy || st.ctx?.isBusy?.()) return false;
+  if (!st.ctx?.hasDoc?.()) return false;
+  await refreshList({ force: true });
+  const docId = String(st.ctx.doc()?.docId || st.docId || '');
+  // 「最近」按最后活动时间算（置顶只影响历史排序，不代表最近用过）；优先挑读过当前论文的那段
+  const rows = st.list
+    .filter((r) => !r.archived && (r.count || 0) > 0)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const row = rows.find((r) => Array.isArray(r.docIds) && r.docIds.map(String).includes(docId))
+    || rows[0] || null;
+  hideEntryCard();
+  if (row) await st.ctx.openSessionFromHistory(row, { force: true });
+  else await st.ctx.startNewSession({ silent: true, fromEntry: true });
+  return true;
+}
+
 /** 设置页「会话」分类用：进入文件夹默认方式 / 历史默认排列 */
 export function sessionsGetEnterMode() { return readOnEnter(); }
 export function sessionsSetEnterMode(mode) {
