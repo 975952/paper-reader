@@ -5027,6 +5027,18 @@ function rightPanelInCol(n) {
 }
 
 function composerMode() { return rightPanelInCol(1) === 'translate' ? 'translate' : 'chat'; }
+
+/** 「译成」选择的目标语言（中文 / English）。划词、文本、截图翻译共用这一份选择，默认中文。 */
+function selectedTranslateTarget() {
+  const v = $('#translateTargetLang')?.value;
+  return v === 'English' ? 'English' : '中文';
+}
+/** 显式传了就用显式的（重试/恢复要用当时的目标语言），否则跟随当前「译成」选择。 */
+function resolveTranslateTarget(pref) {
+  if (pref === 'English') return 'English';
+  if (pref === '中文') return '中文';
+  return selectedTranslateTarget();
+}
 function syncComposerMode(id = rightPanelInCol(1)) {
   const translating = id === 'translate';
   const input = $('#chatInput');
@@ -5355,6 +5367,7 @@ function serialiseRetryPayload(raw) {
   }
   if (kind === 'translate' || kind === 'explain') {
     return { kind, docId: String(raw.docId || '').slice(0, 240), text: String(raw.text || '').slice(0, 6000), page: raw.page || null,
+      targetLang: raw.targetLang === 'English' ? 'English' : (raw.targetLang === '中文' ? '中文' : ''),
       source: raw.source === 'right' ? 'right' : '' };
   }
   if (kind === 'translate-shot') {
@@ -5362,6 +5375,7 @@ function serialiseRetryPayload(raw) {
     return {
       kind, docId: String(raw.docId || '').slice(0, 240), sid: String(raw.sid || '').slice(0, 40),
       page: raw.page || null, label: String(raw.label || '截图').slice(0, 120),
+      targetLang: raw.targetLang === 'English' ? 'English' : (raw.targetLang === '中文' ? '中文' : ''),
       refId: validAttachmentId(raw.refId) ? raw.refId : '',
     };
   }
@@ -6103,7 +6117,7 @@ function restoreRetryCallback(row, entry, priorUser) {
       const sel = { page: payload.page || null, text: payload.text || '', cleanText: payload.text || '',
         source: payload.source === 'right' ? 'right' : '' };
       if (!sel.cleanText) { restoreComposerFallback(fallbackQuestion); return; }
-      if (payload.kind === 'translate') doTranslate(sel);
+      if (payload.kind === 'translate') doTranslate(sel, { targetLang: payload.targetLang || '' });
       else doExplain(sel);
       return;
     }
@@ -9383,12 +9397,12 @@ function revealTranslatePanel() { revealPanel('translate'); }
  * 文本输入翻译（2026-11-03 用户要求）：粘贴/手输文字直接翻，不依赖 PDF 选区。
  * 与划词/截图翻译共用 translateMessages 与同一条流式管线，结果仍按时间堆在译文面板。
  */
-async function doTranslateText({ text, targetLang = '中文' } = {}) {
+async function doTranslateText({ text, targetLang = '' } = {}) {
   const raw = String(text || '').replace(/\r\n?/g, '\n').trim();
   if (!raw || state.busy) return;
   if (!ensureReady()) return;
   const body = raw.slice(0, 20000);
-  const lang = targetLang === 'English' ? 'English' : (targetLang === '中文' ? '中文' : targetLangFor(body));
+  const lang = resolveTranslateTarget(targetLang);
   revealTranslatePanel();
   const retryOf = () => ({
     kind: 'translate-text', docId: state.doc?.docId || null,
@@ -9447,11 +9461,13 @@ async function doTranslateText({ text, targetLang = '中文' } = {}) {
   }
 }
 
-async function doTranslate(sel) {
+async function doTranslate(sel, { targetLang = '' } = {}) {
   if (state.busy) return;
   const text = sel.cleanText || cleanText(sel.text);
   if (!text || !ensureReady()) return;
-  const lang = targetLangFor(text);
+  // 目标语言以输入框旁「译成」的选择为准；重试时沿用当时记录的目标语言
+  // （用户 m10802：切了 English 仍出中文）
+  const lang = resolveTranslateTarget(targetLang);
   // A 线 P3：翻译缓存键带提示词版本（改翻译提示词 → 旧缓存不复用）
   const key = `translate.selection@${PROMPT_SYSTEM_VERSION}::${lang}::${text.length}-${hashStr(text)}`;
   const cached = state.cache.get(key);
@@ -9473,7 +9489,7 @@ async function doTranslate(sel) {
     }
   }
   const entry = addEntry({ block: 'translate', tag: 'translation', page: sel.page, quote: text,
-    retry: { kind: 'translate', docId: state.doc?.docId || null, text, page: sel.page || null }, reveal: !inCard });
+    retry: { kind: 'translate', docId: state.doc?.docId || null, text, page: sel.page || null, targetLang: lang }, reveal: !inCard });
   if (cached) {
     entry.body.innerHTML = renderMarkdown(cached);
     if (cardBody) cardBody.innerHTML = renderMarkdown(cached);
@@ -9517,14 +9533,15 @@ async function doTranslate(sel) {
   }
 }
 
-/** 截图翻译的重试描述（只存附件 id + 页码/标签，不存 base64 图片本体） */
-function translateShotRetryPayload({ docId, sid, page, label, refId = '' }) {
+/** 截图翻译的重试描述（只存附件 id + 页码/标签/目标语言，不存 base64 图片本体） */
+function translateShotRetryPayload({ docId, sid, page, label, refId = '', targetLang = '' }) {
   return {
     kind: 'translate-shot',
     docId: String(docId || ''),
     sid: String(sid || '').slice(0, 40),
     page: page || null,
     label: String(label || '截图').slice(0, 120),
+    targetLang: targetLang === 'English' ? 'English' : (targetLang === '中文' ? '中文' : ''),
     refId: validAttachmentId(refId) ? refId : '',
   };
 }
@@ -9532,8 +9549,9 @@ function translateShotRetryPayload({ docId, sid, page, label, refId = '' }) {
 /**
  * 截图翻译（2026-11-03）：把框选到的 PDF 区域当图片发给模型，直接翻译图里的文字。
  * 与划词翻译的区别：选区来自像素而不是文本层，所以图表、公式、扫描页也能翻。
+ * 目标语言跟随输入框旁「译成」的选择（用户 m10802：之前写死中文，切 English 也出中文）。
  */
-async function doTranslateShot({ shot, page = null, label = '截图', refId = '', sid = '', docId = '' } = {}) {
+async function doTranslateShot({ shot, page = null, label = '截图', refId = '', sid = '', docId = '', targetLang = '' } = {}) {
   const dataUrl = String(shot?.dataUrl || '');
   if (!dataUrl || state.busy) return;
   const curDocId = state.doc?.docId || null;
@@ -9542,11 +9560,12 @@ async function doTranslateShot({ shot, page = null, label = '截图', refId = ''
   if (targetDoc !== curDocId) { toast('这张截图属于另一篇论文，请切回原论文后重试', 'err', 3200); return; }
   if (!ensureReady()) return;
   revealTranslatePanel();
+  const lang = resolveTranslateTarget(targetLang);
   const pageNo = Number(page) > 0 ? Number(page) : null;
   const label0 = String(label || '截图').slice(0, 120);
   const sessionSid = String(sid || '') || activeSidFor(targetDoc);
   let finalRef = validAttachmentId(refId) ? refId : '';
-  const retryOf = (rid) => translateShotRetryPayload({ docId: targetDoc, sid: sessionSid, page: pageNo, label: label0, refId: rid || '' });
+  const retryOf = (rid) => translateShotRetryPayload({ docId: targetDoc, sid: sessionSid, page: pageNo, label: label0, refId: rid || '', targetLang: lang });
 
   const entry = addEntry({
     block: 'translate', tag: 'translation', page: pageNo, quote: label0,
@@ -9574,7 +9593,7 @@ async function doTranslateShot({ shot, page = null, label = '截图', refId = ''
     }
     warnIfNoVisionModel(true);
     const messages = translateShotMessages({
-      page: pageNo, docTitle: state.doc?.name || '', label: label0, targetLang: '中文',
+      page: pageNo, docTitle: state.doc?.name || '', label: label0, targetLang: lang,
     });
     const last = messages[messages.length - 1];
     if (last && typeof last.content === 'string') {
@@ -9625,7 +9644,8 @@ function retryTranslateShot(payload) {
   (async () => {
     const dataUrl = await fetchAttachmentDataUrl(refId, docId, sid);
     if (!dataUrl) { toast('截图文件已不在，请重新框选翻译', 'ok', 5200); return; }
-    await doTranslateShot({ shot: { dataUrl, width: 0, height: 0 }, page: p.page || null, label: p.label || '截图', refId, sid, docId });
+    await doTranslateShot({ shot: { dataUrl, width: 0, height: 0 }, page: p.page || null, label: p.label || '截图',
+      refId, sid, docId, targetLang: p.targetLang || '' });
   })();
 }
 
@@ -10384,7 +10404,7 @@ async function send(retryPending = null) {
     const shots = state.attachments.filter((a) => a.kind === 'image');
     if (!text && !shots.length) return;
     if (text.length > 20000) { toast('最多翻译 20,000 字', 'err', 2400); return; }
-    const lang = $('#translateTargetLang')?.value === 'English' ? 'English' : '中文';
+    const lang = selectedTranslateTarget();
     if (!ensureReady()) return;
     ta.value = '';
     ta.style.height = 'auto';
@@ -10396,6 +10416,7 @@ async function send(retryPending = null) {
         shot: { dataUrl: a.dataUrl, width: a.w || 0, height: a.h || 0 },
         page: a.page || null,
         label: a.label || '截图',
+        targetLang: lang,
       });
     }
     if (text && !state.sessionEntries.some((e) => e?.retry?.kind === 'translate-text' && e.retry.text === text)) {
@@ -11054,7 +11075,27 @@ async function captureRegionShot(topDoc, bottomDoc, leftVp, rightVp) {
     if (bottom - top < 2) continue;
     rangeSlices.push({ page: p, top, height: bottom - top, x, w });
   }
-  if (!rangeSlices.length) { toast('选框太窄', 'err'); return null; }
+  // 用户 m10802：在非 PDF 区域拖动（页面左右的空白处等）不该弹「选框太窄」。
+  // 这里用「选框矩形是否真的与某页相交」区分两种空结果：
+  //   完全没碰到页面 → 静默取消（没截图也不打扰用户）；
+  //   碰到了页面但选出来的区域太窄/太短 → 才提示往左右多拖一点。
+  let touchedPage = false;
+  const selTop = Math.min(topDoc, bottomDoc);
+  const selBottom = Math.max(topDoc, bottomDoc);
+  for (let p = lo; p <= hi; p++) {
+    const el = viewer.pageEls[p];
+    if (!el) continue;
+    const pr = el.getBoundingClientRect();
+    const hOverlap = Math.min(rightVp, pr.right) - Math.max(leftVp, pr.left);
+    const pageTop = viewer.offsets[p] ?? 0;
+    const pageBottom = pageTop + (viewer.heights[p] || pr.height || 0);
+    const vOverlap = Math.min(selBottom, pageBottom) - Math.max(selTop, pageTop);
+    if (hOverlap > 0 && vOverlap > 0) { touchedPage = true; break; }
+  }
+  if (!rangeSlices.length) {
+    if (touchedPage) toast('选框太窄，往左右多拖一点再松手', 'err', 2600);
+    return null;
+  }
 
   setBusy(true, '截图中…');
   try {

@@ -5349,3 +5349,69 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 - 本次实现提交与 Release 由代理推送发布（release tag `release-2026-11-05b`，
   资产 `prt-2026-11-05b.exe`）。
 
+## 100. 翻译目标语言全链路统一 + 框选边界（2026-11-05，用户 m10802）
+
+### 100.1 用户反馈
+
+> m10802：「翻译不管调成翻译成中文还是英文，上面信息都显示翻译成中文，并且输出中文。
+> 而且在截图界面非 pdf 区域时会显示选框太窄。」
+
+### 100.2 根因
+
+- 方向行与输出写死/自动判断：
+  - `doTranslateShot()` 调用 `translateShotMessages({ targetLang: '中文' })` 写死中文；
+    `translateShotRetryPayload()` 不带 targetLang。
+  - `doTranslate()`（划词）用 `targetLangFor(text)` 按文本自动判方向，忽略 `#translateTargetLang`。
+  - `addEntry()` 译文方向行 `retry?.targetLang || (... ? targetLangFor(quote) : '中文')`：
+    截图翻译永远显示「原文 → 中文」。
+  - `sanitizeRetry()` 恢复/重试时把 targetLang 丢掉，重试后回到默认中文。
+- 框选边界：`captureRegionShot()` 只要 `rangeSlices` 为空就 `toast('选框太窄','err')`，
+  不区分「拖在页面外的灰边」和「页面内拖太窄」，非 PDF 区域也弹提示。
+
+### 100.3 实现
+
+- `public/js/app.js`：
+  - 新增 `selectedTranslateTarget()`（读 `#translateTargetLang`，English / 中文，默认中文）与
+    `resolveTranslateTarget(pref)`（显式记录优先，否则跟随当前选择）。
+  - `doTranslate()`、`doTranslateText()`、`doTranslateShot()` 统一走 `resolveTranslateTarget()`；
+    `send()` 翻译模式读同一选择传给文本/截图两条路径。
+  - 三处 retry 载荷（`translate` / `translate-text` / `translate-shot`）都带 `targetLang`；
+    `sanitizeRetry()` 保留；重试分发（`doTranslate(sel,{targetLang})`、`retryTranslateShot`、
+    `doTranslateText`）按记录语言重跑；`doTranslateText` 的 retry 闭包也带 lang。
+  - `captureRegionShot()`：新增「选框矩形是否与页面矩形相交」判断——
+    完全没碰到页面 → 静默返回 null（无 toast、无附件）；
+    确实碰到页面但 slice 太窄/太短 → 「选框太窄，往左右多拖一点再松手」。
+- 未改提示词文件：`translate.selection` / `translate.screenshot` 本来就接收 `ctx.targetLang`，
+  只是调用方没传对；这次只改调用方与恢复链路。
+
+### 100.4 验证
+
+- 解析：`node --experimental-vm-modules test/artifacts/parse-check/check.mjs` 全部 PARSE-OK
+  （app.js / sessions.js / ai.js / prompts / server.js）。
+- 隔离冒烟 `test/artifacts/capture-range-fix/smoke-translate.mjs`（8986 Node 服务 +
+  attention.pdf + mock `/api/chat` SSE；方向行取 `.translation-direction`，提示词取请求 body 的 system）：
+  - 划词 English：提示词「翻译成English」、方向行「译文 · 原文 → English」、输出走 mock 流式、
+    retry 记录 targetLang=English；
+  - 划词 中文：提示词「翻译成中文」、方向行「→ 中文」、retry 记录 targetLang=中文；
+  - 文本翻译（输入中文）：「文本翻译 · 中文 → English」、提示词 English；
+  - 截图翻译（captureRegionShot → 附件 → send）：「把截图里的内容翻译成English」+ image_url、
+    方向行「→ English」、retry targetLang=English；
+  - 非 PDF 区域（缩小到 0.7 后页面右侧 186px 灰边）不弹「选框太窄」、不产附件；
+  - 页面内 2px 太窄：提示「选框太窄，往左右多拖一点再松手」；
+  - **16 passed / 0 failed**，无 pageerror。
+
+### 100.5 交付
+
+- 文档：`docs/使用说明书.md` §4.5 补「目标语言跟随译成选择（划词/截图/文本三条链路 + 重试沿用）」、
+  §4.6 同步、§7 第 7 条补「拖在页面外静默取消，页面内太窄才提示」、
+  §16.6 补「截图翻译目标语言跟随选择」、新增 §16.8 记录本轮修复。
+- 构建：优雅关闭桌面 `prt.exe`（PID 5844）→ `desktop\build.bat` → 项目根与桌面 `prt.exe`
+  **11,162,112 B**，SHA256 `EDE40F7F1DC5D55BC48E3935F65257905ABE6469802D3EDC85B1A9DFBE3829C2`；
+  启动新实例 PID 17432（Responding=True，8787），`/` 返回 200 且 `<title>prt</title>`。
+- 提交：显式 `git add public/js/app.js docs/使用说明书.md docs/PROGRESS.md`（不 `git add -A`）
+  → 「翻译目标语言跟随「译成」选择；框选非 PDF 区域不再提示选框太窄」；
+  走代理 `git -c http.proxy=http://127.0.0.1:10808 push origin main` 推送。
+- Release：走代理 + `git credential fill` 缓存 token 发布 **`release-2026-11-05c`**，
+  资产 **`prt-2026-11-05c.exe`**（11,162,112 B），说明用 UTF-8 JSON 文件发（避免中文乱码）；
+  `curl -sIL -x http://127.0.0.1:10808` 验证下载 302 → 200、Content-Length 与本地一致。
+
