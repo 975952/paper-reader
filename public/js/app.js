@@ -1830,6 +1830,8 @@ function initViewer() {
     get citationStats() { return lastCitationStats; },
     get citationPlan() { return activeCitationPlan ? [...activeCitationPlan.values()] : []; },
     updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
+    // 截图框选（自动化直接验证长截图/双页/缩放；真实入口还是鼠标拖框）
+    captureRegionShot,
     renderAttachments, refreshReturnButton,
     // 发送范围（脚本接口；输入框旁的芯片已移除，默认值在设置页「交互与发送」）
     setScopeRange, SCOPE_RANGES, rangeOverview, currentRange,
@@ -10979,48 +10981,94 @@ function initRegion() {
   });
 }
 
-/** 把滚动坐标落到具体某一页上 */
-function locateDoc(docY) {
+/**
+ * 把滚动坐标落到具体某一页上。
+ * 双页模式下同一行两页的 offsetTop 相同，光看纵坐标会永远选中左页，
+ * 所以要再用选框的横向范围（leftVp / rightVp，视口坐标）判断在哪一页。
+ */
+function locateDoc(docY, leftVp = null, rightVp = null) {
   const pages = viewer.numPages;
+  const xScore = (i) => {
+    if (leftVp == null || rightVp == null) return 0;
+    const el = viewer.pageEls[i];
+    if (!el) return 0;
+    const r = el.getBoundingClientRect();
+    return Math.min(rightVp, r.right) - Math.max(leftVp, r.left);
+  };
+  const candidates = [];
   for (let i = 1; i <= pages; i++) {
     const o = viewer.offsets[i];
     const h = viewer.heights[i];
     if (o === undefined) continue;
-    if (docY >= o && docY < o + h) return { page: i, y: docY - o };
+    if (docY >= o && docY < o + h) candidates.push(i);
   }
-  // 落在页间空隙或末尾：贴到最近的一页
-  let best = 1;
+  if (candidates.length) {
+    let page = candidates[0];
+    for (const i of candidates) if (xScore(i) > xScore(page)) page = i;
+    const o = viewer.offsets[page] ?? 0;
+    return { page, y: clamp(docY - o, 0, viewer.heights[page] ?? 0) };
+  }
+  // 落在页间空隙或末尾：先贴到最近一行，再按横向在同行里挑一页
+  let rowY = 0;
   for (let i = 1; i <= pages; i++) {
-    if (viewer.offsets[i] !== undefined && viewer.offsets[i] <= docY) best = i;
+    if (viewer.offsets[i] !== undefined && viewer.offsets[i] <= docY) rowY = Math.max(rowY, viewer.offsets[i]);
+  }
+  let best = 1;
+  let bestScore = -Infinity;
+  for (let i = 1; i <= pages; i++) {
+    if (viewer.offsets[i] !== rowY) continue;
+    const s = xScore(i);
+    if (s > bestScore) { bestScore = s; best = i; }
   }
   const o = viewer.offsets[best] ?? 0;
   const h = viewer.heights[best] ?? 0;
-  return { page: best, y: Math.max(0, Math.min(h, docY - o)) };
+  return { page: best, y: clamp(docY - o, 0, h) };
 }
 
 /** 框选区域 → 截图；不碰 API Key、不决定去哪个面板，返回 { shot, page, label } 或 null */
 async function captureRegionShot(topDoc, bottomDoc, leftVp, rightVp) {
-  const a = locateDoc(topDoc);
-  const b = locateDoc(bottomDoc);
-  const pageEl = viewer.pageEls[a.page];
-  if (!pageEl) return null;
-  const pr = pageEl.getBoundingClientRect();
-  const x = clamp(leftVp - pr.left, 0, pr.width);
-  const w = clamp(rightVp - pr.left, 0, pr.width) - x;
-  if (w < 8) { toast('选框太窄', 'err'); return null; }
+  const a = locateDoc(topDoc, leftVp, rightVp);
+  const b = locateDoc(bottomDoc, leftVp, rightVp);
+  if (!viewer.pageEls[a.page] || !viewer.pageEls[b.page]) return null;
+
+  // 每一页只保留与选框横向重叠的部分：
+  // 单页模式所有页都整段重叠；双页模式会自然跳过不在一列上的页（否则会把旁边那页也切进来）。
+  const rangeSlices = [];
+  const lo = Math.min(a.page, b.page);
+  const hi = Math.max(a.page, b.page);
+  const offsetA = viewer.offsets[a.page] ?? -1;
+  const offsetB = viewer.offsets[b.page] ?? -1;
+  for (let p = lo; p <= hi; p++) {
+    const el = viewer.pageEls[p];
+    if (!el) continue;
+    const pr = el.getBoundingClientRect();
+    const x = clamp(leftVp - pr.left, 0, pr.width);
+    const right = clamp(rightVp - pr.left, 0, pr.width);
+    const w = right - x;
+    if (w < 8) continue;
+    const o = viewer.offsets[p] ?? 0;
+    const pageH = viewer.heights[p] || pr.height || 0;
+    // 同一行两页共享纵坐标：选区内起始/结束页那一行里的其它页也用同一个 y
+    const top = p === a.page || o === offsetA ? a.y : 0;
+    const bottom = p === b.page || o === offsetB ? b.y : pageH;
+    if (bottom - top < 2) continue;
+    rangeSlices.push({ page: p, top, height: bottom - top, x, w });
+  }
+  if (!rangeSlices.length) { toast('选框太窄', 'err'); return null; }
 
   setBusy(true, '截图中…');
   try {
     let shot;
-    if (a.page === b.page) {
-      shot = await viewer.captureRegion(a.page, { x, y: a.y, w, h: b.y - a.y });
+    if (rangeSlices.length === 1) {
+      const s = rangeSlices[0];
+      shot = await viewer.captureRegion(s.page, { x: s.x, y: s.top, w: s.w, h: s.height });
     } else {
-      shot = await viewer.captureRange({
-        pageStart: a.page, pageEnd: b.page, x, w, yStart: a.y, yEnd: b.y,
-      });
+      shot = await viewer.captureRange({ slices: rangeSlices });
     }
-    const label = a.page === b.page ? `截图 p.${a.page}` : `长截图 p.${a.page}–${b.page}`;
-    return { shot, page: a.page, label };
+    const first = rangeSlices[0].page;
+    const last = rangeSlices[rangeSlices.length - 1].page;
+    const label = first === last ? `截图 p.${first}` : `长截图 p.${first}–p.${last}`;
+    return { shot, page: first, label };
   } catch (e) {
     toast(`截图失败：${e.message}`, 'err', 4000);
     return null;

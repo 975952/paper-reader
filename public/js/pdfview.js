@@ -3122,24 +3122,43 @@ export class PdfViewer {
   /**
    * 把一块可能跨页、超出视口的区域渲染成一张竖图。
    * 因为我是从 PDF 重新渲染而不是截屏，所以不受视口大小限制。
-   * range: { pageStart, pageEnd, x, w, yStart, yEnd } —— 单位都是 CSS px（相对各自页面）
+   * slices: [{ page, top, height, x, w }] —— x/top/w/height 都是**当前缩放比例**下的
+   * CSS px（相对各自页面；双页模式下各页的 x/w 由调用方按横向重叠分别算好）。
+   * 兼容旧调用：{ pageStart, pageEnd, x, w, yStart, yEnd }（同宽单列选区）。
    */
-  async captureRange({ pageStart, pageEnd, x, w, yStart, yEnd }, { ratio = 2.5, maxDim = 3000 } = {}) {
+  async captureRange({ slices: givenSlices, pageStart, pageEnd, x, w, yStart, yEnd }, { ratio = 2.5, maxDim = 3000 } = {}) {
     if (!this.pdf) throw new Error('没有打开的文档');
-    const slices = [];
-    for (let p = pageStart; p <= pageEnd; p++) {
-      const el = this.pageEls[p];
-      if (!el) continue;
-      const pageH = this.heights[p] || el.offsetHeight;
-      const top = p === pageStart ? Math.max(0, yStart) : 0;
-      const bottom = p === pageEnd ? Math.min(pageH, yEnd) : pageH;
-      if (bottom - top < 2) continue;
-      slices.push({ page: p, top, height: bottom - top });
+    /* 单位换算（2026-11-05 修复 m10435/m10452）：
+       选区坐标 x / yStart / yEnd 和 heights 都是**当前缩放比例**下的 CSS 像素
+       （页面元素宽高 = PDF 尺寸 × this.scale），而 page.render 这里用
+       viewport scale:1 —— 渲染出来是「1 PDF 单位 = 1 px」。所以两个比例必须分开：
+         k  = ratio * shrink      每个 CSS 像素对应多少输出像素
+         rs = baseScale * k       每个 PDF 单位对应多少渲染像素
+       之前只乘了 ratio，缩放到 100% 以外时内容会整体缩小（底部/右侧留空白）
+       且裁剪偏移不足（内容飘移）——单页 captureRegion 因为用 renderScale/baseScale
+       换算过所以没这个问题。 */
+    const baseScale = Number(this.scale) > 0 ? Number(this.scale) : 1;
+    let slices;
+    if (Array.isArray(givenSlices) && givenSlices.length) {
+      slices = givenSlices.filter((s) => s && s.height > 1 && s.w > 1);
+    } else {
+      // 旧调用方式：所有页共用同一个 x / w
+      slices = [];
+      for (let p = pageStart; p <= pageEnd; p++) {
+        const el = this.pageEls[p];
+        if (!el) continue;
+        const pageH = this.heights[p] || el.offsetHeight;
+        const top = p === pageStart ? Math.max(0, yStart) : 0;
+        const bottom = p === pageEnd ? Math.min(pageH, yEnd) : pageH;
+        if (bottom - top < 2) continue;
+        slices.push({ page: p, top, height: bottom - top, x, w });
+      }
     }
     if (!slices.length) throw new Error('选区太小');
 
     const totalH = slices.reduce((s, x2) => s + x2.height, 0);
-    const outW = Math.max(1, Math.round(w * ratio));
+    const maxW = Math.max(...slices.map((s) => s.w));
+    const outW = Math.max(1, Math.round(maxW * ratio));
     const outH = Math.max(1, Math.round(totalH * ratio));
     const shrink = Math.min(1, maxDim / Math.max(outW, outH));
     const out = document.createElement('canvas');
@@ -3154,9 +3173,10 @@ export class PdfViewer {
     for (const s of slices) {
       const page = await this.pdf.getPage(s.page);
       const viewport = page.getViewport({ scale: 1 });
-      const r = ratio * shrink;
-      const cw = Math.max(1, Math.round(w * r));
-      const ch = Math.max(1, Math.round(s.height * r));
+      const k = ratio * shrink;          // 输出像素 / CSS 像素
+      const rs = baseScale * k;          // 渲染像素 / PDF 单位
+      const cw = Math.max(1, Math.round(s.w * k));
+      const ch = Math.max(1, Math.round(s.height * k));
       const c = document.createElement('canvas');
       c.width = cw;
       c.height = ch;
@@ -3166,10 +3186,12 @@ export class PdfViewer {
       await page.render({
         canvasContext: ctx,
         viewport,
-        transform: [r, 0, 0, r, -x * r, -s.top * r],
+        // viewport scale=1 时 PDF.js 的 transform 就是画布像素变换：
+        // 内容位置 = rs × PDF 单位 + e；把该页自己的 CSS 坐标移到画布原点要平移 CSS×k
+        transform: [rs, 0, 0, rs, -s.x * k, -s.top * k],
         background: paper,
       }).promise;
-      octx.drawImage(c, 0, Math.round(dy * r));
+      octx.drawImage(c, 0, Math.round(dy * k));
       dy += s.height;
       c.width = 0;
       c.height = 0;

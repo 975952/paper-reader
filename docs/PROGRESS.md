@@ -5294,3 +5294,58 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 - 显式 `git add` 改名相关文件（不 `git add -A`）→ commit → 走代理推送 `origin/main`；
   发布新 Release 资产 `prt-2026-11-05.exe` 并验证下载链接。
 
+## 99. 跨页长截图修复（2026-11-05）
+
+### 99.1 用户反馈
+
+- m10435：「现在的跨页截屏有点文帝，有时候会飘移」；m10452：「而且会有空的区域」。
+- 即长截图（拖到边缘自动滚动、跨页框选）在部分情况下内容错位、底部/右侧出现大块空白，
+  双页模式下有时截到旁边一列。
+
+### 99.2 根因
+
+- **单位换算**：`PdfViewer.captureRange()` 收到的 `x / w / yStart / yEnd` 都是**当前缩放比例**下的
+  CSS px（页面元素宽高 = PDF 尺寸 × `this.scale`），但渲染用 `getViewport({ scale: 1 })` 后
+  只乘了 `ratio`，漏了 `this.scale`：缩放 ≠ 100% 时每片内容只填 1/scale 的高宽 → 底部/右侧空白，
+  裁剪偏移也不足 → 整体飘移。单页 `captureRegion()` 用 `renderScale / baseScale` 换算过，所以没这问题。
+  该函数自 `6cf5be5`（2026-10-04 首版）引入后从未改过，是首版遗留缺陷。
+- **双页选页**：`locateDoc(docY)` 只看纵向坐标，双页同一行两页 `offsetTop` 相同 → 永远选中左页；
+  `captureRange(pageStart..pageEnd)` 又按页码区间把该行两页都切成片 → 选右页会混进左页内容。
+
+### 99.3 实现
+
+- `public/js/app.js`：
+  - `locateDoc(docY, leftVp, rightVp)`：在包含 docY 的候选页里，按选框横向范围与各页
+    `getBoundingClientRect()` 的重叠宽度取最大者；落在页间空隙时先贴最近一行，再在同行里按横向挑页。
+  - `captureRegionShot()`：重写为按页构建 `rangeSlices=[{page,top,height,x,w}]`——逐页用 client rect
+    与选框横向求交，`w < 8` 跳过（双页自然跳过另一列）；同一行的起始/结束页复用 `a.y / b.y`；
+    单 slice 走 `captureRegion`，多 slice 走 `captureRange({ slices })`；label 用首/末页页码。
+  - `window.__ctx` 导出 `captureRegionShot`（自动化验证用；真实入口仍是鼠标拖框）。
+- `public/js/pdfview.js` `captureRange()`：
+  - 新增 `slices` 入参（旧 `{pageStart,pageEnd,x,w,yStart,yEnd}` 签名保留兼容）；
+  - 两个比例分开：`k = ratio * shrink`（输出像素/CSS 像素）、`rs = baseScale * k`（渲染像素/PDF 单位）；
+  - 各片按自己的 `s.w / s.x` 渲染，`transform: [rs, 0, 0, rs, -s.x * k, -s.top * k]`。
+
+### 99.4 验证
+
+- 隔离环境 `test/artifacts/capture-range-fix/`（8986 Node 服务 + 真实多页论文 attention.pdf，
+  Puppeteer + Chrome headless）；`verify.mjs` 直接调 `__ctx.captureRegionShot`，每例与
+  **独立参考图**（整页无 transform 渲染后按 PDF 坐标裁剪、拼成相同输出几何）对比：
+  - 单页模式 fit / 0.8 / 2.8：均抓到 2 页；内容 bbox 与参考差 ≤ 10 px、最长空白差 ≤ 20 px、
+    归一化 meanDiff 20.3–22.9；fit 与 2.8 跨缩放 meanDiff 7.52。
+  - 双页模式右列 p.2 → p.4：只抓 2 页、label「长截图 p.2–p.4」（跳过同排左页 p.3）、meanDiff 14.44。
+  - 超长选区 p.1 → p.3：3 页、label「长截图 p.1–p.3」、meanDiff 18.8。
+  - 真实鼠标拖框 + 边缘自动滚动：生成 2–3 页长截图（inkRatio 0.155–0.163）。
+  - **32 passed / 0 failed**，无 pageerror。
+- 解析：`node --experimental-vm-modules` + `vm.SourceTextModule` 对 `public/js/app.js`、
+  `public/js/pdfview.js`（以及既有 parse-check 列表）全部 PARSE-OK。
+
+### 99.5 交付
+
+- `desktop\build.bat` 重建：项目根与桌面 `prt.exe` **11,160,064 B**，
+  SHA256 `F21E63FAD6AD56C6D9E70CCC876169DD10FD6D3B1857712A0F466D30A2A8FB6D`；
+  旧实例 PID 19024 优雅关闭未退出（有阻塞窗口）后结束进程，新实例 PID 27824（Responding=True，8787）。
+- 文档：`docs/使用说明书.md` §7 补「长截图按 PDF 重渲染，缩放/双页/多页不飘不空、双页只截所在列」说明。
+- 本次实现提交与 Release 由代理推送发布（release tag `release-2026-11-05b`，
+  资产 `prt-2026-11-05b.exe`）。
+
