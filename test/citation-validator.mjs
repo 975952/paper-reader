@@ -33,6 +33,13 @@ console.log('▶ 引用解析');
   check('第四条：半角 || 也认', list[3].fragment === '半角竖线');
   check('普通文字不含引用时返回空', parseCitations('没有引用的一段话。').length === 0);
   check('raw 能精确回指原文', text.includes(list[0].raw));
+
+  const comboText = '多处依据〔p.21–26, p.23, p.37〕。';
+  const combo = parseCitations(comboText);
+  check('组合页码括号展开为 3 条', combo.length === 3, JSON.stringify(combo));
+  check('组合第一项是范围 p.21–26', combo[0]?.page === 21 && combo[0]?.pageEnd === 26 && combo[0]?.fragment === '');
+  check('组合后续是单页 p.23 / p.37', combo[1]?.page === 23 && combo[2]?.page === 37, JSON.stringify(combo.slice(1)));
+  check('组合项 raw 是单项查表键', combo.every((c) => /^p\.\d{1,4}(–\d{1,4})?$/.test(c.raw)), JSON.stringify(combo.map((c) => c.raw)));
 }
 
 /* ── 2. 归一化与页码集合 ── */
@@ -113,6 +120,15 @@ const run = (answer, opts = {}) => validateCitations(answer, {
   check('范围引用逐页检查白名单', range.items[0].level === 'page-only' || range.items[0].level === 'ok');
   const rangeOut = await run('范围越界〔p.2–9〕。');
   check('范围内有页不在白名单 → drop', rangeOut.items[0].level === 'drop');
+
+  const comboOk = await validateCitations('见〔p.3, p.5–6, p.7〕。', {
+    totalPages: 9, availablePages: [1, 2, 3, 5, 6, 7], pageTextFor,
+  });
+  check('组合页码逐项校验通过', comboOk.items.length === 3 && comboOk.items.every((x) => x.level === 'ok'), JSON.stringify(comboOk.items));
+  check('组合范围的 plan 键是单项 p.5–6', comboOk.plan.get('p.5–6')?.level === 'ok', JSON.stringify([...comboOk.plan.keys()]));
+  const comboDrop = await validateCitations('〔p.3, p.12〕。', { totalPages: 9, availablePages: [1, 2, 3], pageTextFor });
+  check('组合里不在白名单的项单独 drop',
+    comboDrop.plan.get('p.12')?.level === 'drop' && comboDrop.plan.get('p.3')?.level === 'ok', JSON.stringify(comboDrop.items));
 }
 
 /* ── 4. 无效引用 100% 被降级或拦截 ── */

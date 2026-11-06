@@ -14,6 +14,12 @@ import { stripPageLabels } from './reading-context.js';
 /** 与 app.js 的 decoratePageRefs 完全一致的引用语法（片段上限 8000，按可见文字另截断） */
 export const CITATION_RE = /〔\s*p\.\s*(\d{1,4})\s*(?:[–\-—]\s*(\d{1,4}))?\s*(?:\|\||‖|｜)\s*([^〕]{1,8000})〕|〔\s*p\.\s*(\d{1,4})\s*(?:[–\-—]\s*(\d{1,4}))?\s*〕/g;
 
+/** 组合引用：一个括号里用逗号/顿号/分号分隔多个页码（可带范围），如〔p.21–26, p.23, p.37〕 */
+export const CITATION_LIST_RE = /〔\s*p\s*\.\s*\d{1,4}(?:\s*[–\-—]\s*\d{1,4})?(?:\s*[,，、;；]\s*p\s*\.\s*\d{1,4}(?:\s*[–\-—]\s*\d{1,4})?)+\s*〕/g;
+const CITATION_ITEM_RE = /p\s*\.\s*(\d{1,4})(?:\s*[–\-—]\s*(\d{1,4}))?/g;
+/** plan 查表键：去掉空白，保证解析与渲染两侧一致 */
+const citationKey = (s) => String(s || '').replace(/\s+/g, '');
+
 /** 解析回答里的全部引用（保留原始文本，渲染器按 raw 对齐） */
 export function parseCitations(text) {
   const out = [];
@@ -35,6 +41,25 @@ export function parseCitations(text) {
     });
     if (!m[0]) break;
   }
+  // 组合引用展开成逐项，渲染器按单项 raw 查 plan（与单条引用共用同一套校验结果）
+  const listRe = new RegExp(CITATION_LIST_RE.source, 'g');
+  guard = 0;
+  while ((m = listRe.exec(s)) && guard++ < 100) {
+    const itemRe = new RegExp(CITATION_ITEM_RE.source, 'g');
+    let im;
+    let items = 0;
+    while ((im = itemRe.exec(m[0])) && items++ < 100) {
+      if (!im[1]) continue;
+      out.push({
+        raw: citationKey(im[0]),
+        index: m.index + im.index,
+        page: Number(im[1]),
+        pageEnd: im[2] ? Number(im[2]) : null,
+        fragment: '',
+      });
+    }
+  }
+  out.sort((a, b) => a.index - b.index);
   return out;
 }
 

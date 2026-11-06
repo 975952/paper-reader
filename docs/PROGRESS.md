@@ -5588,3 +5588,34 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 - 提交：显式 `git add` 本次会话同步/拖拽源码、测试与文档后提交
   「多窗口协作：同会话跨窗口并发热同步、拖标签出栏开新窗」。
 
+
+
+## 104. 组合页码引用〔p.3, p.5–6, p.7〕渲染修复
+
+### 104.1 需求
+
+用户反馈（m00968）：`〔p.21–26, p.23, p.37〕` 这种**一个括号里用逗号分隔多个页码**的引用没有渲染成功，
+只显示原文文字；期望和单条 `〔p.N〕` / `〔p.N–M〕` 一样变成可点击页码。
+
+根因：`public/js/citation-validator.js` 的 `CITATION_RE` 与 `public/js/app.js` `decoratePageRefs` 的正则
+只认「一个括号一条引用」，组合括号不匹配，因此既不校验也不渲染。
+
+### 104.2 实现
+
+- `public/js/citation-validator.js`：新增 `CITATION_LIST_RE`
+  （`p.N` / `p.N–M`，逗号 `,`、顿号 `、`、分号 `;` 分隔）与 `CITATION_ITEM_RE`；
+  `parseCitations` 先收单条引用，再把组合括号展开成逐项（`raw` 归一化为无空白的单项键 `p.5–6`，供 plan 查表）。
+  每项仍走既有白名单/总页数/片段核对，`plan` 按单项 raw 查表。
+- `public/js/app.js` `decoratePageRefs`：在单条引用替换之前先处理组合括号，逐项生成 `.page-ref` 按钮
+  （范围项 `data-page` 取起始页、文案 `p.N–M`）；任何一项越界或被核验 drop 时整段保持原文，
+  page-only 项降级为 `page-ref-unverified`。点击行为复用既有页码按钮委托（跳页）。
+
+### 104.3 验收
+
+- `node test/citation-validator.mjs`：**43/43 PASS**（新增组合解析 4 项 + 逐项校验/范围 plan 键 3 项）。
+- `node test/citation-quote.mjs`：**38/40**（新增「组合页码逐项渲染成页码按钮」「不残留原始〔p.」两项 PASS）。
+  其余 2 项失败在第 9 节「引用片段渲染成可见原文」——已用 `git stash` 验证改动前基线为 36/38 且同样两项失败，
+  属既有环境/用例问题，与本次无关。
+- 构建：`desktop\build.bat` → 项目根 `prt.exe` **11,259,392 B**，
+  SHA256 `8A5A99D26728DDE39BD6DF5B52E3ABB4428D06510A93CA68D60CB9255FFD883F`。
+  桌面副本仍被运行中的旧实例占用未覆盖，需关闭旧实例后重跑构建或复制项目根 exe。

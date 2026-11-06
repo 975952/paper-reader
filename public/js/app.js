@@ -9135,9 +9135,35 @@ async function auditForRenderedAnswer(answer, { docCtx = null, context = '', ref
 function decoratePageRefs(html) {
   const pages = Number(viewer?.numPages) || 0;
   const plan = activeCitationPlan;
+  // 组合引用〔p.21–26, p.23, p.37〕：逐项渲染成页码按钮；任何一项越界/被核验拦截时整段保持原文，
+  // 避免「一半可点一半是文字」的错位观感。必须在单条引用替换之前跑（单条正则不会误吃组合括号）。
+  const listRe = /〔\s*p\s*\.\s*\d{1,4}(?:\s*[–\-—]\s*\d{1,4})?(?:\s*[,，、;；]\s*p\s*\.\s*\d{1,4}(?:\s*[–\-—]\s*\d{1,4})?)+\s*〕/g;
+  const itemRe = /p\s*\.\s*(\d{1,4})(?:\s*[–\-—]\s*(\d{1,4}))?/g;
+  const combined = String(html || '').replace(listRe, (raw) => {
+    const buttons = [];
+    const items = new RegExp(itemRe.source, 'g');
+    let im;
+    while ((im = items.exec(raw))) {
+      const a = Number(im[1]);
+      const b = im[2] ? Number(im[2]) : null;
+      if (!Number.isInteger(a) || a < 1 || (pages && a > pages)) return raw;
+      if (b !== null && (!Number.isInteger(b) || b < a || (pages && b > pages))) return raw;
+      const decision = plan ? planFor(plan, String(im[0] || '').replace(/\s+/g, '')) : null;
+      if (decision && decision.level === 'drop') return raw;
+      const label = b !== null ? `p.${a}–${b}` : `p.${a}`;
+      if (decision && decision.level === 'page-only') {
+        const title = `跳到第 ${a} 页（原文片段未核对，不画高亮）`;
+        buttons.push(`<button type="button" class="page-ref page-ref-unverified" data-page="${a}" data-unverified="1" title="${escapeHtml(title)}">${label}</button>`);
+      } else {
+        const title = b !== null ? `跳到第 ${a}–${b} 页` : `跳到第 ${a} 页`;
+        buttons.push(`<button type="button" class="page-ref" data-page="${a}" title="${escapeHtml(title)}">${label}</button>`);
+      }
+    }
+    return buttons.length ? buttons.join(' ') : raw;
+  });
   // 兼容模型的各种写法：p. 前后带空格、半角/全角竖线、长破折号；片段长度按「可见文字」算，
   // HTML 上限放宽（行内公式的 KaTeX 标记可能上千字符），避免「带公式的引用不渲染」
-  return String(html || '').replace(
+  return combined.replace(
     /〔\s*p\.\s*(\d{1,4})\s*(?:[–\-—]\s*(\d{1,4}))?\s*(?:\|\||‖|｜)\s*([^〕]{1,8000})〕|〔\s*p\.\s*(\d{1,4})\s*(?:[–\-—]\s*(\d{1,4}))?\s*〕/g,
     (raw, aPipe, bPipe, frag, aPlain, bPlain) => {
       // P1.5：程序核验过的不合法引用不渲染按钮（drop），片段核不上的降级成纯页码（page-only）。

@@ -397,6 +397,30 @@ try {
   check('跨页引用：第一页部分有高亮', cross.p5 > 0, JSON.stringify(cross));
   check('跨页引用：下一页接着高亮（不再只画第一页）', cross.p6 > 0 && cross.extra.includes('6'), JSON.stringify(cross));
 
+  /* ── 13. 组合页码〔p.3, p.5–6, p.7〕：一个括号里多个页码逐项渲染成按钮（新会话避免追问材料受限） ── */
+  await page.evaluate(() => { window.__ctx.newSession(); });
+  await wait(600);
+  await page.evaluate(() => {
+    window.__ctx.setPanelVisible('chat', true);
+    window.__ctx.setScopeRange('paper');
+  });
+  await wait(500);
+  answerOverride = '组合依据：〔p.3, p.5–6, p.7〕。';
+  await ask();
+  const comboRefs = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('#aiArea .msg.assistant')].at(-1);
+    return {
+      refs: [...(row?.querySelectorAll('.page-ref') || [])].map((b) => ({ page: b.dataset.page, label: b.textContent })),
+      text: row?.querySelector('.text')?.textContent || '',
+    };
+  });
+  check('组合页码逐项渲染成页码按钮',
+    comboRefs.refs.length === 3 && comboRefs.refs.some((b) => b.page === '3')
+      && comboRefs.refs.some((b) => b.page === '5' && b.label === 'p.5–6')
+      && comboRefs.refs.some((b) => b.page === '7'),
+    JSON.stringify(comboRefs.refs));
+  check('组合页码不残留原始〔p. 文本', !/〔\s*p\./.test(comboRefs.text), comboRefs.text.slice(0, 120));
+
   check('操作期间没有页面错误', pageErrors.length === 0, pageErrors.join(' | '));
   const failed = checks.filter((c) => !c.ok);
   console.log(`\n引用定位：${checks.length - failed.length}/${checks.length} 通过`);
