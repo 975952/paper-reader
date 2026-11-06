@@ -874,11 +874,10 @@ const docViews = new Map();
    一挂回就会显示旧内容、且下一次保存把旧内容写回全局文件（实测踩过：切文件会把迁移进来的聊天覆盖掉）。 */
 let chatVersion = 0;
 
-/** 全局会话「内容指纹」：冷恢复读到全局文件后用它判断内容是否变过（只加不删，长度/末条/当前 sid 足够）。 */
+/** 全局会话「内容指纹」：冷恢复读到全局文件后用它判断内容是否变过（并发回答可能更新列表中间的条目）。 */
 let globalChatSig = '';
 function chatSigOf(sid, entries) {
-  const last = entries.length ? entries[entries.length - 1] : null;
-  return `${sid || ''}|${entries.length}|${last ? `${last.kind || ''}:${String(last.text || '').slice(-40)}` : ''}`;
+  return JSON.stringify([sid || '', entries.map((e) => [e?.id || '', e?.kind || '', e?.status || '', e?.text || ''])]);
 }
 /* B 线 P3.1：问答块是**全局共用**的，切换论文时不重绘它。
    chatDomSig = 当前聊天 DOM 里已经渲染的全局会话指纹；冷切换文档时只有指纹变了才重放整块（其余情况 DOM 原样保留）。 */
@@ -5337,9 +5336,9 @@ function addEntry({ id = '', block = 'chat', tag, page, quote, imageSrc, thumbs,
   return { root, body: textEl, acts, role };
 }
 
-function finishEntry(entry, fullText, { page, onAsk, onRetry, retryLabel = '', sources, meta, status = 'complete', basis = '' } = {}) {
+function finishEntry(entry, fullText, { page, onAsk, onRetry, retryLabel = '', sources, meta, status = 'complete', basis = '', restore = false } = {}) {
   const rec = entry.root.__sessionRecord;
-  if (rec) {
+  if (rec && !restore) {
     rec.text = String(fullText || '').slice(0, 12000);
     rec.page = page || rec.page;
     rec.sources = (sources || []).slice(0, 8);
@@ -5388,7 +5387,7 @@ function finishEntry(entry, fullText, { page, onAsk, onRetry, retryLabel = '', s
   if (status === 'stopped') stateParts.push('已停止 · 已保留当前回答');
   if (stateParts.length) extra.push(el('div', { class: `entry-meta${status === 'stopped' ? ' stopped' : ''}`, text: stateParts.join(' · ') }));
   if (extra.length) entry.root.append(...extra);
-  scheduleSessionSave();
+  if (!restore) scheduleSessionSave();
   scrollBody(entry.root.closest('.ai-body'));
 }
 
@@ -5477,6 +5476,8 @@ function serialiseRetryPayload(raw) {
 }
 
 let sessionSaveInFlight = null;
+let sessionEditVersion = 0;
+let savedSessionEditVersion = 0;
 const persistSession = debounce(() => {
   sessionSaveInFlight = saveSessionNow().catch((e) => {
     toastAction('会话保存失败，当前内容仍保留。', '重试', saveSessionNow, 'err', 12000);
@@ -5484,6 +5485,7 @@ const persistSession = debounce(() => {
 }, 800);
 function scheduleSessionSave() {
   if (!state.doc) return;
+  sessionEditVersion += 1;
   persistSession();
   // 会话有了第一轮完整回答后，后台生成一个更清楚的标题（手动改名永远优先）
   scheduleSessionTitle();
@@ -5807,6 +5809,7 @@ function buildSessionPayload() {
  *  merge=1：服务端按条目 id 合并，多窗口同时写同一会话不会互相覆盖；保存成功后广播给其它窗口。 */
 async function saveSessionNow() {
   if (!state.doc) return;
+  const editVersion = sessionEditVersion;
   const both = buildSessionPayload();
   if (!both) return;
   const docId = state.doc.docId;
@@ -5827,13 +5830,16 @@ async function saveSessionNow() {
   // 通知其它窗口：只有「当前正显示同一会话」的窗口会刷新（见 applyRemoteSessionSaved）
   if (writeChat) notifySessionSaved({ kind: 'chat', docId, scope, sid });
   notifySessionSaved({ kind: 'translate', docId });
+  savedSessionEditVersion = Math.max(savedSessionEditVersion, editVersion);
+  scheduleRemoteSession();
 }
 
 /** 其它窗口保存了会话：只在当前窗口正显示同一会话时重放刷新；不主动切会话、不弹窗。 */
 var remoteSessionPending = [];
 var remoteSessionTimer = 0;
+var remoteSessionApplying = false;
 function scheduleRemoteSession() {
-  if (!remoteSessionPending.length || state.busy) return;
+  if (!remoteSessionPending.length || state.busy || remoteSessionApplying) return;
   clearTimeout(remoteSessionTimer);
   remoteSessionTimer = setTimeout(() => { applyRemoteSessionSaved(); }, 120);
 }
@@ -5843,27 +5849,33 @@ function onRemoteSessionSaved(data) {
   scheduleRemoteSession();
 }
 async function applyRemoteSessionSaved() {
+  if (!state.doc || state.busy || remoteSessionApplying) return;
+  // 生成结束后可能还有一次防抖保存。先把本窗的完成记录合并进磁盘，再读取远端更新。
+  if (sessionEditVersion !== savedSessionEditVersion) {
+    persistSession.flush();
+    return; // 保存成功会重新调度；保存失败时保留本窗内容。
+  }
   const pending = remoteSessionPending.splice(0);
-  if (!pending.length || !state.doc || state.busy) return;
-  for (let i = 0; i < pending.length; i += 1) {
-    const data = pending[i];
-    if (!data) continue;
-    if (state.busy) { remoteSessionPending.push(...pending.slice(i)); return; }
-    try {
-      if (data.kind === 'translate') {
-        if (data.docId !== state.doc.docId) continue;
-        await restoreSession(data.docId, { only: 'translate' });
-        continue;
-      }
-      if (data.kind === 'notes') {
-        if (data.docId !== state.doc.docId) continue;
-        await renderNotes();
-        continue;
-      }
-      const docId = state.doc.docId;
-      if (data.scope !== sessionScopeKey(docId) || data.sid !== activeSidFor(docId)) continue;
-      await followCurrentSession();
-    } catch { /* 同步失败忽略，下一次保存会再对齐 */ }
+  const docId = state.doc.docId;
+  const openSeq = state.openSeq;
+  const scope = sessionScopeKey(docId);
+  const sid = activeSidFor(docId);
+  const editVersion = sessionEditVersion;
+  const sameSession = () => readingRequestCurrent({ docId, openSeq, sid }) && sessionScopeKey(docId) === scope;
+  const canApply = () => sameSession() && !state.busy && editVersion === sessionEditVersion;
+  const chat = !sessionsIsEntryMode() && pending.some((e) => e.kind === 'chat' && e.scope === scope && e.sid === sid);
+  const translate = pending.some((e) => e.kind === 'translate' && e.docId === docId);
+  remoteSessionApplying = true;
+  try {
+    if (chat || translate) {
+      await restoreSession(docId, { only: chat && translate ? 'all' : chat ? 'chat' : 'translate',
+        skipReplayIfSame: true, canApply });
+    }
+    if (canApply() && pending.some((e) => e.kind === 'notes' && e.docId === docId)) await renderNotes();
+  } finally {
+    if (sameSession() && !canApply()) remoteSessionPending.unshift(...pending);
+    remoteSessionApplying = false;
+    scheduleRemoteSession();
   }
 }
 
@@ -6326,10 +6338,10 @@ function restoreRetryCallback(row, entry, priorUser) {
   };
 }
 
-async function restoreSession(docId, { only = 'all', skipReplayIfSame = false } = {}) {
+async function restoreSession(docId, { only = 'all', skipReplayIfSame = false, canApply = null } = {}) {
   try {
     // B 线 P3：首次打开旧数据 → 懒迁移（旧按文档会话 → 全局问答 + 文档译文，复制不删）
-    await migrateLegacySession(docId);
+    if (!canApply) await migrateLegacySession(docId);
     const sid = activeSidFor(docId);
     const openSeq = state.openSeq;
     // 当前文件夹的问答会话 + 本文档译文伪会话（文档级）
@@ -6341,8 +6353,25 @@ async function restoreSession(docId, { only = 'all', skipReplayIfSame = false } 
     const savedChat = await chatRes.json();
     const savedTranslate = translateRes.ok ? await translateRes.json() : {};
     if (!readingRequestCurrent({ docId, openSeq, sid })) return;
-    const chatEntries = Array.isArray(savedChat.entries) ? savedChat.entries : [];
-    const translateEntries = Array.isArray(savedTranslate.entries) ? savedTranslate.entries : [];
+    const keepChat = canApply && only === 'translate';
+    const keepTranslate = canApply && only === 'chat';
+    const chatEntries = keepChat ? state.sessionEntries.filter((e) => e?.block !== 'translate')
+      : (Array.isArray(savedChat.entries) ? savedChat.entries : []);
+    const translateEntries = keepTranslate ? state.sessionEntries.filter((e) => e?.block === 'translate')
+      : (Array.isArray(savedTranslate.entries) ? savedTranslate.entries : []);
+    const combined = [...chatEntries, ...translateEntries];
+    // 远端同步先取齐附件，再一次性替换视图。附件加载期间可能开始新一轮发送。
+    const remoteThumbs = new Map();
+    if (canApply) {
+      if (!canApply()) return;
+      await Promise.all(combined.slice(-90).map(async (row) => {
+        const refs = Array.isArray(row?.shots) ? row.shots.slice(0, 6) : [];
+        if (!refs?.length || (only === 'chat' && row.block !== 'chat')
+          || (only === 'translate' && row.block !== 'translate')) return;
+        remoteThumbs.set(row, await hydrateShotThumbs(refs, docId, sid));
+      }));
+      if (!canApply()) return;
+    }
     /* 会话内容变过（换过会话 / 迁移）→ 让所有停放视图失效，否则热切回会挂回旧 DOM。 */
     const sig = chatSigOf(sid, chatEntries);
     /* 同一段会话、聊天 DOM 也已经是它（同一文件夹/全局共用换论文）：完全不用重放，
@@ -6355,8 +6384,10 @@ async function restoreSession(docId, { only = 'all', skipReplayIfSame = false } 
     const bumpChatVersion = only === 'chat'
       ? !(skipReplayIfSame && sameLoaded && sameDom)
       : !!globalChatSig && sig !== globalChatSig;
-    if (bumpChatVersion) chatVersion += 1;
-    globalChatSig = sig;
+    if (!keepChat) {
+      if (bumpChatVersion) chatVersion += 1;
+      globalChatSig = sig;
+    }
     /* 问答块是全局共用的：切换论文时**不重绘**它。只有两种情况才重放问答：
        ① 换会话（only='chat'）：会话内容换了；② 聊天 DOM 和磁盘上的全局会话对不上（首次打开/迁移过）。
        译文块永远是按文档的：换论文时清空后重放，换会话时原样保留。 */
@@ -6365,45 +6396,45 @@ async function restoreSession(docId, { only = 'all', skipReplayIfSame = false } 
     if (only !== 'chat') clearTranslateBlock();
     // 换会话（only='chat'）只重放问答：译文 DOM 没被清，不能再插一遍（下面重放循环按 only 过滤）。
     // 但译文条目必须留在内存与文件缓存里，否则下一次保存会把文档级译文（__translate）覆盖成空。
-    const combined = [...chatEntries, ...translateEntries];
-    const saved = {
-      ...savedChat,
-      entries: combined,
-      ops: Array.isArray(savedChat.ops) ? savedChat.ops : [],
-    };
     state._fileEntries = combined;
     state._fileDocId = docId;
-    state.sessionEntries = combined.slice(-90);
-    state.history = restoreReadingHistory(savedChat.history, state.sessionEntries);
-    // 会话滚动摘要：老会话没有这个字段，按「没有摘要」处理
-    state.sessionSummary = typeof savedChat.summary === 'string' ? savedChat.summary.slice(0, 2000) : '';
-    state.summaryCovered = Math.max(0, Math.min(Number(savedChat.summaryCovered) || 0, state.history.length));
-    // 旧版本提示词生成的摘要不复用（版本升级 → 等下一次自动重算）
-    if (savedChat.summary && savedChat.summaryPrompt && savedChat.summaryPrompt !== PROMPT_SYSTEM_VERSION) {
-      state.sessionSummary = '';
-      state.summaryCovered = 0;
-    }
-    state.opsDone = {};
-    state.opsDoc = docId;
-    // 「带我一步步读」的进度随全局会话存盘（状态自带 docId，切换文档时按当前文档过滤）
-    state.teaching = { walk: null, current: null };
-    const savedWalk = savedChat?.teaching?.walk;
-    if (savedWalk && savedWalk.docId === docId && (savedWalk.sid || '') === sid) {
-      state.teaching.walk = {
-        docId, sid, step: Number(savedWalk.step) || 1, routeCount: savedWalk.routeCount || null,
-        updatedAt: savedWalk.updatedAt || nowISO(),
-        messages: (Array.isArray(savedWalk.messages) ? savedWalk.messages : []).slice(-16)
-          .map((m) => ({ role: m?.role === 'assistant' ? 'assistant' : 'user', content: String(m?.content || '').slice(0, 12000) })),
-      };
-    }
-    /* AI 功能记录跟着文件夹会话走：先清空内存缓存，再装回这个会话里的记录（兼容旧 id 格式） */
-    state.opsCache.clear();
-    state.opsDone = {};
-    for (const op of Array.isArray(savedChat.ops) ? savedChat.ops : []) {
-      if (!op?.id || typeof op.text !== 'string') continue;
-      const key = String(op.id).includes(':') ? String(op.id) : `${docId}:${op.id}`;
-      state.opsCache.set(key, { text: op.text.slice(0, 12000), at: op.at || Date.now(), page: op.page || null });
-      if (key.startsWith(`${docId}:`)) state.opsDone[key.slice(docId.length + 1)] = true;
+    // 保留未重放消息的记录对象，现有 DOM 上的重试回调仍引用它们。
+    const liveChat = canApply && !replayChat && !keepChat
+      ? new Map(state.sessionEntries.filter((row) => row?.id && row.block === 'chat').map((row) => [row.id, row]))
+      : null;
+    state.sessionEntries = combined.slice(-90).map((row) => row?.block === 'chat' ? liveChat?.get(row.id) || row : row);
+    if (!keepChat) {
+      state.history = restoreReadingHistory(savedChat.history, state.sessionEntries);
+      // 会话滚动摘要：老会话没有这个字段，按「没有摘要」处理
+      state.sessionSummary = typeof savedChat.summary === 'string' ? savedChat.summary.slice(0, 2000) : '';
+      state.summaryCovered = Math.max(0, Math.min(Number(savedChat.summaryCovered) || 0, state.history.length));
+      // 旧版本提示词生成的摘要不复用（版本升级 → 等下一次自动重算）
+      if (savedChat.summary && savedChat.summaryPrompt && savedChat.summaryPrompt !== PROMPT_SYSTEM_VERSION) {
+        state.sessionSummary = '';
+        state.summaryCovered = 0;
+      }
+      state.opsDone = {};
+      state.opsDoc = docId;
+      // 「带我一步步读」的进度随全局会话存盘（状态自带 docId，切换文档时按当前文档过滤）
+      state.teaching = { walk: null, current: null };
+      const savedWalk = savedChat?.teaching?.walk;
+      if (savedWalk && savedWalk.docId === docId && (savedWalk.sid || '') === sid) {
+        state.teaching.walk = {
+          docId, sid, step: Number(savedWalk.step) || 1, routeCount: savedWalk.routeCount || null,
+          updatedAt: savedWalk.updatedAt || nowISO(),
+          messages: (Array.isArray(savedWalk.messages) ? savedWalk.messages : []).slice(-16)
+            .map((m) => ({ role: m?.role === 'assistant' ? 'assistant' : 'user', content: String(m?.content || '').slice(0, 12000) })),
+        };
+      }
+      /* AI 功能记录跟着文件夹会话走：先清空内存缓存，再装回这个会话里的记录（兼容旧 id 格式） */
+      state.opsCache.clear();
+      state.opsDone = {};
+      for (const op of Array.isArray(savedChat.ops) ? savedChat.ops : []) {
+        if (!op?.id || typeof op.text !== 'string') continue;
+        const key = String(op.id).includes(':') ? String(op.id) : `${docId}:${op.id}`;
+        state.opsCache.set(key, { text: op.text.slice(0, 12000), at: op.at || Date.now(), page: op.page || null });
+        if (key.startsWith(`${docId}:`)) state.opsDone[key.slice(docId.length + 1)] = true;
+      }
     }
     for (let rowIndex = 0; rowIndex < state.sessionEntries.length; rowIndex += 1) {
       let row = state.sessionEntries[rowIndex];
@@ -6413,7 +6444,9 @@ async function restoreSession(docId, { only = 'all', skipReplayIfSame = false } 
        * 换论文时：译文块清空后重放；问答块只在「聊天 DOM 与全局会话对不上」时才重放（否则保留 DOM 不重绘）。
        */
       if (only === 'chat' && row.block !== 'chat') continue;
+      if (keepChat && row.block !== 'translate') continue;
       if (row.block === 'chat' && !replayChat) continue;
+      const remoteHydrated = remoteThumbs.get(row);
       const safeBlock = AI_BLOCKS.some((b) => b.id === row.block) ? row.block : 'chat';
       // 右栏按需创建：恢复历史不能因为默认 hidden 就访问不存在的 blockMeta。
       ensureBlock(safeBlock);
@@ -6430,7 +6463,7 @@ async function restoreSession(docId, { only = 'all', skipReplayIfSame = false } 
       let shotsLost = false;
       if (row.screenshot || shotRefs.length) {
         if (shotRefs.length) {
-          const hydrated = await hydrateShotThumbs(shotRefs, docId, sid);
+          const hydrated = canApply ? remoteHydrated : await hydrateShotThumbs(shotRefs, docId, sid);
           thumbs = hydrated.thumbs;
           shotsLost = hydrated.missing;
         } else {
@@ -6454,7 +6487,7 @@ async function restoreSession(docId, { only = 'all', skipReplayIfSame = false } 
         page: row.page, sources: row.sources, meta: row.meta, basis: row.basis,
         status: row.status === 'stopped' ? 'stopped' : 'complete',
         onRetry: (row.status === 'stopped' || (row.status === 'complete' && canRegenerate)) ? retry : null,
-        retryLabel: '重新生成',
+        retryLabel: '重新生成', restore: true,
       });
       else if (row.kind !== 'user' && row.status === 'failed') {
         entry.body.textContent = '上次发送失败。问题、文字附件和截图都保留在这次请求里，点「重试这次发送」即可。';
@@ -6463,7 +6496,8 @@ async function restoreSession(docId, { only = 'all', skipReplayIfSame = false } 
         entry.acts.classList.remove('hidden');
         entry.root.append(el('div', { class: 'entry-meta failed', text: '发送失败 · 问题和附件仍保留在请求里' }));
       } else if (row.kind !== 'user' && row.status === 'pending') {
-        entry.body.textContent = '上次回答尚未完成。';
+        entry.body.textContent = canApply ? '正在等待另一窗口的回答…' : '上次回答尚未完成。';
+        if (canApply) continue;
         entry.acts.replaceChildren(el('button', { text: '恢复并重试', onclick: retry }));
         entry.acts.classList.remove('hidden');
         entry.root.append(el('div', { class: 'entry-meta stopped', text: '未完成 · 点「恢复并重试」继续' }));
@@ -6474,7 +6508,7 @@ async function restoreSession(docId, { only = 'all', skipReplayIfSame = false } 
     // 问答 DOM 已与磁盘上的全局会话对齐，记下指纹：下次切论文时不需要再重放
     if (replayChat) chatDomSig = sig;
     // AI 自动标题：只有「服务端自动标题」（首条问题）才升级；手动改名（user）绝不覆盖
-    if (String(savedChat.titleSource || 'auto') === 'auto') scheduleSessionTitle();
+    if (!canApply && String(savedChat.titleSource || 'auto') === 'auto') scheduleSessionTitle();
   } catch (e) { toast(`读取当前论文会话失败：${e.message}`, 'err', 5000); }
 }
 
@@ -11933,8 +11967,8 @@ window.addEventListener('beforeunload', () => {
       // B 线 P3：unload 时分别保存全局问答与本文档译文（都走 keepalive）
       const both = buildSessionPayload();
       if (both) {
-        saveOnUnload(`/api/session?${sessionQuery(sessionScopeKey(), activeSidFor(state.doc.docId))}`, both.chat);
-        saveOnUnload(`/api/session?${sessionQuery(state.doc.docId, TRANSLATE_SID)}`, both.translate);
+        if (!sessionsIsEntryMode()) saveOnUnload(`/api/session?${sessionQuery(sessionScopeKey(), activeSidFor(state.doc.docId))}&merge=1`, both.chat);
+        saveOnUnload(`/api/session?${sessionQuery(state.doc.docId, TRANSLATE_SID)}&merge=1`, both.translate);
       }
     } catch { /* unload fallback */ }
   }

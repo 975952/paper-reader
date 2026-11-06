@@ -1335,6 +1335,8 @@ fn session_entry_rank(e: &Value) -> u8 {
         3
     } else if e.get("status").and_then(Value::as_str) == Some("complete") {
         2
+    } else if e.get("status").and_then(Value::as_str) == Some("pending") {
+        0
     } else {
         1
     }

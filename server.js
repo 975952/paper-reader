@@ -1832,7 +1832,11 @@ function mergeSessionPayload(old, incoming) {
   const idOf = (e) => collapsWs(e?.id).slice(0, 80);
   const contentKey = (e) => [e?.block, e?.kind, e?.tag, e?.page, e?.quote, e?.text]
     .map((v) => collapsWs(v).slice(0, 300)).join('\u0001');
-  const rank = (e) => (e?.kind === 'user' || e?.status === 'user' ? 3 : (e?.status === 'complete' ? 2 : 1));
+  const rank = (e) => {
+    if (e?.kind === 'user' || e?.status === 'user') return 3;
+    if (e?.status === 'complete') return 2;
+    return e?.status === 'pending' ? 0 : 1;
+  };
   const richer = (a, b) => {
     if (!a) return { ...b };
     if (!b) return { ...a };

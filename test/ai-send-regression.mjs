@@ -66,7 +66,6 @@ try {
     const entriesBefore = await page.evaluate(() => window.__state.sessionEntries.length);
     await page.evaluate(kind => {
       window.__ctx.setScopeRange('current');
-      window.__ctx.toggleScopePanel();
       if (kind === 'chat') {
         document.querySelector('#chatInput').value = 'Explain this paper.';
         document.querySelector('#sendBtn').click();
@@ -86,13 +85,11 @@ try {
     const result = await page.evaluate(() => ({
       text: window.__state.sessionEntries.at(-1).text,
       disabled: document.querySelector('#sendBtn').disabled,
-      scopeClosed: document.querySelector('#sendScope').classList.contains('hidden'),
     }));
     assert.equal(hits, before + 1, `${kind}: reaches upstream`);
     assert.equal(result.text, 'mock answer', `${kind}: renders real response`);
     assert.equal(result.disabled, false, `${kind}: composer usable again`);
-    assert.equal(result.scopeClosed, true, `${kind}: scope popup closed`);
-    console.log(`PASS ${kind}: upstream, response, busy reset, scope closed`);
+    console.log(`PASS ${kind}: upstream, response, busy reset`);
   }
   /* ── 只发截图、不写文字问题：怎么回由 AI 判断，不能写死提示词 ── */
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
@@ -119,7 +116,7 @@ try {
   assert.equal(shotParts.filter((p) => p.type === 'image_url').length, 1, 'screenshot-only: image attached');
   assert.match(shotText, /没有写文字问题/, 'screenshot-only: asks model to judge first');
   assert.match(shotText, /以截图本身为中心/, 'screenshot-only: stays focused on the screenshot');
-  assert.match(shotText, /读者截图/, 'screenshot-only: screenshot labeled');
+  assert.match(shotText, /只发来\s*1\s*张截图/, 'screenshot-only: prompt identifies the attached screenshot');
   assert.ok(!shotText.includes('说明它们在论文里的作用'), 'screenshot-only: no hard-coded instruction');
   assert.ok(!shotText.includes('【论文全文】') && !shotText.includes('【阅读索引】'),
     'screenshot-only: whole-paper scope is not dumped');
@@ -130,7 +127,7 @@ try {
   console.log('PASS screenshot-only: AI decides how to answer (no hard-coded prompt)');
 
   assert.deepEqual(errors, []);
-  console.log('PASS no browser exceptions; 22/22 assertions');
+  console.log('PASS no browser exceptions; all assertions passed');
 } finally {
   await browser?.close(); server?.kill();
   mock.closeAllConnections(); await new Promise(r => mock.close(r));

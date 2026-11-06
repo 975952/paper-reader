@@ -119,6 +119,49 @@ try {
   });
   check('Session edits sync back from the other window', await until(
     () => a.evaluate(() => (window.__state.sessionEntries || []).some((e) => String(e.text || '').includes('来自窗口B'))), 'sync B to A'));
+  // Keep each real send flow streaming until the test releases it. No upstream or real key.
+  for (const page of [a, b]) {
+    await page.evaluate(() => {
+      window.__settings.data.baseURL = 'http://127.0.0.1/v1';
+      window.__ctx.setAgentRead(false);
+      localStorage.setItem('reader.session.aiTitle', '0');
+      const nativeFetch = window.fetch;
+      window.fetch = (url, options) => {
+        if (url !== '/api/chat') return nativeFetch(url, options);
+        const stream = new ReadableStream({ start(controller) {
+          window.completeTestReply = (content) => {
+            const payload = JSON.stringify({ choices: [{ delta: { content } }] });
+            controller.enqueue(new TextEncoder().encode('data: ' + payload + '\n\ndata: [DONE]\n\n'));
+            controller.close();
+          };
+        } });
+        return Promise.resolve(new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } }));
+      };
+    });
+  }
+  async function beginReply(page, question) {
+    await page.evaluate((text) => {
+      document.querySelector('#chatInput').value = text;
+      void window.__ctx.send();
+    }, question);
+    await until(() => page.evaluate(() => typeof window.completeTestReply === 'function' && window.__state.busy), 'real send reaches stream');
+    await page.evaluate(() => window.__ctx.saveSessionNow());
+  }
+  await beginReply(a, '窗口 A 的交错提问');
+  check('Receiving window treats an active pending reply as waiting', await until(() => b.evaluate(() =>
+    document.getElementById('aiArea').textContent.includes('正在等待另一窗口的回答')), 'receiving window shows waiting reply'));
+  await beginReply(b, '窗口 B 的交错提问');
+  await sleep(350); // B's save is queued in A while A is busy.
+  await a.evaluate(() => window.completeTestReply('窗口 A 的完整回答'));
+  await until(() => a.evaluate(() => !window.__state.busy), 'A finishes its stream');
+  await sleep(350); // The old remote replay ran here, before the 800ms local save.
+  await b.evaluate(() => window.completeTestReply('窗口 B 的完整回答'));
+  for (const page of [a, b]) {
+    check('Both finished replies replace pending records in the displayed conversation', await until(() =>
+      page.evaluate(() => ['窗口 A 的完整回答', '窗口 B 的完整回答'].every((text) =>
+        window.__state.sessionEntries.some((row) => row.status === 'complete' && row.text === text)
+        && document.getElementById('aiArea').textContent.includes(text))), 'both completed streams render'));
+  }
   const mergeDoc = `multiwindow-merge-${Date.now().toString(36)}`;
   const mergeURL = `/api/session?doc=${encodeURIComponent(mergeDoc)}&sid=${encodeURIComponent(aSid)}&merge=1`;
   const [ra, rb] = await Promise.all([
