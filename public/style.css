@@ -2906,3 +2906,27 @@ body.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); }
 .composer-row > #chatInput { min-height: 38px; }
 
 
+
+/* 青瓷：低饱和表面与单一强调色。 */
+:root[data-theme="sage"] {
+  color-scheme: light;
+  --bg: #EEF2EE;
+  --bg-elev: #F8FAF7;
+  --bg-sunken: #E3EAE4;
+  --fg: #293B33;
+  --fg-dim: #52665B;
+  --fg-faint: #64786D;
+  --border: #D5DFD5;
+  --border-strong: #BACABC;
+  --accent: #426B56;
+  --accent-soft: #DCE9DF;
+  --accent-fg: #FFFFFF;
+  --btn: #D3E2D5;
+  --btn-fg: #294936;
+  --paper-tint: #F8FAF5;
+  --scroll-thumb: #D5DFD5; --scroll-thumb-hover: #BACABC;
+  --shadow: none; --shadow-sm: none;
+  --ok-text: #3F6B4A; --err-text: #8F4337;
+  --sel: color-mix(in srgb, var(--accent) 28%, transparent);
+  --hit: rgba(230, 176, 65, .36); --hl: rgba(230, 190, 80, .32);
+}

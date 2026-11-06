@@ -1720,7 +1720,16 @@ const PAPER_TINT_LIGHT = (v) => {
 function applyUiStyle() {
   const root = document.documentElement;
   const style = uiStyle;
-  if (style.theme === 'system' || !['light', 'dark', 'black', 'graphite', 'mist'].includes(style.theme)) {
+  const retiredTheme = { sand: 'light', fjord: 'graphite', plum: 'dark' }[style.theme];
+  if (retiredTheme) {
+    style.theme = retiredTheme;
+    try {
+      const saved = readUi();
+      saved.style = { ...saved.style, theme: retiredTheme };
+      localStorage.setItem('reader.ui', JSON.stringify(saved));
+    } catch { /* 存储不可用时仍应用对应主题 */ }
+  }
+  if (style.theme === 'system' || !['light', 'dark', 'black', 'graphite', 'mist', 'sage'].includes(style.theme)) {
     delete root.dataset.theme;
   } else {
     root.dataset.theme = style.theme;

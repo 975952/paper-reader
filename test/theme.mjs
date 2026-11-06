@@ -1,8 +1,9 @@
 /**
  * 主题皮肤验收（2026-11）：
  *  - 设置里能选到全部极简皮肤；
+ *  - 青瓷可切换、刷新恢复；已移除主题自动迁移到保留主题；
  *  - 纯黑皮肤：界面暗色表面是纯黑 rgb(0,0,0)、阴影全部为 none（不发光）；
- *  - 石墨灰/纯白/暖白能正常切换，且选择会保存、刷新后恢复。
+ *  - 米宣、白瓷、青瓷、乌木、石墨、玄墨命名一致，选择可保存。
  *
  *   node test/theme.mjs
  */
@@ -97,16 +98,20 @@ try {
     };
   });
 
+  const artifactDir = path.join(import.meta.dirname, 'artifacts');
+  fs.mkdirSync(artifactDir, { recursive: true });
+
   await page.goto(`${BASE}/?open=theme-paper.pdf&topbar=static`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__state?.doc && window.__viewer?.numPages > 0, { timeout: 40000 });
   await page.click('#settingsBtn');
   await page.waitForSelector('#settingsModal:not(.hidden)');
 
   const options = await page.evaluate(() => [...document.querySelectorAll('#uiTheme option')].map((o) => [o.value, o.textContent.trim()]));
-  const values = options.map(([v]) => v);
-  check('设置里有 6 种皮肤（含纯黑）',
-    ['system', 'light', 'mist', 'dark', 'graphite', 'black'].every((v) => values.includes(v)) && values.length === 6,
-    JSON.stringify(options));
+  check('主题命名统一，已移除三套重复配色',
+    JSON.stringify(options) === JSON.stringify([
+      ['system', '跟随系统'], ['light', '米宣'], ['mist', '白瓷'], ['sage', '青瓷'],
+      ['dark', '乌木'], ['graphite', '石墨'], ['black', '玄墨'],
+    ]), JSON.stringify(options));
 
   /* ── 纯黑：暗色表面纯黑、无阴影（不发光） ── */
   await setTheme('black');
@@ -135,6 +140,59 @@ try {
   await setTheme('light');
   const light = await themeState();
   check('暖白：现有浅色皮肤仍正常', light.theme === 'light' && light.bodyBg !== 'rgb(0, 0, 0)', light.bodyBg);
+
+  /* ── 新主题：验证主题变量、浅/深色外观、偏好持久化并保存截图 ── */
+  const newThemes = [
+    ['sage', '#EEF2EE', '#293B33', 'rgb(238, 242, 238)', '青瓷'],
+  ];
+  for (const [id, bg, fg, bodyBg, label] of newThemes) {
+    await setTheme(id);
+    const state = await themeState();
+    check(`${label}：主题与明暗配色正确`, state.theme === id
+      && state.bg.toLowerCase() === bg.toLowerCase()
+      && state.fg.toLowerCase() === fg.toLowerCase()
+      && state.bodyBg === bodyBg,
+    `${state.theme} / ${state.bg} / ${state.fg} / ${state.bodyBg}`);
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('reader.ui') || '{}').style?.theme);
+    check(`${label}：选择已保存`, stored === id, String(stored));
+    await page.evaluate(() => document.querySelector('#settingsModal')?.classList.add('hidden'));
+    await page.screenshot({ path: path.join(artifactDir, `theme-${id}.png`) });
+    await page.click('#settingsBtn');
+    await page.waitForSelector('#settingsModal:not(.hidden)');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.__state?.doc && window.__viewer?.numPages > 0, { timeout: 40000 });
+    const restoredTheme = await page.evaluate(() => document.documentElement.dataset.theme || '');
+    check(`${label}：刷新后恢复`, restoredTheme === id, restoredTheme);
+    await page.click('#settingsBtn');
+    await page.waitForSelector('#settingsModal:not(.hidden)');
+  }
+
+  for (const [oldTheme, newTheme] of [['sand', 'light'], ['fjord', 'graphite'], ['plum', 'dark']]) {
+    await page.evaluate((theme) => {
+      const saved = JSON.parse(localStorage.getItem('reader.ui') || '{}');
+      saved.style = { ...saved.style, theme };
+      localStorage.setItem('reader.ui', JSON.stringify(saved));
+    }, oldTheme);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.__state?.doc && window.__viewer?.numPages > 0);
+    const migrated = await page.evaluate(() => ({
+      active: document.documentElement.dataset.theme,
+      saved: JSON.parse(localStorage.getItem('reader.ui')).style.theme,
+    }));
+    check('移除主题后偏好迁移 ' + oldTheme, migrated.active === newTheme && migrated.saved === newTheme);
+  }
+
+  /* system 模式由操作系统色彩偏好控制；核验浅/深两套系统色板均正确。 */
+  await setTheme('system');
+  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
+  let systemState = await themeState();
+  check('跟随系统：浅色偏好使用浅色配色', systemState.theme === '' && systemState.bodyBg === 'rgb(248, 245, 235)',
+    `${systemState.theme || 'system'} / ${systemState.bodyBg}`);
+  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
+  systemState = await themeState();
+  check('跟随系统：深色偏好使用深色配色', systemState.theme === '' && systemState.bodyBg === 'rgb(46, 43, 36)',
+    `${systemState.theme || 'system'} / ${systemState.bodyBg}`);
+  await page.emulateMediaFeatures([]);
 
   /* ── 选择保存后刷新恢复 ── */
   await setTheme('black');
