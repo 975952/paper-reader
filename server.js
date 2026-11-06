@@ -166,6 +166,8 @@ async function readDataFile(name, fallback) {
 
 let writeChain = Promise.resolve();
 let profileWriteChain = Promise.resolve();
+/** 每个会话文件一条串行链：POST 的 read-modify-write 不能并发交错 */
+const sessionWriteChains = new Map();
 /** 串行化写盘，避免并发请求交叉写坏 JSON */
 function writeDataFile(name, obj) {
   // 注意先 catch：否则一次写失败会让整条 Promise 链永久处于 rejected 状态，
@@ -1816,6 +1818,91 @@ function mergeSessionDocRefs(oldData, incoming) {
 }
 
 /**
+ * 多窗口并发保存：按条目 id 合并两份会话内容（merge=1）。
+ * - 同 id 条目选「更完整」的版本（用户/complete 优先，其次 text 更长）；
+ * - 旧文件里没有 id 的条目按内容指纹兜底认领，避免首轮保存出现重复；
+ * - 顺序保持旧文件在前、本次新增追加在后；history/ops/teaching/summary 也各自合并。
+ * desktop/src/api.rs 的 merge_session_payload 要保持同一套规则。
+ */
+function mergeSessionPayload(old, incoming) {
+  const oldData = old && typeof old === 'object' && !Array.isArray(old) ? old : {};
+  const next = incoming && typeof incoming === 'object' && !Array.isArray(incoming) ? incoming : {};
+  const oldEntries = Array.isArray(oldData.entries) ? oldData.entries : [];
+  const newEntries = Array.isArray(next.entries) ? next.entries : [];
+  const idOf = (e) => collapsWs(e?.id).slice(0, 80);
+  const contentKey = (e) => [e?.block, e?.kind, e?.tag, e?.page, e?.quote, e?.text]
+    .map((v) => collapsWs(v).slice(0, 300)).join('\u0001');
+  const rank = (e) => (e?.kind === 'user' || e?.status === 'user' ? 3 : (e?.status === 'complete' ? 2 : 1));
+  const richer = (a, b) => {
+    if (!a) return { ...b };
+    if (!b) return { ...a };
+    const ra = rank(a); const rb = rank(b);
+    const pick = ra !== rb ? (ra > rb ? a : b)
+      : (String(b?.text || '').length >= String(a?.text || '').length ? b : a);
+    const other = pick === a ? b : a;
+    return { ...other, ...pick };
+  };
+  const oldById = new Map();
+  const oldByContent = new Map();
+  oldEntries.forEach((e) => {
+    const id = idOf(e);
+    if (id) oldById.set(id, e);
+    const ck = contentKey(e);
+    if (!oldByContent.has(ck)) oldByContent.set(ck, e);
+  });
+  const slotOf = new Map(oldEntries.map((e, i) => [e, i]));
+  const merged = oldEntries.map((e) => ({ ...e }));
+  const used = new Set();
+  const appended = [];
+  for (const e of newEntries) {
+    const id = idOf(e);
+    let hit = id ? oldById.get(id) : null;
+    if (!hit) {
+      // 只有「至少一方没有 id」时才按内容认领，否则同文的两个不同消息会被误并成一条
+      const candidate = oldByContent.get(contentKey(e));
+      if (candidate && !(id && idOf(candidate))) hit = candidate;
+    }
+    if (hit && consumedSafe(used, slotOf.get(hit))) {
+      const i = slotOf.get(hit);
+      used.add(i);
+      const keepId = idOf(hit) || id;
+      merged[i] = { ...richer(hit, e), ...(keepId ? { id: keepId } : {}) };
+    } else {
+      appended.push({ ...e });
+    }
+  }
+  const entries = [...merged, ...appended];
+  // history：旧消息先行，按 role+content+page 去重后再追加新消息（并发提问时两边都能留在上下文里）
+  const historyKey = (m) => [m?.role, m?.kind, collapsWs(m?.content).slice(0, 300), m?.page || '', m?.docId || ''].join('\u0001');
+  const history = [];
+  const seenHistory = new Set();
+  for (const row of [...(Array.isArray(oldData.history) ? oldData.history : []), ...(Array.isArray(next.history) ? next.history : [])]) {
+    const key = historyKey(row);
+    if (seenHistory.has(key)) continue;
+    seenHistory.add(key); history.push(row);
+  }
+  // ops：按 id 取较新的一份（at 更大的胜），不丢任何一边的 AI 结果记录
+  const ops = [];
+  const opIndex = new Map();
+  for (const row of [...(Array.isArray(oldData.ops) ? oldData.ops : []), ...(Array.isArray(next.ops) ? next.ops : [])]) {
+    const key = String(row?.id || '');
+    if (!key) { ops.push(row); continue; }
+    const prev = opIndex.get(key);
+    if (prev === undefined) { opIndex.set(key, ops.length); ops.push(row); continue; }
+    if (Number(row?.at || 0) >= Number(ops[prev]?.at || 0)) ops[prev] = row;
+  }
+  // teaching：取 walk.updatedAt 更新的那份（两边都在「读懂论文」时以最近一步为准）
+  const teachAt = (t) => { const v = Date.parse(String(t?.walk?.updatedAt || '')); return Number.isFinite(v) ? v : 0; };
+  const teaching = teachAt(next.teaching) >= teachAt(oldData.teaching) ? next.teaching : oldData.teaching;
+  const oldSummary = String(oldData.summary || '');
+  const newSummary = String(next.summary || '');
+  const summary = newSummary.length >= oldSummary.length ? newSummary : oldSummary;
+  const summaryCovered = summary === newSummary ? Math.max(Number(next.summaryCovered) || 0, 0) : Math.max(Number(oldData.summaryCovered) || 0, 0);
+  return { ...oldData, ...next, entries, history, ops, teaching: teaching ?? null, summary, summaryCovered };
+}
+function consumedSafe(used, index) { return index !== undefined && !used.has(index); }
+
+/**
  * POST /api/session 落盘前的整理：把 meta 补进 payload。
  * - updatedAt 只在内容真的变了时才更新（指纹没变就沿用旧值）；
  * - createdAt / pinned / archived / title 等客户端没传时沿用旧文件；
@@ -2129,11 +2216,21 @@ async function handle(req, res) {
       if (payload === null) return undefined;
       const bad = sec.checkSession(payload);
       if (bad) return sendJson(res, 413, { error: { message: bad } });
+      // 多窗口：merge=1 时和磁盘旧内容按条目 id 合并，两个窗口同时保存不会互相覆盖。
+      const merge = url.searchParams.get('merge') === '1';
+      // 同一会话文件的 read-modify-write 串行化：否则并发 POST 各读旧内容，后写者抹掉先写者。
+      const prev = sessionWriteChains.get(file) || Promise.resolve();
+      const job = prev.catch(() => {}).then(async () => {
+        const old = await readDataFile(file, null);
+        const merged = merge ? mergeSessionPayload(old, payload) : payload;
+        const record = prepareSessionRecord(merged, old, Date.now());
+        await writeDataFile(file, record);
+        return record;
+      });
+      sessionWriteChains.set(file, job);
       let stored;
       try {
-        const old = await readDataFile(file, null);
-        stored = prepareSessionRecord(payload, old, Date.now());
-        await writeDataFile(file, stored);
+        stored = await job;
       } catch (e) {
         sec.diag(`保存阅读会话失败: ${e && e.message}`);
         return sendJson(res, 500, { error: { message: '保存阅读会话失败，请重试' } });

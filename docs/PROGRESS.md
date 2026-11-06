@@ -5526,3 +5526,65 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
   走代理 `git -c http.proxy=http://127.0.0.1:10808 push origin main` 已推送（09fccf2..1511c65）。
   本次未发布 GitHub Release（README 的下载链接仍指向上一个 release）。
 
+## 103. 多窗口协作改为跨窗口并发热同步（2026-11-06，用户 m00219 / m00244 口径）
+
+> 本节取代 §102 中「同一会话/译文/笔记只允许一个窗口编辑」的单写者保护口径；窗口管理与恢复部分继续有效。
+
+### 103.1 用户改口径
+
+- 不要「同一会话只允许一个窗口编辑」；对同一会话操作时，两边窗口的会话动作应当同步。
+- 没有打开的会话不要自动弹开；两边都打开了同一会话就都显示；支持多会话同时问答。
+- 去掉现有不需要的安全防护；译文同样逻辑；「带的材料以发送信息的哪一个窗口对应的内容为准」。
+- 追加（m00244）：拉着上栏标签（tab）移出上栏，就应该生成新窗口。
+
+### 103.2 实现
+
+- `public/js/app.js`：每条会话记录加稳定 `id`（`newEntryId()`，`crypto.randomUUID` 回退
+  `<windowId>-<time36>-<seq>`；`addEntry` 的 record、`buildSessionPayload` 的 entries、译文缓存都带 id，
+  旧条目保存时补 id）；`saveSessionNow` 的问答/译文请求都加 `&merge=1`，删除 `canWrite` 门禁，
+  成功后向其它窗口广播 chat / translate，`saveNotes` 成功后广播 notes。
+- 跨窗口同步：`remoteSessionPending` 改为**数组队列**（原单槽会被「先 chat 后 translate」两次广播覆盖），
+  `onRemoteSessionSaved` 忽略本窗口 sender，`applyRemoteSessionSaved` 在非 busy 时 120ms 防抖应用；
+  chat 仅当 `scope` 与 `sid` 都与本窗口当前会话一致时 `followCurrentSession()` 重放刷新，
+  translate 仅当 docId 相同才 `restoreSession(only:'translate')`，notes 仅当 docId 相同才重新渲染；
+  对未打开的内容窗口不做任何切换或弹开。生成中（`state.busy`）先挂起，`setBusy(false)` 后再应用。
+- `public/js/windows.js`：删掉 `navigator.locks` 编辑锁、`fetch` 包装的 409 分支、
+  `canWrite` / `allowEdit` 实体、`#windowEditNotice` 与 `releaseDocument` 锁清理
+  （保留同名 no-op 导出，app.js 调用点不变）；保留 `/api/state` 跨窗口进度按 `ts` 合并；
+  新增 `notifySessionSaved()` 走 `BroadcastChannel('prt.reader.windows')` 的 `session-saved` 消息；
+  去掉「移到新窗口」后对目标窗口的 `refresh-document` 触发（那会让新窗口 reload，拖出时会白屏闪现）。
+- `public/js/tabs.js` + `public/tabs.css`：指针拖拽时用 `isOutsideBar` 判断离开标签条
+  （下沿 +24px、左右 ±24px 视为拖出），拖出时高亮标签条并隐藏插入线；`pointerup` 若在栏外
+  调用 `onNewWindow(docId, true)`（与右键「移到新窗口」同语义），否则维持原来的排序逻辑。
+  注意拖拽起点在标签标题上：按在 `×` 关闭按钮上不启动拖拽。
+- `server.js`：`POST /api/session` 支持 `merge=1`，用 `mergeSessionPayload(old, payload)` 按条目 `id`
+  增量合并（旧数据无 id 时按内容键兜底；同 id 取更完整版本：user > complete > 其它，平级取 text 更长；
+  history 按 role+kind+content+page+docId 去重、ops 按 id 取较新、teaching 取 walk.updatedAt 较新、
+  summary 取更长）；同一会话文件用 `sessionWriteChains` Promise 链串行化读改写，避免并发丢条目；
+  不带 `merge` 的 POST（清空会话）仍是整份替换，清空不会被旧条目复活。
+- `desktop/src/api.rs`：与 Node 同一套合并规则的 Rust 实现（`merge_session_payload` 等），
+  POST 读改写包在 `session_write_lock()` 的静态 `Mutex` 里（每个请求一个线程，不能依赖串行 accept）。
+- 笔记不做服务端按 id 合并（删除单条笔记会被「合并」复活）：保持后写覆盖 + 广播后其它窗口重新加载。
+
+### 103.3 验收
+
+- `test/multiwindow.mjs` 改写后 **27/27 PASS**：主窗打开、标签右键两项、窗口独立身份/文档、滚动独立、
+  外观隔离、两窗显示同一会话、A→B 与 B→A 同步、并发 `merge=1` 写入都 200 且两条消息都保留、
+  并发进度保存、同论文阅读位置、重复论文笔记可写且无编辑锁提示、笔记广播刷新、
+  **拖标签出栏生成新窗口 / 原标签移除 / 源窗回到另一篇论文**、平铺三窗仍可用、失败目标清理、
+  重启恢复窗口身份与独立页码、关主窗口不影响副窗口、最后窗口关闭退出码 0、无 pageerror。
+- 既有回归：`tabs` **49/49**、`save-reliability` **10/10**、`fullscreen` **14/14**、`theme` **13/13**。
+- 调试中踩到的坑：`window.__ctx` 一开始没有 `activeSession` getter，测试两侧都取到 `undefined`，
+  `undefined === undefined` 造成假通过；测试拖拽起点取「标签中心」时正落在 `×` 按钮上，
+  `pointerdown` 被 close 按钮拦下而始终没进入拖拽逻辑——改为从 `.tab-title` 起拖。
+- 构建：`desktop\build.bat` → 项目根 `prt.exe` **11,252,736 B**，
+  SHA256 `08D44C888FAFFCB4B5EF5820534855834CB93FA8FCFC93D4FEB9F39C3DA5235A`。
+  桌面副本仍被正在运行的旧实例占用未覆盖（构建脚本会跳过并提示），需关闭旧实例后重跑构建或复制项目根 exe。
+
+### 103.4 交付
+
+- 文档：`docs/多窗口阅读.md` 改写为同步语义并补「拖标签出栏＝移到新窗口」；`docs/使用说明书.md` §16.1
+  同步补充；`docs/README.md` 设计记录条目更新。
+- 提交：显式 `git add` 本次会话同步/拖拽源码、测试与文档后提交
+  「多窗口协作：同会话跨窗口并发热同步、拖标签出栏开新窗」。
+

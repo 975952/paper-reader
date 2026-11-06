@@ -7,9 +7,6 @@ const nativePost = (type, extra = {}) => window.ipc?.postMessage(JSON.stringify(
 const newKey = () => `w-${crypto.randomUUID()}`;
 const stateKey = (id = windowId) => `reader.window.${id}.progress`;
 const readJSON = (key, fallback = {}) => { try { return JSON.parse(rawStorage.getItem(key) || 'null') || fallback; } catch { return fallback; } };
-const claims = new Map();
-const releases = new Map();
-const pendingClaims = new Map();
 const requests = new Map();
 let hooks = {};
 let windowRows = [];
@@ -20,43 +17,19 @@ let ready = false;
 let layoutPage = null;
 const bus = typeof BroadcastChannel === 'function' ? new BroadcastChannel('prt.reader.windows') : null;
 
-function resource(url) {
-  if (url.pathname !== '/api/session' && url.pathname !== '/api/notes') return '';
-  return `${url.pathname}:${url.searchParams.get('doc') || 'default'}:${url.searchParams.get('sid') || ''}`;
+/**
+ * 多窗口不再有「单写者」限制：同一会话可以被多个窗口同时操作。
+ * 各窗口保存时带 `merge=1`，服务端按条目 id 合并；保存成功后在这里广播，
+ * 其它窗口只在「当前正显示同一会话」时刷新（见 app.js onRemoteSessionSaved）。
+ */
+export function notifySessionSaved(info = {}) {
+  bus?.postMessage({ type: 'session-saved', ...info, sender: windowId });
 }
-const ownerKey = (key) => `reader.window.owner.${key}`;
-export function releaseDocument(docId) {
-  for (const key of [`/api/notes:${docId}:`, `/api/session:${docId}:__translate`]) {
-    releases.get(key)?.(); releases.delete(key);
-    // A stale parked view must never reacquire and save without reading the latest file first.
-    claims.set(key, false);
-    if (rawStorage.getItem(ownerKey(key)) === windowId) rawStorage.removeItem(ownerKey(key));
-  }
-}
-async function claim(key, refresh = false) {
-  if (!key) return true;
-  if (claims.get(key) === true) return true;
-  if (!refresh && claims.has(key)) return false;
-  if (pendingClaims.has(key)) return pendingClaims.get(key);
-  // Fail closed if Web Locks are unavailable; all supported WebView2/Chrome builds have them.
-  if (!navigator.locks) { claims.set(key, false); return false; }
-  const promise = new Promise((resolve) => {
-    navigator.locks.request(`prt.edit.${key}`, { ifAvailable: true }, async (lock) => {
-      claims.set(key, !!lock);
-      if (lock) rawStorage.setItem(ownerKey(key), windowId);
-      resolve(!!lock);
-      if (lock) await new Promise((release) => {
-        releases.set(key, release);
-        window.addEventListener('pagehide', release, { once: true });
-      });
-    }).catch(() => { claims.set(key, false); resolve(false); });
-  });
-  pendingClaims.set(key, promise);
-  const result = await promise;
-  pendingClaims.delete(key);
-  updateNotice();
-  return result;
-}
+/** 保留旧接口：防护已移除，始终允许编辑/保存。 */
+export const releaseDocument = () => {};
+export async function canWrite() { return true; }
+export async function allowEdit() { return true; }
+
 const toURL = (value) => new URL(typeof value === 'string' || value instanceof URL ? value : value.url, location.href);
 const jsonResponse = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -66,13 +39,6 @@ window.fetch = async (input, init = {}) => {
   const url = toURL(input);
   if (url.origin !== location.origin) return serviceFetch(input, init);
   const method = String(init.method || input?.method || 'GET').toUpperCase();
-  const key = resource(url);
-  if (key) {
-    const editable = await claim(key, method === 'GET');
-    if (method !== 'GET' && !editable) {
-      return jsonResponse({ error: { message: '另一个窗口正在编辑，请前往编辑窗口，或关闭它后重新载入。' } }, 409);
-    }
-  }
   if (url.pathname === '/api/state') {
     if (method === 'GET') {
       const r = await serviceFetch(input, init);
@@ -100,35 +66,6 @@ window.fetch = async (input, init = {}) => {
   }
   return serviceFetch(input, init);
 };
-
-function currentURLs() { return hooks.resources?.() || {}; }
-export async function canWrite(url) { return !url || claim(resource(toURL(url))); }
-function noticeText() {
-  const urls = currentURLs();
-  const blocked = Object.entries(urls).filter(([, u]) => u && claims.get(resource(toURL(u))) === false);
-  return blocked;
-}
-function updateNotice() {
-  const notice = document.getElementById('windowEditNotice');
-  if (!notice) return;
-  const blocked = noticeText();
-  notice.hidden = !blocked.length;
-  if (!blocked.length) return;
-  notice.querySelector('span').textContent = `${blocked.map(([name]) => name).join('、')}正在另一窗口编辑，此处只读。`;
-  notice.querySelector('[data-owner]').onclick = () => {
-    const key = resource(toURL(blocked[0][1]));
-    const owner = rawStorage.getItem(ownerKey(key));
-    if (desktopWindows) nativePost('window-focus', { key: owner });
-    else bus?.postMessage({ type: 'focus', key: owner });
-  };
-}
-export async function allowEdit(kind) {
-  const url = currentURLs()[kind];
-  if (await canWrite(url)) return true;
-  updateNotice();
-  hooks.notify?.(`${kind}正在另一个窗口编辑；可前往该窗口，或关闭它后重新载入。`);
-  return false;
-}
 
 function renderWindowMenu() {
   if (!menu) return;
@@ -180,10 +117,9 @@ export async function openReaderWindow(doc, { move = false } = {}) {
     await result;
     if (move) {
       await hooks.closeTab?.(doc.docId);
-      // Only hand editing ownership over after the original tab has actually closed.
+      // Only hand the document over after the original tab has actually closed.
       if (hooks.hasTab?.(doc.docId)) throw new Error('原标签尚未关闭，请先保存后重试');
       releaseDocument(doc.docId);
-      bus?.postMessage({ type: 'refresh-document', key });
     }
   } catch (e) { hooks.notify?.(String(e.message || e)); }
 }
@@ -216,7 +152,7 @@ window.addEventListener('prt-desktop', ({ detail }) => {
 bus?.addEventListener('message', ({ data }) => {
   if (data.type === 'open-result') completeRequest(data);
   if (data.type === 'focus' && data.key === windowId) window.focus();
-  if (data.type === 'refresh-document' && data.key === windowId) location.reload();
+  if (data.type === 'session-saved') hooks.sessionSaved?.(data);
 });
 
 export function windowReady() {
@@ -230,7 +166,6 @@ export function windowReady() {
     url.searchParams.delete('document'); url.searchParams.delete('windowRequest');
     history.replaceState(null, '', url.href);
   }
-  updateNotice();
 }
 export function startWindows(callbacks) {
   hooks = callbacks;
@@ -248,12 +183,6 @@ export function startWindows(callbacks) {
   };
   document.addEventListener('click', (e) => { if (!menu.contains(e.target) && !button.contains(e.target)) menu.hidden = true; });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') menu.hidden = true; });
-  const notice = document.createElement('div'); notice.id = 'windowEditNotice'; notice.hidden = true;
-  notice.innerHTML = '<span></span><button type="button" data-owner>前往编辑窗口</button><button type="button" data-reload>重新载入</button>';
-  notice.querySelector('[data-reload]').onclick = async () => {
-    try { await hooks.save?.(); location.reload(); } catch (e) { hooks.notify?.(e.message || String(e)); }
-  };
-  document.getElementById('tabBarMount')?.after(notice);
 }
 export function finishWindowBoot() { ready = true; windowReady(); }
 export const isWindowClosed = () => closed;

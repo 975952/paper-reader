@@ -203,8 +203,8 @@ export function createTabBar({ mount, onActivate, onClose, onOpenDoc, onReorder,
     drag = { tab, el, startX: e.clientX, startY: e.clientY, moved: false, pointerId: e.pointerId };
     el.setPointerCapture?.(e.pointerId);
     el.addEventListener('pointermove', onDragMove);
-    el.addEventListener('pointerup', endDrag);
-    el.addEventListener('pointercancel', endDrag);
+    el.addEventListener('pointerup', (ev) => endDrag(ev));
+    el.addEventListener('pointercancel', (ev) => endDrag(ev));
   };
   const hitIndex = (clientX) => {
     const tabs = [...strip.querySelectorAll('.doc-tab')];
@@ -223,25 +223,38 @@ export function createTabBar({ mount, onActivate, onClose, onOpenDoc, onReorder,
     line.style.left = `${x}px`;
     line.classList.remove('hidden');
   };
+  /** 指针是否已离开标签条：拖出标签条 = 把这篇论文移到新窗口（m00244）。 */
+  const isOutsideBar = (e) => {
+    if (!e) return false;
+    const r = strip.getBoundingClientRect();
+    const pad = 24;
+    return e.clientY > r.bottom + pad || e.clientX < r.left - pad || e.clientX > r.right + pad;
+  };
   function onDragMove(e) {
     if (!drag) return;
     if (Math.abs(e.clientX - drag.startX) + Math.abs(e.clientY - drag.startY) > 4) drag.moved = true;
     if (!drag.moved) return;
     drag.el.classList.add('dragging');
+    drag.out = isOutsideBar(e);
+    document.body.classList.toggle('tab-dragging-out', drag.out);
+    if (drag.out) { line.classList.add('hidden'); return; }
     const idx = hitIndex(e.clientX);
     drag.insertAt = idx;
     showLine(idx);
   }
-  function endDrag() {
+  function endDrag(e) {
     if (!drag) return;
-    const { tab, moved, insertAt, el } = drag;
+    const { tab, moved, insertAt, out, el } = drag;
     el.removeEventListener('pointermove', onDragMove);
     el.removeEventListener('pointerup', endDrag);
     el.removeEventListener('pointercancel', endDrag);
     el.classList.remove('dragging');
+    document.body.classList.remove('tab-dragging-out');
     line.classList.add('hidden');
     drag = null;
     if (!moved) return;
+    // 拖出标签条：在新窗口打开并把原标签移过去（与右键「移到新窗口」同一语义）
+    if (out || isOutsideBar(e)) { onNewWindow?.(tab.docId, true); return; }
     let idx = Number.isInteger(insertAt) ? insertAt : list.length;
     const from = list.findIndex((t) => t.docId === tab.docId);
     if (from >= 0 && idx > from) idx -= 1;

@@ -85,37 +85,98 @@ try {
   check('Scrolling one window preserves the other position', (await read(a)).page === 4 && (await read(b)).page === 9);
   await b.evaluate(async () => { const { windowStorage } = await import('/js/window-storage.js'); windowStorage.setItem('reader.ui', JSON.stringify({ style: { theme: 'dark' } })); });
   check('Appearance writes stay in their own window', await a.evaluate(() => !JSON.parse(localStorage.getItem('reader.ui') || '{}').style?.theme?.includes('dark')));
-  await Promise.all([a.evaluate(() => window.__ctx.newSession({ silent: true })), b.evaluate(() => window.__ctx.newSession({ silent: true }))]);
-  const ids = await Promise.all([a, b].map((p) => p.evaluate(() => window.__ctx.activeSession)));
-  // Use the real persisted session URLs to check single-writer protection independent of UI defaults.
-  const sharedURL = `/api/session?doc=multiwindow-shared&sid=acceptance`;
-  await a.evaluate((u) => fetch(u), sharedURL);
-  await b.evaluate((u) => fetch(u), sharedURL);
-  check('First window can save a shared session', await post(a, sharedURL, { entries: [{ kind: 'answer', text: 'keep me' }], history: [] }) === 200);
-  check('Second window cannot overwrite the shared session', await post(b, sharedURL, { entries: [], history: [] }) === 409);
-  check('Rejected save preserves stored conversation', (await (await fetch(base + sharedURL)).json()).entries[0].text === 'keep me');
+  // ---- 跨窗口同步：同一会话在两个窗口都打开时，一边的改动要出现在另一边 ----
+  await a.evaluate(() => window.__ctx.newSession({ silent: true }));
+  const aSid = await a.evaluate(() => window.__ctx.activeSession);
+  const scopeKey = await a.evaluate(async (sid) => {
+    const { windowStorage } = await import('/js/window-storage.js');
+    const map = JSON.parse(windowStorage.getItem('reader.activeSession') || '{}');
+    return Object.entries(map).find(([, v]) => v === sid)?.[0] || '';
+  }, aSid);
+  await b.evaluate(async (sid, key) => {
+    const { windowStorage } = await import('/js/window-storage.js');
+    const map = JSON.parse(windowStorage.getItem('reader.activeSession') || '{}');
+    map[key] = sid;
+    windowStorage.setItem('reader.activeSession', JSON.stringify(map));
+    await window.__ctx.restoreSession(window.__state.doc.docId, { only: 'chat' });
+  }, aSid, scopeKey);
+  check('Both windows display the same shared session', (await read(b)).sid === aSid);
+  for (const page of [a, b]) {
+    await page.evaluate(async () => {
+      const m = await import('/js/sessions.js');
+      m.sessionsHideEntryCard();
+    });
+  }
+  await a.evaluate(async () => {
+    window.__ctx.addEntry({ block: 'chat', tag: '同步测试', kind: 'user', text: '来自窗口A的消息' });
+    await window.__ctx.saveSessionNow();
+  });
+  check('Session edits sync to the other open window', await until(
+    () => b.evaluate(() => (window.__state.sessionEntries || []).some((e) => String(e.text || '').includes('来自窗口A'))), 'sync A to B'));
+  await b.evaluate(async () => {
+    window.__ctx.addEntry({ block: 'chat', tag: '同步测试', kind: 'assistant', text: '来自窗口B的回复' });
+    await window.__ctx.saveSessionNow();
+  });
+  check('Session edits sync back from the other window', await until(
+    () => a.evaluate(() => (window.__state.sessionEntries || []).some((e) => String(e.text || '').includes('来自窗口B'))), 'sync B to A'));
+  const mergeDoc = `multiwindow-merge-${Date.now().toString(36)}`;
+  const mergeURL = `/api/session?doc=${encodeURIComponent(mergeDoc)}&sid=${encodeURIComponent(aSid)}&merge=1`;
+  const [ra, rb] = await Promise.all([
+    post(a, mergeURL, { entries: [{ id: 'msg-a', kind: 'answer', text: 'A 端并发消息' }], history: [] }),
+    post(b, mergeURL, { entries: [{ id: 'msg-b', kind: 'answer', text: 'B 端并发消息' }], history: [] }),
+  ]);
+  check('Concurrent writes to one session both succeed', ra === 200 && rb === 200);
+  const merged = await (await fetch(`${base}/api/session?doc=${encodeURIComponent(mergeDoc)}&sid=${encodeURIComponent(aSid)}`)).json();
+  const mergedTexts = (merged.entries || []).map((e) => e.text);
+  check('Concurrent merged saves keep both messages', mergedTexts.includes('A 端并发消息') && mergedTexts.includes('B 端并发消息'));
   await Promise.all([a.evaluate(() => window.__ctx.saveSessionNow()), b.evaluate(() => window.__ctx.saveSessionNow())]);
-  await sleep(800);
+  await sleep(900);
   const progress = await (await fetch(base + '/api/state')).json();
   check('Concurrent progress saves retain both papers', progress.docs[sa.doc]?.page === 4 && progress.docs[sb.doc]?.page === 9);
   let duplicate = await newWindow(a, 'a.pdf');
   const sd = await read(duplicate);
   check('Same paper opens at the source reading position', sd.page === 4);
   const notesURL = `/api/notes?doc=${encodeURIComponent(sa.doc)}`;
-  check('Duplicate paper cannot overwrite notes', await post(duplicate, notesURL, { items: [{ id: 'must-not-write', text: 'bad' }] }) === 409);
-  check('Duplicate paper shows editing ownership notice', await duplicate.$eval('#windowEditNotice', (n) => !n.hidden));
+  check('Duplicate paper can save notes without an edit lock', await post(duplicate, notesURL, { items: [{ id: 'sync-note', page: 4, rects: [], text: '另一窗口的笔记', ts: Date.now() }] }) === 200);
+  check('Duplicate window shows no edit-lock notice', await duplicate.evaluate(() => !document.getElementById('windowEditNotice')));
+  // 笔记采用「后写覆盖 + 广播刷新」：模拟另一窗口保存后的广播，主窗口应重新拉取同一篇文档的笔记
+  await a.evaluate((docId) => {
+    const ch = new BroadcastChannel('prt.reader.windows');
+    ch.postMessage({ type: 'session-saved', kind: 'notes', docId, sender: 'acceptance-peer' });
+    setTimeout(() => ch.close(), 600);
+  }, sa.doc);
+  check('Notes refresh when another window saves', await until(
+    () => a.evaluate(() => window.__ctx.highlights.some((h) => h.id === 'sync-note')), 'notes refresh'));
   await ipc(duplicate, 'close');
   await until(async () => (await pages()).length === 2, 'close duplicate');
   check('Closing one reader leaves the service and other windows alive', child.exitCode === null && (await fetch(base + '/api/health')).ok);
+  // ---- 把上栏标签拖出标签栏＝生成新窗口（用户明确要求）----
   await open(a, 'c.pdf');
-  let c = await newWindow(a, 'c.pdf', true);
-  await until(async () => (await read(c)).name === 'c.pdf', 'moved reader');
-  check('Move removes original tab only after destination loads', !(await read(a)).tabs.includes((await read(c)).doc));
-  check('Moved document gets editing ownership', await c.evaluate(async () => {
-    const u = `/api/notes?doc=${encodeURIComponent(window.__state.doc.docId)}`;
-    const r = await fetch(u); const current = await r.json();
-    return (await fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(current) })).ok;
-  }));
+  await until(async () => (await read(a)).name === 'c.pdf', 'c opened');
+  // Grab the title, not the tab's geometric centre: the close button sits at
+  // the right edge and pointerdown on it must not start a drag.
+  const tabBox = await a.$eval('.doc-tab.active .tab-title', (el) => {
+    const r = el.getBoundingClientRect();
+    const bar = el.closest('.doc-tab').getBoundingClientRect();
+    return { x: r.left + Math.min(24, r.width / 2), y: r.top + r.height / 2, bottom: bar.bottom };
+  });
+  const beforeDrag = await pages();
+  await a.mouse.move(tabBox.x, tabBox.y);
+  await a.mouse.down();
+  await a.mouse.move(tabBox.x, tabBox.y + 10, { steps: 3 });
+  await a.mouse.move(tabBox.x, tabBox.bottom + 140, { steps: 8 });
+  await a.mouse.up();
+  const cwin = await until(async () => (await pages()).find((q) => !beforeDrag.includes(q)), 'drag-out window');
+  await ready(cwin);
+  check('Dragging a tab out of the tab bar opens a new window', (await read(cwin)).name === 'c.pdf');
+  const sourceRemoved = await until(async () => {
+    const tabsNow = (await read(a)).tabs;
+    return tabsNow.includes((await read(cwin)).doc) ? null : true;
+  }, 'source tab removed');
+  check('Drag-out removes the source tab after the destination loads', sourceRemoved);
+  const back = await until(async () => { const r = await read(a); return r.name === 'a.pdf' ? r : null; }, 'source back');
+  check('Dragged-out tab leaves the source window on its other paper', back.name === 'a.pdf');
+  await a.evaluate(() => window.__viewer.goToPage(4));
   await ipc(a, 'windows-tile'); await sleep(1200);
   const afterTile = await Promise.all((await pages()).map(read));
   console.log('Tiled readers:', JSON.stringify(afterTile));

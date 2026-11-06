@@ -1,4 +1,4 @@
-import { windowStorage as localStorage, storageKey, windowId, startWindows, finishWindowBoot, windowReady, openReaderWindow, canWrite, allowEdit, isWindowClosed, releaseDocument } from './windows.js';
+import { windowStorage as localStorage, storageKey, windowId, startWindows, finishWindowBoot, windowReady, openReaderWindow, canWrite, allowEdit, isWindowClosed, releaseDocument, notifySessionSaved } from './windows.js';
 import { $, $$, el, appendAll, toast, toastAction, cleanText, renderMarkdown, escapeHtml, debounce, throttle, clamp, fmtSize } from './util.js';
 import { iconEl, iconHTML, hasIcon } from './icons.js';
 import { PdfViewer, clampZoomSpeed, ZOOM_SPEED_MIN, ZOOM_SPEED_MAX, readPdfPages, renderPdfPageImage } from './pdfview.js';
@@ -787,6 +787,7 @@ let serverState = {};
     current: () => (!tabsFeatureEnabled() || tabsStore.tabs.length) ? state.doc : null,
     closeTab,
     hasTab: (docId) => tabsStore.tabs.some((t) => t.docId === docId),
+    sessionSaved: onRemoteSessionSaved,
     notify: (message) => toast(message, 'err', 6500),
     resources: () => state.doc && (!tabsFeatureEnabled() || tabsStore.tabs.length) ? {
       '问答': `/api/session?${sessionQuery(sessionScopeKey(), activeSidFor(state.doc.docId))}`,
@@ -1848,6 +1849,7 @@ function initViewer() {
     get translateSid() { return TRANSLATE_SID; },
     get lastHotTrace() { return window.__lastHotTrace || null; },
     openDoc, closeTab, activateTab, moveTab, reopenClosedTab, goWelcome, openReaderWindow, windowId,
+    get activeSession() { return state.doc ? activeSidFor(state.doc.docId) : ''; },
     newSession, switchSession, deleteSession, clearCurrentSession, loadSessionList, switchFolder,
     // P2.5 Agent 读取：开关（写 localStorage）、默认值、最近一次运行统计
     get agentRead() { return agentReadEnabled(); },
@@ -3976,6 +3978,7 @@ async function saveNotes() {
       body: JSON.stringify({ items: state.highlights }),
     });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  notifySessionSaved({ kind: 'notes', docId: state.doc.docId });
 }
 
 async function addHighlight(sel, note = '') {
@@ -5225,7 +5228,14 @@ function renderAiBar() {
  *   角色行（小圆标 + 类型 + 页码 + 回跳） / 引用原文（细竖线，不做盒子） / 截图 / 正文 / 底部小动作
  * 没有边框卡片，也没有任何折叠。
  */
-function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = 'assistant', text, retry, restore = false, reveal = true, docId = '', docTitle = '' }) {
+let entryIdSeq = 0;
+/** 每条会话记录的稳定 id：跨窗口合并靠它识别同一条消息（旧数据没有 id 时现场补）。 */
+function newEntryId() {
+  entryIdSeq += 1;
+  try { if (crypto?.randomUUID) return crypto.randomUUID(); } catch { /* 回退 */ }
+  return `${windowId}-${Date.now().toString(36)}-${entryIdSeq.toString(36)}`;
+}
+function addEntry({ id = '', block = 'chat', tag, page, quote, imageSrc, thumbs, kind = 'assistant', text, retry, restore = false, reveal = true, docId = '', docTitle = '' }) {
   // 恢复历史时只把内容装回对应块，不强行打开右栏；用户可从下方开关按需展开。
   if (!restore && reveal && !state.panels[block].visible) setPanelVisible(block, true);
   // A translation card can record a result before its sidebar block has ever been opened.
@@ -5303,7 +5313,7 @@ function addEntry({ block = 'chat', tag, page, quote, imageSrc, thumbs, kind = '
   root.dataset.seq = String(state.msgSeq);
   if (block === 'translate') bodyEl.prepend(root);
   else bodyEl.append(root);
-  const record = { block, tag: tag || '', page: page || null, quote: quote || '', kind, text: text || '', screenshot: !!shots.length, sources: [], meta: '',
+  const record = { id: id || newEntryId(), block, tag: tag || '', page: page || null, quote: quote || '', kind, text: text || '', screenshot: !!shots.length, sources: [], meta: '',
     // B 线 P3：消息带来源文档（问答会话全局共享，恢复时能看出每条是哪篇论文下问的）
     docId: String(docId || state.doc?.docId || ''), docTitle: String(docTitle || state.doc?.name || ''),
     status: isUser ? 'user' : (text !== undefined ? 'complete' : 'pending'), retry: retry || null };
@@ -5717,7 +5727,10 @@ function serializeTeachingState() {
 function buildSessionPayload() {
   if (!state.doc) return null;
   const docId = state.doc.docId;
-  const entries = state.sessionEntries.slice(-90).map((x) => ({
+  const entries = state.sessionEntries.slice(-90).map((x) => {
+    if (!x.id) x.id = newEntryId();
+    return {
+    id: String(x.id || '').slice(0, 80),
     block: String(x.block || 'chat'), tag: String(x.tag || '').slice(0, 120), page: x.page || null,
     quote: String(x.quote || '').slice(0, 3000), kind: x.kind === 'user' ? 'user' : 'assistant',
     text: String(x.text || '').slice(0, 12000), screenshot: !!x.screenshot,
@@ -5739,14 +5752,14 @@ function buildSessionPayload() {
       kind: String(x.teaching.kind || '').slice(0, 40), name: String(x.teaching.name || '').slice(0, 160),
       boundary: String(x.teaching.boundary || '').slice(0, 2000), page: x.teaching.page || null,
     } : null,
-  }));
+  }; });
   const inMemory = new Set(entries.map((e) => `${e.tag}\u0000${e.text}`));
   // 文件缓存只对「它所属的那篇文档」有效：热切换后 _fileEntries 可能还是上一篇的，不能串用
   const kept = (state._fileDocId === docId && Array.isArray(state._fileEntries) ? state._fileEntries : [])
     .filter((e) => e && e.block !== 'chat')
     .filter((e) => !inMemory.has(`${String(e.tag || '').slice(0, 120)}\u0000${String(e.text || '').slice(0, 12000)}`))
     .slice(-40)
-    .map((e) => ({ ...e, block: String(e.block || 'translate') }));
+    .map((e) => ({ ...e, id: e.id || newEntryId(), block: String(e.block || 'translate') }));
   const allEntries = [...kept, ...entries];
   /* AI 功能记录（深入阅读等）属于**本次文件夹会话**：换会话/重新进文件夹时清空，
      这样新会话里 AI 功能菜单不会显示「已生成」，点它会重新算。 */
@@ -5790,24 +5803,68 @@ function buildSessionPayload() {
   return { chat: clampPayload(chat), translate: clampPayload(translate) };
 }
 
-/** 保存：文件夹问答 → doc=<folderKey>；本文档译文 → doc=<docId>&sid=__translate（复用现有接口） */
+/** 保存：文件夹问答 → doc=<folderKey>；本文档译文 → doc=<docId>&sid=__translate（复用现有接口）。
+ *  merge=1：服务端按条目 id 合并，多窗口同时写同一会话不会互相覆盖；保存成功后广播给其它窗口。 */
 async function saveSessionNow() {
   if (!state.doc) return;
   const both = buildSessionPayload();
   if (!both) return;
   const docId = state.doc.docId;
   const sid = activeSidFor(docId);
+  const scope = sessionScopeKey();
   const headers = { 'Content-Type': 'application/json' };
-  const chatURL = `/api/session?${sessionQuery(sessionScopeKey(), sid)}`;
-  const translateURL = `/api/session?${sessionQuery(docId, TRANSLATE_SID)}`;
+  const chatURL = `/api/session?${sessionQuery(scope, sid)}&merge=1`;
+  const translateURL = `/api/session?${sessionQuery(docId, TRANSLATE_SID)}&merge=1`;
+  const writeChat = !sessionsIsEntryMode();
   const [chatRes, translateRes] = await Promise.all([
-    !sessionsIsEntryMode() && (await canWrite(chatURL)) ? fetch(chatURL, { method: 'POST', headers, body: both.chat }) : { ok: true },
-    (await canWrite(translateURL)) ? fetch(translateURL, { method: 'POST', headers, body: both.translate }) : { ok: true },
+    writeChat ? fetch(chatURL, { method: 'POST', headers, body: both.chat }) : Promise.resolve({ ok: true }),
+    fetch(translateURL, { method: 'POST', headers, body: both.translate }),
   ]);
   if (!chatRes.ok) throw new Error(`HTTP ${chatRes.status}`);
   if (!translateRes.ok) throw new Error(`译文保存失败 HTTP ${translateRes.status}`);
   // 记住「刚存进去的文件夹会话指纹」：下次冷恢复读到同样的内容时就不用作废停放视图（热切换仍可复用 DOM）
   try { globalChatSig = chatSigOf(sid, JSON.parse(both.chat).entries); } catch { globalChatSig = ''; }
+  // 通知其它窗口：只有「当前正显示同一会话」的窗口会刷新（见 applyRemoteSessionSaved）
+  if (writeChat) notifySessionSaved({ kind: 'chat', docId, scope, sid });
+  notifySessionSaved({ kind: 'translate', docId });
+}
+
+/** 其它窗口保存了会话：只在当前窗口正显示同一会话时重放刷新；不主动切会话、不弹窗。 */
+var remoteSessionPending = [];
+var remoteSessionTimer = 0;
+function scheduleRemoteSession() {
+  if (!remoteSessionPending.length || state.busy) return;
+  clearTimeout(remoteSessionTimer);
+  remoteSessionTimer = setTimeout(() => { applyRemoteSessionSaved(); }, 120);
+}
+function onRemoteSessionSaved(data) {
+  if (!data || data.sender === windowId) return;
+  remoteSessionPending.push(data);
+  scheduleRemoteSession();
+}
+async function applyRemoteSessionSaved() {
+  const pending = remoteSessionPending.splice(0);
+  if (!pending.length || !state.doc || state.busy) return;
+  for (let i = 0; i < pending.length; i += 1) {
+    const data = pending[i];
+    if (!data) continue;
+    if (state.busy) { remoteSessionPending.push(...pending.slice(i)); return; }
+    try {
+      if (data.kind === 'translate') {
+        if (data.docId !== state.doc.docId) continue;
+        await restoreSession(data.docId, { only: 'translate' });
+        continue;
+      }
+      if (data.kind === 'notes') {
+        if (data.docId !== state.doc.docId) continue;
+        await renderNotes();
+        continue;
+      }
+      const docId = state.doc.docId;
+      if (data.scope !== sessionScopeKey(docId) || data.sid !== activeSidFor(docId)) continue;
+      await followCurrentSession();
+    } catch { /* 同步失败忽略，下一次保存会再对齐 */ }
+  }
 }
 
 /**
@@ -9394,6 +9451,7 @@ function abortStream(reason = 'user') {
 function setBusy(on, hint = '') {
   state.busy = on;
   if (!on) state.activeSendScope = '';
+  if (!on) scheduleRemoteSession();
   $('#stopBtn')?.classList.toggle('hidden', !on || !state.abort);
   $('#sendBtn').disabled = on;
   $('#clipBtn').disabled = on;

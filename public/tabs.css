@@ -154,3 +154,7 @@ body.tabs-open.window-fullscreen #main { height: calc(100vh - var(--topbar-h)); 
   .doc-tab { max-width: 130px; min-width: 64px; padding-left: 7px; }
   .tab-close { opacity: .8; }
 }
+
+/* 拖标签离开标签栏＝松手会生成新窗口：只做轻量视觉提示 */
+body.tab-dragging-out .tab-bar { outline: 1px dashed var(--accent, #4c8dff); outline-offset: -1px; }
+body.tab-dragging-out .doc-tab.dragging { opacity: .3; }

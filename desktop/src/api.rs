@@ -3,11 +3,12 @@
 //! 每个处理函数的返回体、状态码、字段名都和 server.js 一一对应，
 //! 因为前端 public/js/*.js 已经按那个契约写死了。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{empty, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
@@ -1301,6 +1302,207 @@ fn merge_session_doc_refs(old: Option<&Value>, incoming: &Value) -> (Vec<Value>,
     )
 }
 
+// ---- 多窗口并发合并（与 server.js 的 mergeSessionPayload 同一套规则） ----
+
+fn session_entry_id(e: &Value) -> String {
+    e.get("id")
+        .and_then(Value::as_str)
+        .map(|s| utf16_clip(&collaps_ws(s), 80))
+        .unwrap_or_default()
+}
+
+fn session_scalar_text(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn session_entry_content_key(e: &Value) -> String {
+    ["block", "kind", "tag", "page", "quote", "text"]
+        .iter()
+        .map(|k| utf16_clip(&collaps_ws(&session_scalar_text(e.get(*k))), 300))
+        .collect::<Vec<_>>()
+        .join("\u{1}")
+}
+
+fn session_entry_rank(e: &Value) -> u8 {
+    let is_user = e.get("kind").and_then(Value::as_str) == Some("user")
+        || e.get("status").and_then(Value::as_str) == Some("user");
+    if is_user {
+        3
+    } else if e.get("status").and_then(Value::as_str) == Some("complete") {
+        2
+    } else {
+        1
+    }
+}
+
+/// 浅合并两个 JSON 对象：over 覆盖 base；非对象时取 over。
+fn shallow_merge(base: &Value, over: &Value) -> Value {
+    match (base.as_object(), over.as_object()) {
+        (Some(a), Some(b)) => {
+            let mut m = a.clone();
+            for (k, v) in b {
+                m.insert(k.clone(), v.clone());
+            }
+            Value::Object(m)
+        }
+        _ => over.clone(),
+    }
+}
+
+/// 同一条目取更完整版本：用户/complete 优先，其次 text 更长。
+fn richer_entry(a: &Value, b: &Value) -> Value {
+    let ra = session_entry_rank(a);
+    let rb = session_entry_rank(b);
+    let pick_b = if ra != rb {
+        rb > ra
+    } else {
+        utf16_len(b.get("text").and_then(Value::as_str).unwrap_or(""))
+            >= utf16_len(a.get("text").and_then(Value::as_str).unwrap_or(""))
+    };
+    if pick_b {
+        shallow_merge(a, b)
+    } else {
+        shallow_merge(b, a)
+    }
+}
+
+fn session_teach_at(t: Option<&Value>) -> String {
+    t.and_then(|v| v.get("walk"))
+        .and_then(|w| w.get("updatedAt"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// 多窗口并发保存：按条目 id 合并（旧条目无 id 时按内容指纹兜底），
+/// 顺序保持旧文件在前、本次新增追加在后；history/ops/teaching/summary 各自合并。
+fn merge_session_payload(old: Option<&Value>, incoming: &Value) -> Value {
+    let empty = json!({});
+    let old_data: &Value = old.filter(|v| v.is_object()).unwrap_or(&empty);
+    let next: &Value = if incoming.is_object() { incoming } else { &empty };
+    let old_entries: Vec<Value> = old_data.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
+    let new_entries: Vec<Value> = next.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut by_id: HashMap<String, usize> = HashMap::new();
+    let mut by_content: HashMap<String, usize> = HashMap::new();
+    for (i, e) in old_entries.iter().enumerate() {
+        let id = session_entry_id(e);
+        if !id.is_empty() {
+            by_id.insert(id, i);
+        }
+        by_content.entry(session_entry_content_key(e)).or_insert(i);
+    }
+    let mut merged: Vec<Value> = old_entries.clone();
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut appended: Vec<Value> = Vec::new();
+    for e in new_entries.iter() {
+        let id = session_entry_id(e);
+        let mut hit: Option<usize> = if id.is_empty() { None } else { by_id.get(&id).copied() };
+        if hit.is_none() {
+            if let Some(&idx) = by_content.get(&session_entry_content_key(e)) {
+                // 只有「至少一方没有 id」时才按内容认领，避免同文的两条不同消息被误并
+                let candidate_has_id = !session_entry_id(&old_entries[idx]).is_empty();
+                if !(!id.is_empty() && candidate_has_id) {
+                    hit = Some(idx);
+                }
+            }
+        }
+        match hit {
+            Some(i) if !used.contains(&i) => {
+                used.insert(i);
+                let old_id = session_entry_id(&old_entries[i]);
+                let keep_id = if old_id.is_empty() { id } else { old_id };
+                let mut entry = richer_entry(&old_entries[i], e);
+                if !keep_id.is_empty() {
+                    if let Some(m) = entry.as_object_mut() {
+                        m.insert("id".to_string(), json!(keep_id));
+                    }
+                }
+                merged[i] = entry;
+            }
+            _ => appended.push(e.clone()),
+        }
+    }
+    let entries: Vec<Value> = merged.into_iter().chain(appended.into_iter()).collect();
+    // history：旧消息先行，按 role+kind+content+page+docId 去重后追加新消息
+    let history_key = |m: &Value| -> String {
+        [
+            session_scalar_text(m.get("role")),
+            session_scalar_text(m.get("kind")),
+            utf16_clip(&collaps_ws(m.get("content").and_then(Value::as_str).unwrap_or("")), 300),
+            session_scalar_text(m.get("page")),
+            session_scalar_text(m.get("docId")),
+        ]
+        .join("\u{1}")
+    };
+    let mut history: Vec<Value> = Vec::new();
+    let mut seen_history: HashSet<String> = HashSet::new();
+    let old_history: Vec<Value> = old_data.get("history").and_then(Value::as_array).cloned().unwrap_or_default();
+    let new_history: Vec<Value> = next.get("history").and_then(Value::as_array).cloned().unwrap_or_default();
+    for row in old_history.into_iter().chain(new_history.into_iter()) {
+        if seen_history.insert(history_key(&row)) {
+            history.push(row);
+        }
+    }
+    // ops：按 id 取 at 较新的一份，不丢任何一边的 AI 结果记录
+    let mut ops: Vec<Value> = Vec::new();
+    let mut op_index: HashMap<String, usize> = HashMap::new();
+    let old_ops: Vec<Value> = old_data.get("ops").and_then(Value::as_array).cloned().unwrap_or_default();
+    let new_ops: Vec<Value> = next.get("ops").and_then(Value::as_array).cloned().unwrap_or_default();
+    for row in old_ops.into_iter().chain(new_ops.into_iter()) {
+        let key = row.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        if key.is_empty() {
+            ops.push(row);
+            continue;
+        }
+        match op_index.get(&key).copied() {
+            None => {
+                op_index.insert(key, ops.len());
+                ops.push(row);
+            }
+            Some(i) => {
+                let old_at = ops[i].get("at").and_then(Value::as_u64).unwrap_or(0);
+                let new_at = row.get("at").and_then(Value::as_u64).unwrap_or(0);
+                if new_at >= old_at {
+                    ops[i] = row;
+                }
+            }
+        }
+    }
+    // teaching：取 walk.updatedAt 更新的那份（ISO 字符串可直接字典序比较）
+    let old_teach = old_data.get("teaching");
+    let new_teach = next.get("teaching");
+    let teaching = if session_teach_at(new_teach) >= session_teach_at(old_teach) {
+        new_teach.cloned()
+    } else {
+        old_teach.cloned()
+    }
+    .unwrap_or(Value::Null);
+    // summary：取更长的一份（连同它覆盖的条数）
+    let old_summary = old_data.get("summary").and_then(Value::as_str).unwrap_or("").to_string();
+    let new_summary = next.get("summary").and_then(Value::as_str).unwrap_or("").to_string();
+    let use_new_summary = utf16_len(&new_summary) >= utf16_len(&old_summary);
+    let summary = if use_new_summary { new_summary } else { old_summary };
+    let summary_covered = if use_new_summary {
+        next.get("summaryCovered").and_then(Value::as_u64).unwrap_or(0)
+    } else {
+        old_data.get("summaryCovered").and_then(Value::as_u64).unwrap_or(0)
+    };
+    let base = shallow_merge(old_data, next);
+    let mut out = base.as_object().cloned().unwrap_or_default();
+    out.insert("entries".to_string(), Value::Array(entries));
+    out.insert("history".to_string(), Value::Array(history));
+    out.insert("ops".to_string(), Value::Array(ops));
+    out.insert("teaching".to_string(), teaching);
+    out.insert("summary".to_string(), json!(summary));
+    out.insert("summaryCovered".to_string(), json!(summary_covered));
+    Value::Object(out)
+}
+
 /// 内容指纹：与 server.js 的 sessionContentFingerprint 完全一致
 fn session_content_fingerprint(data: &Value) -> String {
     let entries = data.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -1735,6 +1937,13 @@ pub fn attachment(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
     }
 }
 
+
+/// 会话文件 read-modify-write 的全局串行锁：多窗口并发保存必须「读-合并-写」原子完成。
+fn session_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
     let doc = query_get(raw_query, "doc").unwrap_or_else(|| "default".to_string());
     let sid = query_get(raw_query, "sid")
@@ -1758,11 +1967,22 @@ pub fn session(rq: Request, method: &Method, raw_query: &str, body: &[u8]) {
             }
             // 会话 meta（v4）：标题/文件夹/时间戳/置顶归档/内容指纹由服务端统一维护，
             // 前端只传 entries/history/ops… 也能补出一份完整会话文件
-            let old = store::read_json_opt(&file);
-            let stored = prepare_session_record(&payload, old.as_ref());
-            if !store::write_json(&file, &stored) {
-                return send_json(rq, 500, &err_json("保存阅读会话失败，请重试"));
-            }
+            // 多窗口：merge=1 时与磁盘旧内容按条目 id 合并；read-modify-write 全程持锁，避免并发抹写。
+            let merge = query_get(raw_query, "merge").as_deref() == Some("1");
+            let stored = {
+                let _guard = session_write_lock().lock().unwrap_or_else(|e| e.into_inner());
+                let old = store::read_json_opt(&file);
+                let merged = if merge {
+                    merge_session_payload(old.as_ref(), &payload)
+                } else {
+                    payload.clone()
+                };
+                let record = prepare_session_record(&merged, old.as_ref());
+                if !store::write_json(&file, &record) {
+                    return send_json(rq, 500, &err_json("保存阅读会话失败，请重试"));
+                }
+                record
+            };
             // 图片单独存：会话写成功之后按「还引用着的 id」清理本会话的附件目录
             // （清空会话 = 没有引用 → 图全删；发送失败留下的孤儿图也在这里被清掉）
             prune_attachments(&doc, &sid, &stored);
