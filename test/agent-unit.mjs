@@ -4,7 +4,8 @@
  *   node test/agent-unit.mjs
  *
  * 覆盖：工具 schema/参数校验、模型响应解析、只读工具执行、有界循环
- * （最多 3 轮 / 每轮最多 3 个 / 总超时 / abort）、读过页的收集、失败回退信号。
+ * （最多 AGENT_MAX_ROUNDS 轮 / 每轮最多 AGENT_MAX_CALLS_PER_ROUND 个 / 总超时 / abort）、
+ * 读过页的收集、失败回退信号。
  */
 import {
   AGENT_MAX_ROUNDS, AGENT_MAX_CALLS_PER_ROUND, AGENT_TOOL_SPECS, AGENT_SYSTEM_NOTE,
@@ -23,11 +24,12 @@ const check = (name, cond, detail = '') => {
 
 /* ── 1. 工具声明 ── */
 console.log('▶ 工具声明');
-check('6 个只读工具', AGENT_TOOL_SPECS.length === 6, String(AGENT_TOOL_SPECS.length));
+check('10 个只读工具', AGENT_TOOL_SPECS.length === 10, String(AGENT_TOOL_SPECS.length));
 check('全部是 function 形状', AGENT_TOOL_SPECS.every((t) => t.type === 'function' && t.function.name && t.function.parameters));
 check('工具名符合契约', AGENT_TOOL_SPECS.map((t) => t.function.name).join(',')
-  === 'get_reading_state,read_page,search_paper,read_scan_page,read_page_image,read_memory');
-check('system 说明最多 3 轮/3 个', /最多 3 轮、每轮最多 3 个/.test(AGENT_SYSTEM_NOTE));
+  === 'get_reading_state,read_page,search_paper,read_scan_page,read_page_image,read_memory,list_papers,search_papers,read_other_paper,read_other_paper_image');
+check('system 说明里的轮次上限与常量一致',
+  new RegExp(`最多 ${AGENT_MAX_ROUNDS} 轮、每轮最多 ${AGENT_MAX_CALLS_PER_ROUND} 个`).test(AGENT_SYSTEM_NOTE));
 
 /* ── 2. 参数校验 ── */
 console.log('\n▶ 工具参数校验');
@@ -39,6 +41,9 @@ check('read_page 超过总页数被拒', !!v('read_page', { page: 10 }, { numPag
 check('read_page 字符串页码可转数字', v('read_page', { page: '3' }, { numPages: 9 }).args.page === 3);
 check('search_paper 短查询被拒', !!v('search_paper', { query: 'a' }).error);
 check('search_paper 正常查询通过', !v('search_paper', { query: '注意力机制' }).error);
+check('search_papers 短查询被拒', !!v('search_papers', { query: 'a' }).error);
+check('search_papers 默认 scope=folder', v('search_papers', { query: '注意力' }).args.scope === 'folder');
+check('search_papers scope=all 通过', v('search_papers', { query: '注意力', scope: 'all' }).args.scope === 'all');
 check('read_memory 空 topic 被拒', !!v('read_memory', { topic: '  ' }).error);
 check('get_reading_state 无参数', !v('get_reading_state', {}).error);
 
@@ -71,11 +76,13 @@ const runtime = {
   async readScanPage(page) { return { page, text: `扫描 ${page}` }; },
   async readPageImage(page) { return { page, note: 'ok' }; },
   async readMemory(topic) { return { items: [{ topic, kind: 'knowledge' }] }; },
+  async searchPapers() { return { query: '注意力', scope: 'folder', count: 1, hits: [{ name: 'a.pdf', page: 3 }] }; },
 };
 {
-  for (const name of ['get_reading_state', 'read_page', 'search_paper', 'read_scan_page', 'read_page_image', 'read_memory']) {
+  for (const name of ['get_reading_state', 'read_page', 'search_paper', 'read_scan_page', 'read_page_image', 'read_memory', 'search_papers']) {
     const args = name === 'read_page' || name === 'read_scan_page' || name === 'read_page_image' ? { page: 3 }
-      : name === 'search_paper' || name === 'read_memory' ? { [name === 'search_paper' ? 'query' : 'topic']: '注意力' } : {};
+      : name === 'search_paper' || name === 'search_papers' ? { query: '注意力' }
+      : name === 'read_memory' ? { topic: '注意力' } : {};
     const r = await executeToolCall({ name, args }, runtime);
     check(`执行 ${name} 成功`, r.ok === true, JSON.stringify(r.value || r.error).slice(0, 60));
   }
@@ -108,13 +115,13 @@ const baseMessages = [{ role: 'system', content: 'sys' }, { role: 'user', conten
   check('两轮后结束（done）', run.ok && run.rounds === 2 && run.reason === 'done', JSON.stringify(agentStats(run)));
   check('记录了 2 次工具调用', run.calls.length === 2);
   check('收集到读过的页', run.pages.includes(2), JSON.stringify(run.pages));
-  check('每轮请求都带 tools', callsSeen.every((c) => c.tools === 6));
+  check('每轮请求都带 tools', callsSeen.every((c) => c.tools === AGENT_TOOL_SPECS.length));
   check('工具结果以 role=tool 追加', run.messages.some((m) => m.role === 'tool' && m.tool_call_id === 'c2'));
   check('assistant 的 tool_calls 被原样回传', run.messages.some((m) => m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length === 2));
 }
 
 {
-  // 模型一直要工具：最多 3 轮、每轮最多 3 个
+  // 模型一直要工具：轮数和每轮调用数都受常量上限约束
   let modelCalls = 0;
   const run = await runAgentLoop({
     messages: baseMessages, runtime,
@@ -125,8 +132,8 @@ const baseMessages = [{ role: 'system', content: 'sys' }, { role: 'user', conten
       })) } }] };
     },
   });
-  check('最多 3 轮', modelCalls === AGENT_MAX_ROUNDS, `${modelCalls}`);
-  check('每轮最多 3 个工具', run.calls.length === AGENT_MAX_ROUNDS * AGENT_MAX_CALLS_PER_ROUND, `${run.calls.length}`);
+  check(`最多 ${AGENT_MAX_ROUNDS} 轮`, modelCalls === AGENT_MAX_ROUNDS, `${modelCalls}`);
+  check(`每轮最多 ${AGENT_MAX_CALLS_PER_ROUND} 个工具`, run.calls.length === AGENT_MAX_ROUNDS * AGENT_MAX_CALLS_PER_ROUND, `${run.calls.length}`);
   check('轮次用尽标记 max-rounds', run.reason === 'max-rounds');
 }
 
@@ -179,6 +186,10 @@ console.log('\n▶ 过程展示（步骤标签 / 结果摘要 / onStep 事件）
 check('读取页步骤文案', toolStepLabel({ name: 'read_page', args: { page: 3 } }) === '读取第 3 页');
 check('检索步骤文案带查询词', /检索「注意力机制」/.test(toolStepLabel({ name: 'search_paper', args: { query: '注意力机制' } })));
 check('阅读状态步骤文案', toolStepLabel({ name: 'get_reading_state', args: {} }) === '查看当前阅读状态');
+check('论文库检索步骤文案', /检索论文库「帅哥」（当前文件夹）/.test(toolStepLabel({ name: 'search_papers', args: { query: '帅哥', scope: 'folder' } })));
+const sumLib = summarizeToolResult({ name: 'search_papers', args: { query: '帅哥' } },
+  { ok: true, value: { scope: 'folder', count: 2, hits: [{}, {}], papersScanned: 8, papersTotal: 8 } });
+check('论文库检索摘要带命中数', /2 条命中/.test(sumLib), sumLib);
 const sumSearch = summarizeToolResult({ name: 'search_paper', args: { query: 'BLEU' } }, { ok: true, value: { pages: [{ page: 2 }, { page: 5 }] } });
 check('检索结果摘要列出命中页', /命中 p\.2、p\.5/.test(sumSearch), sumSearch);
 const sumRead = summarizeToolResult({ name: 'read_page', args: { page: 4 } }, { ok: true, value: { page: 4, text: 'x'.repeat(1234) } });

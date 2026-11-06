@@ -1873,7 +1873,10 @@ function initViewer() {
     validateCitations, collectAvailablePages, formatPageList,
     get citationStats() { return lastCitationStats; },
     get citationPlan() { return activeCitationPlan ? [...activeCitationPlan.values()] : []; },
-    updateSendScope, runSearch, stepHit, addToChat, addImageToChat, removeAttach,
+    updateSendScope, runSearch, stepHit, searchLibrary, searchLibraryPages, searchScopeLabel,
+    get searchScope() { return currentSearchScope(); },
+    setSearchScope(scope) { const v = writeSearchScope(scope); try { $('#searchScope')?.querySelectorAll('[data-scope]').forEach((btn) => btn.setAttribute('aria-pressed', btn.dataset.scope === v ? 'true' : 'false')); } catch { /* ignore */ } return v; },
+    addToChat, addImageToChat, removeAttach,
     // 截图框选（自动化直接验证长截图/双页/缩放；真实入口还是鼠标拖框）
     captureRegionShot,
     renderAttachments, refreshReturnButton,
@@ -8846,31 +8849,52 @@ function createAgentRuntime(pending, { scannedDoc = false } = {}) {
         note: '顺序与左侧文件树一致；用户说「第 N 篇」按 index 数。',
       };
     },
+    async searchPapers(args = {}) {
+      const query = String(args.query || '').trim();
+      if (query.length < 2) return { error: 'query 至少 2 个字' };
+      await loadPapers();
+      const scope = args.scope === 'all' ? 'all' : 'folder';
+      try {
+        const result = await searchLibraryPages(query, scope, {
+          papers: other.papers, maxHits: 60, timeBudgetMs: 18000,
+        });
+        const hits = result.hits.slice(0, 24).map((h) => ({
+          name: h.docName, folder: h.folder, page: h.page, snippet: String(h.snippet || '').slice(0, 420),
+        }));
+        return {
+          query, scope,
+          scopeLabel: scope === 'all' ? '全部论文' : `当前文件夹（${currentFolderPath() || 'papers/'}）`,
+          papersScanned: result.scanned, papersTotal: result.total, truncated: result.truncated,
+          count: hits.length, hits,
+          note: hits.length
+            ? (result.truncated ? '结果较多/时间到，只扫了部分论文；缩小范围或换更具体的关键词会更快' : '')
+            : '没有命中：可以换关键词（用论文里的原文词），或先用 list_papers 看有哪些论文',
+        };
+      } catch (e) {
+        return { error: `论文库检索失败：${e?.message || e}` };
+      }
+    },
     async readOtherPaper(args = {}) {
       await loadPapers();
       const paper = findPaper(args.name);
       if (!paper) return { error: `没有找到论文「${String(args.name || '').slice(0, 60)}」，请先用 list_papers 看有哪些文件`, papers: (other.papers || []).slice(0, 20).map(paperBrief) };
+      let entry;
+      try { entry = await paperText(paper); }
+      catch (e) { return { error: `读取《${paper.name}》失败：${e?.message || e}` }; }
       if (args.query) {
-        const got = await readPdfPages(paper.url, { maxPages: 30 });
-        const terms = searchTerms(args.query).map((t) => t.toLowerCase()).filter((t) => t.length >= 2);
-        const hits = [];
-        for (const row of got.pages) {
-          const lower = row.text.toLowerCase();
-          if (!lower) continue;
-          const at = terms.length ? Math.min(...terms.map((t) => { const i = lower.indexOf(t); return i < 0 ? Number.POSITIVE_INFINITY : i; })) : lower.indexOf(String(args.query).toLowerCase());
-          if (!Number.isFinite(at) || at < 0) continue;
-          const start = Math.max(0, at - 100);
-          hits.push({ page: row.page, snippet: row.text.slice(start, start + 420).replace(/\s+/g, ' ').trim() });
-          if (hits.length >= 6) break;
-        }
-        return { name: paper.name, folder: paper.folder, numPages: got.numPages, query: args.query, hits, note: hits.length ? '' : '没有命中，可以换个词或直接给 page 读那一页' };
+        // 整篇检索（不再只看前 30 页）：命中靠后的章节也能找到
+        const hits = pageHitsInPaper(paper, entry, args.query, 8)
+          .map((h) => ({ page: h.page, snippet: String(h.snippet || '').slice(0, 420) }));
+        return {
+          name: paper.name, folder: paper.folder, numPages: entry.numPages, query: args.query, hits,
+          note: hits.length ? '' : '整篇（含靠后的页）没有命中，可以换词或直接给 page 读那一页',
+        };
       }
       const page = Number(args.page) || 1;
-      const got = await readPdfPages(paper.url, { pages: [page] });
-      const row = got.pages[0] || { page, text: '' };
+      const row = entry.pages.find((r) => r.page === page) || { page, text: '' };
       const text = String(row.text || '').slice(0, 8000);
       return {
-        name: paper.name, folder: paper.folder, index: paper.index, page, numPages: got.numPages,
+        name: paper.name, folder: paper.folder, index: paper.index, page, numPages: entry.numPages,
         chars: text.length, text,
         scanned: text.length < 40,
         note: text.length < 40 ? '这一页几乎没有文本层（可能是扫描件），可用 read_other_paper_image 取页图' : '',
@@ -11347,6 +11371,120 @@ async function captureToTranslate(topDoc, bottomDoc, leftVp, rightVp) {
 }
 
 
+/* ---- 全文搜索范围：本文 / 当前文件夹 / 全部论文 -------------------------
+   本文沿用原有 viewer.search（虚拟滚动命中、跳页最准）；文件夹和全部用
+   pdf.js 逐篇抽文本再检索，结果按论文分组。抽出的页文本按论文缓存，重复
+   搜索不再解析 PDF；缓存只活在本次页面里，不写盘。 */
+const SEARCH_SCOPE_KEY = 'reader.searchScope';
+const paperTextCache = new Map();
+
+function readSearchScope() {
+  try {
+    const v = localStorage.getItem(SEARCH_SCOPE_KEY);
+    return v === 'folder' || v === 'all' ? v : 'doc';
+  } catch { return 'doc'; }
+}
+
+function writeSearchScope(scope) {
+  const v = scope === 'folder' || scope === 'all' ? scope : 'doc';
+  try { localStorage.setItem(SEARCH_SCOPE_KEY, v); } catch { /* 隐私模式下忽略 */ }
+  return v;
+}
+
+function currentSearchScope() { return readSearchScope(); }
+
+function searchScopeLabel(scope) {
+  return scope === 'all' ? '全部论文' : scope === 'folder' ? '当前文件夹' : '本文';
+}
+
+/** 抽一篇论文的整本页文本（内存缓存，跨论文搜索与 Agent 读取共用）。 */
+async function paperText(paper) {
+  const key = String(paper?.docId || paper?.path || paper?.url || '');
+  if (!key) throw new Error('论文缺少标识');
+  const cached = paperTextCache.get(key);
+  if (cached) return cached;
+  const got = await readPdfPages(paper.url, { maxPages: 999 });
+  const entry = {
+    numPages: got.numPages,
+    pages: (got.pages || []).map((row) => ({ page: row.page, text: String(row.text || '') })),
+  };
+  paperTextCache.set(key, entry);
+  return entry;
+}
+
+/** 所有词都出现时返回最早命中位置，否则 -1。 */
+function searchTermsAllHit(lower, terms) {
+  const indexes = terms.map((t) => lower.indexOf(t));
+  return indexes.every((i) => i >= 0) ? Math.min(...indexes) : -1;
+}
+
+/** 在一篇论文的页文本里找命中：优先整串精确匹配，否则要求所有搜索词都出现。 */
+function pageHitsInPaper(paper, entry, query, limit = 12) {
+  const q = String(query || '').trim();
+  const full = q.toLowerCase();
+  const terms = searchTerms(q).map((t) => t.toLowerCase()).filter((t) => t.length >= 2);
+  if (!full) return [];
+  const hits = [];
+  for (const row of entry.pages) {
+    const text = String(row.text || '');
+    const lower = text.toLowerCase();
+    if (!lower) continue;
+    let at = full ? lower.indexOf(full) : -1;
+    let len = at >= 0 ? full.length : 0;
+    if (at < 0 && terms.length) {
+      at = searchTermsAllHit(lower, terms);
+      if (at >= 0) len = Math.max(1, terms.find((t) => lower.indexOf(t) === at)?.length || 1);
+    }
+    if (at < 0) continue;
+    const start = Math.max(0, at - 60);
+    const end = Math.min(text.length, at + len + 160);
+    hits.push({
+      docId: paper.docId,
+      docName: paper.name,
+      folder: paper.folder || '',
+      page: row.page,
+      pageIndex: 0,
+      before: text.slice(start, at).replace(/\s+/g, ' '),
+      match: text.slice(at, at + len).replace(/\s+/g, ' '),
+      after: text.slice(at + len, end).replace(/\s+/g, ' '),
+      snippet: text.slice(start, end).replace(/\s+/g, ' ').trim(),
+    });
+    if (hits.length >= limit) break;
+  }
+  return hits;
+}
+
+async function searchLibraryPages(query, scope = readSearchScope(), { onProgress, papers, maxHits = 120, timeBudgetMs = 0 } = {}) {
+  const q = String(query || '').trim();
+  if (!q) return { hits: [], scanned: 0, total: 0, truncated: false };
+  const all = (papers || state.papers || []).filter((p) => p && p.url);
+  const folder = currentFolderPath();
+  const activeId = state.doc?.docId;
+  const targets = (scope === 'all' ? all : all.filter((p) => String(p.folder || '') === folder))
+    .slice()
+    .sort((a, b) => Number(b.docId === activeId) - Number(a.docId === activeId));
+  const hits = [];
+  const startedAt = Date.now();
+  let scanned = 0;
+  let truncated = false;
+  for (let i = 0; i < targets.length; i += 1) {
+    if (timeBudgetMs && Date.now() - startedAt > timeBudgetMs) { truncated = true; break; }
+    onProgress?.(i, targets.length, targets[i]);
+    let entry;
+    try { entry = await paperText(targets[i]); } catch { scanned += 1; continue; }
+    hits.push(...pageHitsInPaper(targets[i], entry, q, maxHits - hits.length));
+    scanned += 1;
+    if (hits.length >= maxHits) { truncated = scanned < targets.length; break; }
+  }
+  return { hits: hits.slice(0, maxHits), scanned, total: targets.length, truncated };
+}
+
+/** 自动化脚本 / Agent 用的简版：只返回命中数组。 */
+async function searchLibrary(query, scope = currentSearchScope()) {
+  const result = await searchLibraryPages(query, scope);
+  return result.hits;
+}
+
 let searchToken = 0;
 let searchDebounced = null;
 
@@ -11367,6 +11505,26 @@ function cancelSearch({ clearInput = false, close = false, focus = false } = {})
 function initSearch() {
   const bar = $('#searchBar');
   const input = $('#searchInput');
+  const scopeBox = $('#searchScope');
+  const syncScope = () => {
+    const scope = currentSearchScope();
+    scopeBox?.querySelectorAll('[data-scope]').forEach((btn) => {
+      btn.setAttribute('aria-pressed', btn.dataset.scope === scope ? 'true' : 'false');
+    });
+    input.placeholder = scope === 'all' ? '在全部论文里搜索…'
+      : scope === 'folder' ? '在当前文件夹里搜索…' : '在全文里搜索…';
+  };
+  syncScope();
+  scopeBox?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-scope]');
+    if (!btn) return;
+    writeSearchScope(btn.dataset.scope);
+    syncScope();
+    const q = input.value.trim();
+    if (!q) return;
+    searchDebounced?.cancel?.();
+    runSearch(q);
+  });
   $('#searchBtn').onclick = () => {
     if (bar.classList.contains('hidden')) { bar.classList.remove('hidden'); input.focus(); }
     else cancelSearch({ clearInput: true, close: true, focus: true });
@@ -11393,8 +11551,13 @@ function initSearch() {
     $('#searchResults').replaceChildren();
     $('#searchResults').classList.add('hidden');
     const q = input.value.trim();
-    const ready = !!viewer?.pdf && state.viewerDocId === state.doc?.docId;
-    $('#searchCount').textContent = q ? (ready ? '搜索中…' : (state.doc ? '论文正在打开' : '先打开一篇论文')) : '';
+    const scope = currentSearchScope();
+    // 文件夹/全部只依赖 papers 列表，不需要当前论文已经打开
+    const ready = scope === 'doc'
+      ? (!!viewer?.pdf && state.viewerDocId === state.doc?.docId)
+      : !!(state.papers || []).length;
+    $('#searchCount').textContent = q ? (ready ? '搜索中…'
+      : (scope === 'doc' ? (state.doc ? '论文正在打开' : '先打开一篇论文') : '还没有可搜索的论文')) : '';
     if (q && ready) searchDebounced(q);
   });
 }
@@ -11403,10 +11566,44 @@ async function runSearch(q) {
   const count = $('#searchCount');
   q = String(q || '').trim();
   const my = ++searchToken;
-  viewer?.setActiveQuery(q);
-  const ready = !!viewer?.pdf && state.viewerDocId === state.doc?.docId;
-  if (!q || !ready) {
-    count.textContent = q && !ready ? (state.doc ? '论文正在打开' : '先打开一篇论文') : '';
+  const scope = currentSearchScope();
+  if (scope === 'doc') viewer?.setActiveQuery(q);
+  else viewer?.setActiveQuery('');
+  const docReady = !!viewer?.pdf && state.viewerDocId === state.doc?.docId;
+  const libraryReady = !!(state.papers || []).length;
+  if (!q) {
+    count.textContent = '';
+    state.search = { hits: [], idx: 0, query: '' };
+    $('#searchResults').replaceChildren();
+    $('#searchResults').classList.add('hidden');
+    return;
+  }
+  if (scope !== 'doc') {
+    if (!libraryReady) {
+      count.textContent = '还没有可搜索的论文';
+      state.search = { hits: [], idx: 0, query: '' };
+      $('#searchResults').replaceChildren();
+      $('#searchResults').classList.add('hidden');
+      return;
+    }
+    count.textContent = '搜索中…';
+    $('#searchResults').replaceChildren();
+    $('#searchResults').classList.add('hidden');
+    const result = await searchLibraryPages(q, scope, {
+      onProgress: (i, total) => { if (my === searchToken) count.textContent = `搜索中 ${Math.min(i + 1, total)}/${total} 篇…`; },
+    });
+    if (my !== searchToken) return;
+    state.search = { hits: result.hits, idx: 0, query: q, scope };
+    renderSearchResults();
+    updateSearchCount();
+    // 文件夹/全部范围只列出结果，不自动跳转：命中的论文可能还没打开，
+    // 用户点某一条时才切论文并翻页（见 showSearchHit）。
+    if (result.truncated) count.textContent = `只搜了 ${result.scanned}/${result.total} 篇（结果较多）`;
+    else if (!result.hits.length) count.textContent = `无结果（已搜 ${result.scanned} 篇）`;
+    return;
+  }
+  if (!docReady) {
+    count.textContent = state.doc ? '论文正在打开' : '先打开一篇论文';
     state.search = { hits: [], idx: 0, query: '' };
     $('#searchResults').replaceChildren();
     $('#searchResults').classList.add('hidden');
@@ -11424,7 +11621,7 @@ async function runSearch(q) {
   }
   // 慢的旧搜索后返回不能覆盖新结果；换文档后的结果直接丢弃
   if (my !== searchToken || result.stale || docId !== state.doc?.docId) return;
-  state.search = { hits: result.hits, idx: 0, query: q };
+  state.search = { hits: result.hits, idx: 0, query: q, scope: 'doc' };
   renderSearchResults();
   if (result.hits.length) await showSearchHit(0, true);
   else count.textContent = '无结果';
@@ -11435,7 +11632,12 @@ function renderSearchResults() {
   const hits = state.search.hits;
   results.replaceChildren();
   results.classList.toggle('hidden', !hits.length);
+  let lastDoc = null;
   hits.forEach((hit, i) => {
+    if (hit.docId && hit.docId !== lastDoc) {
+      lastDoc = hit.docId;
+      results.append(el('div', { class: 'search-result-doc', text: hit.docName || '未命名论文' }));
+    }
     const button = el('button', {
       type: 'button', class: `search-result${i === state.search.idx ? ' current' : ''}`,
       role: 'option', 'aria-selected': i === state.search.idx ? 'true' : 'false',
@@ -11451,21 +11653,52 @@ function renderSearchResults() {
 }
 
 function updateSearchCount() {
-  const { hits, idx } = state.search;
+  const { hits, idx, scope } = state.search;
   const hit = hits[idx];
   if (!hit) return;
-  $('#searchCount').textContent = `${idx + 1}/${hits.length} 条 · p.${hit.page}`;
+  const doc = scope && scope !== 'doc' && hit.docName
+    ? ` · ${String(hit.docName).replace(/\.pdf$/i, '').slice(0, 14)}` : '';
+  $('#searchCount').textContent = `${idx + 1}/${hits.length} 条${doc} · p.${hit.page}`;
 }
 
 async function showSearchHit(index, record = true) {
   const hit = state.search.hits[index];
-  if (!hit || !viewer?.pdf || state.viewerDocId !== state.doc?.docId) return;
+  if (!hit) return;
   state.search.idx = index;
   renderSearchResults();
   updateSearchCount();
   if (record) recordReaderJump();
+  const scope = state.search.scope || 'doc';
+  let my = searchToken;
+  // 文件夹/全部：命中可能在另一篇论文里 —— 先打开它，再把当前页翻过去
+  if (scope !== 'doc' && hit.docId) {
+    if (hit.docId !== state.doc?.docId) {
+      const paper = (state.papers || []).find((p) => p.docId === hit.docId);
+      if (!paper) return;
+      const saved = { hits: state.search.hits.slice(), idx: index, query: state.search.query, scope };
+      await openDoc(paper);
+      if (hit.docId !== state.doc?.docId) return;
+      // 打开新论文会清空搜索状态（openDocColdSwitch 里 cancelSearch）；
+      // 这里恢复结果并重新打开搜索栏，方便继续用上/下一个按钮翻结果。
+      state.search = saved;
+      $('#searchBar')?.classList.remove('hidden');
+      renderSearchResults();
+      updateSearchCount();
+      my = searchToken;
+    }
+    if (!viewer?.pdf || state.viewerDocId !== state.doc?.docId) return;
+    const docId = state.doc?.docId;
+    const q = state.search.query;
+    let exact = null;
+    try { const found = await viewer.search(q); exact = found?.hits?.find((h) => h.page === hit.page) || null; } catch { /* 退化为只跳页 */ }
+    if (my !== searchToken || docId !== state.doc?.docId) return;
+    if (exact) await viewer.gotoHit(exact.page, exact.pageIndex,
+      () => my === searchToken && docId === state.doc?.docId && state.search.hits[index] === hit);
+    else await viewer.goToPage(hit.page);
+    return;
+  }
+  if (!viewer?.pdf || state.viewerDocId !== state.doc?.docId) return;
   const docId = state.doc?.docId;
-  const my = searchToken;
   await viewer.gotoHit(hit.page, hit.pageIndex,
     () => my === searchToken && docId === state.doc?.docId && state.search.hits[index] === hit);
   if (docId !== state.doc?.docId) return;

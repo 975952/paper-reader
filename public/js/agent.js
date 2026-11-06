@@ -108,6 +108,22 @@ export const AGENT_TOOL_SPECS = [
   {
     type: 'function',
     function: {
+      name: 'search_papers',
+      description: '在论文库里做全文检索（不限于当前打开的论文）：返回每篇论文的命中页和一小段原文。用于「在这个文件夹/全部论文里找某个例子、定义或句子」。默认只搜当前打开的论文所在文件夹。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '检索词（2–200 字），越具体越好' },
+          scope: { type: 'string', enum: ['folder', 'all'], description: 'folder=当前打开的论文所在文件夹（默认）；all=papers 里全部论文' },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'read_other_paper',
       description: '读取 papers 文件夹里**其它论文**（不是当前打开的这篇）的正文：给文件名和页码读那一页，或给 query 在整篇里检索关键词。用于回答关于其它论文的问题（例如「第一篇论文的第二句话是什么」）。',
       parameters: {
@@ -153,6 +169,7 @@ export const AGENT_SYSTEM_NOTE = [
   '【能看的材料】除了当前打开的论文（read_page / search_paper / get_reading_state），你还可以看 papers 文件夹里**所有已导入的论文**：',
   '先用 list_papers 找到目标文件（返回顺序 = 左侧文件树顺序；用户说「第 N 篇」时按这个序号数），',
   '再用 read_other_paper({name, page}) 读指定页、用 read_other_paper({name, query}) 在整篇里检索；扫描件/无文本层时用 read_other_paper_image 取页图。',
+  '**在多个论文 / 整个文件夹里找某个例子、定义或句子**时，先用 search_papers({query, scope})：scope=folder 搜当前打开的论文所在文件夹（默认），scope=all 搜 papers 里全部论文；它会返回每篇的命中页，再对目标论文用 read_other_paper 读那一页。',
   '用户问「某篇论文的第 N 句话 / 第几段」时：先把那一页正文读出来，再按句号/问号/感叹号/分号等完整句子边界**准确数出第 N 句**，原样引用，并说明出自哪篇论文第几页；不要凭印象改写。',
   '**不要说「我拿不到 papers 文件夹」「看不到其它论文」**——你有 list_papers / read_other_paper 工具，先查再读。',
   '引用**其它论文**的原文/页码时用专用格式：〔《文件名》p.N‖原文片段〕（没有原文片段就 〔《文件名》p.N〕）；程序会把它渲染成可点标签，点击自动打开那篇论文、跳到第 N 页并高亮原文。不要只写 p.N（那会跳到当前打开的论文）。',
@@ -255,6 +272,12 @@ export function validateToolCall(call, { numPages = 0 } = {}) {
     return { name, args: { topic } };
   }
   if (name === 'list_papers') return { name, args: {} };
+  if (name === 'search_papers') {
+    const query = clip(args.query, 200).trim();
+    if (query.length < 2) return { error: 'query 至少 2 个字' };
+    const scope = args.scope === 'all' ? 'all' : 'folder';
+    return { name, args: { query, scope } };
+  }
   if (name === 'read_other_paper') {
     const paper = clip(args.name, 200).trim();
     if (!paper) return { error: 'name 不能为空（论文文件名或片段）' };
@@ -325,6 +348,7 @@ export async function executeToolCall(call, runtime) {
     else if (name === 'read_page_image') value = await runtime.readPageImage(args.page);
     else if (name === 'read_memory') value = await runtime.readMemory(args.topic);
     else if (name === 'list_papers') value = await runtime.listPapers();
+    else if (name === 'search_papers') value = await runtime.searchPapers(args);
     else if (name === 'read_other_paper') value = await runtime.readOtherPaper(args);
     else if (name === 'read_other_paper_image') value = await runtime.readOtherPaperImage(args);
     else return { ok: false, error: `未知工具：${name}` };
@@ -351,6 +375,9 @@ export function toolStepLabel(call) {
   if (name === 'read_page_image') return `加入第 ${toInt(args.page) || '?'} 页原图`;
   if (name === 'read_memory') return `读取学习记忆：${clip(args.topic, 30)}`;
   if (name === 'list_papers') return '查看 papers 文件夹';
+  if (name === 'search_papers') {
+    return `检索论文库「${q}」（${args.scope === 'all' ? '全部论文' : '当前文件夹'}）`;
+  }
   if (name === 'read_other_paper') {
     const paper = clip(args.name, 40);
     const page = toInt(args.page);
@@ -410,6 +437,13 @@ export function summarizeToolResult(call, result) {
     }
     if (v.scanned) return `《${paper}》第 ${v.page || args.page} 页没有文本层（可改用页图）`;
     return `已读取《${paper}》第 ${v.page || args.page} 页（${String(v.text || '').length.toLocaleString()} 字，共 ${v.numPages || '?'} 页）`;
+  }
+  if (name === 'search_papers') {
+    const hits = Array.isArray(v.hits) ? v.hits : [];
+    const label = v.scope === 'all' ? '全部论文' : '当前文件夹';
+    return hits.length
+      ? `检索${label}「${clip(args.query, 40)}」→ ${v.count ?? hits.length} 条命中（已扫 ${v.papersScanned ?? '?'}/${v.papersTotal ?? '?'} 篇）`
+      : `检索${label}「${clip(args.query, 40)}」→ ${v.papersScanned ?? 0} 篇里没有命中`;
   }
   if (name === 'read_other_paper_image') return `已加入《${clip(v.name || args.name, 40)}》第 ${v.page || args.page} 页原图`;
   return `${toolStepLabel(call)}完成`;

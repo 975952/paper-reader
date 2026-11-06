@@ -121,6 +121,11 @@
     <div class="searchbar hidden" id="searchBar">
       <div class="search-tools">
         <input id="searchInput" type="search" placeholder="在全文里搜索…" />
+        <div class="search-scope" id="searchScope" role="group" aria-label="搜索范围">
+          <button type="button" class="search-scope-btn" data-scope="doc" aria-pressed="true" title="只搜索当前打开的论文">本文</button>
+          <button type="button" class="search-scope-btn" data-scope="folder" aria-pressed="false" title="搜索当前文件夹里的全部论文">文件夹</button>
+          <button type="button" class="search-scope-btn" data-scope="all" aria-pressed="false" title="搜索 papers 里的全部论文">全部</button>
+        </div>
         <span class="search-count" id="searchCount"></span>
         <button class="tbtn" id="searchPrev" title="上一个结果"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 5.4 19.6 15H4.4z"/></svg></button>
         <button class="tbtn" id="searchNext" title="下一个结果"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 18.6 4.4 9h15.2z"/></svg></button>

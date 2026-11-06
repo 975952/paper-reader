@@ -2,9 +2,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const PAGE_COUNT = 16;
+/* 默认 16 页；隔离测试可用 FIXTURE_PAGES 生成更多页（<=30 页会让「只读前 30 页」的旧实现漏掉尾部）。 */
+const PAGE_COUNT = Number(process.env.FIXTURE_PAGES || 16);
 const GROUP_COUNT = 4;
+if (!Number.isInteger(PAGE_COUNT) || PAGE_COUNT < 4 || PAGE_COUNT % GROUP_COUNT !== 0) {
+  throw new Error('FIXTURE_PAGES 必须是 4 的倍数且 >=4');
+}
 const childrenPerGroup = PAGE_COUNT / GROUP_COUNT;
+/* 只在最后一页追加的探针文本：验证全文检索能命中靠后的页。 */
+const LAST_PAGE_MARK = String(process.env.FIXTURE_LAST_MARK || '');
 
 /* 正文排版常量：第一行基线 Y=740，行距 10（对应下面 content 里的 `72 740 Td` / `10 TL`）。
    书签目标必须指向**标题所在那一行的 Y**，否则「点目录顶到标题」根本无从验证。 */
@@ -58,7 +64,10 @@ for (let p = 1; p <= PAGE_COUNT; p++) {
     'Automated tests must not depend on a users personal bookshelf contents.',
   ];
   for (let i = 1; i <= 45; i++) lines.push(`Supplementary fixture line ${i}: attention supports contextual sequence processing and evaluation.`);
-  if (p === PAGE_COUNT) lines.push('References', '[1] Vaswani et al. Attention Is All You Need. NeurIPS 2017.');
+  if (p === PAGE_COUNT) {
+    lines.push('References', '[1] Vaswani et al. Attention Is All You Need. NeurIPS 2017.');
+    if (LAST_PAGE_MARK) lines.push(LAST_PAGE_MARK);
+  }
   // 自检：书签指向的 Y 必须真的是那一行标题，行号算错这里就直接炸，不留静默错位
   if (lines[topicHeadingIndex(sibling)] !== `Section ${group + 1} Topic ${sibling + 1}`) {
     throw new Error(`夹具行号错位：第 ${p} 页第 ${topicHeadingIndex(sibling)} 行不是主题标题`);
@@ -107,6 +116,6 @@ const xrefOffset = offset;
 let xref = `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
 for (const at of offsets.slice(1)) xref += `${String(at).padStart(10, '0')} 00000 n \n`;
 chunks.push(Buffer.from(`${xref}trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`, 'ascii'));
-const dest = path.join(import.meta.dirname, 'multipage-sample.pdf');
+const dest = process.env.FIXTURE_OUT || path.join(import.meta.dirname, 'multipage-sample.pdf');
 fs.writeFileSync(dest, Buffer.concat(chunks));
 console.log(`Created ${dest} (${PAGE_COUNT} pages)`);

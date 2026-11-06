@@ -887,6 +887,13 @@ body.dragging .viewer { pointer-events: none; }
 .search-result .sr-page { flex: 0 0 auto; color: var(--accent); font-variant-numeric: tabular-nums; }
 .search-result .sr-snippet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-result mark { background: var(--hit); color: inherit; border-radius: 2px; padding: 0 1px; }
+/* 搜索范围（本文 / 文件夹 / 全部）：文件夹/全部会逐篇抽文本，结果按论文分组 */
+.search-scope { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--border-strong); border-radius: 7px; overflow: hidden; }
+.search-scope-btn { border: 0; background: transparent; color: var(--fg-faint); font: inherit; font-size: var(--ui-fs-xs); padding: calc(4px * var(--ctl-scale)) calc(8px * var(--ctl-scale)); cursor: pointer; }
+.search-scope-btn + .search-scope-btn { border-left: 1px solid var(--border); }
+.search-scope-btn:hover { color: var(--fg); background: var(--accent-soft); }
+.search-scope-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.search-result-doc { padding: calc(var(--list-pad-y) - 2px) var(--list-pad-x) 1px; color: var(--fg-faint); font-size: var(--ui-fs-xs); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 消息动作里的图标按钮（2026-10 用户口径：「复制 / 回到第8页用图标表示不要用文字」）。
    尺寸与其他 .acts button 对齐，但不占文字宽度。 */

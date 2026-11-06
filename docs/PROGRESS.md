@@ -5619,3 +5619,59 @@ m04010 补充真实 bug：两张截图的内容被交叉套用（不是 OCR 识�
 - 构建：`desktop\build.bat` → 项目根 `prt.exe` **11,259,392 B**，
   SHA256 `8A5A99D26728DDE39BD6DF5B52E3ABB4428D06510A93CA68D60CB9255FFD883F`。
   桌面副本仍被运行中的旧实例占用未覆盖，需关闭旧实例后重跑构建或复制项目根 exe。
+
+
+
+## 105. 全文搜索支持「当前文件夹 / 全部论文」（UI 三档范围 + Agent search_papers）
+
+### 105.1 需求
+
+用户反馈（m01098）：让 AI 在《离散数学》里找「帅哥」例子，AI 翻前几章都没找到（只说第 39 页是命题公式真值表），
+随后要求「完善文件夹内和全局搜索功能」。既有实现两条限制：
+
+- UI 全文搜索 `runSearch` 只调 `viewer.search(q)`，**只能搜当前这一篇论文**；
+- AI 的 `read_other_paper` 用 `readPdfPages(paper.url,{ maxPages:30 })`，**只抽其它论文的前 30 页**再检索，
+  书长一点或关键词靠后就必然漏；也没有跨论文/文件夹的检索工具。
+
+「帅哥」实际位置（本次排查确认）：`papers/离散数学/《离散数学》第6章.pdf` PDF **第 4 页**（第 5 页是同一张
+幻灯片重复），小节 `6.1 集合的基本概念`，原文 `例: A = {中国的所有帅哥} ?`、`A不是集合, 因为没有确定帅的标准.`、
+`到底什么样才算是帅呢？`；按章节推算对应教材印刷页约 39 页，与用户说的「第39页」一致。
+
+### 105.2 实现
+
+- `public/js/app.js` 搜索段：
+  - 新增三档范围 `reader.searchScope`（本文 / 文件夹 / 全部，localStorage 记忆）与共用检索层：
+    `paperText(paper)` 用 `readPdfPages({maxPages:999})` 抽整本并按 docId/path/url 缓存；
+    `pageHitsInPaper`（整句优先、退化为全部词命中）与
+    `searchLibraryPages(query, scope, {onProgress, papers, maxHits, timeBudgetMs})`
+    （文件夹范围用 `p.folder === currentFolderPath()` 过滤，当前论文排最前）。
+  - `runSearch`：文件夹/全部范围不依赖已打开的论文，显示「搜索中 i/N 篇…」，结果存 `state.search.scope`；
+    `renderSearchResults` 按论文插 `.search-result-doc` 分组标题；`showSearchHit` 命中其它论文时先 `openDoc`，
+    打开后恢复搜索结果、重新打开搜索栏并翻到命中页（打开新论文会 `cancelSearch`，故需恢复）。
+  - `window.__ctx` 暴露 `searchLibrary / searchLibraryPages / searchScope / setSearchScope` 供自动化复用。
+  - Agent runtime 新增 `searchPapers`（folder/all，18s 时间预算），`readOtherPaper` 改为整篇文本缓存检索
+    （不再限 30 页）。
+- `public/js/agent.js`：新增只读工具 `search_papers`（query ≥2 字必填，scope 默认 folder），并补
+  `validateToolCall / executeToolCall / toolStepLabel / summarizeToolResult` 分支与系统提示
+  （跨论文找内容先 `search_papers`，已知篇目才 `read_other_paper`）；工具总数 9 → 10。
+- `public/index.html` 搜索框内加 `#searchScope` 三按钮；`public/style.css` 加 `.search-scope*` 与
+  `.search-result-doc` 样式。
+- 夹具：`test/fixtures/make-multipage-pdf.mjs` 支持 `FIXTURE_PAGES / FIXTURE_LAST_MARK / FIXTURE_OUT`
+  （可生成 40 页带尾部关键词的 PDF）。
+
+### 105.3 验收
+
+- 新增 `node test/library-search.mjs`（隔离 server + 合成 PDF，不碰真实书库）：**16/16 PASS**——
+  文件夹范围命中第6章第 40 页（旧 30 页上限下必漏）、文件夹不串到其它文件夹、全部范围跨文件夹命中、
+  结果按论文分组、范围记忆与 placeholder、点击结果打开另一篇并跳到命中页且搜索栏仍可用、
+  切全部后打开其它文件夹论文、无 pageerror。
+- `node test/agent-unit.mjs`：**60/60 PASS**（工具数改为 10、search_papers 校验/执行/摘要断言、
+  轮次常量断言更新）。
+- 构建：`desktop\build.bat` 重新生成项目根 `prt.exe`；桌面副本仍被运行中的旧实例占用，
+  需关闭后重跑构建或复制根 exe。
+
+### 105.4 交付
+
+- 文档：`docs/使用说明书.md` §8 全文搜索改写为三档范围 + 跨论文跳转 + AI 检索说明。
+- 提交：显式 `git add` 搜索相关源码/测试/夹具/文档后提交
+  「全文搜索支持当前文件夹/全部论文：UI 三档范围 + Agent search_papers」。
